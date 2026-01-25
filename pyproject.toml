@@ -1,77 +1,59 @@
-name: CI Checks
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
 
-on: [push]
+[project]
+name = "python_research_starter"
+version = "0.1.0"
+description = "An example of how to structure research code."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+   "matplotlib",
+   "numpy",
+   "pandas",
+   "pandas-stubs",
+   "hydra-core",
+   "omegaconf",
+   "tomsutils@git+https://github.com/tomsilver/toms-utils.git",
+]
 
-jobs:
-  autoformat:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run black to test code linting
-        uses: psf/black@stable
-        with:
-          options: "--check --verbose --extend-exclude 'venv|notebooks'"
-          jupyter: true
-      - name: Run isort to organize imports
-        uses: isort/isort-action@master
-  linting:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10"]
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install uv
-      uses: astral-sh/setup-uv@v3
-      with:
-        enable-cache: true
-        cache-dependency-glob: "pyproject.toml"
-    - name: Set up Python ${{ matrix.python-version }}
-      run: uv python install ${{ matrix.python-version }}    
-    - name: Install the project
-      run: uv sync --all-extras --dev
-    - name: Lint
-      run: |
-        uv run pytest . --pylint -m pylint --pylint-rcfile=.pylintrc
-  static-type-checking:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10"]
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install uv
-      uses: astral-sh/setup-uv@v3
-      with:
-        enable-cache: true
-        cache-dependency-glob: "pyproject.toml"
-    - name: Set up Python ${{ matrix.python-version }}
-      run: uv python install ${{ matrix.python-version }}    
-    - name: Install the project
-      run: uv sync --all-extras --dev
-    - name: Mypy
-      run: |
-        uv run mypy .
-  unit-tests:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10"]
-    steps:
-    - name: Install LAPACK and BLAS
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y liblapack-dev libblas-dev
-    - uses: actions/checkout@v4
-    - name: Install uv
-      uses: astral-sh/setup-uv@v3
-      with:
-        enable-cache: true
-        cache-dependency-glob: "pyproject.toml"
-    - name: Set up Python ${{ matrix.python-version }}
-      run: uv python install ${{ matrix.python-version }}    
-    - name: Install the project
-      run: uv sync --all-extras --dev
-    - name: Pytest
-      run: |
-       uv run pytest tests/
+[project.optional-dependencies]
+develop = [
+    "black",
+    "docformatter",
+    "isort",
+    "mypy",
+    "pylint>=2.14.5",
+    "pytest-pylint>=0.18.0",
+    "pytest>=7.2.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+python_research_starter = ["py.typed"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.isort]
+py_version = 310
+profile = "black"
+multi_line_output = 2
+skip_glob = ["venv/*"]
+split_on_trailing_comma = true
+
+[tool.mypy]
+strict_equality = true
+disallow_untyped_calls = true
+warn_unreachable = true
+exclude = ["venv/*"]
+
+[[tool.mypy.overrides]]
+module = [
+    "matplotlib.*",
+]
+ignore_missing_imports = true

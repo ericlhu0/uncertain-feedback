@@ -1,0 +1,4 @@
+[submodule "src/uncertain-feedback/motion-generators/mdm/motion-diffusion-model"]
+	path = src/uncertain-feedback/motion-generators/mdm/motion-diffusion-model
+	url = https://github.com/GuyTevet/motion-diffusion-model.git
+	

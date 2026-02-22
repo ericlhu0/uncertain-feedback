@@ -77,10 +77,14 @@ strict_equality = true
 disallow_untyped_calls = true
 warn_unreachable = true
 exclude = ["venv/*"]
+mypy_path = ["src"]
+explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = [
     "matplotlib.*",
+    "mpl_toolkits.*",
+    "scipy.*",
 ]
 ignore_missing_imports = true
 

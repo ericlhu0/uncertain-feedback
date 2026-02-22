@@ -10,10 +10,12 @@ jobs:
       - name: Run black to test code linting
         uses: psf/black@stable
         with:
-          options: "--check --verbose"
+          options: "--check --verbose --extend-exclude src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model"
           jupyter: true
       - name: Run isort to organize imports
         uses: isort/isort-action@master
+        with:
+          configuration: "--skip-glob=src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/*"
   linting:
     runs-on: ubuntu-latest
     strategy:
@@ -32,7 +34,7 @@ jobs:
       run: uv sync --all-extras --dev
     - name: Lint
       run: |
-        uv run pytest . --pylint -m pylint --pylint-rcfile=.pylintrc
+        uv run pytest . --ignore=src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model --pylint -m pylint --pylint-rcfile=.pylintrc
   static-type-checking:
     runs-on: ubuntu-latest
     strategy:
@@ -51,7 +53,7 @@ jobs:
       run: uv sync --all-extras --dev
     - name: Mypy
       run: |
-        uv run mypy .
+        uv run mypy . --exclude src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model
   unit-tests:
     runs-on: ubuntu-latest
     strategy:

@@ -9,13 +9,38 @@ description = "An example of how to structure research code."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-   "matplotlib",
-   "numpy",
+   "matplotlib>=3.5,<3.6",
+   "numpy<1.24",
    "pandas",
    "pandas-stubs",
    "hydra-core",
    "omegaconf",
    "tomsutils@git+https://github.com/tomsilver/toms-utils.git",
+   # MDM dependencies
+   "torch>=2.1.0",
+   "torchvision>=0.16.0",
+   "torchaudio>=2.1.0",
+   "scipy",
+   "scikit-learn",
+   "h5py",
+   "spacy>=3.3,<3.4",
+   "en-core-web-sm@https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.3.0/en_core_web_sm-3.3.0.tar.gz",
+   "trimesh",
+   "smplx",
+   "chumpy",
+   "ftfy",
+   "regex",
+   "lxml",
+   "moviepy<2",
+   "tqdm",
+   "pybullet",
+   "wandb",
+   "transformers",
+   "openai-clip",
+   "pydantic<2",
+   "pyquaternion",
+   "gdown",
+   "setuptools<70",
 ]
 
 [project.optional-dependencies]
@@ -57,3 +82,16 @@ module = [
     "matplotlib.*",
 ]
 ignore_missing_imports = true
+
+[tool.uv]
+extra-build-dependencies = { chumpy = ["pip"] }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }
+torchaudio = { index = "pytorch-cu121" }

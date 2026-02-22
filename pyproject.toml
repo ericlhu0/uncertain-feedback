@@ -3,11 +3,11 @@ requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "python_research_starter"
+name = "uncertain_feedback"
 version = "0.1.0"
 description = "An example of how to structure research code."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = "==3.10"
 dependencies = [
    "matplotlib>=3.5,<3.6",
    "pyqt5",
@@ -16,7 +16,6 @@ dependencies = [
    "pandas-stubs",
    "hydra-core",
    "omegaconf",
-   "tomsutils@git+https://github.com/tomsilver/toms-utils.git",
    # MDM dependencies
    "torch>=2.1.0",
    "torchvision>=0.16.0",
@@ -59,7 +58,7 @@ develop = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-python_research_starter = ["py.typed"]
+uncertain_feedback = ["py.typed"]
 
 [tool.black]
 line-length = 88

@@ -1,7 +1,7 @@
 """Sampling-based MPC for the SMPL left arm in joint angle space.
 
-State and target are expressed as axis-angle vectors, matching SMPL's native
-``body_pose`` format (``smplx.SMPL``)
+State and target are expressed as axis-angle vectors, matching SMPL's
+native ``body_pose`` format (``smplx.SMPL``)
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ _N_JOINTS = 4  # number of controlled joints
 # Helper: batched SO(3) composition
 # ---------------------------------------------------------------------------
 
+
 def _compose_rotvec(q: np.ndarray, delta: np.ndarray) -> np.ndarray:
     """Compose axis-angle rotations element-wise: R_new = R_delta ∘ R_q.
 
@@ -47,6 +48,7 @@ def _compose_rotvec(q: np.ndarray, delta: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # MPC controller
 # ---------------------------------------------------------------------------
+
 
 class SmplLeftArmMPC:
     """Sampling-based MPC for the SMPL left arm.
@@ -80,7 +82,8 @@ class SmplLeftArmMPC:
     # ------------------------------------------------------------------
 
     def _rollout(self, current_q: np.ndarray, U: np.ndarray) -> np.ndarray:
-        """Roll out N trajectories from ``current_q`` using action sequences ``U``.
+        """Roll out N trajectories from ``current_q`` using action sequences
+        ``U``.
 
         Args:
             current_q: ``(4, 3)`` current joint angles.

@@ -33,7 +33,30 @@ _SMPL_PKL_DEFAULT = (
 # ---------------------------------------------------------------------------
 
 # Parent index for each of the 22 joints (-1 = root)
-SMPL_PARENTS_22 = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
+SMPL_PARENTS_22 = [
+    -1,
+    0,
+    0,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    9,
+    9,
+    12,
+    13,
+    14,
+    16,
+    17,
+    18,
+    19,
+]
 
 # All (parent, child) bone pairs for the 22-joint skeleton
 SMPL_BONE_PAIRS_22 = [(p, c) for c, p in enumerate(SMPL_PARENTS_22) if p >= 0]
@@ -46,7 +69,13 @@ LEFT_ARM_BONE_PAIRS_22 = [(9, 13), (13, 16), (16, 18), (18, 20)]
 
 # SMPL joint chain for the left arm FK (spine3 is the anchor)
 LEFT_ARM_CHAIN_INDICES = [9, 13, 16, 18, 20]
-LEFT_ARM_CHAIN_NAMES = ["spine3", "left_collar", "left_shoulder", "left_elbow", "left_wrist"]
+LEFT_ARM_CHAIN_NAMES = [
+    "spine3",
+    "left_collar",
+    "left_shoulder",
+    "left_elbow",
+    "left_wrist",
+]
 
 
 class SmplLeftArmFK:
@@ -61,8 +90,12 @@ class SmplLeftArmFK:
     """
 
     def __init__(self, smpl_pkl_path: str | Path | None = None) -> None:
-        pkl_path = Path(smpl_pkl_path) if smpl_pkl_path is not None else _SMPL_PKL_DEFAULT
-        self._bone_offsets, self._tpose_joints, self._tpose_22 = self._load_from_pkl(pkl_path)
+        pkl_path = (
+            Path(smpl_pkl_path) if smpl_pkl_path is not None else _SMPL_PKL_DEFAULT
+        )
+        self._bone_offsets, self._tpose_joints, self._tpose_22 = self._load_from_pkl(
+            pkl_path
+        )
 
     # ------------------------------------------------------------------
     # Loading
@@ -92,11 +125,11 @@ class SmplLeftArmFK:
 
         # Arm chain subset
         chain = LEFT_ARM_CHAIN_INDICES
-        tpose_chain = joints[chain]           # (5, 3)
+        tpose_chain = joints[chain]  # (5, 3)
         bone_offsets = np.diff(tpose_chain, axis=0)  # (4, 3)
 
         # Full 22-joint subset (exclude hands at 22, 23)
-        tpose_22 = joints[:22].copy()         # (22, 3)
+        tpose_22 = joints[:22].copy()  # (22, 3)
 
         return bone_offsets, tpose_chain, tpose_22
 
@@ -202,7 +235,8 @@ class SmplLeftArmFK:
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return all 22 joint positions with the left arm updated by ``arm_aa``.
+        """Return all 22 joint positions with the left arm updated by
+        ``arm_aa``.
 
         All non-arm joints remain at their SMPL T-pose positions.  The five
         arm-chain joints (spine3, collar, shoulder, elbow, wrist) are

@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code
 """Sampling-based MPC for the SMPL left arm in joint angle space.
 
 State and target are expressed as axis-angle vectors, matching SMPL's
@@ -6,49 +7,54 @@ native ``body_pose`` format (``smplx.SMPL``)
 
 from __future__ import annotations
 
+import argparse
+from dataclasses import dataclass
+
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy.spatial.transform import Rotation
+
+from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.visualizer import ArmVisualizer
 
 # ---------------------------------------------------------------------------
 # Joint index constants
 # ---------------------------------------------------------------------------
 
-LEFT_ARM_JOINT_NAMES = ["left_collar", "left_shoulder", "left_elbow", "left_wrist"]
-
-# Indices into the 22-joint HumanML3D skeleton
-LEFT_ARM_HML_INDICES = [13, 16, 18, 20]
-
-# Indices into SMPL's body_pose (23 joints, 0-indexed; joint 0 = pelvis = global_orient)
-LEFT_ARM_SMPL_INDICES = [12, 15, 17, 19]
-
 _N_JOINTS = 4  # number of controlled joints
+
+
+@dataclass
+class _VisConfig:
+    fk: SmplLeftArmFK
+    target_q: np.ndarray
+    spine_pos: np.ndarray | None
+    spine_aa: np.ndarray | None
 
 
 # ---------------------------------------------------------------------------
 # Helper: batched SO(3) composition
 # ---------------------------------------------------------------------------
 
-
-def _compose_rotvec(q: np.ndarray, delta: np.ndarray) -> np.ndarray:
+def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
     """Compose axis-angle rotations element-wise: R_new = R_delta ∘ R_q.
 
     Args:
-        q:     ``(..., 3)`` current axis-angle vectors.
-        delta: ``(..., 3)`` delta axis-angle vectors.
+        rotvec: ``(..., 3)`` current axis-angle vectors.
+        delta:  ``(..., 3)`` delta axis-angle vectors.
 
     Returns:
         ``(..., 3)`` composed axis-angle vectors.
     """
-    flat_q = q.reshape(-1, 3)
+    flat_q = rotvec.reshape(-1, 3)
     flat_d = delta.reshape(-1, 3)
     composed = (Rotation.from_rotvec(flat_d) * Rotation.from_rotvec(flat_q)).as_rotvec()
-    return composed.reshape(q.shape)
+    return composed.reshape(rotvec.shape)
 
 
 # ---------------------------------------------------------------------------
 # MPC controller
 # ---------------------------------------------------------------------------
-
 
 class SmplLeftArmMPC:
     """Sampling-based MPC for the SMPL left arm.
@@ -62,6 +68,15 @@ class SmplLeftArmMPC:
                          ``solve`` call.
         max_angle_delta: Standard deviation of the sampling distribution
                          (radians).
+        visualize:       If ``True``, open a live matplotlib window and update
+                         it each time :meth:`step` is called.  Requires
+                         ``fk`` and ``target_q`` to also be provided.
+        fk:              :class:`SmplLeftArmFK` instance (required when
+                         ``visualize=True``).
+        target_q:        ``(4, 3)`` target joint angles used to draw the
+                         static target pose (required when ``visualize=True``).
+        spine3_pos:      ``(3,)`` world position of spine3 (optional).
+        spine3_aa:       ``(3,)`` world axis-angle of spine3 (optional).
     """
 
     def __init__(
@@ -69,49 +84,68 @@ class SmplLeftArmMPC:
         horizon: int = 10,
         n_samples: int = 512,
         max_angle_delta: float = 0.001,
+        visualize: bool = False,
+        fk: SmplLeftArmFK | None = None,
+        target_q: np.ndarray | None = None,
+        spine3_pos: np.ndarray | None = None,
+        spine3_aa: np.ndarray | None = None,
     ) -> None:
         self.horizon = horizon
         self.n_samples = n_samples
         self.max_angle_delta = max_angle_delta
+        self.visualize = visualize
+
+        if visualize:
+            if fk is None or target_q is None:
+                raise ValueError(
+                    "visualize=True requires both `fk` and `target_q` to be provided."
+                )
+            self._vis_config: _VisConfig | None = _VisConfig(
+                fk, target_q, spine3_pos, spine3_aa
+            )
+        else:
+            self._vis_config = None
 
         # Warm-start: previous best plan shifted forward by one step
         self._prev_best: np.ndarray | None = None
+
+        # Live visualizer (lazily initialised on first step)
+        self._vis: ArmVisualizer | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _rollout(self, current_q: np.ndarray, U: np.ndarray) -> np.ndarray:
-        """Roll out N trajectories from ``current_q`` using action sequences
-        ``U``.
+    def _rollout(self, current_q: np.ndarray, actions: np.ndarray) -> np.ndarray:
+        """Roll out N trajectories from ``current_q`` using action sequences ``actions``.
 
         Args:
             current_q: ``(4, 3)`` current joint angles.
-            U:         ``(N, H, 4, 3)`` sampled action sequences.
+            actions:   ``(N, H, 4, 3)`` sampled action sequences.
 
         Returns:
             ``(N, H+1, 4, 3)`` state trajectories (includes initial state).
         """
-        N, H = U.shape[0], U.shape[1]
-        Q = np.empty((N, H + 1, _N_JOINTS, 3), dtype=np.float64)
-        Q[:, 0] = current_q[np.newaxis]
+        n_seqs, h_len = actions.shape[0], actions.shape[1]
+        q_trajs = np.empty((n_seqs, h_len + 1, _N_JOINTS, 3), dtype=np.float64)
+        q_trajs[:, 0] = current_q[np.newaxis]
 
-        for t in range(H):
-            Q[:, t + 1] = _compose_rotvec(Q[:, t], U[:, t])
+        for t in range(h_len):
+            q_trajs[:, t + 1] = _compose_rotvec(q_trajs[:, t], actions[:, t])
 
-        return Q
+        return q_trajs
 
-    def _cost(self, Q: np.ndarray, target_q: np.ndarray) -> np.ndarray:
+    def _cost(self, q_trajs: np.ndarray, target_q: np.ndarray) -> np.ndarray:
         """Compute terminal cost for each of the N sampled trajectories.
 
         Args:
-            Q:        ``(N, H+1, 4, 3)`` state trajectories.
+            q_trajs:  ``(N, H+1, 4, 3)`` state trajectories.
             target_q: ``(4, 3)``         target joint configuration.
 
         Returns:
             ``(N,)`` cost per trajectory.
         """
-        return ((Q[:, -1] - target_q[np.newaxis]) ** 2).sum(axis=(-2, -1))
+        return ((q_trajs[:, -1] - target_q[np.newaxis]) ** 2).sum(axis=(-2, -1))
 
     # ------------------------------------------------------------------
     # Public API
@@ -146,20 +180,24 @@ class SmplLeftArmMPC:
         else:
             mean = np.zeros((self.horizon, _N_JOINTS, 3), dtype=np.float64)
 
-        U = np.random.normal(
+        actions = np.random.normal(
             loc=mean,
             scale=self.max_angle_delta,
             size=(self.n_samples, self.horizon, _N_JOINTS, 3),
         )
 
-        Q = self._rollout(current_q, U)
-        costs = self._cost(Q, target_q)
+        q_trajs = self._rollout(current_q, actions)
+        costs = self._cost(q_trajs, target_q)
 
         best_idx = np.argmin(costs)
-        best_plan = U[best_idx]
+        best_plan = actions[best_idx]
 
         self._prev_best = best_plan
         return best_plan[0], best_plan
+
+    def reset_warmstart(self) -> None:
+        """Reset the warm-start plan (call before re-running from a new initial pose)."""
+        self._prev_best = None
 
     def step(
         self,
@@ -169,7 +207,9 @@ class SmplLeftArmMPC:
         """Perform one MPC step.
 
         Samples action sequences, applies the best first action to ``current_q``
-        via SO(3) composition, and returns the updated joint angles.
+        via SO(3) composition, and returns the updated joint angles.  If
+        ``visualize=True`` was set at construction, the live window is updated
+        automatically.
 
         Args:
             current_q: ``(4, 3)`` current axis-angle joint angles.
@@ -179,4 +219,57 @@ class SmplLeftArmMPC:
             ``(4, 3)`` updated axis-angle joint angles.
         """
         first_action, _ = self.solve(current_q, target_q)
-        return _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
+        next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
+
+        if self._vis_config is not None:
+            if self._vis is None:
+                self._vis = ArmVisualizer(self._vis_config.fk)
+                self._vis.open_live(
+                    self._vis_config.target_q,
+                    self._vis_config.spine_pos,
+                    self._vis_config.spine_aa,
+                )
+            dist = float(np.linalg.norm(next_q - np.asarray(target_q)))
+            self._vis.update_step(next_q, dist=dist)
+
+        return next_q
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run SMPL left arm MPC with live visualization"
+    )
+    parser.add_argument("--steps", type=int, default=100, help="Number of MPC steps")
+    parser.add_argument("--samples", type=int, default=512, help="CEM sample count")
+    parser.add_argument("--horizon", type=int, default=10, help="MPC horizon")
+    parser.add_argument(
+        "--no-vis", action="store_true", help="Disable live visualization"
+    )
+    args = parser.parse_args()
+
+    demo_fk = SmplLeftArmFK()
+
+    demo_initial_q = np.zeros((4, 3))
+    demo_target_q = np.array(
+        [
+            [0.3, 0.3, 0.3],  # left_collar
+            [0.0, -1.45, 0.0],  # left_shoulder
+            [0.0, 0.0, 0.4],  # left_elbow
+            [0.0, 0.0, 0.0],  # left_wrist
+        ]
+    )
+
+    demo_mpc = SmplLeftArmMPC(
+        horizon=args.horizon,
+        n_samples=args.samples,
+        visualize=not args.no_vis,
+        fk=demo_fk,
+        target_q=demo_target_q,
+    )
+
+    demo_q = demo_initial_q.copy()
+    for _ in range(args.steps):
+        demo_q = demo_mpc.step(demo_q, demo_target_q)
+
+    plt.ioff()
+    plt.show()

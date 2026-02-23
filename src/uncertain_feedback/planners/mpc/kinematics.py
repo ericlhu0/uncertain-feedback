@@ -114,14 +114,14 @@ class SmplLeftArmFK:
         with open(pkl_path, "rb") as f:
             dd = pickle.load(f, encoding="latin1")
 
-        J_reg = dd["J_regressor"]
-        if hasattr(J_reg, "todense"):
-            J_reg = np.array(J_reg.todense())
+        j_reg = dd["j_regressor"]
+        if hasattr(j_reg, "todense"):
+            j_reg = np.array(j_reg.todense())
         else:
-            J_reg = np.array(J_reg)
+            j_reg = np.array(j_reg)
 
         v = np.array(dd["v_template"])
-        joints = J_reg @ v  # (24, 3) T-pose joint positions
+        joints = j_reg @ v  # (24, 3) T-pose joint positions
 
         # Arm chain subset
         chain = LEFT_ARM_CHAIN_INDICES
@@ -195,10 +195,10 @@ class SmplLeftArmFK:
         positions = np.empty((5, 3), dtype=np.float64)
         positions[0] = spine3_pos
 
-        T = Rotation.from_rotvec(spine3_aa)
+        t_rot = Rotation.from_rotvec(spine3_aa)
         for i in range(4):
-            T = T * Rotation.from_rotvec(arm_aa[i])
-            positions[i + 1] = positions[i] + T.apply(self._bone_offsets[i])
+            t_rot = t_rot * Rotation.from_rotvec(arm_aa[i])
+            positions[i + 1] = positions[i] + t_rot.apply(self._bone_offsets[i])
 
         return positions
 
@@ -219,9 +219,9 @@ class SmplLeftArmFK:
             ``(N, 5, 3)`` world positions.
         """
         arm_aa = np.asarray(arm_aa, dtype=np.float64)
-        N = arm_aa.shape[0]
-        out = np.empty((N, 5, 3), dtype=np.float64)
-        for i in range(N):
+        n_configs = arm_aa.shape[0]
+        out = np.empty((n_configs, 5, 3), dtype=np.float64)
+        for i in range(n_configs):
             out[i] = self.fk(arm_aa[i], spine3_pos, spine3_aa)
         return out
 

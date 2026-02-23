@@ -33,7 +33,30 @@ _SMPL_PKL_DEFAULT = (
 # ---------------------------------------------------------------------------
 
 # Parent index for each of the 22 joints (-1 = root)
-SMPL_PARENTS_22 = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
+SMPL_PARENTS_22 = [
+    -1,
+    0,
+    0,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    9,
+    9,
+    12,
+    13,
+    14,
+    16,
+    17,
+    18,
+    19,
+]
 
 # All (parent, child) bone pairs for the 22-joint skeleton
 SMPL_BONE_PAIRS_22 = [(p, c) for c, p in enumerate(SMPL_PARENTS_22) if p >= 0]
@@ -46,7 +69,13 @@ LEFT_ARM_BONE_PAIRS_22 = [(9, 13), (13, 16), (16, 18), (18, 20)]
 
 # SMPL joint chain for the left arm FK (spine3 is the anchor)
 LEFT_ARM_CHAIN_INDICES = [9, 13, 16, 18, 20]
-LEFT_ARM_CHAIN_NAMES = ["spine3", "left_collar", "left_shoulder", "left_elbow", "left_wrist"]
+LEFT_ARM_CHAIN_NAMES = [
+    "spine3",
+    "left_collar",
+    "left_shoulder",
+    "left_elbow",
+    "left_wrist",
+]
 
 
 class SmplLeftArmFK:
@@ -61,8 +90,12 @@ class SmplLeftArmFK:
     """
 
     def __init__(self, smpl_pkl_path: str | Path | None = None) -> None:
-        pkl_path = Path(smpl_pkl_path) if smpl_pkl_path is not None else _SMPL_PKL_DEFAULT
-        self._bone_offsets, self._tpose_joints, self._tpose_22 = self._load_from_pkl(pkl_path)
+        pkl_path = (
+            Path(smpl_pkl_path) if smpl_pkl_path is not None else _SMPL_PKL_DEFAULT
+        )
+        self._bone_offsets, self._tpose_joints, self._tpose_22 = self._load_from_pkl(
+            pkl_path
+        )
 
     # ------------------------------------------------------------------
     # Loading
@@ -81,22 +114,22 @@ class SmplLeftArmFK:
         with open(pkl_path, "rb") as f:
             dd = pickle.load(f, encoding="latin1")
 
-        J_reg = dd["J_regressor"]
-        if hasattr(J_reg, "todense"):
-            J_reg = np.array(J_reg.todense())
+        j_reg = dd["j_regressor"]
+        if hasattr(j_reg, "todense"):
+            j_reg = np.array(j_reg.todense())
         else:
-            J_reg = np.array(J_reg)
+            j_reg = np.array(j_reg)
 
         v = np.array(dd["v_template"])
-        joints = J_reg @ v  # (24, 3) T-pose joint positions
+        joints = j_reg @ v  # (24, 3) T-pose joint positions
 
         # Arm chain subset
         chain = LEFT_ARM_CHAIN_INDICES
-        tpose_chain = joints[chain]           # (5, 3)
+        tpose_chain = joints[chain]  # (5, 3)
         bone_offsets = np.diff(tpose_chain, axis=0)  # (4, 3)
 
         # Full 22-joint subset (exclude hands at 22, 23)
-        tpose_22 = joints[:22].copy()         # (22, 3)
+        tpose_22 = joints[:22].copy()  # (22, 3)
 
         return bone_offsets, tpose_chain, tpose_22
 
@@ -162,10 +195,10 @@ class SmplLeftArmFK:
         positions = np.empty((5, 3), dtype=np.float64)
         positions[0] = spine3_pos
 
-        T = Rotation.from_rotvec(spine3_aa)
+        t_rot = Rotation.from_rotvec(spine3_aa)
         for i in range(4):
-            T = T * Rotation.from_rotvec(arm_aa[i])
-            positions[i + 1] = positions[i] + T.apply(self._bone_offsets[i])
+            t_rot = t_rot * Rotation.from_rotvec(arm_aa[i])
+            positions[i + 1] = positions[i] + t_rot.apply(self._bone_offsets[i])
 
         return positions
 
@@ -186,9 +219,9 @@ class SmplLeftArmFK:
             ``(N, 5, 3)`` world positions.
         """
         arm_aa = np.asarray(arm_aa, dtype=np.float64)
-        N = arm_aa.shape[0]
-        out = np.empty((N, 5, 3), dtype=np.float64)
-        for i in range(N):
+        n_configs = arm_aa.shape[0]
+        out = np.empty((n_configs, 5, 3), dtype=np.float64)
+        for i in range(n_configs):
             out[i] = self.fk(arm_aa[i], spine3_pos, spine3_aa)
         return out
 
@@ -202,7 +235,8 @@ class SmplLeftArmFK:
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return all 22 joint positions with the left arm updated by ``arm_aa``.
+        """Return all 22 joint positions with the left arm updated by
+        ``arm_aa``.
 
         All non-arm joints remain at their SMPL T-pose positions.  The five
         arm-chain joints (spine3, collar, shoulder, elbow, wrist) are

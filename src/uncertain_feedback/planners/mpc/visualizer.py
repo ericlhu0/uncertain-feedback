@@ -113,19 +113,6 @@ class _LiveState:
     step: int = 0
 
 
-@dataclasses.dataclass
-class _LiveState:
-    """Mutable state for the interactive live window."""
-
-    fig: plt.Figure
-    artists3d: list[dict]
-    artists2d: list[dict]
-    spine_pos: np.ndarray | None
-    spine_aa: np.ndarray | None
-    wrist_trace: list = dataclasses.field(default_factory=list)
-    step: int = 0
-
-
 class ArmVisualizer:
     """Animate the full SMPL skeleton with the left arm driven by MPC.
 
@@ -347,7 +334,8 @@ class ArmVisualizer:
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,
     ) -> tuple[plt.Figure, list[dict], list[dict]]:
-        """Build the figure with static elements drawn and mutable artists created.
+        """Build the figure with static elements drawn and mutable artists
+        created.
 
         Returns:
             ``(fig, artists_3d, artists_2d)``
@@ -567,7 +555,8 @@ def _make_frame_updater(
     artists_2d: list[dict],
     n_steps: int,
 ):
-    """Return a FuncAnimation update callback that closes over the given data."""
+    """Return a FuncAnimation update callback that closes over the given
+    data."""
     wrist_trace = np.array([f["positions"][_WRIST_IDX] for f in frames])
 
     def update(k: int):

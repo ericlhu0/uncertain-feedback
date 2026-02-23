@@ -1,4 +1,4 @@
-"""Placeholder tests"""
+"""Placeholder tests."""
 
 
 def test_perfect_communicator():

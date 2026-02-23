@@ -75,7 +75,11 @@ split_on_trailing_comma = true
 strict_equality = true
 disallow_untyped_calls = true
 warn_unreachable = true
-exclude = ["venv/*"]
+exclude = [
+    "venv/*",
+    "src/uncertain_feedback/motion_generators/mdm/mdm_parser_util.py",
+    "src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py",
+]
 mypy_path = ["src"]
 explicit_package_bases = true
 

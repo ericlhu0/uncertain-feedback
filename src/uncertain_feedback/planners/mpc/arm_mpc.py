@@ -36,6 +36,7 @@ class _VisConfig:
 # Helper: batched SO(3) composition
 # ---------------------------------------------------------------------------
 
+
 def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
     """Compose axis-angle rotations element-wise: R_new = R_delta ∘ R_q.
 
@@ -55,6 +56,7 @@ def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # MPC controller
 # ---------------------------------------------------------------------------
+
 
 class SmplLeftArmMPC:
     """Sampling-based MPC for the SMPL left arm.
@@ -117,7 +119,8 @@ class SmplLeftArmMPC:
     # ------------------------------------------------------------------
 
     def _rollout(self, current_q: np.ndarray, actions: np.ndarray) -> np.ndarray:
-        """Roll out N trajectories from ``current_q`` using action sequences ``actions``.
+        """Roll out N trajectories from ``current_q`` using action sequences
+        ``actions``.
 
         Args:
             current_q: ``(4, 3)`` current joint angles.
@@ -196,7 +199,8 @@ class SmplLeftArmMPC:
         return best_plan[0], best_plan
 
     def reset_warmstart(self) -> None:
-        """Reset the warm-start plan (call before re-running from a new initial pose)."""
+        """Reset the warm-start plan (call before re-running from a new initial
+        pose)."""
         self._prev_best = None
 
     def step(

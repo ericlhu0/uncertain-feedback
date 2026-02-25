@@ -8,6 +8,7 @@ native ``body_pose`` format (``smplx.SMPL``)
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
@@ -27,7 +28,6 @@ _N_JOINTS = 4  # number of controlled joints
 @dataclass
 class _VisConfig:
     fk: SmplLeftArmFK
-    target_q: np.ndarray
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
 
@@ -64,19 +64,26 @@ class SmplLeftArmMPC:
     Draws ``n_samples`` random action sequences, rolls each out, and returns
     the one with the lowest terminal cost.
 
+    The controller maintains a queue of goals.  It always targets the first
+    goal in the queue.  Once the controller reaches that goal (within
+    ``goal_threshold``), the goal is popped and the next one becomes active.
+    Goals can be added at any time via :meth:`append_goal` or
+    :meth:`prepend_goal`.
+
     Args:
         horizon:         Number of look-ahead steps.
         n_samples:       Number of candidate action sequences sampled per
                          ``solve`` call.
         max_angle_delta: Standard deviation of the sampling distribution
                          (radians).
+        goals:           Initial list of ``(4, 3)`` target joint configurations.
+        goal_threshold:  L2 distance (in rot-vec space) below which the
+                         current goal is considered reached (default: 0.01).
         visualize:       If ``True``, open a live matplotlib window and update
                          it each time :meth:`step` is called.  Requires
-                         ``fk`` and ``target_q`` to also be provided.
+                         ``fk`` to also be provided.
         fk:              :class:`SmplLeftArmFK` instance (required when
                          ``visualize=True``).
-        target_q:        ``(4, 3)`` target joint angles used to draw the
-                         static target pose (required when ``visualize=True``).
         spine3_pos:      ``(3,)`` world position of spine3 (optional).
         spine3_aa:       ``(3,)`` world axis-angle of spine3 (optional).
     """
@@ -86,9 +93,10 @@ class SmplLeftArmMPC:
         horizon: int = 10,
         n_samples: int = 512,
         max_angle_delta: float = 0.001,
+        goals: list[np.ndarray] | None = None,
+        goal_threshold: float = 0.01,
         visualize: bool = False,
         fk: SmplLeftArmFK | None = None,
-        target_q: np.ndarray | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
     ) -> None:
@@ -97,14 +105,15 @@ class SmplLeftArmMPC:
         self.max_angle_delta = max_angle_delta
         self.visualize = visualize
 
+        self._goals: deque[np.ndarray] = deque(
+            [np.asarray(g, dtype=np.float64) for g in goals] if goals else []
+        )
+        self._goal_threshold = goal_threshold
+
         if visualize:
-            if fk is None or target_q is None:
-                raise ValueError(
-                    "visualize=True requires both `fk` and `target_q` to be provided."
-                )
-            self._vis_config: _VisConfig | None = _VisConfig(
-                fk, target_q, spine3_pos, spine3_aa
-            )
+            if fk is None:
+                raise ValueError("visualize=True requires `fk` to be provided.")
+            self._vis_config: _VisConfig | None = _VisConfig(fk, spine3_pos, spine3_aa)
         else:
             self._vis_config = None
 
@@ -113,6 +122,23 @@ class SmplLeftArmMPC:
 
         # Live visualizer (lazily initialised on first step)
         self._vis: ArmVisualizer | None = None
+
+    # ------------------------------------------------------------------
+    # Goal queue management
+    # ------------------------------------------------------------------
+
+    @property
+    def current_goal(self) -> np.ndarray | None:
+        """The active goal (front of the queue), or ``None`` if the queue is empty."""
+        return self._goals[0] if self._goals else None
+
+    def append_goal(self, goal: np.ndarray) -> None:
+        """Add a goal to the back of the queue."""
+        self._goals.append(np.asarray(goal, dtype=np.float64))
+
+    def prepend_goal(self, goal: np.ndarray) -> None:
+        """Insert a goal at the front of the queue (becomes the immediate next target)."""
+        self._goals.appendleft(np.asarray(goal, dtype=np.float64))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -157,23 +183,26 @@ class SmplLeftArmMPC:
     def solve(
         self,
         current_q: np.ndarray,
-        target_q: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Sample action sequences and return the best one.
 
         Args:
             current_q: ``(4, 3)`` current axis-angle joint angles for
                        [left_collar, left_shoulder, left_elbow, left_wrist].
-            target_q:  ``(4, 3)`` desired axis-angle joint configuration.
 
         Returns:
             Tuple of:
 
             - ``first_action`` ``(4, 3)``: best delta to apply at the current step.
             - ``plan`` ``(H, 4, 3)``: full best action sequence.
+
+        Raises:
+            RuntimeError: If the goal queue is empty.
         """
+        if self.current_goal is None:
+            raise RuntimeError("Goal queue is empty. Add a goal before calling solve().")
         current_q = np.asarray(current_q, dtype=np.float64)
-        target_q = np.asarray(target_q, dtype=np.float64)
+        target_q = self.current_goal
 
         # Warm-start: shift previous best plan by one step; fill last with zeros
         if self._prev_best is not None:
@@ -206,34 +235,44 @@ class SmplLeftArmMPC:
     def step(
         self,
         current_q: np.ndarray,
-        target_q: np.ndarray,
     ) -> np.ndarray:
         """Perform one MPC step.
 
         Samples action sequences, applies the best first action to ``current_q``
-        via SO(3) composition, and returns the updated joint angles.  If
-        ``visualize=True`` was set at construction, the live window is updated
-        automatically.
+        via SO(3) composition, and returns the updated joint angles.  If the
+        current goal is reached (L2 distance < ``goal_threshold``) and more
+        goals remain, the front goal is popped and the warm-start is reset.
+        If ``visualize=True`` was set at construction, the live window is
+        updated automatically.
 
         Args:
             current_q: ``(4, 3)`` current axis-angle joint angles.
-            target_q:  ``(4, 3)`` target axis-angle joint configuration.
 
         Returns:
             ``(4, 3)`` updated axis-angle joint angles.
         """
-        first_action, _ = self.solve(current_q, target_q)
+        first_action, _ = self.solve(current_q)
         next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
+
+        # Advance goal queue when the current goal is reached
+        goal = self.current_goal
+        if goal is not None:
+            dist = float(np.linalg.norm(next_q - goal))
+            if dist < self._goal_threshold and len(self._goals) > 1:
+                self._goals.popleft()
+                self.reset_warmstart()
+                if self._vis is not None:
+                    self._vis.update_goals(list(self._goals))
 
         if self._vis_config is not None:
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    self._vis_config.target_q,
+                    list(self._goals),
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                 )
-            dist = float(np.linalg.norm(next_q - np.asarray(target_q)))
+            dist = float(np.linalg.norm(next_q - self.current_goal))
             self._vis.update_step(next_q, dist=dist)
 
         return next_q
@@ -243,8 +282,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run SMPL left arm MPC with live visualization"
     )
-    parser.add_argument("--steps", type=int, default=100, help="Number of MPC steps")
-    parser.add_argument("--samples", type=int, default=512, help="CEM sample count")
+    parser.add_argument("--steps", type=int, default=500, help="Number of MPC steps")
+    parser.add_argument("--samples", type=int, default=256, help="CEM sample count")
     parser.add_argument("--horizon", type=int, default=10, help="MPC horizon")
     parser.add_argument(
         "--no-vis", action="store_true", help="Disable live visualization"
@@ -254,26 +293,36 @@ if __name__ == "__main__":
     demo_fk = SmplLeftArmFK()
 
     demo_initial_q = np.zeros((4, 3))
-    demo_target_q = np.array(
-        [
-            [0.3, 0.3, 0.3],  # left_collar
-            [0.0, -1.45, 0.0],  # left_shoulder
-            [0.0, 0.0, 0.4],  # left_elbow
-            [0.0, 0.0, 0.0],  # left_wrist
-        ]
-    )
+    demo_goals = [
+        np.array(
+            [
+                [0.3, 0.3, 0.3],  # left_collar
+                [0.0, -1.45, 0.0],  # left_shoulder
+                [0.0, 0.0, 0.4],  # left_elbow
+                [0.0, 0.0, 0.0],  # left_wrist
+            ]
+        ),
+        np.array(
+            [
+                [0.0, 0.0, 0.0],  # left_collar
+                [0.0, -0.8, 0.0],  # left_shoulder
+                [0.0, 0.0, 0.8],  # left_elbow
+                [0.0, 0.0, 0.0],  # left_wrist
+            ]
+        ),
+    ]
 
     demo_mpc = SmplLeftArmMPC(
         horizon=args.horizon,
         n_samples=args.samples,
+        goals=demo_goals,
         visualize=not args.no_vis,
         fk=demo_fk,
-        target_q=demo_target_q,
     )
 
     demo_q = demo_initial_q.copy()
     for _ in range(args.steps):
-        demo_q = demo_mpc.step(demo_q, demo_target_q)
+        demo_q = demo_mpc.step(demo_q)
 
     plt.ioff()
     plt.show()

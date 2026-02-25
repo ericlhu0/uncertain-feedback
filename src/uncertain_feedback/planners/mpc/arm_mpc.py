@@ -26,6 +26,13 @@ _N_JOINTS = 4  # number of controlled joints
 
 
 @dataclass
+class _MpcConfig:
+    horizon: int
+    n_samples: int
+    max_angle_delta: float
+
+
+@dataclass
 class _VisConfig:
     fk: SmplLeftArmFK
     spine_pos: np.ndarray | None
@@ -100,9 +107,7 @@ class SmplLeftArmMPC:
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
     ) -> None:
-        self.horizon = horizon
-        self.n_samples = n_samples
-        self.max_angle_delta = max_angle_delta
+        self._config = _MpcConfig(horizon, n_samples, max_angle_delta)
         self.visualize = visualize
 
         self._goals: deque[np.ndarray] = deque(
@@ -129,7 +134,8 @@ class SmplLeftArmMPC:
 
     @property
     def current_goal(self) -> np.ndarray | None:
-        """The active goal (front of the queue), or ``None`` if the queue is empty."""
+        """The active goal (front of the queue), or ``None`` if the queue is
+        empty."""
         return self._goals[0] if self._goals else None
 
     def append_goal(self, goal: np.ndarray) -> None:
@@ -137,7 +143,8 @@ class SmplLeftArmMPC:
         self._goals.append(np.asarray(goal, dtype=np.float64))
 
     def prepend_goal(self, goal: np.ndarray) -> None:
-        """Insert a goal at the front of the queue (becomes the immediate next target)."""
+        """Insert a goal at the front of the queue (becomes the immediate next
+        target)."""
         self._goals.appendleft(np.asarray(goal, dtype=np.float64))
 
     # ------------------------------------------------------------------
@@ -200,7 +207,9 @@ class SmplLeftArmMPC:
             RuntimeError: If the goal queue is empty.
         """
         if self.current_goal is None:
-            raise RuntimeError("Goal queue is empty. Add a goal before calling solve().")
+            raise RuntimeError(
+                "Goal queue is empty. Add a goal before calling solve()."
+            )
         current_q = np.asarray(current_q, dtype=np.float64)
         target_q = self.current_goal
 
@@ -210,12 +219,12 @@ class SmplLeftArmMPC:
                 [self._prev_best[1:], np.zeros((1, _N_JOINTS, 3))], axis=0
             )
         else:
-            mean = np.zeros((self.horizon, _N_JOINTS, 3), dtype=np.float64)
+            mean = np.zeros((self._config.horizon, _N_JOINTS, 3), dtype=np.float64)
 
         actions = np.random.normal(
             loc=mean,
-            scale=self.max_angle_delta,
-            size=(self.n_samples, self.horizon, _N_JOINTS, 3),
+            scale=self._config.max_angle_delta,
+            size=(self._config.n_samples, self._config.horizon, _N_JOINTS, 3),
         )
 
         q_trajs = self._rollout(current_q, actions)

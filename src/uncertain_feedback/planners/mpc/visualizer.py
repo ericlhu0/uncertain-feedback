@@ -295,7 +295,8 @@ class ArmVisualizer:
     def _draw_goal_artists(self, goals: list[np.ndarray]) -> list[dict]:
         """Draw all goals onto the live axes and return their artists.
 
-        Intermediate goals are orange; the final goal is red (``_TARGET_COLOR``).
+        Intermediate goals are orange; the final goal is red
+        (``_TARGET_COLOR``).
         """
         assert self._live is not None
         result = []
@@ -339,13 +340,23 @@ class ArmVisualizer:
                     linestyle="--",
                 )
                 sc = a2["ax"].scatter(
-                    arm_pts[:, hi], arm_pts[:, vi], color=color, s=28, alpha=0.4, zorder=4
+                    arm_pts[:, hi],
+                    arm_pts[:, vi],
+                    color=color,
+                    s=28,
+                    alpha=0.4,
+                    zorder=4,
                 )
                 lines2d.append(ls)
                 scats2d.append(sc)
 
             result.append(
-                {"lines3d": lines3d, "scats3d": scats3d, "lines2d": lines2d, "scats2d": scats2d}
+                {
+                    "lines3d": lines3d,
+                    "scats3d": scats3d,
+                    "lines2d": lines2d,
+                    "scats2d": scats2d,
+                }
             )
         return result
 
@@ -621,7 +632,7 @@ class ArmVisualizer:
             dist = float(np.linalg.norm(current_q - target_q))
             frames.append({"q": current_q.copy(), "positions": positions, "dist": dist})
             if step < n_steps:
-                current_q = mpc.step(current_q, target_q)
+                current_q = mpc.step(current_q)
 
         return frames
 

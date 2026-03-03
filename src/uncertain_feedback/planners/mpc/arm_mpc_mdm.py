@@ -66,10 +66,10 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         self,
         horizon: int = 10,
         n_samples: int = 512,
-        max_angle_delta: float = 0.001,
-        advance_threshold: float = 0.05,
+        max_angle_delta: float = 0.0025,
+        advance_threshold: float = 0.1,
         goals: list[np.ndarray] | None = None,
-        goal_threshold: float = 0.01,
+        goal_threshold: float = 0.1,
         visualize: bool = False,
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
@@ -268,13 +268,13 @@ if __name__ == "__main__":
 
     gen = MdmMotionGenerator()
     initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
-    initial_arm_aa, initial_body_positions = gen.decode_pose(initial_pose)
+    initial_arm_aa, initial_body_positions, initial_spine3_aa = gen.decode_pose(initial_pose)
 
-    demo_target_q = np.array(
+    demo_target_q = initial_arm_aa.copy() + np.array(
         [
             [0.0, 0.0, 0.0],  # left_collar
-            [0.0, -0.8, 0.0],  # left_shoulder
-            [0.0, 0.0, 0.8],  # left_elbow
+            [0.0, -1.6, 0.8],  # left_shoulder
+            [0.0, 0.0, 0.0],  # left_elbow
             [0.0, 0.0, 0.0],  # left_wrist
         ]
     )
@@ -285,6 +285,8 @@ if __name__ == "__main__":
         visualize=not args.no_vis,
         fk=demo_fk,
         goals=[demo_target_q],
+        spine3_pos=initial_body_positions[9],
+        spine3_aa=initial_spine3_aa,
         body_pos=initial_body_positions,
     )
 
@@ -302,14 +304,15 @@ if __name__ == "__main__":
     print(
         f"Generating MDM trajectory for: '{args.text}' (starting from current MPC state)"
     )
+    current_pose = gen.build_pose_from_arm_aa(initial_pose, demo_q)
     trajectory = gen.generate_left_arm_trajectory(
         args.text,
-        start_arm_aa=demo_q,
-        start_pose=initial_pose,
+        start_pose=current_pose,
         save_path=args.save_motion or None,
     )  # (n_frames, 4, 3)
     n_frames = trajectory.shape[0]
-    print(f"Generated {n_frames} frames.")
+    half = n_frames // 2
+    print(f"Generated {n_frames} frames; enqueuing first {half}.")
 
     # If MDM switched the backend to Agg (e.g. for video saving), switch back to interactive
     if plt.get_backend().lower() == "agg":
@@ -320,10 +323,10 @@ if __name__ == "__main__":
             except Exception:  # pylint: disable=broad-exception-caught
                 continue
 
-    demo_mpc.set_mdm_goal(trajectory[-1])
+    demo_mpc.set_mdm_goal(trajectory[half - 1])
     demo_mpc.push_trajectory(
-        trajectory
-    )  # prepends MDM frames; demo_target_q stays last
+        trajectory[:half]
+    )  # prepends first-half MDM frames; demo_target_q stays last
 
     for _ in range(args.steps - args.text_time):
         demo_q = demo_mpc.step(demo_q)

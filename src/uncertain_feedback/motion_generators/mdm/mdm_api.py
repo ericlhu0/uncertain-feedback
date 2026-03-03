@@ -13,12 +13,15 @@ Typical usage::
 
     # Load the starting pose and decode it.
     start_pose = gen.load_hml_pose("path/to/pose.pt")
-    initial_q, body_positions = gen.decode_pose(start_pose)
+    initial_q, body_positions, spine3_aa = gen.decode_pose(start_pose)
+
+    # Build a start pose that reflects the current arm configuration.
+    current_pose = gen.build_pose_from_arm_aa(start_pose, current_arm_aa)
 
     # Generate a trajectory from a text prompt.
     trajectory = gen.generate_left_arm_trajectory(
         "a person raises their left arm above their head",
-        start_pose=start_pose,
+        start_pose=current_pose,
     )  # (n_frames, 4, 3)
 
     # Enqueue trajectory into the MPC.
@@ -192,14 +195,12 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         # HML263 block layout:
         #   [4 root] [21×3 positions] [21×6 rotations] [22×3 velocities] [4 contacts]
         _rot_block_offset = 4 + 63  # 6D rotation block starts at 67
-        _pos_block_offset = 4  # RIC position block starts at 4
         _vel_block_offset = (
             4 + 63 + 126
         )  # 193; velocity block uses all 22 joints (not j-1)
         self._arm_info = HmlArmFeatureInfo(
             l_arm_joints=l_arm_joints,
             arm_6d_offsets=[_rot_block_offset + (j - 1) * 6 for j in l_arm_joints],
-            arm_pos_offsets=[_pos_block_offset + (j - 1) * 3 for j in l_arm_joints],
             arm_vel_offsets=[_vel_block_offset + j * 3 for j in l_arm_joints],
         )
 
@@ -233,7 +234,9 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             .numpy()
         )  # (263,)
 
-    def decode_pose(self, pose: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def decode_pose(
+        self, pose: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Decode a ``(263,)`` HML263 pose into arm angles and body positions.
 
         Args:
@@ -246,7 +249,15 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                             left_wrist]``.
             body_positions: ``(22, 3)`` world joint positions for all SMPL
                             joints.
+            spine3_aa:      ``(3,)`` world axis-angle of spine3 (joint 9).
+                            Pass this to :meth:`SmplLeftArmFK.fk` as
+                            ``spine3_aa``, together with
+                            ``spine3_pos=body_positions[9]``, so that arm
+                            joint positions computed from ``arm_aa`` match
+                            those in ``body_positions``.
         """
+        from scipy.spatial.transform import Rotation  # pylint: disable=import-outside-toplevel
+
         self._ensure_loaded()
         import torch  # pylint: disable=import-outside-toplevel
 
@@ -262,13 +273,59 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         body_positions = smpl_body_pose_to_positions(
             body_pose[0], self._fk.tpose_all_joints
         )  # (22, 3)
-        return arm_aa, body_positions
+
+        # Spine3 world rotation: accumulate local rotations along the spine
+        # chain (root→spine1(j=3)→spine2(j=6)→spine3(j=9)).
+        # body_pose[j-1] is the local rotation for SMPL joint j.
+        spine3_world_rot = (
+            Rotation.from_rotvec(body_pose[0][2])  # spine1 (j=3)
+            * Rotation.from_rotvec(body_pose[0][5])  # spine2 (j=6)
+            * Rotation.from_rotvec(body_pose[0][8])  # spine3 (j=9)
+        )
+        spine3_aa = spine3_world_rot.as_rotvec()  # (3,)
+
+        return arm_aa, body_positions, spine3_aa
+
+    def build_pose_from_arm_aa(
+        self,
+        base_pose: np.ndarray,
+        arm_aa: np.ndarray,
+    ) -> np.ndarray:
+        """Patch arm joint features into a base HML263 pose.
+
+        Converts ``arm_aa`` to HML263 6D rotation features and replaces the
+        corresponding entries in ``base_pose``.  Use this to construct a
+        ``start_pose`` that reflects the MPC's current arm configuration
+        before calling :meth:`generate_left_arm_trajectory`.
+
+        Args:
+            base_pose: ``(263,)`` HML263 feature vector (e.g. sitting pose
+                       from :meth:`load_hml_pose`).
+            arm_aa:    ``(4, 3)`` axis-angle for
+                       ``[left_collar, left_shoulder, left_elbow,
+                       left_wrist]``.
+
+        Returns:
+            ``(263,)`` HML263 feature vector with arm joints patched to
+            ``arm_aa``.
+        """
+        self._ensure_loaded()
+        assert self._arm_info is not None
+        assert self._hml_mean is not None
+        assert self._hml_std is not None
+        return smpl_arm_aa_to_hml263_frame(
+            base_norm=np.asarray(base_pose, dtype=np.float64),
+            arm_aa=np.asarray(arm_aa, dtype=np.float64),
+            arm_info=self._arm_info,
+            hml_mean=self._hml_mean,
+            hml_std=self._hml_std,
+            fk=self._fk,
+        )
 
     def generate_left_arm_trajectory(  # pylint: disable=too-many-locals
         self,
         text: str,
         motion_length_seconds: float = 6.0,
-        start_arm_aa: np.ndarray | None = None,
         start_pose: np.ndarray | None = None,
         save_path: str | Path | None = None,
     ) -> np.ndarray:
@@ -276,8 +333,9 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
 
         All body joints except the left arm (left_shoulder, left_elbow,
         left_wrist) are inpainted to ``start_pose`` throughout the motion.
-        The first 10 frames are locked to ``start_arm_aa`` (if provided) or
-        the base configuration from ``start_pose``.
+        The first 10 frames are locked to the arm configuration encoded in
+        ``start_pose``.  To start from the MPC's current arm state, pass a
+        ``start_pose`` built with :meth:`build_pose_from_arm_aa`.
 
         Args:
             text:                  Natural-language description of the desired
@@ -285,21 +343,11 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                                    arm"``).
             motion_length_seconds: Length of the generated motion in seconds.
                                    Capped at 9.8 s (HumanML3D maximum).
-            start_arm_aa:          ``(4, 3)`` axis-angle joint angles for
-                                   ``[left_collar, left_shoulder, left_elbow,
-                                   left_wrist]`` representing the skeleton
-                                   configuration at the moment generation is
-                                   called.  When provided, the 6D rotation
-                                   features for the free arm joints
-                                   (shoulder, elbow, wrist) are patched into
-                                   the inpainting tensor so the first frames
-                                   of the generated motion start from the
-                                   current MPC state.  Defaults to ``None``
-                                   (uses ``start_pose`` arm configuration).
             start_pose:            ``(263,)`` HML263 feature vector used as
-                                   the inpainting base for all non-arm joints
+                                   the inpainting base for all joints
                                    throughout the motion.  Pass the output of
-                                   :meth:`load_hml_pose`.
+                                   :meth:`load_hml_pose` or
+                                   :meth:`build_pose_from_arm_aa`.
             save_path:             If provided, save a full-body visualization
                                    of the generated motion to this path as an
                                    MP4 (e.g. ``"motion.mp4"``).  Uses the same
@@ -342,30 +390,11 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                 model_kwargs["y"][key] = model_kwargs["y"][key].to(dist_util.dev())
 
         # --- Inpainting: start pose + left-arm-only mask ----------------------
-        # Build the inpainting start frame.  If start_arm_aa is provided, patch
-        # the arm joints into start_pose so the first frames are locked to the
-        # current MPC skeleton configuration.
-        sitting = torch.tensor(
+        start_frame = torch.tensor(
             start_pose, dtype=torch.float32, device=dist_util.dev()
         ).unsqueeze(
             -1
         )  # (263, 1)
-        if start_arm_aa is not None:
-            patched_norm = smpl_arm_aa_to_hml263_frame(
-                base_norm=sitting.squeeze(-1).cpu().numpy(),
-                arm_aa=np.asarray(start_arm_aa, dtype=np.float64),
-                arm_info=self._arm_info,
-                hml_mean=self._hml_mean,
-                hml_std=self._hml_std,
-                fk=self._fk,
-            )
-            start_frame = torch.tensor(
-                patched_norm, dtype=torch.float32, device=sitting.device
-            ).unsqueeze(
-                -1
-            )  # (263, 1)
-        else:
-            start_frame = sitting
 
         # input_motions: (1, 263, 1, n_frames)
         input_motions = start_frame.unsqueeze(0).unsqueeze(-1).repeat(1, 1, 1, n_frames)

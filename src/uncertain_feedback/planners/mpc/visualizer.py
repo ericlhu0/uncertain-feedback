@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code
 """3D stick-figure visualizer for the SMPL left arm MPC.
 
 Draws the full 22-joint SMPL skeleton.  Non-arm joints are fixed at the
@@ -101,7 +102,7 @@ _ORTHO_VIEWS = [
 
 
 @dataclasses.dataclass
-class _LiveState:
+class _LiveState:  # pylint: disable=too-many-instance-attributes
     """Mutable state for the interactive live window."""
 
     fig: plt.Figure
@@ -114,7 +115,7 @@ class _LiveState:
     step: int = 0
 
 
-class ArmVisualizer:
+class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
     """Animate the full SMPL skeleton with the left arm driven by MPC.
 
     Args:
@@ -330,7 +331,8 @@ class ArmVisualizer:
                        for an MP4 video (requires ``ffmpeg``).
         """
         assert self._live is not None, "finish_live() called before open_live()"
-        recorded = self._live.recorded_frames
+        live = self._live
+        recorded = live.recorded_frames
         if not recorded:
             print("No frames recorded; nothing to save.")
             return
@@ -343,8 +345,8 @@ class ArmVisualizer:
             arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
             tr = wrist_trace[: k + 1]
             _update_artists(
-                self._live.artists3d,
-                self._live.artists2d,
+                live.artists3d,
+                live.artists2d,
                 pos,
                 arm_pts,
                 tr,
@@ -355,15 +357,15 @@ class ArmVisualizer:
                 trace_color=recorded[k].get("trace_color", _TRACE_COLOR),
             )
             all_artists = []
-            for a3 in self._live.artists3d:
+            for a3 in live.artists3d:
                 all_artists += [a3["scat"], *a3["lines"], a3["trace"]]
-            for a2 in self._live.artists2d:
+            for a2 in live.artists2d:
                 all_artists += [a2["scat"], *a2["lines"], a2["trace"]]
             return all_artists
 
         plt.ioff()
         anim = FuncAnimation(
-            self._live.fig,
+            live.fig,
             _update,
             frames=len(recorded),
             interval=50,
@@ -466,7 +468,7 @@ class ArmVisualizer:
         artists_2d = self._build_2d_panels(fig, gs, target_full, ref_body, lims)
         return fig, artists_3d, artists_2d
 
-    def _build_3d_panels(
+    def _build_3d_panels(  # pylint: disable=too-many-locals
         self,
         fig: plt.Figure,
         gs: gridspec.GridSpec,
@@ -721,7 +723,7 @@ def _make_frame_updater(
     return update
 
 
-def _update_artists(
+def _update_artists(  # pylint: disable=too-many-locals
     artists_3d: list[dict],
     artists_2d: list[dict],
     pos: np.ndarray,

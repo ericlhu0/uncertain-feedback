@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code
 """Tests for hml_smpl_conversion.py — HumanML3D 263-dim ↔ SMPL body_pose
 conversion.
 
@@ -29,6 +30,7 @@ from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 @pytest.fixture(scope="module")
 def fk() -> SmplLeftArmFK:
+    """Return a shared SmplLeftArmFK instance for the test module."""
     return SmplLeftArmFK()
 
 
@@ -40,17 +42,24 @@ def fk() -> SmplLeftArmFK:
 class TestPositionsToSmplBodyPose:
     """Unit tests for positions_to_smpl_body_pose."""
 
-    def test_output_shape(self, fk: SmplLeftArmFK) -> None:
+    def test_output_shape(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
+        """Check that the output shape is (21, 3)."""
         result = positions_to_smpl_body_pose(fk.tpose_all_joints, fk.tpose_all_joints)
         assert result.shape == (21, 3)
 
-    def test_tpose_gives_zero_body_pose(self, fk: SmplLeftArmFK) -> None:
+    def test_tpose_gives_zero_body_pose(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
         """T-pose positions require no rotation; body_pose should be all
         zeros."""
         result = positions_to_smpl_body_pose(fk.tpose_all_joints, fk.tpose_all_joints)
         np.testing.assert_allclose(result, 0.0, atol=1e-5)
 
-    def test_fk_roundtrip_random_arm(self, fk: SmplLeftArmFK) -> None:
+    def test_fk_roundtrip_random_arm(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
         """IK(FK(arm_aa)) → recovered arm positions match original arm
         positions."""
         rng = np.random.default_rng(42)
@@ -65,7 +74,9 @@ class TestPositionsToSmplBodyPose:
             recovered_arm_pos = fk.fk(recovered_arm_aa)  # (5, 3)
             np.testing.assert_allclose(recovered_arm_pos, original_arm_pos, atol=1e-4)
 
-    def test_fk_roundtrip_realistic_pose(self, fk: SmplLeftArmFK) -> None:
+    def test_fk_roundtrip_realistic_pose(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
         """Roundtrip for a realistic arm pose from the MPC demo.
 
         Minimum-rotation IK does not preserve twist, so recovered axis-
@@ -93,16 +104,19 @@ class TestSmplBodyPoseToArmAa:
     """Unit tests for smpl_body_pose_to_arm_aa."""
 
     def test_output_shape(self) -> None:
+        """Check that the output shape is (4, 3) for a single frame."""
         body_pose = np.zeros((21, 3))
         result = smpl_body_pose_to_arm_aa(body_pose)
         assert result.shape == (4, 3)
 
     def test_zeros_in_zeros_out(self) -> None:
+        """Zero body_pose should yield zero arm axis-angles."""
         body_pose = np.zeros((21, 3))
         result = smpl_body_pose_to_arm_aa(body_pose)
         np.testing.assert_allclose(result, 0.0)
 
     def test_batched_shape(self) -> None:
+        """Check that batched input gives (N, 4, 3) output."""
         body_pose = np.zeros((10, 21, 3))
         result = smpl_body_pose_to_arm_aa(body_pose)
         assert result.shape == (10, 4, 3)
@@ -117,18 +131,21 @@ class TestSmplBodyPoseToArmAa:
         np.testing.assert_allclose(arm_aa[1:], 0.0)
 
     def test_shoulder_index(self) -> None:
+        """Check that shoulder joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
         body_pose[ARM_BODY_POSE_INDICES[1]] = [0.4, 0.5, 0.6]  # shoulder
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
         np.testing.assert_allclose(arm_aa[1], [0.4, 0.5, 0.6])
 
     def test_elbow_index(self) -> None:
+        """Check that elbow joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
         body_pose[ARM_BODY_POSE_INDICES[2]] = [0.7, 0.8, 0.9]  # elbow
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
         np.testing.assert_allclose(arm_aa[2], [0.7, 0.8, 0.9])
 
     def test_wrist_index(self) -> None:
+        """Check that wrist joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
         body_pose[ARM_BODY_POSE_INDICES[3]] = [1.0, 1.1, 1.2]  # wrist
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
@@ -166,8 +183,12 @@ class TestHml263ToSmplBodyPose:
     """
 
     @pytest.fixture(scope="class")
-    def mdm_resources(self, fk: SmplLeftArmFK):
+    def mdm_resources(
+        self,
+        fk: SmplLeftArmFK,  # pylint: disable=redefined-outer-name,unused-argument
+    ):
         """Load MDM model + dataset once for all tests in this class."""
+        # pylint: disable=import-outside-toplevel,too-many-locals
         import os
         import sys as _sys
         from pathlib import Path as _Path
@@ -181,6 +202,7 @@ class TestHml263ToSmplBodyPose:
 
         os.chdir(_mdm_dir)
 
+        # pylint: disable=import-error
         from data_loaders.get_data import get_dataset_loader
         from utils import dist_util
         from utils.fixseed import fixseed
@@ -196,7 +218,7 @@ class TestHml263ToSmplBodyPose:
             "",
         ]
         try:
-            args = edit_args()
+            args = edit_args()  # type: ignore[no-untyped-call]
         finally:
             _sys.argv = _orig_argv
 
@@ -229,8 +251,14 @@ class TestHml263ToSmplBodyPose:
         )  # (263, 1)
         return {"dataset": data, "model": model, "sitting_pose": sitting_pose}
 
-    def test_output_shape(self, fk: SmplLeftArmFK, mdm_resources: dict) -> None:
-        from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
+    def test_output_shape(
+        self,
+        fk: SmplLeftArmFK,  # pylint: disable=redefined-outer-name
+        mdm_resources: dict,
+    ) -> None:
+        """Check that the output shape is (1, 21, 3) for a single sitting
+        frame."""
+        from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (  # pylint: disable=import-outside-toplevel
             hml263_to_smpl_body_pose,
         )
 
@@ -244,9 +272,12 @@ class TestHml263ToSmplBodyPose:
         assert result.shape == (1, 21, 3)
 
     def test_arm_aa_shape_and_nonzero(
-        self, fk: SmplLeftArmFK, mdm_resources: dict
+        self,
+        fk: SmplLeftArmFK,  # pylint: disable=redefined-outer-name
+        mdm_resources: dict,
     ) -> None:
-        from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
+        """Check arm axis-angles are non-zero for the sitting pose."""
+        from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (  # pylint: disable=import-outside-toplevel
             hml263_to_smpl_body_pose,
         )
 

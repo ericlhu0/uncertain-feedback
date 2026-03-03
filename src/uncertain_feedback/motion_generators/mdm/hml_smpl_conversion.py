@@ -64,7 +64,10 @@ _SRC_ROOT = Path(__file__).resolve().parents[3]
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from uncertain_feedback.planners.mpc.kinematics import SMPL_PARENTS_22, SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import (  # pylint: disable=wrong-import-position
+    SMPL_PARENTS_22,
+    SmplLeftArmFK,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -118,7 +121,7 @@ class HmlArmFeatureInfo:
 # ---------------------------------------------------------------------------
 
 
-def smpl_arm_aa_to_hml263_frame(
+def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
     base_norm: np.ndarray,
     arm_aa: np.ndarray,
     arm_info: HmlArmFeatureInfo,
@@ -163,8 +166,8 @@ def smpl_arm_aa_to_hml263_frame(
     # arm_aa indices: 0=collar, 1=shoulder, 2=elbow, 3=wrist.
     # collar has no HML rotation feature (joint 0 in HML is root); skip it.
     for arm_idx, offset in zip(range(1, 4), arm_info.arm_6d_offsets):
-        R = Rotation.from_rotvec(arm_aa[arm_idx]).as_matrix()
-        r6d = np.concatenate([R[:, 0], R[:, 1]])  # first two columns → (6,)
+        rot_mat = Rotation.from_rotvec(arm_aa[arm_idx]).as_matrix()
+        r6d = np.concatenate([rot_mat[:, 0], rot_mat[:, 1]])  # first two columns → (6,)
         raw[offset : offset + 6] = r6d
 
     # --- Patch RIC position features for shoulder, elbow, wrist -------------
@@ -352,6 +355,7 @@ def hml263_to_smpl_body_pose(
         ``(n_frames, 21, 3)`` SMPL body_pose axis-angles.
     """
     # Import here so the module remains importable without MDM on sys.path.
+    # pylint: disable=import-outside-toplevel,import-error
     import torch
     from data_loaders.humanml.scripts.motion_process import recover_from_ric
 

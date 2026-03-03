@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -41,6 +42,7 @@ _SRC_ROOT = Path(__file__).resolve().parents[3]
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
+# pylint: disable=wrong-import-position
 from uncertain_feedback.consts import MDM_MODEL_WEIGHTS_PATH, MDM_ROOT
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     HmlArmFeatureInfo,
@@ -57,7 +59,7 @@ _MAX_FRAMES = 196  # HumanML3D hard limit
 _FPS = 20  # HumanML3D frame rate
 
 
-class MdmMotionGenerator:
+class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
     """Lazy-loading wrapper for the MDM model.
 
     The MDM model and HumanML3D dataset are loaded on the first call to
@@ -81,11 +83,11 @@ class MdmMotionGenerator:
         self._seed = seed
 
         # Populated lazily by _ensure_loaded().
-        self._model = None
-        self._diffusion = None
-        self._data = None
-        self._args = None
-        self._dist_util = None
+        self._model: Any = None
+        self._diffusion: Any = None
+        self._data: Any = None
+        self._args: Any = None
+        self._dist_util: Any = None
         self._fk: SmplLeftArmFK = SmplLeftArmFK()
         self._not_l_arm_mask: np.ndarray | None = None  # (263,) bool
 
@@ -98,7 +100,9 @@ class MdmMotionGenerator:
     # Lazy initialisation
     # ------------------------------------------------------------------
 
-    def _ensure_loaded(self) -> None:
+    def _ensure_loaded(  # pylint: disable=too-many-locals,too-many-statements
+        self,
+    ) -> None:
         """Load the MDM model and dataset if not already done."""
         if self._model is not None:
             return
@@ -107,7 +111,7 @@ class MdmMotionGenerator:
             sys.path.insert(0, str(_MDM_SUBDIR))
         os.chdir(_MDM_SUBDIR)
 
-        import torch
+        # pylint: disable=import-outside-toplevel,import-error
         from data_loaders import humanml_utils
         from data_loaders.get_data import get_dataset_loader
         from utils import dist_util
@@ -127,7 +131,7 @@ class MdmMotionGenerator:
             "",
         ]
         try:
-            args = edit_args()
+            args = edit_args()  # type: ignore[no-untyped-call]
         finally:
             sys.argv = _orig_argv
 
@@ -185,17 +189,18 @@ class MdmMotionGenerator:
         self._not_l_arm_mask = not_l_arm_mask  # (263,) bool
 
         # Precompute HML263 feature offsets for left arm joints.
-        # HML263 block layout: [4 root] [21×3 positions] [21×6 rotations] [22×3 velocities] [4 contacts]
-        _ROT_BLOCK_OFFSET = 4 + 63  # 6D rotation block starts at 67
-        _POS_BLOCK_OFFSET = 4  # RIC position block starts at 4
-        _VEL_BLOCK_OFFSET = (
+        # HML263 block layout:
+        #   [4 root] [21×3 positions] [21×6 rotations] [22×3 velocities] [4 contacts]
+        _rot_block_offset = 4 + 63  # 6D rotation block starts at 67
+        _pos_block_offset = 4  # RIC position block starts at 4
+        _vel_block_offset = (
             4 + 63 + 126
         )  # 193; velocity block uses all 22 joints (not j-1)
         self._arm_info = HmlArmFeatureInfo(
             l_arm_joints=l_arm_joints,
-            arm_6d_offsets=[_ROT_BLOCK_OFFSET + (j - 1) * 6 for j in l_arm_joints],
-            arm_pos_offsets=[_POS_BLOCK_OFFSET + (j - 1) * 3 for j in l_arm_joints],
-            arm_vel_offsets=[_VEL_BLOCK_OFFSET + j * 3 for j in l_arm_joints],
+            arm_6d_offsets=[_rot_block_offset + (j - 1) * 6 for j in l_arm_joints],
+            arm_pos_offsets=[_pos_block_offset + (j - 1) * 3 for j in l_arm_joints],
+            arm_vel_offsets=[_vel_block_offset + j * 3 for j in l_arm_joints],
         )
 
         # Store normalization stats for building custom start frames.
@@ -220,7 +225,7 @@ class MdmMotionGenerator:
             ``(263,)`` HML263 feature vector suitable for use as ``start_pose``
             in :meth:`generate_left_arm_trajectory` or :meth:`decode_pose`.
         """
-        import torch
+        import torch  # pylint: disable=import-outside-toplevel
 
         return (
             torch.load(Path(path), map_location="cpu", weights_only=True)
@@ -243,7 +248,7 @@ class MdmMotionGenerator:
                             joints.
         """
         self._ensure_loaded()
-        import torch
+        import torch  # pylint: disable=import-outside-toplevel
 
         pose_t = torch.tensor(
             pose, dtype=torch.float32, device=self._dist_util.dev()
@@ -259,12 +264,12 @@ class MdmMotionGenerator:
         )  # (22, 3)
         return arm_aa, body_positions
 
-    def generate_left_arm_trajectory(
+    def generate_left_arm_trajectory(  # pylint: disable=too-many-locals
         self,
         text: str,
         motion_length_seconds: float = 6.0,
         start_arm_aa: np.ndarray | None = None,
-        start_pose: np.ndarray = None,
+        start_pose: np.ndarray | None = None,
         save_path: str | Path | None = None,
     ) -> np.ndarray:
         """Generate a left arm motion trajectory from a text description.
@@ -308,7 +313,11 @@ class MdmMotionGenerator:
             ``[left_collar, left_shoulder, left_elbow, left_wrist]``.
         """
         self._ensure_loaded()
+        assert self._arm_info is not None
+        assert self._hml_mean is not None
+        assert self._hml_std is not None
 
+        # pylint: disable=import-outside-toplevel,import-error
         import torch
         from data_loaders.tensors import collate
 
@@ -324,7 +333,7 @@ class MdmMotionGenerator:
         collate_args = [
             {"inp": torch.zeros(n_frames), "tokens": None, "lengths": n_frames}
         ]
-        collate_args = [dict(arg, text=text) for arg in collate_args]
+        collate_args = [{**arg, "text": text} for arg in collate_args]  # type: ignore[dict-item]
         _, model_kwargs = collate(collate_args)
 
         # Move mask/lengths tensors to device.
@@ -398,8 +407,9 @@ class MdmMotionGenerator:
 
         # --- Optionally save a full-body visualization MP4 -------------------
         if save_path is not None:
-            import data_loaders.humanml.utils.paramUtil as paramUtil
+            # pylint: disable=import-outside-toplevel,import-error
             from data_loaders.humanml.scripts.motion_process import recover_from_ric
+            from data_loaders.humanml.utils import paramUtil
             from data_loaders.humanml.utils.plot_script import plot_3d_motion
 
             n_joints = 22

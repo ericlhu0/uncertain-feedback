@@ -37,6 +37,7 @@ class _VisConfig:
     fk: SmplLeftArmFK
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
+    body_pos: np.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------

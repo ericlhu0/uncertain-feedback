@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code
 """Visualize the sitting pose before and after HumanML3D → SMPL conversion.
 
 Produces a side-by-side 3D plot saved to ``sitting_pose_comparison.png``:
@@ -28,6 +29,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")  # headless rendering — must be set before importing pyplot
+# pylint: disable=wrong-import-position,wrong-import-order,ungrouped-imports
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -51,6 +53,7 @@ os.chdir(_MDM_SUBDIR)
 # MDM imports (only valid after sys.path setup + chdir)
 # ---------------------------------------------------------------------------
 
+# pylint: disable=import-error
 import torch
 from data_loaders.get_data import get_dataset_loader
 from data_loaders.humanml.scripts.motion_process import recover_from_ric
@@ -59,7 +62,7 @@ from utils.fixseed import fixseed
 from utils.model_util import create_model_and_diffusion, load_saved_model
 from utils.sampler_util import ClassifierFreeSampleModel
 
-from uncertain_feedback.motion_generators.mdm.hml_to_smpl import (
+from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     hml263_to_smpl_body_pose,
     smpl_body_pose_to_positions,
 )
@@ -146,7 +149,7 @@ def _decode_hml263_to_xyz(hml_vec: torch.Tensor, dataset, model) -> np.ndarray:
     return xyz[0, :, :, 0].cpu().numpy()
 
 
-def _draw_skeleton(
+def _draw_skeleton(  # pylint: disable=too-many-locals
     ax, positions: np.ndarray, title: str, highlight_joints=None
 ) -> None:
     """Draw a 22-joint skeleton on a 3D axes.
@@ -205,8 +208,9 @@ def _draw_skeleton(
 
 
 def main() -> None:
+    """Load sitting pose, decode via MDM and via IK→FK, and save comparison."""
     print("Loading MDM model and dataset…")
-    model, data, _ = _load_model_and_data()
+    model, data, _ = _load_model_and_data()  # type: ignore[no-untyped-call]
     fk = SmplLeftArmFK()
 
     # Load the sitting pose (263-dim, normalized)
@@ -237,7 +241,7 @@ def main() -> None:
     _draw_skeleton(ax2, reconstructed_xyz, "Converted (IK → FK)", _ARM_JOINT_SET)
 
     # Add a legend note
-    from matplotlib.lines import Line2D
+    from matplotlib.lines import Line2D  # pylint: disable=import-outside-toplevel
 
     legend_elements = [
         Line2D([0], [0], color="#e05c2a", lw=2.5, label="Left arm"),

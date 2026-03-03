@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,6 +20,7 @@ import numpy as np
 from uncertain_feedback.planners.mpc.arm_mpc import (
     SmplLeftArmMPC,
     _compose_rotvec,
+    _VisConfig,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.planners.mpc.visualizer import (
@@ -28,19 +28,6 @@ from uncertain_feedback.planners.mpc.visualizer import (
     _TARGET_COLOR,
     ArmVisualizer,
 )
-
-# ---------------------------------------------------------------------------
-# MDM-specific visualizer config (adds body_pos; no target_q — derived live)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _MdmVisConfig:
-    fk: SmplLeftArmFK
-    spine_pos: np.ndarray | None
-    spine_aa: np.ndarray | None
-    body_pos: np.ndarray | None  # (22, 3) body background (e.g. sitting pose)
-
 
 # ---------------------------------------------------------------------------
 # MDM-extended MPC
@@ -107,7 +94,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         if visualize:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")
-            self._vis_config = _MdmVisConfig(fk, spine3_pos, spine3_aa, body_pos)
+            self._vis_config = _VisConfig(fk, spine3_pos, spine3_aa, body_pos=body_pos)
 
         # Last frame of the MDM trajectory, shown as a goal marker.
         self._mdm_goal: np.ndarray | None = None
@@ -122,16 +109,17 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
     ) -> None:
         """Push an MDM-generated trajectory into the goal queue.
 
-        Each frame of ``frames`` becomes one ``(4, 3)`` target in the goal
-        queue.  By default the new trajectory is prepended to the *front* of
-        the queue so it executes immediately ahead of any
-        previously queued goals.
+                Each frame of ``frames`` becomes one ``(4, 3)`` target in the goal
+                queue.  By default the new trajectory is prepended to the *front* of
+                the queue so it executes immediately ahead of any
+                previously queued goals.
 
-        Args:
-            frames:   ``(n_frames, 4, 3)`` axis-angle trajectory for
-                      ``[left_collar, left_shoulder, left_elbow, left_wrist]``,
-                      as returned by
-                      :meth:`~uncertain_feedback.motion_generators.mdm.mdm_api.MdmMotionGenerator.generate_left_arm_trajectory`.
+                Args:
+                    frames:   ``(n_frames, 4, 3)`` axis-angle trajectory for
+                              ``[left_collar, left_shoulder, left_elbow, left_wrist]``,
+                              as returned by
+                              :meth:`~uncertain_feedback.motion_generators.mdm.mdm_api\
+        .MdmMotionGenerator.generate_left_arm_trajectory`.
         """
         frames = np.asarray(frames, dtype=np.float64)
         # extendleft reverses the iterable, so reverse first to preserve order.
@@ -258,15 +246,28 @@ if __name__ == "__main__":
             "(e.g. 'motion.mp4').  Only used when --text is provided."
         ),
     )
+    parser.add_argument(
+        "--start_pose",
+        type=str,
+        default="sitting_pose.pt",
+        help=(
+            "Name of the .pt file in MDM_ROOT to use as the initial pose"
+            " (default: sitting_pose.pt)"
+        ),
+    )
     args = parser.parse_args()
 
     demo_fk = SmplLeftArmFK()
 
-    from uncertain_feedback.consts import MDM_ROOT
-    from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
+    from uncertain_feedback.consts import (  # pylint: disable=wrong-import-position
+        MDM_ROOT,
+    )
+    from uncertain_feedback.motion_generators.mdm.mdm_api import (  # pylint: disable=wrong-import-position
+        MdmMotionGenerator,
+    )
 
     gen = MdmMotionGenerator()
-    initial_pose = gen.load_hml_pose(MDM_ROOT / "sitting_pose.pt")  # (263,)
+    initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
     initial_arm_aa, initial_body_positions = gen.decode_pose(initial_pose)
 
     demo_target_q = np.array(
@@ -293,10 +294,10 @@ if __name__ == "__main__":
         demo_q = demo_mpc.step(demo_q)
 
     # Close the visualizer before generation to avoid it freezing/becoming unresponsive
-    if demo_mpc._vis is not None:
-        if demo_mpc._vis._live is not None:
-            plt.close(demo_mpc._vis._live.fig)
-        demo_mpc._vis = None
+    if demo_mpc._vis is not None:  # pylint: disable=protected-access
+        if demo_mpc._vis._live is not None:  # pylint: disable=protected-access
+            plt.close(demo_mpc._vis._live.fig)  # pylint: disable=protected-access
+        demo_mpc._vis = None  # pylint: disable=protected-access
 
     print(
         f"Generating MDM trajectory for: '{args.text}' (starting from current MPC state)"
@@ -327,8 +328,9 @@ if __name__ == "__main__":
     for _ in range(args.steps - args.text_time):
         demo_q = demo_mpc.step(demo_q)
 
-    if args.save and not args.no_vis and demo_mpc._vis is not None:
-        demo_mpc._vis.finish_live(args.save)
+    vis = demo_mpc._vis  # pylint: disable=protected-access
+    if args.save and not args.no_vis and vis is not None:
+        vis.finish_live(args.save)  # type: ignore[unreachable]
 
     plt.ioff()
     plt.show()

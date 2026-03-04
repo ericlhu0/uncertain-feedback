@@ -207,7 +207,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run SMPL left arm MPC with live visualization"
     )
-    parser.add_argument("--steps", type=int, default=500, help="Number of MPC steps")
+    parser.add_argument("--steps", type=int, default=750, help="Number of MPC steps")
     parser.add_argument("--samples", type=int, default=512, help="CEM sample count")
     parser.add_argument("--horizon", type=int, default=10, help="MPC horizon")
     parser.add_argument(
@@ -295,11 +295,12 @@ if __name__ == "__main__":
     for _ in range(args.text_time):
         demo_q = demo_mpc.step(demo_q)
 
-    # Close the visualizer before generation to avoid it freezing/becoming unresponsive
-    if demo_mpc._vis is not None:  # pylint: disable=protected-access
-        if demo_mpc._vis._live is not None:  # pylint: disable=protected-access
-            plt.close(demo_mpc._vis._live.fig)  # pylint: disable=protected-access
-        demo_mpc._vis = None  # pylint: disable=protected-access
+    # Close the visualizer before generation to avoid it freezing/becoming unresponsive.
+    # Keep a reference so the recorded pre-MDM frames survive for the saved output.
+    pre_mdm_vis = demo_mpc._vis  # pylint: disable=protected-access
+    if pre_mdm_vis is not None and pre_mdm_vis._live is not None:  # pylint: disable=protected-access
+        plt.close(pre_mdm_vis._live.fig)  # pylint: disable=protected-access
+    demo_mpc._vis = None  # pylint: disable=protected-access
 
     print(
         f"Generating MDM trajectory for: '{args.text}' (starting from current MPC state)"
@@ -333,6 +334,16 @@ if __name__ == "__main__":
 
     vis = demo_mpc._vis  # pylint: disable=protected-access
     if args.save and not args.no_vis and vis is not None:
+        # Prepend pre-MDM frames so the saved animation covers the full run.
+        if (  # pylint: disable=protected-access
+            pre_mdm_vis is not None
+            and pre_mdm_vis._live is not None
+            and vis._live is not None
+        ):
+            vis._live.recorded_frames = (  # pylint: disable=protected-access
+                pre_mdm_vis._live.recorded_frames  # pylint: disable=protected-access
+                + vis._live.recorded_frames  # pylint: disable=protected-access
+            )
         vis.finish_live(args.save)  # type: ignore[unreachable]
 
     plt.ioff()

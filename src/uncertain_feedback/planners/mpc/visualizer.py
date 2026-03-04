@@ -322,9 +322,15 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
     def finish_live(self, save_path: str) -> None:
         """Save the frames recorded during the live session to a video or GIF.
 
-        Must be called after the MPC step loop has finished.  Replays all
-        captured frames through :class:`~matplotlib.animation.FuncAnimation`
-        using the already-open figure, then delegates to :func:`_save`.
+        Must be called after the MPC step loop has finished.  Closes the
+        interactive window, then replays all captured frames through
+        :class:`~matplotlib.animation.FuncAnimation` and delegates to
+        :func:`_save`.
+
+        The interactive window is closed before rendering so that the GUI
+        event loop cannot interfere with frame capture.  The Pillow / ffmpeg
+        writers use ``fig.savefig`` internally, which creates a fresh Agg
+        renderer and is independent of whether the window is open.
 
         Args:
             save_path: Output file path.  Use ``.gif`` for a GIF or ``.mp4``
@@ -363,6 +369,14 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 all_artists += [a2["scat"], *a2["lines"], a2["trace"]]
             return all_artists
 
+        # Close the interactive window before rendering.  On Qt/Tk backends,
+        # canvas.draw() processes the GUI event queue; if a close event is
+        # queued (e.g. from a prior plt.close on another figure), it fires
+        # mid-save and truncates the GIF at a random frame.  Closing the
+        # window first makes canvas.draw() a no-op while fig.savefig() (used
+        # by both Pillow and ffmpeg writers) still renders correctly via its
+        # own fresh Agg renderer.
+        plt.close(live.fig)
         plt.ioff()
         anim = FuncAnimation(
             live.fig,

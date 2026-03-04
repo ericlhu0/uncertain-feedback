@@ -120,7 +120,7 @@ class HmlArmFeatureInfo:
 # ---------------------------------------------------------------------------
 
 
-def smpl_arm_aa_to_hml263_frame(
+def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
     base_norm: np.ndarray,
     arm_aa: np.ndarray,
     arm_info: HmlArmFeatureInfo,
@@ -166,7 +166,7 @@ def smpl_arm_aa_to_hml263_frame(
 
     # Derive collar / spine3 joint indices from SMPL topology — no magic numbers.
     collar_j = SMPL_PARENTS_22[arm_info.l_arm_joints[0]]  # parent of shoulder = 13
-    spine3_j = SMPL_PARENTS_22[collar_j]                   # parent of collar  =  9
+    spine3_j = SMPL_PARENTS_22[collar_j]  # parent of collar  =  9
 
     # --- Patch 6D rotation features: collar + shoulder + elbow + wrist ------
     # arm_aa: [0=collar, 1=shoulder, 2=elbow, 3=wrist].
@@ -221,8 +221,12 @@ def smpl_arm_aa_to_hml263_frame(
         zip(arm_chain_smpl[:-1], arm_chain_smpl[1:]), start=1
     ):
         tpose_bone = tpose_22[child_j] - tpose_22[parent_j]
-        child_ric = current_ric + current_rot.apply(tpose_bone)  # parent rot → child pos
-        child_rot = current_rot * Rotation.from_rotvec(arm_aa[arm_idx])  # child world rot
+        child_ric = current_ric + current_rot.apply(
+            tpose_bone
+        )  # parent rot → child pos
+        child_rot = current_rot * Rotation.from_rotvec(
+            arm_aa[arm_idx]
+        )  # child world rot
         raw[4 + (child_j - 1) * 3 : 4 + child_j * 3] = child_ric
         current_rot = child_rot
         current_ric = child_ric

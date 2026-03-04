@@ -268,7 +268,9 @@ if __name__ == "__main__":
 
     gen = MdmMotionGenerator()
     initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
-    initial_arm_aa, initial_body_positions, initial_spine3_aa = gen.decode_pose(initial_pose)
+    initial_arm_aa, initial_body_positions, initial_spine3_aa = gen.decode_pose(
+        initial_pose
+    )
 
     demo_target_q = initial_arm_aa.copy() + np.array(
         [
@@ -298,7 +300,10 @@ if __name__ == "__main__":
     # Close the visualizer before generation to avoid it freezing/becoming unresponsive.
     # Keep a reference so the recorded pre-MDM frames survive for the saved output.
     pre_mdm_vis = demo_mpc._vis  # pylint: disable=protected-access
-    if pre_mdm_vis is not None and pre_mdm_vis._live is not None:  # pylint: disable=protected-access
+    if (
+        pre_mdm_vis is not None
+        and pre_mdm_vis._live is not None  # pylint: disable=protected-access
+    ):
         plt.close(pre_mdm_vis._live.fig)  # pylint: disable=protected-access
     demo_mpc._vis = None  # pylint: disable=protected-access
 
@@ -335,7 +340,7 @@ if __name__ == "__main__":
     vis = demo_mpc._vis  # pylint: disable=protected-access
     if args.save and not args.no_vis and vis is not None:
         # Prepend pre-MDM frames so the saved animation covers the full run.
-        if (  # pylint: disable=protected-access
+        if (  # type: ignore[unreachable]  # pylint: disable=protected-access
             pre_mdm_vis is not None
             and pre_mdm_vis._live is not None
             and vis._live is not None
@@ -344,7 +349,7 @@ if __name__ == "__main__":
                 pre_mdm_vis._live.recorded_frames  # pylint: disable=protected-access
                 + vis._live.recorded_frames  # pylint: disable=protected-access
             )
-        vis.finish_live(args.save)  # type: ignore[unreachable]
+        vis.finish_live(args.save)
 
     plt.ioff()
     plt.show()

@@ -256,7 +256,9 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                             joint positions computed from ``arm_aa`` match
                             those in ``body_positions``.
         """
-        from scipy.spatial.transform import Rotation  # pylint: disable=import-outside-toplevel
+        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
+            Rotation,
+        )
 
         self._ensure_loaded()
         import torch  # pylint: disable=import-outside-toplevel

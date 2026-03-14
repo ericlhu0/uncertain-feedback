@@ -190,7 +190,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    self._goals[-1],
+                    list(self._goals),
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     body_pos=self._vis_config.body_pos,

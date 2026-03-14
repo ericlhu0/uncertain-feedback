@@ -212,7 +212,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                         background skeleton.  When provided (e.g. sitting pose)
                         it replaces the default T-pose for the grey backdrop.
         """
-        target_full = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
+        target_full = self.fk.full_body_positions(goals[-1], spine3_pos, spine3_aa)
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
         # Use body reference + target to set axis limits
@@ -223,7 +223,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         plt.ion()
         # Build figure without a static target (goals drawn as mutable artists)
         fig, artists_3d, artists_2d = self._build_figure(
-            target_q, lims, spine3_pos, spine3_aa, body_pos=body_pos
+            goals[-1], lims, spine3_pos, spine3_aa, body_pos=body_pos
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -552,7 +552,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
     def _build_figure(
         self,
-        target_q: np.ndarray | None,
+        target_q: np.ndarray,
         lims: list[tuple[float, float]],
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,

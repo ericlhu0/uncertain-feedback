@@ -5,6 +5,7 @@ conversion.
 Group A  (no MDM, no GPU):
     Tests for ``positions_to_smpl_body_pose`` and ``smpl_body_pose_to_arm_aa``
     using only numpy/scipy and the SMPL neutral model PKL.
+    Skipped automatically when SMPL_NEUTRAL.pkl is not present.
 
 Group B  (requires MDM model + CUDA):
     Tests for the full ``hml263_to_smpl_body_pose`` pipeline.
@@ -12,6 +13,8 @@ Group B  (requires MDM model + CUDA):
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,6 +25,18 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_body_pose_to_arm_aa,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+
+_SMPL_PKL = (
+    Path(__file__).parent.parent
+    / "src"
+    / "uncertain_feedback"
+    / "motion_generators"
+    / "mdm"
+    / "motion-diffusion-model"
+    / "body_models"
+    / "smpl"
+    / "SMPL_NEUTRAL.pkl"
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixture
@@ -39,6 +54,10 @@ def fk() -> SmplLeftArmFK:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    not _SMPL_PKL.exists(),
+    reason="SMPL_NEUTRAL.pkl not available",
+)
 class TestPositionsToSmplBodyPose:
     """Unit tests for positions_to_smpl_body_pose."""
 
@@ -191,7 +210,6 @@ class TestHml263ToSmplBodyPose:
         # pylint: disable=import-outside-toplevel,too-many-locals
         import os
         import sys as _sys
-        from pathlib import Path as _Path
 
         from uncertain_feedback.consts import MDM_MODEL_WEIGHTS_PATH, MDM_ROOT
         from uncertain_feedback.motion_generators.mdm.mdm_parser_util import edit_args

@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code
 """3D stick-figure visualizer for the SMPL left arm MPC.
 
 Draws the full 22-joint SMPL skeleton.  Non-arm joints are fixed at the
@@ -67,9 +68,9 @@ if TYPE_CHECKING:
 
 # Visual style
 _BODY_COLOR = "#aaaaaa"
-_CURRENT_COLOR = "royalblue"
-_TARGET_COLOR = "tomato"
+_TARGET_COLOR = "royalblue"
 _TRACE_COLOR = "cornflowerblue"
+_MDM_COLOR = "darkorange"  # arm color when following an MDM trajectory
 
 _BODY_BONES = [p for p in SMPL_BONE_PAIRS_22 if p not in LEFT_ARM_BONE_PAIRS_22]
 _BODY_JOINTS = [j for j in range(22) if j not in LEFT_ARM_JOINT_INDICES_22]
@@ -101,7 +102,7 @@ _ORTHO_VIEWS = [
 
 
 @dataclasses.dataclass
-class _LiveState:
+class _LiveState:  # pylint: disable=too-many-instance-attributes
     """Mutable state for the interactive live window."""
 
     fig: plt.Figure
@@ -111,10 +112,11 @@ class _LiveState:
     spine_aa: np.ndarray | None
     goal_artists: list = dataclasses.field(default_factory=list)
     wrist_trace: list = dataclasses.field(default_factory=list)
+    recorded_frames: list = dataclasses.field(default_factory=list)
     step: int = 0
 
 
-class ArmVisualizer:
+class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
     """Animate the full SMPL skeleton with the left arm driven by MPC.
 
     Args:
@@ -191,6 +193,7 @@ class ArmVisualizer:
         goals: list[np.ndarray],
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
+        body_pos: np.ndarray | None = None,
     ) -> None:
         """Open an interactive window for live step-by-step visualization.
 
@@ -205,21 +208,22 @@ class ArmVisualizer:
             goals:      List of ``(4, 3)`` target axis-angle joint configurations.
             spine3_pos: ``(3,)`` world position of spine3.
             spine3_aa:  ``(3,)`` world axis-angle of spine3.
+            body_pos:   ``(22, 3)`` world positions for the static body
+                        background skeleton.  When provided (e.g. sitting pose)
+                        it replaces the default T-pose for the grey backdrop.
         """
-        tpose = self.fk.tpose_all_joints
+        target_full = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
+        ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
-        # Compute limits spanning tpose + all goal positions
-        goal_pts = [
-            self.fk.full_body_positions(g, spine3_pos, spine3_aa) for g in goals
-        ]
-        all_pts = np.vstack([tpose] + goal_pts) if goal_pts else tpose
+        # Use body reference + target to set axis limits
+        all_pts = np.vstack([ref_body, target_full])
         mg = 0.15
         lims = [(all_pts[:, i].min() - mg, all_pts[:, i].max() + mg) for i in range(3)]
 
         plt.ion()
         # Build figure without a static target (goals drawn as mutable artists)
         fig, artists_3d, artists_2d = self._build_figure(
-            None, lims, spine3_pos, spine3_aa
+            target_q, lims, spine3_pos, spine3_aa, body_pos=body_pos
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -241,17 +245,29 @@ class ArmVisualizer:
         self,
         q: np.ndarray,
         dist: float,
+        color: str = _TARGET_COLOR,
     ) -> None:
         """Update the live window with the current joint configuration.
 
         Args:
-            q:    ``(4, 3)`` current axis-angle joint angles.
-            dist: Distance to target (for title).
+            q:     ``(4, 3)`` current axis-angle joint angles.
+            dist:  Distance to target (for title).
+            color: Arm color.  Pass ``_MDM_COLOR`` when following an MDM
+                   trajectory so the arm is visually distinct.
         """
         assert self._live is not None
         pos = self.fk.full_body_positions(q, self._live.spine_pos, self._live.spine_aa)
         arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
         self._live.wrist_trace.append(pos[_WRIST_IDX])
+        trace_color = _MDM_COLOR if color == _MDM_COLOR else _TRACE_COLOR
+        self._live.recorded_frames.append(
+            {
+                "positions": pos.copy(),
+                "dist": dist,
+                "color": color,
+                "trace_color": trace_color,
+            }
+        )
 
         _update_artists(
             self._live.artists3d,
@@ -262,12 +278,120 @@ class ArmVisualizer:
             step=self._live.step,
             n_steps=None,
             dist=dist,
+            color=color,
+            trace_color=trace_color,
         )
         self._live.step += 1
 
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
-        plt.pause(0.001)
+        plt.pause(0.0001)
+
+    def update_mdm_goal(self, goal_q: np.ndarray) -> None:
+        """Draw (or update) the green MDM end-of-trajectory goal marker.
+
+        Computes full body positions for ``goal_q`` and updates the green
+        dashed arm skeleton artists in every panel.  Safe to call multiple
+        times — subsequent calls simply move the marker to the new pose.
+
+        Args:
+            goal_q: ``(4, 3)`` axis-angle joint angles for the MDM trajectory's
+                    last frame ``[left_collar, left_shoulder, left_elbow,
+                    left_wrist]``.
+        """
+        assert self._live is not None, "update_mdm_goal() called before open_live()"
+        goal_full = self.fk.full_body_positions(
+            goal_q, self._live.spine_pos, self._live.spine_aa
+        )
+        arm_pts = goal_full[LEFT_ARM_JOINT_INDICES_22]
+
+        for a3 in self._live.artists3d:
+            a3["mdm_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
+                arm_pts[:, 0],
+                arm_pts[:, 1],
+                arm_pts[:, 2],
+            )
+            for line, (pi, ci) in zip(a3["mdm_goal_lines"], LEFT_ARM_BONE_PAIRS_22):
+                seg = goal_full[[pi, ci]]
+                line.set_data(seg[:, 0], seg[:, 1])
+                line.set_3d_properties(seg[:, 2])
+
+        for a2 in self._live.artists2d:
+            a2["mdm_goal_scat"].set_offsets(arm_pts[:, [a2["hi"], a2["vi"]]])
+            for line, (pi, ci) in zip(a2["mdm_goal_lines"], LEFT_ARM_BONE_PAIRS_22):
+                seg = goal_full[[pi, ci]]
+                line.set_data(seg[:, a2["hi"]], seg[:, a2["vi"]])
+
+        self._live.fig.canvas.draw_idle()
+        self._live.fig.canvas.flush_events()
+
+    def finish_live(self, save_path: str) -> None:
+        """Save the frames recorded during the live session to a video or GIF.
+
+        Must be called after the MPC step loop has finished.  Closes the
+        interactive window, then replays all captured frames through
+        :class:`~matplotlib.animation.FuncAnimation` and delegates to
+        :func:`_save`.
+
+        The interactive window is closed before rendering so that the GUI
+        event loop cannot interfere with frame capture.  The Pillow / ffmpeg
+        writers use ``fig.savefig`` internally, which creates a fresh Agg
+        renderer and is independent of whether the window is open.
+
+        Args:
+            save_path: Output file path.  Use ``.gif`` for a GIF or ``.mp4``
+                       for an MP4 video (requires ``ffmpeg``).
+        """
+        assert self._live is not None, "finish_live() called before open_live()"
+        live = self._live
+        recorded = live.recorded_frames
+        if not recorded:
+            print("No frames recorded; nothing to save.")
+            return
+
+        n_steps = len(recorded) - 1
+        wrist_trace = np.array([f["positions"][_WRIST_IDX] for f in recorded])
+
+        def _update(k: int):
+            pos = recorded[k]["positions"]
+            arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
+            tr = wrist_trace[: k + 1]
+            _update_artists(
+                live.artists3d,
+                live.artists2d,
+                pos,
+                arm_pts,
+                tr,
+                step=k,
+                n_steps=n_steps,
+                dist=recorded[k]["dist"],
+                color=recorded[k].get("color", _TARGET_COLOR),
+                trace_color=recorded[k].get("trace_color", _TRACE_COLOR),
+            )
+            all_artists = []
+            for a3 in live.artists3d:
+                all_artists += [a3["scat"], *a3["lines"], a3["trace"]]
+            for a2 in live.artists2d:
+                all_artists += [a2["scat"], *a2["lines"], a2["trace"]]
+            return all_artists
+
+        # Close the interactive window before rendering.  On Qt/Tk backends,
+        # canvas.draw() processes the GUI event queue; if a close event is
+        # queued (e.g. from a prior plt.close on another figure), it fires
+        # mid-save and truncates the GIF at a random frame.  Closing the
+        # window first makes canvas.draw() a no-op while fig.savefig() (used
+        # by both Pillow and ffmpeg writers) still renders correctly via its
+        # own fresh Agg renderer.
+        plt.close(live.fig)
+        plt.ioff()
+        anim = FuncAnimation(
+            live.fig,
+            _update,
+            frames=len(recorded),
+            interval=50,
+            blit=False,
+        )
+        _save(anim, save_path)
 
     def update_goals(self, goals: list[np.ndarray]) -> None:
         """Replace the displayed goal poses in the live window.
@@ -384,14 +508,14 @@ class ArmVisualizer:
             ax,
             pos,
             LEFT_ARM_BONE_PAIRS_22,
-            _CURRENT_COLOR,
+            _TARGET_COLOR,
             alpha=1.0,
             lw=2,
             label="current",
         )
         ax.scatter(
             *pos[LEFT_ARM_JOINT_INDICES_22].T,
-            color=_CURRENT_COLOR,
+            color=_TARGET_COLOR,
             s=45,
             depthshade=False,
         )
@@ -432,37 +556,35 @@ class ArmVisualizer:
         lims: list[tuple[float, float]],
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,
+        body_pos: np.ndarray | None = None,
     ) -> tuple[plt.Figure, list[dict], list[dict]]:
         """Build the figure with static elements drawn and mutable artists
         created.
 
-        Pass ``target_q=None`` to skip drawing a static target (used in live
-        mode where goals are drawn as mutable artists).
+        Args:
+            body_pos: ``(22, 3)`` positions for the grey background body.
+                      Defaults to T-pose when ``None``.
 
         Returns:
             ``(fig, artists_3d, artists_2d)``
         """
-        target_full = (
-            self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
-            if target_q is not None
-            else None
-        )
-        tpose = self.fk.tpose_all_joints
+        target_full = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
+        ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
         fig = plt.figure(figsize=(20, 9))
         gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
         fig.suptitle("SMPL Left Arm MPC (CEM)", fontsize=13, y=1.01)
 
-        artists_3d = self._build_3d_panels(fig, gs, target_full, tpose, lims)
-        artists_2d = self._build_2d_panels(fig, gs, target_full, tpose, lims)
+        artists_3d = self._build_3d_panels(fig, gs, target_full, ref_body, lims)
+        artists_2d = self._build_2d_panels(fig, gs, target_full, ref_body, lims)
         return fig, artists_3d, artists_2d
 
-    def _build_3d_panels(
+    def _build_3d_panels(  # pylint: disable=too-many-locals
         self,
         fig: plt.Figure,
         gs: gridspec.GridSpec,
-        target_full: np.ndarray | None,
-        tpose: np.ndarray,
+        target_full: np.ndarray,
+        ref_body: np.ndarray,
         lims: list[tuple[float, float]],
     ) -> list[dict]:
         artists: list[dict] = []
@@ -478,9 +600,9 @@ class ArmVisualizer:
             ax.set_ylim(*lims[1])
             ax.set_zlim(*lims[2])
 
-            _draw_bones_3d(ax, tpose, _BODY_BONES, _BODY_COLOR, alpha=0.45, lw=1.2)
+            _draw_bones_3d(ax, ref_body, _BODY_BONES, _BODY_COLOR, alpha=0.45, lw=1.2)
             ax.scatter(
-                *tpose[_BODY_JOINTS].T,
+                *ref_body[_BODY_JOINTS].T,
                 color=_BODY_COLOR,
                 s=14,
                 alpha=0.45,
@@ -511,18 +633,26 @@ class ArmVisualizer:
                 [],
                 [],
                 [],
-                color=_CURRENT_COLOR,
+                color=_TARGET_COLOR,
                 s=40,
                 depthshade=False,
                 zorder=5,
                 label="current" if col == 0 else None,
             )
             lines = [
-                ax.plot([], [], [], color=_CURRENT_COLOR, lw=1.8)[0]
+                ax.plot([], [], [], color=_TARGET_COLOR, lw=1.8)[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             (trace,) = ax.plot(
                 [], [], [], color=_TRACE_COLOR, lw=1, alpha=0.6, linestyle=":"
+            )
+            # Green MDM goal (initially invisible — populated by update_mdm_goal)
+            mdm_goal_lines = [
+                ax.plot([], [], [], color=_MDM_COLOR, lw=1.8, linestyle="--")[0]
+                for _ in LEFT_ARM_BONE_PAIRS_22
+            ]
+            mdm_goal_scat = ax.scatter(
+                [], [], [], color=_MDM_COLOR, s=30, alpha=0.6, depthshade=False
             )
             artists.append(
                 {
@@ -531,6 +661,8 @@ class ArmVisualizer:
                     "trace": trace,
                     "ax": ax,
                     "is_main": col == 0,
+                    "mdm_goal_lines": mdm_goal_lines,
+                    "mdm_goal_scat": mdm_goal_scat,
                 }
             )
         return artists
@@ -539,8 +671,8 @@ class ArmVisualizer:
         self,
         fig: plt.Figure,
         gs: gridspec.GridSpec,
-        target_full: np.ndarray | None,
-        tpose: np.ndarray,
+        target_full: np.ndarray,
+        ref_body: np.ndarray,
         lims: list[tuple[float, float]],
     ) -> list[dict]:
         artists: list[dict] = []
@@ -556,7 +688,7 @@ class ArmVisualizer:
 
             _draw_bones_2d(
                 ax,
-                tpose,
+                ref_body,
                 _BODY_BONES,
                 view.hi,
                 view.vi,
@@ -565,8 +697,8 @@ class ArmVisualizer:
                 lw=1.2,
             )
             ax.scatter(
-                tpose[_BODY_JOINTS, view.hi],
-                tpose[_BODY_JOINTS, view.vi],
+                ref_body[_BODY_JOINTS, view.hi],
+                ref_body[_BODY_JOINTS, view.vi],
                 color=_BODY_COLOR,
                 s=14,
                 alpha=0.45,
@@ -593,13 +725,21 @@ class ArmVisualizer:
                     zorder=4,
                 )
 
-            scat = ax.scatter([], [], color=_CURRENT_COLOR, s=35, zorder=5)
+            scat = ax.scatter([], [], color=_TARGET_COLOR, s=35, zorder=5)
             lines = [
-                ax.plot([], [], color=_CURRENT_COLOR, lw=1.8)[0]
+                ax.plot([], [], color=_TARGET_COLOR, lw=1.8)[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             (trace,) = ax.plot(
                 [], [], color=_TRACE_COLOR, lw=1, alpha=0.6, linestyle=":"
+            )
+            # Green MDM goal (initially invisible — populated by update_mdm_goal)
+            mdm_goal_lines = [
+                ax.plot([], [], color=_MDM_COLOR, lw=1.8, linestyle="--")[0]
+                for _ in LEFT_ARM_BONE_PAIRS_22
+            ]
+            mdm_goal_scat = ax.scatter(
+                [], [], color=_MDM_COLOR, s=28, alpha=0.6, zorder=4
             )
             artists.append(
                 {
@@ -608,7 +748,8 @@ class ArmVisualizer:
                     "trace": trace,
                     "hi": view.hi,
                     "vi": view.vi,
-                    "ax": ax,
+                    "mdm_goal_lines": mdm_goal_lines,
+                    "mdm_goal_scat": mdm_goal_scat,
                 }
             )
         return artists
@@ -674,7 +815,16 @@ def _make_frame_updater(
         dist = frames[k]["dist"]
         tr = wrist_trace[: k + 1]
         _update_artists(
-            artists_3d, artists_2d, pos, arm_pts, tr, step=k, n_steps=n_steps, dist=dist
+            artists_3d,
+            artists_2d,
+            pos,
+            arm_pts,
+            tr,
+            step=k,
+            n_steps=n_steps,
+            dist=dist,
+            color=frames[k].get("color", _TARGET_COLOR),
+            trace_color=frames[k].get("trace_color", _TRACE_COLOR),
         )
         all_artists = []
         for a3 in artists_3d:
@@ -686,7 +836,7 @@ def _make_frame_updater(
     return update
 
 
-def _update_artists(
+def _update_artists(  # pylint: disable=too-many-locals
     artists_3d: list[dict],
     artists_2d: list[dict],
     pos: np.ndarray,
@@ -695,6 +845,8 @@ def _update_artists(
     step: int,
     n_steps: int | None,
     dist: float,
+    color: str = _TARGET_COLOR,
+    trace_color: str = _TRACE_COLOR,
 ) -> None:
     """Update all mutable artists for a single frame/step."""
     for a3 in artists_3d:
@@ -703,13 +855,16 @@ def _update_artists(
             arm_pts[:, 1],
             arm_pts[:, 2],
         )
+        a3["scat"].set_color([color])
         for line, (pi, ci) in zip(a3["lines"], LEFT_ARM_BONE_PAIRS_22):
             seg = pos[[pi, ci]]
             line.set_data(seg[:, 0], seg[:, 1])
             line.set_3d_properties(seg[:, 2])
+            line.set_color(color)
         if len(wrist_trace):
             a3["trace"].set_data(wrist_trace[:, 0], wrist_trace[:, 1])
             a3["trace"].set_3d_properties(wrist_trace[:, 2])
+            a3["trace"].set_color(trace_color)
         if a3["is_main"]:
             step_str = f"{step}/{n_steps}" if n_steps is not None else str(step)
             a3["ax"].set_title(
@@ -719,11 +874,14 @@ def _update_artists(
 
     for a2 in artists_2d:
         a2["scat"].set_offsets(arm_pts[:, [a2["hi"], a2["vi"]]])
+        a2["scat"].set_facecolor([color])
         for line, (pi, ci) in zip(a2["lines"], LEFT_ARM_BONE_PAIRS_22):
             seg = pos[[pi, ci]]
             line.set_data(seg[:, a2["hi"]], seg[:, a2["vi"]])
+            line.set_color(color)
         if len(wrist_trace):
             a2["trace"].set_data(wrist_trace[:, a2["hi"]], wrist_trace[:, a2["vi"]])
+            a2["trace"].set_color(trace_color)
 
 
 def _draw_bones_3d(
@@ -781,7 +939,7 @@ def _draw_bones_2d(
 
 def _save(anim: FuncAnimation, path: str) -> None:
     if path.endswith(".gif"):
-        anim.save(path, writer="pillow")
+        anim.save(path, writer="pillow", dpi=64)
     elif path.endswith(".mp4"):
         anim.save(path, writer="ffmpeg")
     else:

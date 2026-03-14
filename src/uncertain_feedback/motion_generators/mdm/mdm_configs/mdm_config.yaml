@@ -1,0 +1,31 @@
+# Inference-time configuration for MdmMotionGenerator.
+# Model architecture, diffusion, and dataset settings are loaded automatically
+# from args.json in the model directory.
+
+# Hardware
+device: 0
+cuda: true
+
+# Sampling
+guidance_param: 2.5
+num_samples: 1
+num_repetitions: 1
+batch_size: 1
+no_video: true
+
+# Edit / inpainting
+edit_mode: in_between
+motion_length: 9.8
+text_condition: ""
+prefix_end: 0.25
+suffix_start: null
+zero_inpaint: false
+zero_length: 120
+
+# Misc
+train_platform_type: NoPlatform
+external_mode: false
+output_dir: ""
+autoregressive: false
+autoregressive_include_prefix: false
+autoregressive_init: data

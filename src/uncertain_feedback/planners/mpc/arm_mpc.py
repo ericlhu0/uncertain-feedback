@@ -37,6 +37,7 @@ class _VisConfig:
     fk: SmplLeftArmFK
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
+    body_pos: np.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -270,14 +271,12 @@ class SmplLeftArmMPC:
             if dist < self._goal_threshold and len(self._goals) > 1:
                 self._goals.popleft()
                 self.reset_warmstart()
-                if self._vis is not None:
-                    self._vis.update_goals(list(self._goals))
 
         if self._vis_config is not None:
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    list(self._goals),
+                    self._goals[-1],
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                 )

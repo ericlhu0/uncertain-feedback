@@ -114,9 +114,7 @@ class SmplLeftArmFK:
         with open(pkl_path, "rb") as f:
             dd = pickle.load(f, encoding="latin1")
 
-        print(dd.keys())
-
-        j_reg = dd["J_regressor"]
+        j_reg = dd.get("j_regressor") or dd["J_regressor"]
         if hasattr(j_reg, "todense"):
             j_reg = np.array(j_reg.todense())
         else:

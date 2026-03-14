@@ -834,7 +834,7 @@ def _draw_bones_2d(
 
 def _save(anim: FuncAnimation, path: str) -> None:
     if path.endswith(".gif"):
-        anim.save(path, writer="pillow")
+        anim.save(path, writer="pillow", dpi=64)
     elif path.endswith(".mp4"):
         anim.save(path, writer="ffmpeg")
     else:

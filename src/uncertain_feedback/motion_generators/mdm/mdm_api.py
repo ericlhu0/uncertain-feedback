@@ -30,12 +30,15 @@ Typical usage::
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 # ---------------------------------------------------------------------------
 # sys.path / chdir setup — mirror sample_leftarm.py
@@ -122,26 +125,24 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         from utils.model_util import create_model_and_diffusion, load_saved_model
         from utils.sampler_util import ClassifierFreeSampleModel
 
-        from uncertain_feedback.motion_generators.mdm.mdm_parser_util import edit_args
+        # Start from model's saved args so all model/diffusion/dataset fields are present.
+        _args_json = self._model_path.parent / "args.json"
+        _model_args = {}
+        if _args_json.exists():
+            with open(_args_json, encoding="utf-8") as _f:
+                _model_args = json.load(_f)
+        args = argparse.Namespace(**_model_args)
 
-        # Parse args using the same pattern as sample_leftarm.py.
-        _orig_argv = sys.argv
-        sys.argv = [
-            "mdm_api.py",
-            "--model_path",
-            str(self._model_path),
-            "--text_condition",
-            "",
-        ]
-        try:
-            args = edit_args()  # type: ignore[no-untyped-call]
-        finally:
-            sys.argv = _orig_argv
+        # Overlay inference config from YAML (inference/sampling/edit settings).
+        _config_path = Path(__file__).parent / "mdm_configs" / "mdm_config.yaml"
+        with open(_config_path, encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f)
+        _cfg["model_path"] = str(self._model_path)
+        for _k, _v in _cfg.items():
+            setattr(args, _k, _v)
 
-        args.batch_size = 1
-        args.num_samples = 1
-        args.num_repetitions = 1
-        args.no_video = True
+        if args.pred_len == 0:
+            args.pred_len = args.context_len
 
         fixseed(self._seed)
         dist_util.setup_dist(args.device)

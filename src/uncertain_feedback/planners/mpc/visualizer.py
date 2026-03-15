@@ -110,7 +110,6 @@ class _LiveState:  # pylint: disable=too-many-instance-attributes
     artists2d: list[dict]
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
-    goal_artists: list = dataclasses.field(default_factory=list)
     wrist_trace: list = dataclasses.field(default_factory=list)
     recorded_frames: list = dataclasses.field(default_factory=list)
     step: int = 0
@@ -190,7 +189,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
     def open_live(
         self,
-        goals: list[np.ndarray],
+        target_q: np.ndarray,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
@@ -201,18 +200,15 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         iteration.  Uses matplotlib's interactive mode so the window stays
         responsive while Python keeps running.
 
-        All goals are drawn simultaneously: intermediate goals in orange, the
-        final goal in red.
-
         Args:
-            goals:      List of ``(4, 3)`` target axis-angle joint configurations.
+            target_q:   ``(4, 3)`` target axis-angle joint angles (drawn static).
             spine3_pos: ``(3,)`` world position of spine3.
             spine3_aa:  ``(3,)`` world axis-angle of spine3.
             body_pos:   ``(22, 3)`` world positions for the static body
                         background skeleton.  When provided (e.g. sitting pose)
                         it replaces the default T-pose for the grey backdrop.
         """
-        target_full = self.fk.full_body_positions(goals[-1], spine3_pos, spine3_aa)
+        target_full = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
         # Use body reference + target to set axis limits
@@ -221,9 +217,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         lims = [(all_pts[:, i].min() - mg, all_pts[:, i].max() + mg) for i in range(3)]
 
         plt.ion()
-        # Build figure without a static target (goals drawn as mutable artists)
         fig, artists_3d, artists_2d = self._build_figure(
-            goals[-1], lims, spine3_pos, spine3_aa, body_pos=body_pos
+            target_q, lims, spine3_pos, spine3_aa, body_pos=body_pos
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -239,7 +234,6 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             spine_pos=spine3_pos,
             spine_aa=spine3_aa,
         )
-        self._live.goal_artists = self._draw_goal_artists(goals)
 
     def update_step(
         self,
@@ -393,97 +387,6 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         )
         _save(anim, save_path)
 
-    def update_goals(self, goals: list[np.ndarray]) -> None:
-        """Replace the displayed goal poses in the live window.
-
-        Intermediate goals are drawn in orange; the final goal in red.
-
-        Args:
-            goals: Updated list of ``(4, 3)`` target axis-angle configurations.
-        """
-        assert self._live is not None
-        for ga in self._live.goal_artists:
-            for panel_lines in ga["lines3d"]:
-                for line in panel_lines:
-                    line.remove()
-            for scat in ga["scats3d"]:
-                scat.remove()
-            for panel_lines in ga["lines2d"]:
-                for line in panel_lines:
-                    line.remove()
-            for scat in ga["scats2d"]:
-                scat.remove()
-        self._live.goal_artists = self._draw_goal_artists(goals)
-        self._live.fig.canvas.draw_idle()
-
-    def _draw_goal_artists(self, goals: list[np.ndarray]) -> list[dict]:
-        """Draw all goals onto the live axes and return their artists.
-
-        Intermediate goals are orange; the final goal is red
-        (``_TARGET_COLOR``).
-        """
-        assert self._live is not None
-        result = []
-        n = len(goals)
-        for i, goal in enumerate(goals):
-            color = _TARGET_COLOR if i == n - 1 else "darkorange"
-            goal_full = self.fk.full_body_positions(
-                goal, self._live.spine_pos, self._live.spine_aa
-            )
-            arm_pts = goal_full[LEFT_ARM_JOINT_INDICES_22]
-
-            lines3d, scats3d = [], []
-            for a3 in self._live.artists3d:
-                ls = _draw_bones_3d(
-                    a3["ax"],
-                    goal_full,
-                    LEFT_ARM_BONE_PAIRS_22,
-                    color,
-                    alpha=0.4,
-                    lw=1.8,
-                    linestyle="--",
-                )
-                sc = a3["ax"].scatter(
-                    *arm_pts.T, color=color, s=30, alpha=0.4, depthshade=False
-                )
-                lines3d.append(ls)
-                scats3d.append(sc)
-
-            lines2d, scats2d = [], []
-            for a2 in self._live.artists2d:
-                hi, vi = a2["hi"], a2["vi"]
-                ls = _draw_bones_2d(
-                    a2["ax"],
-                    goal_full,
-                    LEFT_ARM_BONE_PAIRS_22,
-                    hi,
-                    vi,
-                    color,
-                    alpha=0.4,
-                    lw=1.8,
-                    linestyle="--",
-                )
-                sc = a2["ax"].scatter(
-                    arm_pts[:, hi],
-                    arm_pts[:, vi],
-                    color=color,
-                    s=28,
-                    alpha=0.4,
-                    zorder=4,
-                )
-                lines2d.append(ls)
-                scats2d.append(sc)
-
-            result.append(
-                {
-                    "lines3d": lines3d,
-                    "scats3d": scats3d,
-                    "lines2d": lines2d,
-                    "scats2d": scats2d,
-                }
-            )
-        return result
-
     def plot_pose(
         self,
         q: np.ndarray,
@@ -608,24 +511,23 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 alpha=0.45,
                 depthshade=False,
             )
-            if target_full is not None:
-                _draw_bones_3d(
-                    ax,
-                    target_full,
-                    LEFT_ARM_BONE_PAIRS_22,
-                    _TARGET_COLOR,
-                    alpha=0.4,
-                    lw=1.8,
-                    linestyle="--",
-                    label="target" if col == 0 else None,
-                )
-                ax.scatter(
-                    *target_full[LEFT_ARM_JOINT_INDICES_22].T,
-                    color=_TARGET_COLOR,
-                    s=30,
-                    alpha=0.4,
-                    depthshade=False,
-                )
+            _draw_bones_3d(
+                ax,
+                target_full,
+                LEFT_ARM_BONE_PAIRS_22,
+                _TARGET_COLOR,
+                alpha=0.4,
+                lw=1.8,
+                linestyle="--",
+                label="target" if col == 0 else None,
+            )
+            ax.scatter(
+                *target_full[LEFT_ARM_JOINT_INDICES_22].T,
+                color=_TARGET_COLOR,
+                s=30,
+                alpha=0.4,
+                depthshade=False,
+            )
             if col == 0:
                 ax.legend(loc="upper left", fontsize=7)
 
@@ -704,26 +606,25 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 alpha=0.45,
                 zorder=3,
             )
-            if target_full is not None:
-                _draw_bones_2d(
-                    ax,
-                    target_full,
-                    LEFT_ARM_BONE_PAIRS_22,
-                    view.hi,
-                    view.vi,
-                    _TARGET_COLOR,
-                    alpha=0.4,
-                    lw=1.8,
-                    linestyle="--",
-                )
-                ax.scatter(
-                    target_full[LEFT_ARM_JOINT_INDICES_22, view.hi],
-                    target_full[LEFT_ARM_JOINT_INDICES_22, view.vi],
-                    color=_TARGET_COLOR,
-                    s=28,
-                    alpha=0.4,
-                    zorder=4,
-                )
+            _draw_bones_2d(
+                ax,
+                target_full,
+                LEFT_ARM_BONE_PAIRS_22,
+                view.hi,
+                view.vi,
+                _TARGET_COLOR,
+                alpha=0.4,
+                lw=1.8,
+                linestyle="--",
+            )
+            ax.scatter(
+                target_full[LEFT_ARM_JOINT_INDICES_22, view.hi],
+                target_full[LEFT_ARM_JOINT_INDICES_22, view.vi],
+                color=_TARGET_COLOR,
+                s=28,
+                alpha=0.4,
+                zorder=4,
+            )
 
             scat = ax.scatter([], [], color=_TARGET_COLOR, s=35, zorder=5)
             lines = [
@@ -893,11 +794,10 @@ def _draw_bones_3d(
     lw: float = 2.0,
     linestyle: str = "-",
     label: str | None = None,
-) -> list:
-    lines = []
+) -> None:
     for i, (pi, ci) in enumerate(bone_pairs):
         seg = positions[[pi, ci]]
-        (line,) = ax.plot(
+        ax.plot(
             seg[:, 0],
             seg[:, 1],
             seg[:, 2],
@@ -907,8 +807,6 @@ def _draw_bones_3d(
             linestyle=linestyle,
             label=label if i == 0 else None,
         )
-        lines.append(line)
-    return lines
 
 
 def _draw_bones_2d(
@@ -921,11 +819,10 @@ def _draw_bones_2d(
     alpha: float = 1.0,
     lw: float = 1.5,
     linestyle: str = "-",
-) -> list:
-    lines = []
+) -> None:
     for pi, ci in bone_pairs:
         seg = positions[[pi, ci]]
-        (line,) = ax.plot(
+        ax.plot(
             seg[:, hi],
             seg[:, vi],
             color=color,
@@ -933,8 +830,6 @@ def _draw_bones_2d(
             linewidth=lw,
             linestyle=linestyle,
         )
-        lines.append(line)
-    return lines
 
 
 def _save(anim: FuncAnimation, path: str) -> None:

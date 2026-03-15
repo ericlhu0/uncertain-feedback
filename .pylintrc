@@ -8,5 +8,3 @@ disable=
     too-many-arguments,
     too-many-positional-arguments,
     duplicate-code,
-    too-many-instance-attributes,
-    too-many-locals,

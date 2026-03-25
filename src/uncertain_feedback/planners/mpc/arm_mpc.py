@@ -28,7 +28,7 @@ _N_JOINTS = 4  # number of controlled joints
 @dataclass
 class _MpcConfig:
     horizon: int
-    n_samples: int
+    n_mpc_samples: int
     max_angle_delta: float
 
 
@@ -69,7 +69,7 @@ def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
 class SmplLeftArmMPC:
     """Sampling-based MPC for the SMPL left arm.
 
-    Draws ``n_samples`` random action sequences, rolls each out, and returns
+    Draws ``n_mpc_samples`` random action sequences, rolls each out, and returns
     the one with the lowest terminal cost.
 
     The controller maintains a queue of goals.  It always targets the first
@@ -80,7 +80,7 @@ class SmplLeftArmMPC:
 
     Args:
         horizon:         Number of look-ahead steps.
-        n_samples:       Number of candidate action sequences sampled per
+        n_mpc_samples:   Number of candidate action sequences sampled per
                          ``solve`` call.
         max_angle_delta: Standard deviation of the sampling distribution
                          (radians).
@@ -99,7 +99,7 @@ class SmplLeftArmMPC:
     def __init__(
         self,
         horizon: int = 10,
-        n_samples: int = 512,
+        n_mpc_samples: int = 512,
         max_angle_delta: float = 0.001,
         goals: list[np.ndarray] | None = None,
         goal_threshold: float = 0.01,
@@ -108,7 +108,7 @@ class SmplLeftArmMPC:
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
     ) -> None:
-        self._config = _MpcConfig(horizon, n_samples, max_angle_delta)
+        self._config = _MpcConfig(horizon, n_mpc_samples, max_angle_delta)
         self.visualize = visualize
 
         self._goals: deque[np.ndarray] = deque(
@@ -225,7 +225,7 @@ class SmplLeftArmMPC:
         actions = np.random.normal(
             loc=mean,
             scale=self._config.max_angle_delta,
-            size=(self._config.n_samples, self._config.horizon, _N_JOINTS, 3),
+            size=(self._config.n_mpc_samples, self._config.horizon, _N_JOINTS, 3),
         )
 
         q_trajs = self._rollout(current_q, actions)
@@ -322,7 +322,7 @@ if __name__ == "__main__":
 
     demo_mpc = SmplLeftArmMPC(
         horizon=args.horizon,
-        n_samples=args.samples,
+        n_mpc_samples=args.samples,
         goals=demo_goals,
         visualize=not args.no_vis,
         fk=demo_fk,

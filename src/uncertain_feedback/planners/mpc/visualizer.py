@@ -11,7 +11,7 @@ Example::
     import numpy as np
 
     fk  = SmplLeftArmFK()
-    mpc = SmplLeftArmMPC(horizon=10, n_samples=512)
+    mpc = SmplLeftArmMPC(horizon=10, n_mpc_samples=512)
     vis = ArmVisualizer(fk)
 
     initial_q = np.zeros((4, 3))
@@ -319,6 +319,45 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
 
+    def update_trajectory_preview(self, preview_q: np.ndarray) -> None:
+        """Draw (or update) a semi-transparent ghost arm at the trajectory cutoff frame.
+
+        Called automatically by
+        :meth:`~uncertain_feedback.planners.mpc.arm_mpc_mdm.LeftArmMPCMDM.push_trajectory`
+        to show the arm pose at the enqueued cutoff timestep (e.g. 75 % through
+        the generated trajectory).  Safe to call multiple times — subsequent
+        calls simply move the ghost to the new pose.
+
+        Args:
+            preview_q: ``(4, 3)`` axis-angle joint angles for the cutoff frame
+                       ``[left_collar, left_shoulder, left_elbow, left_wrist]``.
+        """
+        assert self._live is not None, "update_trajectory_preview() called before open_live()"
+        preview_full = self.fk.full_body_positions(
+            preview_q, self._live.spine_pos, self._live.spine_aa
+        )
+        arm_pts = preview_full[LEFT_ARM_JOINT_INDICES_22]
+
+        for a3 in self._live.artists3d:
+            a3["preview_scat"]._offsets3d = (  # pylint: disable=protected-access
+                arm_pts[:, 0],
+                arm_pts[:, 1],
+                arm_pts[:, 2],
+            )
+            for line, (pi, ci) in zip(a3["preview_lines"], LEFT_ARM_BONE_PAIRS_22):
+                seg = preview_full[[pi, ci]]
+                line.set_data(seg[:, 0], seg[:, 1])
+                line.set_3d_properties(seg[:, 2])
+
+        for a2 in self._live.artists2d:
+            a2["preview_scat"].set_offsets(arm_pts[:, [a2["hi"], a2["vi"]]])
+            for line, (pi, ci) in zip(a2["preview_lines"], LEFT_ARM_BONE_PAIRS_22):
+                seg = preview_full[[pi, ci]]
+                line.set_data(seg[:, a2["hi"]], seg[:, a2["vi"]])
+
+        self._live.fig.canvas.draw_idle()
+        self._live.fig.canvas.flush_events()
+
     def finish_live(self, save_path: str) -> None:
         """Save the frames recorded during the live session to a video or GIF.
 
@@ -556,6 +595,14 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             mdm_goal_scat = ax.scatter(
                 [], [], [], color=_MDM_COLOR, s=30, alpha=0.6, depthshade=False
             )
+            # Ghost arm at trajectory-fraction timestep (solid, 0.5 alpha)
+            preview_lines = [
+                ax.plot([], [], [], color=_MDM_COLOR, lw=1.8, alpha=0.5)[0]
+                for _ in LEFT_ARM_BONE_PAIRS_22
+            ]
+            preview_scat = ax.scatter(
+                [], [], [], color=_MDM_COLOR, s=30, alpha=0.5, depthshade=False
+            )
             artists.append(
                 {
                     "scat": scat,
@@ -565,6 +612,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "is_main": col == 0,
                     "mdm_goal_lines": mdm_goal_lines,
                     "mdm_goal_scat": mdm_goal_scat,
+                    "preview_lines": preview_lines,
+                    "preview_scat": preview_scat,
                 }
             )
         return artists
@@ -642,6 +691,14 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             mdm_goal_scat = ax.scatter(
                 [], [], color=_MDM_COLOR, s=28, alpha=0.6, zorder=4
             )
+            # Ghost arm at trajectory-fraction timestep (solid, 0.5 alpha)
+            preview_lines = [
+                ax.plot([], [], color=_MDM_COLOR, lw=1.8, alpha=0.5)[0]
+                for _ in LEFT_ARM_BONE_PAIRS_22
+            ]
+            preview_scat = ax.scatter(
+                [], [], color=_MDM_COLOR, s=28, alpha=0.5, zorder=4
+            )
             artists.append(
                 {
                     "scat": scat,
@@ -651,6 +708,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "vi": view.vi,
                     "mdm_goal_lines": mdm_goal_lines,
                     "mdm_goal_scat": mdm_goal_scat,
+                    "preview_lines": preview_lines,
+                    "preview_scat": preview_scat,
                 }
             )
         return artists
@@ -857,7 +916,7 @@ if __name__ == "__main__":
     demo_args = parser.parse_args()
 
     demo_fk = SmplLeftArmFK()
-    demo_mpc = SmplLeftArmMPC(horizon=demo_args.horizon, n_samples=demo_args.samples)
+    demo_mpc = SmplLeftArmMPC(horizon=demo_args.horizon, n_mpc_samples=demo_args.samples)
     demo_vis = ArmVisualizer(demo_fk)
 
     demo_initial_q = np.zeros((4, 3))

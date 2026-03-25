@@ -43,31 +43,39 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
     tracking an MDM trajectory.
 
     Args:
-        horizon:          Number of look-ahead steps.
-        n_samples:        Number of candidate action sequences per step.
-        max_angle_delta:  Sampling std dev (radians).
-        advance_threshold: Default L2 distance below which the controller
-                           advances to the next queued frame.  Can be
-                           overridden per :meth:`step` call.
-        goals:            Initial list of ``(4, 3)`` target configurations.
-        goal_threshold:   Threshold passed to the base class (used only when
-                          ``advance_threshold`` is not overriding).
-        visualize:        If ``True``, open a live matplotlib window.
-                          Requires ``fk``.
-        fk:               :class:`SmplLeftArmFK` instance (required when
-                          ``visualize=True``).
-        spine3_pos:       ``(3,)`` world position of spine3 (optional).
-        spine3_aa:        ``(3,)`` world axis-angle of spine3 (optional).
-        body_pos:         ``(22, 3)`` world joint positions for the grey
-                          background skeleton (e.g. sitting pose).
+        horizon:             Number of look-ahead steps.
+        n_mpc_samples:       Number of candidate action sequences per step.
+        max_angle_delta:     Sampling std dev (radians).
+        advance_threshold:   Default L2 distance below which the controller
+                             advances to the next queued frame.  Can be
+                             overridden per :meth:`step` call.
+        trajectory_fraction: Fraction of MDM-generated frames to enqueue
+                             (e.g. ``0.75`` enqueues the first 75 % of
+                             frames).  Defaults to
+                             :attr:`TRAJECTORY_FRACTION`.
+        goals:               Initial list of ``(4, 3)`` target configurations.
+        goal_threshold:      Threshold passed to the base class (used only
+                             when ``advance_threshold`` is not overriding).
+        visualize:           If ``True``, open a live matplotlib window.
+                             Requires ``fk``.
+        fk:                  :class:`SmplLeftArmFK` instance (required when
+                             ``visualize=True``).
+        spine3_pos:          ``(3,)`` world position of spine3 (optional).
+        spine3_aa:           ``(3,)`` world axis-angle of spine3 (optional).
+        body_pos:            ``(22, 3)`` world joint positions for the grey
+                             background skeleton (e.g. sitting pose).
     """
+
+    TRAJECTORY_FRACTION: float = 0.75
+    """Fraction of MDM trajectory frames to enqueue (default 75 %)."""
 
     def __init__(
         self,
         horizon: int = 10,
-        n_samples: int = 512,
+        n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         advance_threshold: float = 0.1,
+        trajectory_fraction: float = TRAJECTORY_FRACTION,
         goals: list[np.ndarray] | None = None,
         goal_threshold: float = 0.1,
         visualize: bool = False,
@@ -80,7 +88,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         # Pass visualize=False; MDM overrides vis config below.
         super().__init__(
             horizon=horizon,
-            n_samples=n_samples,
+            n_mpc_samples=n_mpc_samples,
             max_angle_delta=max_angle_delta,
             goals=goals,
             goal_threshold=goal_threshold,
@@ -90,6 +98,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             spine3_aa=spine3_aa,
         )
         self.advance_threshold = advance_threshold
+        self.trajectory_fraction = trajectory_fraction
         self.visualize = visualize
         if visualize:
             if fk is None:
@@ -98,6 +107,8 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
 
         # Last frame of the MDM trajectory, shown as a goal marker.
         self._mdm_goal: np.ndarray | None = None
+        # Cutoff frame shown as a ghost arm in the live visualiser.
+        self._preview_q: np.ndarray | None = None
 
     # ------------------------------------------------------------------
     # MDM-specific public API
@@ -124,6 +135,10 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         frames = np.asarray(frames, dtype=np.float64)
         # extendleft reverses the iterable, so reverse first to preserve order.
         self._goals.extendleft(frames[::-1])
+        # Notify live visualiser of the new preview frame (last enqueued frame).
+        self._preview_q = frames[-1].copy()
+        if self._vis is not None:
+            self._vis.update_trajectory_preview(self._preview_q)
 
     def set_mdm_goal(self, goal_q: np.ndarray) -> None:
         """Set the MDM end-of-trajectory goal marker.
@@ -197,6 +212,8 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                 )
                 if self._mdm_goal is not None:
                     self._vis.update_mdm_goal(self._mdm_goal)
+                if self._preview_q is not None:
+                    self._vis.update_trajectory_preview(self._preview_q)
             color = _TARGET_COLOR if len(self._goals) <= 1 else _MDM_COLOR
             self._vis.update_step(next_q, dist=dist, color=color)
 
@@ -283,7 +300,7 @@ if __name__ == "__main__":
 
     demo_mpc = LeftArmMPCMDM(
         horizon=args.horizon,
-        n_samples=args.samples,
+        n_mpc_samples=args.samples,
         visualize=not args.no_vis,
         fk=demo_fk,
         goals=[demo_target_q],
@@ -317,8 +334,11 @@ if __name__ == "__main__":
         save_path=args.save_motion or None,
     )  # (n_frames, 4, 3)
     n_frames = trajectory.shape[0]
-    half = n_frames // 2
-    print(f"Generated {n_frames} frames; enqueuing first {half}.")
+    cutoff = max(1, round(n_frames * demo_mpc.trajectory_fraction))
+    print(
+        f"Generated {n_frames} frames; enqueuing first {cutoff}"
+        f" ({demo_mpc.trajectory_fraction:.0%})."
+    )
 
     # If MDM switched the backend to Agg (e.g. for video saving), switch back to interactive
     if plt.get_backend().lower() == "agg":
@@ -329,10 +349,10 @@ if __name__ == "__main__":
             except Exception:  # pylint: disable=broad-exception-caught
                 continue
 
-    demo_mpc.set_mdm_goal(trajectory[half - 1])
+    demo_mpc.set_mdm_goal(trajectory[cutoff - 1])
     demo_mpc.push_trajectory(
-        trajectory[:half]
-    )  # prepends first-half MDM frames; demo_target_q stays last
+        trajectory[:cutoff]
+    )  # prepends first-fraction MDM frames; demo_target_q stays last
 
     for _ in range(args.steps - args.text_time):
         demo_q = demo_mpc.step(demo_q)

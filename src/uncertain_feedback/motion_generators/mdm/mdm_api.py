@@ -52,6 +52,7 @@ if str(_SRC_ROOT) not in sys.path:
 from uncertain_feedback.consts import MDM_MODEL_WEIGHTS_PATH, MDM_ROOT
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     HmlArmFeatureInfo,
+    hml263_batch_to_smpl_body_pose,
     hml263_to_smpl_body_pose,
     smpl_arm_aa_to_hml263_frame,
     smpl_body_pose_to_arm_aa,
@@ -331,6 +332,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         motion_length_seconds: float = 6.0,
         start_pose: np.ndarray | None = None,
         save_path: str | Path | None = None,
+        num_samples: int = 1,
     ) -> np.ndarray:
         """Generate a left arm motion trajectory from a text description.
 
@@ -357,13 +359,19 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                                    ``plot_3d_motion`` pipeline as
                                    ``sample_leftarm.py``.  Requires ``ffmpeg``
                                    and ``moviepy``.  Defaults to ``None``
-                                   (no video saved).
+                                   (no video saved).  When ``num_samples > 1``,
+                                   only the first sample is visualized.
+            num_samples:           Number of independent diffusion samples to
+                                   draw in a single forward pass.  Defaults to
+                                   ``1`` (backward-compatible).
 
         Returns:
-            ``(n_frames, 4, 3)`` axis-angle trajectory for
-            ``[left_collar, left_shoulder, left_elbow, left_wrist]``.
+            ``(n_frames, 4, 3)`` axis-angle trajectory when ``num_samples==1``.
+            ``(num_samples, n_frames, 4, 3)`` when ``num_samples > 1``.
         """
         self._ensure_loaded()
+        if num_samples < 1:
+            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         assert self._arm_info is not None
         assert self._hml_mean is not None
         assert self._hml_std is not None
@@ -399,33 +407,33 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             -1
         )  # (263, 1)
 
-        # input_motions: (1, 263, 1, n_frames)
-        input_motions = start_frame.unsqueeze(0).unsqueeze(-1).repeat(1, 1, 1, n_frames)
+        # input_motions: (num_samples, 263, 1, n_frames)
+        input_motions = start_frame.unsqueeze(0).unsqueeze(-1).repeat(num_samples, 1, 1, n_frames)
         model_kwargs["y"]["inpainted_motion"] = input_motions
 
         mask_tensor = torch.tensor(
             self._not_l_arm_mask, dtype=torch.bool, device=input_motions.device
         )
-        # Expand: (263,) → (1, 263, 1, n_frames)
+        # Expand: (263,) → (num_samples, 263, 1, n_frames)
         model_kwargs["y"]["inpainting_mask"] = (
             mask_tensor.unsqueeze(0)
             .unsqueeze(-1)
             .unsqueeze(-1)
-            .repeat(1, 1, 1, n_frames)
+            .repeat(num_samples, 1, 1, n_frames)
         )
         # Lock the first 10 frames to the start frame.
         model_kwargs["y"]["inpainting_mask"][..., :10] = True
 
         # --- Classifier-free guidance scale ----------------------------------
         model_kwargs["y"]["scale"] = (
-            torch.ones(1, device=dist_util.dev()) * args.guidance_param
+            torch.ones(num_samples, device=dist_util.dev()) * args.guidance_param
         )
 
         # --- Run diffusion sampling ------------------------------------------
         print(f"Generating motion for: '{text}' ({n_frames} frames)…")
         sample = diffusion.p_sample_loop(
             model,
-            (1, model.njoints, model.nfeats, n_frames),
+            (num_samples, model.njoints, model.nfeats, n_frames),
             clip_denoised=False,
             model_kwargs=model_kwargs,
             skip_timesteps=0,
@@ -480,9 +488,18 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             print(f"Saved motion video to {save_path}")
 
         # --- Convert normalized HML → SMPL body_pose → arm axis-angles ------
-        hml_vec = sample[0, :, 0, :].T  # (n_frames, 263)
-        body_pose = hml263_to_smpl_body_pose(
-            hml_vec, data, model, self._fk.tpose_all_joints
-        )  # (n_frames, 21, 3)
-        arm_aa = smpl_body_pose_to_arm_aa(body_pose)  # (n_frames, 4, 3)
-        return arm_aa
+        if num_samples == 1:
+            # Single-sample fast path: no ThreadPoolExecutor overhead.
+            hml_vec = sample[0, :, 0, :].T  # (n_frames, 263)
+            body_pose = hml263_to_smpl_body_pose(
+                hml_vec, data, model, self._fk.tpose_all_joints
+            )  # (n_frames, 21, 3)
+            return smpl_body_pose_to_arm_aa(body_pose)  # (n_frames, 4, 3)
+
+        # Batch path: one rot2xyz call + parallel IK across all samples.
+        # sample: (num_samples, 263, 1, n_frames) → (num_samples, n_frames, 263)
+        hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
+        body_pose_batch = hml263_batch_to_smpl_body_pose(
+            hml_vecs, data, model, self._fk.tpose_all_joints
+        )  # (num_samples, n_frames, 21, 3)
+        return smpl_body_pose_to_arm_aa(body_pose_batch)  # (num_samples, n_frames, 4, 3)

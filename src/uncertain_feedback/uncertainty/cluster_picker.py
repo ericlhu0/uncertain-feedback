@@ -8,6 +8,7 @@ a panel to select it, then clicks "Confirm" to return the chosen cluster label.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,9 +23,13 @@ from uncertain_feedback.planners.mpc.visualizer import (
     _BODY_BONES,
     _BODY_COLOR,
     _BODY_JOINTS,
-    _WRIST_IDX,
     _draw_bones_3d,
 )
+
+if TYPE_CHECKING:
+    import matplotlib
+    from matplotlib.figure import Figure
+    from mpl_toolkits.mplot3d.axes3d import Axes3D  # type: ignore[import-untyped]
 
 _COLOR_ARM = "#4878CF"
 _COLOR_SELECTED = "#E87722"
@@ -71,7 +76,7 @@ def _draw_body(ax: "Axes3D", body_pos: np.ndarray, arm_color: str) -> tuple[list
     return arm_lines, arm_scat
 
 
-def _build_figure(
+def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     unique_labels: list[int],
     cluster_body_cutoffs: list[np.ndarray],             # each (22, 3) — mean arm at cutoff
     cluster_wrist_traces: list[np.ndarray],             # each (n_frames, 3)
@@ -97,13 +102,13 @@ def _build_figure(
         zip(unique_labels, cluster_body_cutoffs, cluster_wrist_traces, cluster_counts)
     ):
         ax = axes[idx]
-        ax.view_init(elev=_ELEV, azim=_AZIM)
+        ax.view_init(elev=_ELEV, azim=_AZIM)  # type: ignore[attr-defined]
         ax.set_xlim(*lims[0])
         ax.set_ylim(*lims[1])
-        ax.set_zlim(*lims[2])
+        ax.set_zlim(*lims[2])  # type: ignore[attr-defined]
         ax.set_xlabel("X", fontsize=7)
         ax.set_ylabel("Y", fontsize=7)
-        ax.set_zlabel("Z", fontsize=7)
+        ax.set_zlabel("Z", fontsize=7)  # type: ignore[attr-defined]
         ax.tick_params(labelsize=6)
         ax.set_title(f"Cluster {k}\n({count} samples)", fontsize=9, pad=4)
 
@@ -127,7 +132,7 @@ def _build_figure(
                 ax, current_body, LEFT_ARM_BONE_PAIRS_22,
                 _COLOR_CURRENT, alpha=0.9, lw=2.2,
             )
-            ax.scatter(
+            ax.scatter(  # type: ignore[misc]
                 *current_body[LEFT_ARM_JOINT_INDICES_22].T,
                 color=_COLOR_CURRENT, s=28, depthshade=False,
             )
@@ -140,7 +145,7 @@ def _build_figure(
     return fig, axes, panel_arm_lines, panel_arm_scats
 
 
-def pick_cluster(
+def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
     trajectories: np.ndarray,
     labels: np.ndarray,
     fk: SmplLeftArmFK | None = None,
@@ -191,7 +196,6 @@ def pick_cluster(
     trajectories = np.asarray(trajectories, dtype=np.float64)
     labels = np.asarray(labels, dtype=np.intp)
     unique_labels = sorted(set(labels.tolist()))
-    n_clusters = len(unique_labels)
 
     # ------------------------------------------------------------------
     # Precompute per-cluster mean trajectories
@@ -306,7 +310,7 @@ def pick_cluster(
 # ---------------------------------------------------------------------------
 # Demo / screenshot entry point
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
+if __name__ == "__main__":  # pylint: disable=redefined-outer-name
     import sys
 
     rng = np.random.default_rng(42)
@@ -348,7 +352,7 @@ if __name__ == "__main__":
         all_body = np.stack(cluster_body_finals).reshape(-1, 3)
         all_wrists = np.concatenate(cluster_wrist_traces)
         all_pts = np.vstack([all_body, all_wrists])
-        margin = 0.05
+        margin = 0.05  # pylint: disable=invalid-name
         lims = [
             (float(all_pts[:, d].min()) - margin, float(all_pts[:, d].max()) + margin)
             for d in range(3)

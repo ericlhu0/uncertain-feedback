@@ -57,7 +57,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                              :class:`XyzPositionClusterer` with ``n_clusters``.
     """
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-locals
         self,
         horizon: int = 10,
         n_mpc_samples: int = 512,
@@ -100,7 +100,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
     # UQ pipeline
     # ------------------------------------------------------------------
 
-    def query_mdm_with_uncertainty(
+    def query_mdm_with_uncertainty(  # pylint: disable=redefined-outer-name
         self,
         gen: "MdmMotionGenerator",  # type: ignore[name-defined]  # noqa: F821
         text: str,

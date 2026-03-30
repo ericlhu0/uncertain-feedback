@@ -458,7 +458,7 @@ def hml263_to_smpl_body_pose(
     return body_pose
 
 
-def hml263_batch_to_smpl_body_pose(
+def hml263_batch_to_smpl_body_pose(  # pylint: disable=too-many-locals
     hml_vecs: "torch.Tensor",  # type: ignore[name-defined]  # noqa: F821
     dataset,
     model,
@@ -485,9 +485,9 @@ def hml263_batch_to_smpl_body_pose(
         ``(n_samples, n_frames, 21, 3)`` SMPL body_pose axis-angles.
     """
     # pylint: disable=import-outside-toplevel,import-error
-    import torch
     from concurrent.futures import ThreadPoolExecutor
 
+    import torch
     from data_loaders.humanml.scripts.motion_process import recover_from_ric
 
     hml_vecs = hml_vecs.float().cpu()

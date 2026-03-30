@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 
-class TrajectoryClusterer(ABC):
+class TrajectoryClusterer(ABC):  # pylint: disable=too-few-public-methods
     """Cluster a batch of arm trajectories into integer labels.
 
     Subclasses implement :meth:`cluster` to map a ``(num_samples, n_frames,

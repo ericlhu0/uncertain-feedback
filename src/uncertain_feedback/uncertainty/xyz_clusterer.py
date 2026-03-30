@@ -9,7 +9,7 @@ from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.uncertainty.base import TrajectoryClusterer
 
 
-class XyzPositionClusterer(TrajectoryClusterer):
+class XyzPositionClusterer(TrajectoryClusterer):  # pylint: disable=too-few-public-methods
     """Cluster trajectories by their FK joint-position feature vectors.
 
     Each trajectory ``(n_frames, 4, 3)`` is converted to XYZ positions via

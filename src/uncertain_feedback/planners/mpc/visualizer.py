@@ -443,7 +443,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         tpose = self.fk.tpose_all_joints
 
         _draw_bones_3d(ax, tpose, _BODY_BONES, _BODY_COLOR, alpha=0.5, lw=1.5)
-        ax.scatter(
+        ax.scatter(  # type: ignore[misc]
             *tpose[_BODY_JOINTS].T, color=_BODY_COLOR, s=20, alpha=0.5, depthshade=False
         )
         _draw_bones_3d(
@@ -455,7 +455,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             lw=2,
             label="current",
         )
-        ax.scatter(
+        ax.scatter(  # type: ignore[misc]
             *pos[LEFT_ARM_JOINT_INDICES_22].T,
             color=_TARGET_COLOR,
             s=45,
@@ -474,7 +474,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 linestyle="--",
                 label="target",
             )
-            ax.scatter(
+            ax.scatter(  # type: ignore[misc]
                 *tgt[LEFT_ARM_JOINT_INDICES_22].T,
                 color=_TARGET_COLOR,
                 s=35,
@@ -484,7 +484,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
-        ax.set_zlabel("Z (m)")
+        ax.set_zlabel("Z (m)")  # type: ignore[union-attr]
         ax.legend(fontsize=8)
         return ax
 
@@ -618,7 +618,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             )
         return artists
 
-    def _build_2d_panels(
+    def _build_2d_panels(  # pylint: disable=too-many-locals
         self,
         fig: plt.Figure,
         gs: gridspec.GridSpec,

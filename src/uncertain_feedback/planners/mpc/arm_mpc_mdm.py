@@ -136,9 +136,10 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         # extendleft reverses the iterable, so reverse first to preserve order.
         self._goals.extendleft(frames[::-1])
         # Notify live visualiser of the new preview frame (last enqueued frame).
-        self._preview_q = frames[-1].copy()
+        preview_q = frames[-1].copy()
+        self._preview_q = preview_q
         if self._vis is not None:
-            self._vis.update_trajectory_preview(self._preview_q)
+            self._vis.update_trajectory_preview(preview_q)
 
     def set_mdm_goal(self, goal_q: np.ndarray) -> None:
         """Set the MDM end-of-trajectory goal marker.

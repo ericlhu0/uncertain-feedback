@@ -109,29 +109,27 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
     ) -> None:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
-        The full pipeline:
+                The full pipeline:
 
-        1. Draw ``num_samples`` trajectories from the diffusion model.
-        2. Cluster them with the configured :class:`TrajectoryClusterer`.
-        3. Show the interactive cluster-picker window (blocks until chosen).
-           Each cluster panel shows the arm at the ``trajectory_fraction``
-           timestep as a semi-transparent ghost arm.
-        4. Compute the mean trajectory of the selected cluster.
-        5. Enqueue the first ``trajectory_fraction`` portion of the mean
-           trajectory and set the MDM goal.
+                1. Draw ``num_samples`` trajectories from the diffusion model.
+                2. Cluster them with the configured :class:`TrajectoryClusterer`.
+                3. Show the interactive cluster-picker window (blocks until chosen).
+                   Each cluster panel shows the arm at the ``trajectory_fraction``
+                   timestep as a semi-transparent ghost arm.
+                4. Compute the mean trajectory of the selected cluster.
+                5. Enqueue the first ``trajectory_fraction`` portion of the mean
+                   trajectory and set the MDM goal.
 
-        Args:
-            gen:        :class:`~uncertain_feedback.motion_generators.mdm\
-.mdm_api.MdmMotionGenerator` instance (already loaded or lazy).
-            text:       Natural-language motion description.
-            start_pose: ``(263,)`` HML263 vector to condition the start of
-                        the generated motion.  Pass the output of
-                        :meth:`~uncertain_feedback.motion_generators.mdm\
-.mdm_api.MdmMotionGenerator.build_pose_from_arm_aa`.
+                Args:
+                    gen:        :class:`~uncertain_feedback.motion_generators.mdm\
+        .mdm_api.MdmMotionGenerator` instance (already loaded or lazy).
+                    text:       Natural-language motion description.
+                    start_pose: ``(263,)`` HML263 vector to condition the start of
+                                the generated motion.  Pass the output of
+                                :meth:`~uncertain_feedback.motion_generators.mdm\
+        .mdm_api.MdmMotionGenerator.build_pose_from_arm_aa`.
         """
-        print(
-            f"Generating {self._n_diffusion_samples} MDM samples for: '{text}' …"
-        )
+        print(f"Generating {self._n_diffusion_samples} MDM samples for: '{text}' …")
         trajectories = gen.generate_left_arm_trajectory(
             text,
             start_pose=start_pose,
@@ -142,16 +140,14 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         labels = self._clusterer.cluster(trajectories)  # (num_samples,)
         print(f"labels shape: {labels.shape}")
 
-        fk = (
-            self._vis_config.fk
-            if self._vis_config is not None
-            else SmplLeftArmFK()
-        )
+        fk = self._vis_config.fk if self._vis_config is not None else SmplLeftArmFK()
         spine_pos = self._vis_config.spine_pos if self._vis_config is not None else None
         spine_aa = self._vis_config.spine_aa if self._vis_config is not None else None
         body_pos = self._vis_config.body_pos if self._vis_config is not None else None
         chosen_label = pick_cluster(
-            trajectories, labels, fk=fk,
+            trajectories,
+            labels,
+            fk=fk,
             trajectory_fraction=self.trajectory_fraction,
             spine_pos=spine_pos,
             spine_aa=spine_aa,
@@ -250,7 +246,6 @@ if __name__ == "__main__":
         MdmMotionGenerator,
     )
 
-
     gen = MdmMotionGenerator()
     initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
     initial_arm_aa, initial_body_positions, initial_spine3_aa = gen.decode_pose(
@@ -259,10 +254,10 @@ if __name__ == "__main__":
 
     demo_target_q = initial_arm_aa.copy() + np.array(
         [
-            [0.0, 0.0, 0.0],   # left_collar
+            [0.0, 0.0, 0.0],  # left_collar
             [0.0, -1.6, 0.8],  # left_shoulder
-            [0.0, 0.0, 0.0],   # left_elbow
-            [0.0, 0.0, 0.0],   # left_wrist
+            [0.0, 0.0, 0.0],  # left_elbow
+            [0.0, 0.0, 0.0],  # left_wrist
         ]
     )
 
@@ -295,8 +290,9 @@ if __name__ == "__main__":
     demo_mpc._vis = None  # pylint: disable=protected-access
 
     current_pose = gen.build_pose_from_arm_aa(initial_pose, demo_q)
-    demo_mpc.query_mdm_with_uncertainty(gen, args.text, start_pose=current_pose,
-                                        current_arm_aa=demo_q)
+    demo_mpc.query_mdm_with_uncertainty(
+        gen, args.text, start_pose=current_pose, current_arm_aa=demo_q
+    )
 
     # If MDM switched the backend to Agg, switch back to interactive.
     if plt.get_backend().lower() == "agg":

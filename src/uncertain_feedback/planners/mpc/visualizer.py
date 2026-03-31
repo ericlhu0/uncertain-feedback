@@ -320,7 +320,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self._live.fig.canvas.flush_events()
 
     def update_trajectory_preview(self, preview_q: np.ndarray) -> None:
-        """Draw (or update) a semi-transparent ghost arm at the trajectory cutoff frame.
+        """Draw (or update) a semi-transparent ghost arm at the trajectory
+        cutoff frame.
 
         Called automatically by
         :meth:`~uncertain_feedback.planners.mpc.arm_mpc_mdm.LeftArmMPCMDM.push_trajectory`
@@ -332,7 +333,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             preview_q: ``(4, 3)`` axis-angle joint angles for the cutoff frame
                        ``[left_collar, left_shoulder, left_elbow, left_wrist]``.
         """
-        assert self._live is not None, "update_trajectory_preview() called before open_live()"
+        assert (
+            self._live is not None
+        ), "update_trajectory_preview() called before open_live()"
         preview_full = self.fk.full_body_positions(
             preview_q, self._live.spine_pos, self._live.spine_aa
         )
@@ -916,7 +919,9 @@ if __name__ == "__main__":
     demo_args = parser.parse_args()
 
     demo_fk = SmplLeftArmFK()
-    demo_mpc = SmplLeftArmMPC(horizon=demo_args.horizon, n_mpc_samples=demo_args.samples)
+    demo_mpc = SmplLeftArmMPC(
+        horizon=demo_args.horizon, n_mpc_samples=demo_args.samples
+    )
     demo_vis = ArmVisualizer(demo_fk)
 
     demo_initial_q = np.zeros((4, 3))

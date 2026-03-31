@@ -175,5 +175,3 @@ class TestSmplBodyPoseToArmAa:
             smpl_body_pose_to_arm_aa(collar_bp),
             smpl_body_pose_to_arm_aa(wrist_bp),
         )
-
-

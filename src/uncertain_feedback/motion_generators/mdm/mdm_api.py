@@ -408,7 +408,9 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         )  # (263, 1)
 
         # input_motions: (num_samples, 263, 1, n_frames)
-        input_motions = start_frame.unsqueeze(0).unsqueeze(-1).repeat(num_samples, 1, 1, n_frames)
+        input_motions = (
+            start_frame.unsqueeze(0).unsqueeze(-1).repeat(num_samples, 1, 1, n_frames)
+        )
         model_kwargs["y"]["inpainted_motion"] = input_motions
 
         mask_tensor = torch.tensor(
@@ -502,4 +504,6 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         body_pose_batch = hml263_batch_to_smpl_body_pose(
             hml_vecs, data, model, self._fk.tpose_all_joints
         )  # (num_samples, n_frames, 21, 3)
-        return smpl_body_pose_to_arm_aa(body_pose_batch)  # (num_samples, n_frames, 4, 3)
+        return smpl_body_pose_to_arm_aa(
+            body_pose_batch
+        )  # (num_samples, n_frames, 4, 3)

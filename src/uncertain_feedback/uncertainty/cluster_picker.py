@@ -1,8 +1,9 @@
 """Interactive cluster picker for MDM trajectory uncertainty quantification.
 
-Shows one 3D panel per cluster, each displaying the full body (T-pose grey)
-with the mean arm pose overlaid in blue, plus a wrist trace.  The user clicks
-a panel to select it, then clicks "Confirm" to return the chosen cluster label.
+Shows one 3D panel per cluster, each displaying the full body (T-pose
+grey) with the mean arm pose overlaid in blue, plus a wrist trace.  The
+user clicks a panel to select it, then clicks "Confirm" to return the
+chosen cluster label.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
 
 _COLOR_ARM = "#4878CF"
 _COLOR_SELECTED = "#E87722"
-_COLOR_TRACE = "#888888"    # wrist trace
+_COLOR_TRACE = "#888888"  # wrist trace
 _COLOR_CURRENT = "#AAAAAA"  # current MPC arm state
 _ELEV = 120
 _AZIM = -90
@@ -53,37 +54,49 @@ def _merge_arm(arm_full: np.ndarray, body_pos: np.ndarray | None) -> np.ndarray:
     return result
 
 
-def _draw_body(ax: "Axes3D", body_pos: np.ndarray, arm_color: str) -> tuple[list, object]:
-    """Draw full body on ax. Returns (arm_bone_lines, arm_joint_scatter)."""
+def _draw_body(
+    ax: "Axes3D", body_pos: np.ndarray, arm_color: str
+) -> tuple[list, object]:
+    """Draw full body on ax.
+
+    Returns (arm_bone_lines, arm_joint_scatter).
+    """
     # Grey non-arm skeleton
     _draw_bones_3d(ax, body_pos, _BODY_BONES, _BODY_COLOR, alpha=0.45, lw=1.2)
     ax.scatter(
         *body_pos[_BODY_JOINTS].T,
-        color=_BODY_COLOR, s=14, alpha=0.45, depthshade=False,
+        color=_BODY_COLOR,
+        s=14,
+        alpha=0.45,
+        depthshade=False,
     )
 
     # Coloured arm skeleton (mutable for highlight)
     arm_lines = []
     for pi, ci in LEFT_ARM_BONE_PAIRS_22:
         seg = body_pos[[pi, ci]]
-        (ln,) = ax.plot(seg[:, 0], seg[:, 1], seg[:, 2],
-                        color=arm_color, linewidth=2.2)
+        (ln,) = ax.plot(seg[:, 0], seg[:, 1], seg[:, 2], color=arm_color, linewidth=2.2)
         arm_lines.append(ln)
     arm_scat = ax.scatter(
         *body_pos[LEFT_ARM_JOINT_INDICES_22].T,
-        c=arm_color, s=35, depthshade=False, zorder=5,
+        c=arm_color,
+        s=35,
+        depthshade=False,
+        zorder=5,
     )
     return arm_lines, arm_scat
 
 
 def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     unique_labels: list[int],
-    cluster_body_cutoffs: list[np.ndarray],             # each (22, 3) — mean arm at cutoff
-    cluster_wrist_traces: list[np.ndarray],             # each (n_frames, 3)
+    cluster_body_cutoffs: list[np.ndarray],  # each (22, 3) — mean arm at cutoff
+    cluster_wrist_traces: list[np.ndarray],  # each (n_frames, 3)
     cluster_counts: list[int],
     lims: list[tuple[float, float]],
-    cluster_individual_previews: list[list[np.ndarray]] | None = None,  # each list of (22, 3)
-    current_body: np.ndarray | None = None,             # (22, 3) current MPC arm state
+    cluster_individual_previews: (
+        list[list[np.ndarray]] | None
+    ) = None,  # each list of (22, 3)
+    current_body: np.ndarray | None = None,  # (22, 3) current MPC arm state
 ) -> tuple["Figure", list["Axes3D"], list[list], list]:
     n_clusters = len(unique_labels)
     fig_w = max(4 * n_clusters, 8)
@@ -114,27 +127,42 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
 
         # Wrist trace (static grey)
         ax.plot(
-            wrist_trace[:, 0], wrist_trace[:, 1], wrist_trace[:, 2],
-            linestyle=":", color=_COLOR_TRACE, linewidth=1.0, alpha=0.7,
+            wrist_trace[:, 0],
+            wrist_trace[:, 1],
+            wrist_trace[:, 2],
+            linestyle=":",
+            color=_COLOR_TRACE,
+            linewidth=1.0,
+            alpha=0.7,
         )
 
         # Individual ghost arms (one per sample in cluster), very faint
         if cluster_individual_previews is not None:
             for body_ind in cluster_individual_previews[idx]:
                 _draw_bones_3d(
-                    ax, body_ind, LEFT_ARM_BONE_PAIRS_22,
-                    _COLOR_ARM, alpha=0.12, lw=1.2,
+                    ax,
+                    body_ind,
+                    LEFT_ARM_BONE_PAIRS_22,
+                    _COLOR_ARM,
+                    alpha=0.12,
+                    lw=1.2,
                 )
 
         # Current MPC arm state (grey, drawn behind the cluster arm)
         if current_body is not None:
             _draw_bones_3d(
-                ax, current_body, LEFT_ARM_BONE_PAIRS_22,
-                _COLOR_CURRENT, alpha=0.9, lw=2.2,
+                ax,
+                current_body,
+                LEFT_ARM_BONE_PAIRS_22,
+                _COLOR_CURRENT,
+                alpha=0.9,
+                lw=2.2,
             )
             ax.scatter(  # type: ignore[misc]
                 *current_body[LEFT_ARM_JOINT_INDICES_22].T,
-                color=_COLOR_CURRENT, s=28, depthshade=False,
+                color=_COLOR_CURRENT,
+                s=28,
+                depthshade=False,
             )
 
         # Solid mean arm at trajectory-fraction cutoff (the pose that will be enqueued)
@@ -200,9 +228,11 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     # ------------------------------------------------------------------
     # Precompute per-cluster mean trajectories
     # ------------------------------------------------------------------
-    cluster_body_cutoffs: list[np.ndarray] = []         # (22, 3) mean arm at cutoff frame
-    cluster_individual_previews: list[list[np.ndarray]] = []  # per-sample (22, 3) at cutoff
-    cluster_wrist_traces: list[np.ndarray] = []         # (n_frames, 3)
+    cluster_body_cutoffs: list[np.ndarray] = []  # (22, 3) mean arm at cutoff frame
+    cluster_individual_previews: list[list[np.ndarray]] = (
+        []
+    )  # per-sample (22, 3) at cutoff
+    cluster_wrist_traces: list[np.ndarray] = []  # (n_frames, 3)
     cluster_counts: list[int] = []
 
     for k in unique_labels:
@@ -212,7 +242,8 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         # Mean body at trajectory-fraction cutoff frame (the pose that gets enqueued)
         preview_idx = max(0, round(n_frames * trajectory_fraction) - 1)
         body_cutoff = _merge_arm(
-            fk.full_body_positions(mean_traj[preview_idx], spine_pos, spine_aa), body_pos
+            fk.full_body_positions(mean_traj[preview_idx], spine_pos, spine_aa),
+            body_pos,
         )  # (22, 3)
         # Per-sample ghost arm body poses at the cutoff frame
         individual_previews = [
@@ -222,8 +253,8 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
             for traj in trajectories[mask]
         ]
         # Wrist trace from arm-chain FK
-        arm_positions = fk.fk_batch(mean_traj)              # (n_frames, 5, 3)
-        wrist_trace = arm_positions[:, -1, :]               # (n_frames, 3)
+        arm_positions = fk.fk_batch(mean_traj)  # (n_frames, 5, 3)
+        wrist_trace = arm_positions[:, -1, :]  # (n_frames, 3)
 
         cluster_body_cutoffs.append(body_cutoff)
         cluster_individual_previews.append(individual_previews)
@@ -253,7 +284,11 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     # Build figure
     # ------------------------------------------------------------------
     fig, axes, panel_arm_lines, panel_arm_scats = _build_figure(
-        unique_labels, cluster_body_cutoffs, cluster_wrist_traces, cluster_counts, lims,
+        unique_labels,
+        cluster_body_cutoffs,
+        cluster_wrist_traces,
+        cluster_counts,
+        lims,
         cluster_individual_previews=cluster_individual_previews,
         current_body=current_body,
     )
@@ -294,7 +329,9 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         plt.close(fig)
 
     btn.on_clicked(_on_confirm)
-    fig.suptitle("Click a cluster to select it, then click Confirm", fontsize=10, y=0.97)
+    fig.suptitle(
+        "Click a cluster to select it, then click Confirm", fontsize=10, y=0.97
+    )
 
     if save_path is not None:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -319,9 +356,9 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
     # Three synthetic clusters with distinct arm directions
     raw = rng.standard_normal((num_samples, n_frames, 4, 3)) * 0.15
     offsets = [
-        np.array([0.0, 0.3, 0.0]),    # arm up
-        np.array([0.3, 0.0, 0.0]),    # arm forward
-        np.array([0.0, 0.0, -0.3]),   # arm down
+        np.array([0.0, 0.3, 0.0]),  # arm up
+        np.array([0.3, 0.0, 0.0]),  # arm forward
+        np.array([0.0, 0.0, -0.3]),  # arm down
     ]
     demo_labels = np.array([i % 3 for i in range(num_samples)], dtype=np.intp)
     for i in range(num_samples):
@@ -359,14 +396,20 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
         ]
 
         fig, axes, _, _ = _build_figure(
-            unique_labels, cluster_body_finals, cluster_wrist_traces, cluster_counts, lims
+            unique_labels,
+            cluster_body_finals,
+            cluster_wrist_traces,
+            cluster_counts,
+            lims,
         )
         btn_ax = fig.add_axes([0.38, 0.04, 0.24, 0.08])
         btn_ax.set_facecolor("#DDDDDD")
         btn_ax.text(0.5, 0.5, "Confirm", ha="center", va="center", fontsize=10)
         btn_ax.set_xticks([])
         btn_ax.set_yticks([])
-        fig.suptitle("Click a cluster to select it, then click Confirm", fontsize=10, y=0.97)
+        fig.suptitle(
+            "Click a cluster to select it, then click Confirm", fontsize=10, y=0.97
+        )
         fig.savefig(save, dpi=150, bbox_inches="tight")
         print(f"Saved → {save.resolve()}")
         sys.exit(0)

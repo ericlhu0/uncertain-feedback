@@ -6,6 +6,11 @@ HML → SMPL  (MDM output decoding):
         Full pipeline: MDM de-normalization + ``recover_from_ric`` + ``rot2xyz``
         (all provided by the MDM repo) followed by minimum-rotation IK.
 
+    ``hml263_batch_to_smpl_body_pose``
+        Batched variant: processes all ``n_samples`` trajectories in a single
+        ``rot2xyz`` GPU call, then parallelises the per-frame IK across samples
+        with :class:`~concurrent.futures.ThreadPoolExecutor`.
+
     ``positions_to_smpl_body_pose``
         Core IK: ``(22, 3)`` global XYZ positions → ``(21, 3)`` SMPL local
         axis-angle body_pose.
@@ -451,3 +456,84 @@ def hml263_to_smpl_body_pose(
     )  # (n_frames, 21, 3)
 
     return body_pose
+
+
+def hml263_batch_to_smpl_body_pose(  # pylint: disable=too-many-locals
+    hml_vecs: "torch.Tensor",  # type: ignore[name-defined]  # noqa: F821
+    dataset,
+    model,
+    tpose_22: np.ndarray,
+) -> np.ndarray:
+    """Batched variant of :func:`hml263_to_smpl_body_pose`.
+
+    Processes all ``n_samples`` trajectories in a single ``rot2xyz`` GPU call
+    instead of one call per sample, then parallelises the per-frame IK across
+    samples with :class:`~concurrent.futures.ThreadPoolExecutor`.
+
+    ``Rotation.align_vectors`` (used inside :func:`positions_to_smpl_body_pose`)
+    releases the GIL, so thread-level parallelism gives real speed-up here.
+
+    Args:
+        hml_vecs:  ``(n_samples, n_frames, 263)`` normalized HumanML3D tensor.
+        dataset:   HumanML3D ``DataLoader`` returned by ``get_dataset_loader``
+                   — accesses ``dataset.dataset.t2m_dataset.inv_transform``.
+        model:     MDM model — must expose ``model.rot2xyz``.
+        tpose_22:  ``(22, 3)`` T-pose positions, e.g. from
+                   :attr:`SmplLeftArmFK.tpose_all_joints`.
+
+    Returns:
+        ``(n_samples, n_frames, 21, 3)`` SMPL body_pose axis-angles.
+    """
+    # pylint: disable=import-outside-toplevel,import-error
+    from concurrent.futures import ThreadPoolExecutor
+
+    import torch
+    from data_loaders.humanml.scripts.motion_process import recover_from_ric
+
+    hml_vecs = hml_vecs.float().cpu()
+    n_samples, n_frames, _ = hml_vecs.shape
+
+    # --- De-normalize all samples at once -----------------------------------
+    # inv_transform expects (batch, nfeats=1, seq_len, 263).
+    unnorm = dataset.dataset.t2m_dataset.inv_transform(
+        hml_vecs.unsqueeze(1)  # (n_samples, 1, n_frames, 263)
+    ).float()
+
+    # --- Recover global XYZ positions for all samples -----------------------
+    # recover_from_ric: (n_samples, 1, n_frames, 263) → (n_samples, 1, n_frames, 22, 3)
+    ric = recover_from_ric(unnorm, 22)
+    # (n_samples, 22, 3, n_frames)
+    ric = ric.view(-1, *ric.shape[2:]).permute(0, 2, 3, 1)
+
+    # Single rot2xyz call for the full batch (was n_samples separate calls).
+    xyz = model.rot2xyz(
+        x=ric,
+        mask=None,
+        pose_rep="xyz",
+        glob=True,
+        translation=True,
+        jointstype="smpl",
+        vertstrans=True,
+        betas=None,
+        beta=0,
+        glob_rot=None,
+        get_rotations_back=False,
+    )
+    # xyz: (n_samples, 22, 3, n_frames) → (n_samples, n_frames, 22, 3)
+    positions_all: np.ndarray = xyz.permute(0, 3, 1, 2).cpu().numpy()
+
+    # --- IK: parallelise across samples -------------------------------------
+    # positions_to_smpl_body_pose is pure numpy/scipy; Rotation.align_vectors
+    # releases the GIL so ThreadPoolExecutor gives real parallelism.
+    def _ik_sample(positions_seq: np.ndarray) -> np.ndarray:
+        return np.stack(
+            [
+                positions_to_smpl_body_pose(positions_seq[t], tpose_22)
+                for t in range(n_frames)
+            ]
+        )  # (n_frames, 21, 3)
+
+    with ThreadPoolExecutor(max_workers=n_samples) as pool:
+        body_poses = list(pool.map(_ik_sample, positions_all))
+
+    return np.stack(body_poses)  # (n_samples, n_frames, 21, 3)

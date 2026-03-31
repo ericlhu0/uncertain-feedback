@@ -92,6 +92,10 @@ module = [
     "data_loaders.*",
     "sample.*",
     "utils.*",
+    "torch",
+    "torch.*",
+    "sklearn.*",
+    "yaml",
 ]
 ignore_missing_imports = true
 
@@ -107,3 +111,11 @@ explicit = true
 torch = { index = "pytorch-cu121" }
 torchvision = { index = "pytorch-cu121" }
 torchaudio = { index = "pytorch-cu121" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-pylint>=0.18.0",
+    "mypy>=1.0",
+    "types-PyYAML",
+]

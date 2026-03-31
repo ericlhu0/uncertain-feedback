@@ -249,7 +249,7 @@ def main() -> None:
     ]
     fig.legend(handles=legend_elements, loc="lower center", ncol=2, fontsize=10)
 
-    plt.tight_layout(rect=[0, 0.05, 1, 1])
+    plt.tight_layout(rect=(0, 0.05, 1, 1))
 
     out_path = Path(__file__).parent / "sitting_pose_comparison.png"
     plt.savefig(out_path, dpi=150, bbox_inches="tight")

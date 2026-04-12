@@ -41,6 +41,19 @@ dependencies = [
    "pyquaternion",
    "gdown",
    "setuptools<70",
+   # SAM 3D Body inference worker dependencies
+   "timm>=1.0",
+   "einops",
+   "roma",
+   "opencv-python",
+   "yacs",
+   "fvcore",
+   "iopath",
+   "pycocotools",
+   "pytorch-lightning",
+   "pyrender",
+   "braceexpand",
+   "detectron2",
 ]
 
 [project.optional-dependencies]
@@ -100,7 +113,7 @@ module = [
 ignore_missing_imports = true
 
 [tool.uv]
-extra-build-dependencies = { chumpy = ["pip"] }
+extra-build-dependencies = { chumpy = ["pip"], detectron2 = ["torch", "pip"] }
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
@@ -111,6 +124,7 @@ explicit = true
 torch = { index = "pytorch-cu121" }
 torchvision = { index = "pytorch-cu121" }
 torchaudio = { index = "pytorch-cu121" }
+detectron2 = { git = "https://github.com/facebookresearch/detectron2.git" }
 
 [dependency-groups]
 dev = [

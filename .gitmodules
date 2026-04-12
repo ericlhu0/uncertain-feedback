@@ -1,4 +1,11 @@
-[submodule "src/uncertain-feedback/motion-generators/mdm/motion-diffusion-model"]
-	path = src/uncertain-feedback/motion-generators/mdm/motion-diffusion-model
+[submodule "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model"]
+	path = src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model
 	url = https://github.com/GuyTevet/motion-diffusion-model.git
 	
+[submodule "src/uncertain_feedback/data_collection/sam-3d-body"]
+	path = src/uncertain_feedback/data_collection/sam-3d-body
+	url = https://github.com/facebookresearch/sam-3d-body.git
+	
+[submodule "src/uncertain_feedback/data_collection/MHR"]
+	path = src/uncertain_feedback/data_collection/MHR
+	url = https://github.com/facebookresearch/MHR.git

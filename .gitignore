@@ -2,7 +2,8 @@ uv.lock
 .claude/
 env_snapshots/
 amass/
-src/uncertain_feedback/data_collection/demo/images/
+src/uncertain_feedback/data_collection/demo/*/*.png
+src/uncertain_feedback/data_collection/demo/*/*.jpg
 
 .DS_Store
 .python-version

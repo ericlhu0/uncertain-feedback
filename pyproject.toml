@@ -54,6 +54,7 @@ dependencies = [
    "pyrender",
    "braceexpand",
    "detectron2",
+   "flask",
 ]
 
 [project.optional-dependencies]

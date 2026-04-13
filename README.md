@@ -5,7 +5,12 @@ Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedb
 
 ## Running (Custom) Motion Generation
 ```
-uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py   --model_path save/humanml_enc_512_50steps/model000750000.pt   --text_condition "a person barely raises their left hand."   --num_samples 1 --num_repetitions 1 --motion_length 5.0
+uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py
+--model_path save/humanml_enc_512_50steps/model000750000.pt
+--text_condition "a person barely raises their left hand."
+--num_samples 1
+--num_repetitions 1
+--motion_length 5.0
 ```
 
 ## Get HML263 from sequence of images of human
@@ -27,4 +32,4 @@ uv run python src/uncertain_feedback/data_collection/demo/run_demo.py
 ```
 
 ## Thanks
-This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code). We suggest starting with that codebase and then working your way up to the structure exemplified here.
+This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code).

@@ -71,6 +71,41 @@ def _write_text_file(path: Path, captions: list[str], nlp: Language) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Motion resampling helper
+# ---------------------------------------------------------------------------
+
+_MDM_MIN_FRAMES = 40
+_MDM_MAX_FRAMES = 199
+
+
+def _resample_hml263(hml263: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Resample *hml263* so its length falls in [_MDM_MIN_FRAMES, _MDM_MAX_FRAMES].
+
+    Sequences shorter than the minimum are linearly interpolated up to the
+    minimum.  Sequences longer than the maximum are uniformly subsampled down
+    to the maximum.  Sequences already in range are returned unchanged.
+
+    Args:
+        hml263: Float32 array of shape ``(N, 263)``.
+
+    Returns:
+        Tuple of the (possibly resampled) array and a boolean that is ``True``
+        when resampling was applied.
+    """
+    n = len(hml263)
+    if _MDM_MIN_FRAMES <= n <= _MDM_MAX_FRAMES:
+        return hml263, False
+    target = _MDM_MIN_FRAMES if n < _MDM_MIN_FRAMES else _MDM_MAX_FRAMES
+    old_t = np.linspace(0, 1, n)
+    new_t = np.linspace(0, 1, target)
+    resampled = np.stack(
+        [np.interp(new_t, old_t, hml263[:, i]) for i in range(hml263.shape[1])],
+        axis=1,
+    ).astype(np.float32)
+    return resampled, True
+
+
+# ---------------------------------------------------------------------------
 # Frame-copy helper
 # ---------------------------------------------------------------------------
 
@@ -172,6 +207,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                         motion_id -= 1
                         continue
                     hml263 = pipeline.run(Path(tmp_dir))  # (N, 263)
+                    hml263, resampled = _resample_hml263(hml263)
                 except Exception as exc:  # pylint: disable=broad-except
                     print(f"  ✗ pipeline failed ({exc}) — skipping")
                     motion_id -= 1
@@ -179,7 +215,8 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
 
             np.save(output_dir / "new_joint_vecs" / f"{id_str}.npy", hml263)
             _write_text_file(output_dir / "texts" / f"{id_str}.txt", [caption], nlp)
-            print(f"  ✓ frames={n_frames}, hml263={hml263.shape}")
+            resample_note = " (resampled)" if resampled else ""
+            print(f"  ✓ frames={n_frames}, hml263={hml263.shape}{resample_note}")
             successful_ids.append(id_str)
 
     if not successful_ids:

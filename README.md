@@ -55,5 +55,17 @@ uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py \
 
 The output directory will be ready to pass to MDM's training script with `--dataset humanml --data_dir ./my_mdm_dataset/.`
 
+4. Fine-tune motion-diffusion-model
+```
+cd src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/
+
+python -m train.train_mdm \
+    --save_dir ./save/my_run \
+    --dataset humanml \
+    --batch_size 1 \
+    --num_steps 10000
+    --resume_checkpoint ./save/pretrained/model000200000.pt
+```
+
 ## Thanks
 This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code).

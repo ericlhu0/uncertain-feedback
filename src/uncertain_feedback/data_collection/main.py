@@ -39,12 +39,12 @@ def draw_skeleton(skeleton_ax, joint_positions, title="", highlight_joints=None)
 # ── Run pipeline ──────────────────────────────────────────────────────────────
 config = MhrToHml263Config(
     mhr_estimator_config=MhrEstimatorConfig(
-        sam_checkpoint_path=Path(__file__).parent
+        sam_checkpoint_path=str(Path(__file__).parent
         / "sam-3d-body"
         / "checkpoints"
         / "sam-3d-body-dinov3"
         / "model.ckpt",
-    ),
+    )),
     hml_stats_dir=Path("path/to/HumanML3D/Mean_Std/"),
 )
 pipeline = MhrToHml263Pipeline(config)

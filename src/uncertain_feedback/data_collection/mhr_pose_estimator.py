@@ -29,7 +29,6 @@ import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -53,11 +52,11 @@ class MhrEstimatorConfig:  # pylint: disable=too-few-public-methods
         default_factory=lambda: Path(__file__).parent / "sam-3d-body"
     )
     conda_env: str = "sam_3d_body"
-    sam_checkpoint_path: Optional[Path] = None
+    sam_checkpoint_path: str = ""
     mhr_path: str = ""
     bbox_thresh: float = 0.8
     detector_name: str = "vitdet"
-    fov_name: str = "moge2"
+    fov_name: str = ""
 
 
 class MhrPoseEstimator:  # pylint: disable=too-few-public-methods
@@ -102,7 +101,7 @@ class MhrPoseEstimator:  # pylint: disable=too-few-public-methods
             raise FileNotFoundError(f"Image folder not found: {image_folder}")
 
         cfg = self._config
-        if cfg.sam_checkpoint_path is None:
+        if not cfg.sam_checkpoint_path:
             raise ValueError("MhrEstimatorConfig.sam_checkpoint_path must be set.")
 
         with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as tmp:
@@ -120,7 +119,7 @@ class MhrPoseEstimator:  # pylint: disable=too-few-public-methods
             "--output_path",
             output_path,
             "--sam_checkpoint_path",
-            str(cfg.sam_checkpoint_path.expanduser()),
+            str(Path(cfg.sam_checkpoint_path).expanduser()),
             "--sam_repo_path",
             str(cfg.sam_repo_path),
             "--mhr_path",

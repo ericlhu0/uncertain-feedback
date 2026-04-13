@@ -31,5 +31,29 @@ Step 2 — HML263 conversion + visualization (produces demo/comparison.png)
 uv run python src/uncertain_feedback/data_collection/demo/run_demo.py
 ```
 
+## Label data and make dataset
+1. Turn videos into images
+```
+uv run python src/uncertain_feedback/data_collection/extract_all_frames.py \
+--videos_dir src/uncertain_feedback/data_collection/demo/videos/ \
+--frames_dir src/uncertain_feedback/data_collection/demo/video_frames/
+```
+
+2. Label segments with text descriptions in browser
+```
+uv run python src/uncertain_feedback/data_collection/labeler.py \
+--frames_dir src/uncertain_feedback/data_collection/demo/video_frames/
+```
+                                                                                       
+3. Build MDM dataset
+```
+uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py \
+--frames_dir src/uncertain_feedback/data_collection/demo/video_frames/ \
+--labels_json src/uncertain_feedback/data_collection/demo/video_frames/labels.json \
+--output_dir ./my_mdm_dataset/
+```
+
+The output directory will be ready to pass to MDM's training script with `--dataset humanml --data_dir ./my_mdm_dataset/.`
+
 ## Thanks
 This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code).

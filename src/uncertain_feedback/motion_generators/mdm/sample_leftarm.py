@@ -138,7 +138,7 @@ def main():
     input_motions = torch.zeros(args.num_samples, 263, 1, n_frames, device="cuda")
     # TODO: start the guy in a sitting position
     # TODO: generate the starting position by calling the model!!
-    sitting_pose_path = MDM_ROOT / "demo_pose.pt"
+    sitting_pose_path = MDM_ROOT / "demo_pose2.pt"
     sitting_pose = torch.load(sitting_pose_path, map_location="cuda")  # (263, 1)
     input_motions = (
         sitting_pose.unsqueeze(0).unsqueeze(-1).repeat(args.num_samples, 1, 1, n_frames)
@@ -199,7 +199,7 @@ def main():
     # Pin the first N_PREFIX frames to the demo pose.
     # With only 1 frame the model immediately diverges to its prior (standing).
     # A longer prefix forces the model to stay near the initial pose before transitioning.
-    N_PREFIX = 10
+    N_PREFIX = 1
     model_kwargs["y"]["inpainting_mask"][..., :N_PREFIX] = True
 
     ####

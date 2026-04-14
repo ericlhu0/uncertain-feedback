@@ -56,24 +56,29 @@ uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py \
 --noise_std 0.05
 ```
 
-The output directory will be ready to pass to MDM's training script with `--dataset humanml --data_dir ./my_mdm_dataset/.`
-
 4. Fine-tune motion-diffusion-model
 First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` to `.../HumanML3D`
+
+!!!!! run this before retraining to clear cache
+```
+rm -f src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/t2m_train.npy \
+src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/t2m_val.npy \
+src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/t2m_test.npy
+```
 
 Then,
 ```
 cd src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/
 
 uv run python -m train.train_mdm \
-    --save_dir ./save/my_finetuned2 \
+    --save_dir ./save/my_finetuned13 \
     --dataset humanml \
     --resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt \
     --diffusion_steps 50 \
     --mask_frames \
     --use_ema \
     --batch_size 1 \
-    --num_steps 10000
+    --num_steps 1000
 ```
 
 5. Run motion generation with the new model
@@ -81,7 +86,7 @@ uv run python -m train.train_mdm \
 cd src/uncertain_feedback/motion_generators/mdm/
 
 uv run python sample_leftarm.py \
---model_path save/my_finetuned/model000760003.pt \
+--model_path save/my_finetuned12/model000751201.pt \
 --text_condition "raise my arm a little bit" \
 --num_samples 1 \
 --num_repetitions 1 \
@@ -90,7 +95,10 @@ uv run python sample_leftarm.py \
 (1s is 20 frames)
 
 src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned3/model000750502.pt
+
+src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned12/model000751201.pt
 ```
+
 
 ## Thanks
 This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code).

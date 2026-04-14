@@ -240,7 +240,7 @@ def main() -> None:
 
     plt.tight_layout(rect=(0, 0.05, 1, 1))
 
-    out_path = Path(__file__).resolve().parent / "sitting_pose_comparison.png"
+    out_path = Path(__file__).resolve().parent / "demo_pose.png"
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Saved to {out_path}")
     plt.show()

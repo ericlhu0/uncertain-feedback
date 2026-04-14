@@ -6,6 +6,13 @@
       "start_sec": 0.65,
       "end_sec": 1.7,
       "caption": "raise my left arm a little bit"
+    },
+    {
+      "start_frame": 130,
+      "end_frame": 180,
+      "start_sec": 6.5,
+      "end_sec": 9,
+      "caption": "raise my left arm a little bit"
     }
   ]
 }

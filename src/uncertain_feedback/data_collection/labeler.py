@@ -9,9 +9,9 @@ then start this server against that directory::
 
     uv run python src/uncertain_feedback/data_collection/labeler.py \\
         --frames_dir ./frames/ \\
-        [--port 5000]
+        [--port 6767]
 
-Then open http://localhost:5000 (SSH-tunnel: ``ssh -L 5000:localhost:5000 user@host``).
+Then open http://localhost:6767 (SSH-tunnel: ``ssh -L 6767:localhost:6767 user@host``).
 Labels are persisted to ``<frames_dir>/labels.json``.
 
 labels.json format::
@@ -433,7 +433,7 @@ def main() -> None:
         help="Directory of per-clip frame subdirectories (output of extract_all_frames.py).",
     )
     parser.add_argument(
-        "--port", type=int, default=5000, help="Port to serve on (default: 5000)."
+        "--port", type=int, default=6767, help="Port to serve on (default: 6767)."
     )
     args = parser.parse_args()
 

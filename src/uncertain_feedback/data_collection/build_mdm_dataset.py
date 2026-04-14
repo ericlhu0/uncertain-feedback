@@ -75,8 +75,8 @@ def _write_text_file(path: Path, captions: list[str], nlp: Language) -> None:
 # Motion resampling helper
 # ---------------------------------------------------------------------------
 
-_MDM_MIN_FRAMES = 45
-_MDM_MAX_FRAMES = 195
+_MDM_MIN_FRAMES = 50
+_MDM_MAX_FRAMES = 190
 
 
 def _resample_hml263(hml263: np.ndarray) -> tuple[np.ndarray, bool]:

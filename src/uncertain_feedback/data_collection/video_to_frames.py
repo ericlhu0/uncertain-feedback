@@ -81,7 +81,8 @@ def extract_frames(  # pylint: disable=too-many-locals
         if segment_idx % stride == 0:
             written += 1
             out_path = output_dir / f"frame_{written:06d}.{ext}"
-            cv2.imwrite(str(out_path), cv2.flip(frame, -1))  # pylint: disable=no-member
+            # cv2.imwrite(str(out_path), cv2.flip(frame, -1))  # pylint: disable=no-member
+            cv2.imwrite(str(out_path), frame.copy())
         segment_idx += 1
 
     cap.release()

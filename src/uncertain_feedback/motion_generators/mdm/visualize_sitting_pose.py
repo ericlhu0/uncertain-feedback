@@ -203,7 +203,7 @@ def main() -> None:
     fk = SmplLeftArmFK()
 
     # Load the sitting pose (263-dim, normalized)
-    sitting_pt = torch.load(MDM_ROOT / "demo_final_pose.pt", map_location=dist_util.dev())
+    sitting_pt = torch.load(MDM_ROOT / "demo_pose.pt", map_location=dist_util.dev())
     sitting = sitting_pt.squeeze(-1).unsqueeze(0)  # (1, 263)
 
     # --- Panel 1: original pose decoded by MDM ------------------------------

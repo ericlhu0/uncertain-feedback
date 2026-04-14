@@ -50,7 +50,7 @@ uv run python src/uncertain_feedback/data_collection/labeler.py \
 uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py \
 --frames_dir src/uncertain_feedback/data_collection/demo/video_frames/ \
 --labels_json src/uncertain_feedback/data_collection/demo/video_frames/labels.json \
---output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3Dnew
+--output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3Dnew \
 --fix_body \
 --n_augment 49 \
 --noise_std 0.05

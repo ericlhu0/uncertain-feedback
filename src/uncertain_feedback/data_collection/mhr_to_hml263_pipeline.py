@@ -59,16 +59,19 @@ class MhrToHml263Config:
             which a joint is treated as grounded.
         foot_vel_thresh: Per-frame foot speed below which a joint is treated
             as stationary.
+        output_normalized: If True (default), output z-normalized HML263
+            vectors. If False, output raw HML263 vectors.
     """
 
     mhr_estimator_config: MhrEstimatorConfig = field(default_factory=MhrEstimatorConfig)
     hml_stats_dir: Optional[Path] = None
     foot_height_thresh: float = 0.05
     foot_vel_thresh: float = 0.05
+    output_normalized: bool = True
 
 
 class MhrToHml263Pipeline:
-    """Convert an image folder to a normalized HML263 motion array.
+    """Convert an image folder to an HML263 motion array.
 
     Args:
         config: Pipeline configuration.
@@ -87,7 +90,9 @@ class MhrToHml263Pipeline:
                 sequence; ordered by natural sort on filenames).
 
         Returns:
-            ``(N, 263)`` normalized HML263 feature array, ``float32``.
+            ``(N, 263)`` HML263 feature array, ``float32``.
+            Normalized vs. raw is controlled by
+            :attr:`MhrToHml263Config.output_normalized`.
 
         Raises:
             ValueError: If ``hml_stats_dir`` is not configured.
@@ -106,6 +111,7 @@ class MhrToHml263Pipeline:
             tpose_22=self._tpose_22,
             foot_height_thresh=self._config.foot_height_thresh,
             foot_vel_thresh=self._config.foot_vel_thresh,
+            normalize=self._config.output_normalized,
         )
 
     def run_to_smpl_positions(self, image_folder: Path) -> np.ndarray:

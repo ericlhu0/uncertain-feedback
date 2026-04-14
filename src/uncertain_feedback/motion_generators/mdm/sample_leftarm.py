@@ -171,7 +171,7 @@ def main():
     #   - Frame 0: fix ALL features to the demo pose (seeds the initial state).
     #   - All other frames: only arm features are free; body+root are inpainted.
     #   Set FIX_BODY_ALL_FRAMES = False to let the body move freely after frame 0.
-    FIX_BODY_ALL_FRAMES = True
+    FIX_BODY_ALL_FRAMES = False
 
     if FIX_BODY_ALL_FRAMES:
         body_mask = torch.tensor(

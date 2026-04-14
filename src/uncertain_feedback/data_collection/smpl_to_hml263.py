@@ -96,8 +96,9 @@ def smpl_params_to_hml263(  # pylint: disable=too-many-locals,too-many-statement
     tpose_22: np.ndarray | None = None,
     foot_height_thresh: float = 0.05,
     foot_vel_thresh: float = 0.05,
+    normalize: bool = True,
 ) -> np.ndarray:
-    """Convert SMPL parameters to normalized HML263 feature vectors.
+    """Convert SMPL parameters to HML263 feature vectors.
 
     Args:
         body_pose:          ``(N, 69)`` SMPL body_pose.
@@ -112,9 +113,11 @@ def smpl_params_to_hml263(  # pylint: disable=too-many-locals,too-many-statement
                             considered in contact with the ground.
         foot_vel_thresh:    Per-frame displacement (in SMPL units) below which a
                             foot joint is considered stationary.
+        normalize:          If True (default), return z-normalized HML263 using
+                            ``mean``/``std``. If False, return raw HML263.
 
     Returns:
-        ``(N, 263)`` normalized HML263 feature array, ``float32``.
+        ``(N, 263)`` HML263 feature array, ``float32``.
     """
     body_pose = np.asarray(body_pose, dtype=np.float64)
     global_orient = np.asarray(global_orient, dtype=np.float64)
@@ -225,8 +228,11 @@ def smpl_params_to_hml263(  # pylint: disable=too-many-locals,too-many-statement
     features[:, 193:259] = joint_vel.reshape(n_frames, 66)
     features[:, 259:263] = foot_contacts
 
-    # ── Normalize ─────────────────────────────────────────────────────────────
-    features = (features - mean.astype(np.float32)) / (std.astype(np.float32) + 1e-8)
+    # ── Optional normalization ────────────────────────────────────────────────
+    if normalize:
+        features = (features - mean.astype(np.float32)) / (
+            std.astype(np.float32) + 1e-8
+        )
     return features
 
 
@@ -237,8 +243,9 @@ def positions_to_hml263(  # pylint: disable=too-many-locals,too-many-statements
     tpose_22: np.ndarray | None = None,
     foot_height_thresh: float = 0.05,
     foot_vel_thresh: float = 0.05,
+    normalize: bool = True,
 ) -> np.ndarray:
-    """Convert world-space 22-joint positions directly to normalized HML263 features.
+    """Convert world-space 22-joint positions directly to HML263 features.
 
     This is the positions-first variant of :func:`smpl_params_to_hml263`, skipping
     the SMPL FK step.  Use it when joint positions come from direct keypoint mapping
@@ -253,9 +260,11 @@ def positions_to_hml263(  # pylint: disable=too-many-locals,too-many-statements
         foot_height_thresh: Height (SMPL units) below which a foot joint is
                             considered in contact with the ground.
         foot_vel_thresh:    Per-frame displacement below which a foot is stationary.
+        normalize:          If True (default), return z-normalized HML263 using
+                            ``mean``/``std``. If False, return raw HML263.
 
     Returns:
-        ``(N, 263)`` normalized HML263 feature array, ``float32``.
+        ``(N, 263)`` HML263 feature array, ``float32``.
     """
     positions = np.asarray(positions, dtype=np.float64)
     n_frames = positions.shape[0]
@@ -329,7 +338,7 @@ def positions_to_hml263(  # pylint: disable=too-many-locals,too-many-statements
             mat = Rotation.from_rotvec(bp_local[j]).as_matrix()
             rotations_6d[t, j] = np.concatenate([mat[:, 0], mat[:, 1]])
 
-    # ── Assemble and normalize ────────────────────────────────────────────────
+    # ── Assemble ──────────────────────────────────────────────────────────────
     features = np.zeros((n_frames, 263), dtype=np.float32)
     features[:, 0] = rot_vel
     features[:, 1] = root_vel_local_x
@@ -340,7 +349,11 @@ def positions_to_hml263(  # pylint: disable=too-many-locals,too-many-statements
     features[:, 193:259] = joint_vel.reshape(n_frames, 66)
     features[:, 259:263] = foot_contacts
 
-    features = (features - mean.astype(np.float32)) / (std.astype(np.float32) + 1e-8)
+    # ── Optional normalization ────────────────────────────────────────────────
+    if normalize:
+        features = (features - mean.astype(np.float32)) / (
+            std.astype(np.float32) + 1e-8
+        )
     return features
 
 

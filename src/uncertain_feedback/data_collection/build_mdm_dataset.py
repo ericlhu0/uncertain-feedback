@@ -19,7 +19,7 @@ Output structure mirrors HumanML3D so it can be consumed directly by the MDM
 data loader (``--dataset humanml``)::
 
     output_dir/
-    ├── new_joint_vecs/000001.npy   # (N, 263) float32 normalized HML263
+    ├── new_joint_vecs/000001.npy   # (N, 263) float32 raw (unnormalized) HML263
     ├── texts/000001.txt            # caption#w/POS w/POS ...#0.0#0.0
     ├── train.txt
     ├── val.txt
@@ -47,6 +47,7 @@ from uncertain_feedback.data_collection.mhr_to_hml263_pipeline import (
     MhrToHml263Config,
     MhrToHml263Pipeline,
 )
+from uncertain_feedback.data_collection.smpl_to_hml263 import load_hml_stats
 
 # ---------------------------------------------------------------------------
 # Text annotation helpers
@@ -176,6 +177,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
     labels: dict[str, list[dict[str, Any]]],
     output_dir: Path,
     pipeline: MhrToHml263Pipeline,
+    hml_std: np.ndarray,
     nlp: Language,
     val_fraction: float,
     test_fraction: float,
@@ -195,6 +197,8 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             ``start_frame`` (int), ``end_frame`` (int), and ``caption`` (str).
         output_dir: Root directory to write the dataset into.
         pipeline: Configured :class:`MhrToHml263Pipeline` instance.
+        hml_std: HumanML3D std vector ``(263,)`` for converting augmentation
+            noise from normalized space to raw HML space.
         nlp: Loaded spaCy ``Language`` model for POS tagging.
         val_fraction: Fraction of motions to assign to the validation split.
         test_fraction: Fraction of motions to assign to the test split.
@@ -203,13 +207,14 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             values so the training data is consistent with fixed-body inference.
         n_augment: Number of additional noisy copies to save per trajectory.
             Each copy adds Gaussian noise (std=*noise_std*) to the arm features.
-        noise_std: Standard deviation of the arm-feature noise added during
-            augmentation, in normalized HML263 space.
+        noise_std: Standard deviation of the noise added to all HML263 features
+            during augmentation, in normalized space.
     """
     (output_dir / "new_joint_vecs").mkdir(parents=True, exist_ok=True)
     (output_dir / "texts").mkdir(parents=True, exist_ok=True)
 
     arm_mask = _arm_feature_mask()
+    hml_std = np.asarray(hml_std, dtype=np.float32)
     successful_ids: list[str] = []
     motion_id = 0
 
@@ -246,7 +251,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                         print("  ✗ no frames found in range — skipping")
                         motion_id -= 1
                         continue
-                    hml263 = pipeline.run(Path(tmp_dir))  # (N, 263)
+                    hml263 = pipeline.run(Path(tmp_dir))  # (N, 263) raw HML263
                     hml263, resampled = _resample_hml263(hml263)
                     if fix_body:
                         hml263 = _lock_body_to_frame0(hml263)
@@ -261,14 +266,19 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             print(f"  ✓ frames={n_frames}, hml263={hml263.shape}{resample_note}")
             successful_ids.append(id_str)
 
-            # Noisy augmentations — perturb arm features around the base trajectory
+            # Noisy augmentations — perturb all features around the base trajectory
             aug_rng = np.random.default_rng(seed + motion_id)
             for _ in range(n_augment):
                 motion_id += 1
                 aug_id_str = f"{motion_id:06d}"
                 hml263_aug = hml263.copy()
-                noise = aug_rng.standard_normal(hml263.shape).astype(np.float32)
-                hml263_aug[:, arm_mask] += noise[:, arm_mask] * noise_std
+                # Keep --noise_std semantics in normalized space while storing
+                # raw vectors: scale Gaussian noise by per-feature Std.
+                noise_norm = aug_rng.standard_normal(hml263.shape).astype(np.float32)
+                hml263_aug += noise_norm * noise_std * hml_std
+                # Re-lock body so it stays static (at a slightly noisy pose)
+                if fix_body:
+                    hml263_aug = _lock_body_to_frame0(hml263_aug)
                 np.save(
                     output_dir / "new_joint_vecs" / f"{aug_id_str}.npy", hml263_aug
                 )
@@ -297,10 +307,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
     test_ids = shuffled[n_val : n_val + n_test]
     train_ids = shuffled[n_val + n_test :]
 
-    # MDM asserts len(dataset) > 1, so every split needs at least 2 unique IDs.
-    # Pad from train_ids (repeating is fine — the loader just uses them for
-    # inv_transform / normalisation stats, not for novel data).
-    fallback = (train_ids * 2)[:2]
+    # MDM asserts len(dataset) > 1, so every split needs at least 2 IDs.
     if len(val_ids) < 2:
         val_ids = (val_ids + train_ids * 2)[:2]
     if len(test_ids) < 2:
@@ -396,8 +403,8 @@ def main() -> None:  # pylint: disable=too-many-locals
         type=float,
         default=0.05,
         help=(
-            "Std-dev of arm-feature noise added per augmentation copy, "
-            "in normalized HML263 space (default: 0.05)."
+            "Std-dev of noise added to all HML263 features per augmentation copy, "
+            "in normalized space (default: 0.05)."
         ),
     )
     parser.add_argument(
@@ -434,8 +441,10 @@ def main() -> None:  # pylint: disable=too-many-locals
             mhr_path=args.mhr_path,
         ),
         hml_stats_dir=hml_stats_dir,
+        output_normalized=False,
     )
     pipeline = MhrToHml263Pipeline(config)
+    _, hml_std = load_hml_stats(hml_stats_dir)
 
     # Load spaCy
     print("Loading spaCy model ...")
@@ -447,6 +456,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         labels=labels,
         output_dir=output_dir,
         pipeline=pipeline,
+        hml_std=hml_std,
         nlp=nlp,
         val_fraction=args.val_fraction,
         test_fraction=args.test_fraction,

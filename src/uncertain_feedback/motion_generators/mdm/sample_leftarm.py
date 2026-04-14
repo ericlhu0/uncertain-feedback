@@ -138,7 +138,7 @@ def main():
     input_motions = torch.zeros(args.num_samples, 263, 1, n_frames, device="cuda")
     # TODO: start the guy in a sitting position
     # TODO: generate the starting position by calling the model!!
-    sitting_pose_path = MDM_ROOT / "sitting_pose.pt"
+    sitting_pose_path = MDM_ROOT / "demo_pose.pt"
     sitting_pose = torch.load(sitting_pose_path, map_location="cuda")  # (263, 1)
     input_motions = (
         sitting_pose.unsqueeze(0).unsqueeze(-1).repeat(args.num_samples, 1, 1, n_frames)
@@ -167,12 +167,18 @@ def main():
     )
     NOT_L_ARM_MASK = NOT_L_ARM_MASK | humanml_utils.HML_ROOT_MASK
 
-    if "only allow arm to move":  # if True lol
-        model_kwargs["y"]["inpainting_mask"] = torch.tensor(
+    # Inpainting strategy:
+    #   - Frame 0: fix ALL features to the demo pose (seeds the initial state).
+    #   - All other frames: only arm features are free; body+root are inpainted.
+    #   Set FIX_BODY_ALL_FRAMES = False to let the body move freely after frame 0.
+    FIX_BODY_ALL_FRAMES = True
+
+    if FIX_BODY_ALL_FRAMES:
+        body_mask = torch.tensor(
             NOT_L_ARM_MASK, dtype=torch.bool, device=input_motions.device
         )
         model_kwargs["y"]["inpainting_mask"] = (
-            model_kwargs["y"]["inpainting_mask"]
+            body_mask
             .unsqueeze(0)
             .unsqueeze(-1)
             .unsqueeze(-1)
@@ -183,11 +189,18 @@ def main():
                 input_motions.shape[3],
             )
         )
+    else:
+        # All frames free — model generates everything.
+        model_kwargs["y"]["inpainting_mask"] = torch.zeros(
+            input_motions.shape[0], 263, 1, n_frames,
+            dtype=torch.bool, device=input_motions.device,
+        )
 
-    if "start the body at a defined pose":  # also if True
-        # True for the first {prefix} frames
-        print("mask shape", model_kwargs["y"]["inpainting_mask"].shape)
-        model_kwargs["y"]["inpainting_mask"][..., :10] = True
+    # Pin the first N_PREFIX frames to the demo pose.
+    # With only 1 frame the model immediately diverges to its prior (standing).
+    # A longer prefix forces the model to stay near the initial pose before transitioning.
+    N_PREFIX = 10
+    model_kwargs["y"]["inpainting_mask"][..., :N_PREFIX] = True
 
     ####
 
@@ -222,7 +235,10 @@ def main():
 
         samples.append(sample)
 
-        # Recover XYZ *positions* from HumanML3D vector representation
+        # Recover XYZ *positions* from HumanML3D vector representation.
+        # For hml_vec, recover_from_ric already returns world-space xyz, so
+        # rot2xyz is skipped — it would apply root translation a second time
+        # (vertstrans=True) and produce drifting/exploding joint positions.
         if model.data_rep == "hml_vec":
             n_joints = 22 if sample.shape[1] == 263 else 21
             sample = data.dataset.t2m_dataset.inv_transform(
@@ -230,29 +246,24 @@ def main():
             ).float()
             sample = recover_from_ric(sample, n_joints)
             sample = sample.view(-1, *sample.shape[2:]).permute(0, 2, 3, 1)
-
-        # Match generate.py output format: convert to absolute xyz joints (T, 22, 3)
-        rot2xyz_pose_rep = (
-            "xyz" if model.data_rep in ["xyz", "hml_vec"] else model.data_rep
-        )
-        rot2xyz_mask = (
-            None
-            if rot2xyz_pose_rep == "xyz"
-            else model_kwargs["y"]["mask"].reshape(args.batch_size, n_frames).bool()
-        )
-        sample = model.rot2xyz(
-            x=sample,
-            mask=rot2xyz_mask,
-            pose_rep=rot2xyz_pose_rep,
-            glob=True,
-            translation=True,
-            jointstype="smpl",
-            vertstrans=True,
-            betas=None,
-            beta=0,
-            glob_rot=None,
-            get_rotations_back=False,
-        )
+        else:
+            rot2xyz_pose_rep = model.data_rep
+            rot2xyz_mask = model_kwargs["y"]["mask"].reshape(
+                args.batch_size, n_frames
+            ).bool()
+            sample = model.rot2xyz(
+                x=sample,
+                mask=rot2xyz_mask,
+                pose_rep=rot2xyz_pose_rep,
+                glob=True,
+                translation=True,
+                jointstype="smpl",
+                vertstrans=True,
+                betas=None,
+                beta=0,
+                glob_rot=None,
+                get_rotations_back=False,
+            )
 
         all_text += model_kwargs["y"]["text"]
         all_motions.append(sample.cpu().numpy())

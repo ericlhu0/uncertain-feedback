@@ -5,12 +5,12 @@ Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedb
 
 ## Running (Custom) Motion Generation
 ```
-uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py
---model_path save/humanml_enc_512_50steps/model000750000.pt
---text_condition "a person barely raises their left hand."
---num_samples 1
---num_repetitions 1
---motion_length 5.0
+uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
+--model_path save/humanml_enc_512_50steps/model000750000.pt \
+--text_condition "a person barely raises their left hand." \
+--num_samples 1 \
+--num_repetitions 1 \
+--motion_length 5.0 \
 ```
 
 ## Get HML263 from sequence of images of human
@@ -50,21 +50,46 @@ uv run python src/uncertain_feedback/data_collection/labeler.py \
 uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py \
 --frames_dir src/uncertain_feedback/data_collection/demo/video_frames/ \
 --labels_json src/uncertain_feedback/data_collection/demo/video_frames/labels.json \
---output_dir ./my_mdm_dataset/
+--output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3Dnew
+--fix_body \
+--n_augment 49 \
+--noise_std 0.05
 ```
 
 The output directory will be ready to pass to MDM's training script with `--dataset humanml --data_dir ./my_mdm_dataset/.`
 
 4. Fine-tune motion-diffusion-model
+First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` to `.../HumanML3D`
+
+Then,
 ```
 cd src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/
 
-python -m train.train_mdm \
-    --save_dir ./save/my_run \
+uv run python -m train.train_mdm \
+    --save_dir ./save/my_finetuned2 \
     --dataset humanml \
+    --resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt \
+    --diffusion_steps 50 \
+    --mask_frames \
+    --use_ema \
     --batch_size 1 \
     --num_steps 10000
-    --resume_checkpoint ./save/pretrained/model000200000.pt
+```
+
+5. Run motion generation with the new model
+```
+cd src/uncertain_feedback/motion_generators/mdm/
+
+uv run python sample_leftarm.py \
+--model_path save/my_finetuned/model000760003.pt \
+--text_condition "raise my arm a little bit" \
+--num_samples 1 \
+--num_repetitions 1 \
+--motion_length 2.25 
+
+(1s is 20 frames)
+
+src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned3/model000750502.pt
 ```
 
 ## Thanks

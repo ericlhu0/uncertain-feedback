@@ -83,7 +83,9 @@ def _hml263_to_local_positions(
 
     positions = np.zeros((n, 22, 3), dtype=np.float64)
     positions[:, 0, 1] = root_y  # root XZ = 0, Y = height
-    positions[:, 1:] = positions[:, :1] + rel_pos
+    # rel_pos has absolute Y (not root-relative) — only XZ are root-relative,
+    # and the root sits at XZ = 0, so joints can be placed directly.
+    positions[:, 1:] = rel_pos
     return positions
 
 

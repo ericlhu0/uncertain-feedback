@@ -169,14 +169,19 @@ def smpl_params_to_hml263(  # pylint: disable=too-many-locals,too-many-statement
     cos_h = np.cos(heading)  # (N,)
     sin_h = np.sin(heading)  # (N,)
 
-    rel = positions - positions[:, 0:1]  # (N, 22, 3)  root-relative
-    local_x = cos_h[:, None] * rel[:, :, 0] - sin_h[:, None] * rel[:, :, 2]
-    local_y = rel[:, :, 1]
-    local_z = sin_h[:, None] * rel[:, :, 0] + cos_h[:, None] * rel[:, :, 2]
-    local_positions = np.stack([local_x, local_y, local_z], axis=-1)  # (N, 22, 3)
-
+    # ── Step 4: Local-frame positions (vectorised) ────────────────────────────
+    # XZ are made root-relative then rotated into the heading frame.
+    # Y is kept as absolute height above ground (NOT root-relative) — this
+    # matches HumanML3D's extract_features / get_rifke convention, where only
+    # XZ are subtracted and recover_from_ric therefore does NOT add root Y back.
     # ── Step 5: Ground height ─────────────────────────────────────────────────
     ground_y = float(np.min(positions[:, :, 1]))
+
+    rel_xz = positions - positions[:, 0:1]  # (N, 22, 3)  root-relative (used for X and Z only)
+    local_x = cos_h[:, None] * rel_xz[:, :, 0] - sin_h[:, None] * rel_xz[:, :, 2]
+    local_y = positions[:, :, 1] - ground_y   # absolute height above ground
+    local_z = sin_h[:, None] * rel_xz[:, :, 0] + cos_h[:, None] * rel_xz[:, :, 2]
+    local_positions = np.stack([local_x, local_y, local_z], axis=-1)  # (N, 22, 3)
 
     # ── Step 6: Root linear velocity in local frame ───────────────────────────
     root_vel_world = np.zeros((n_frames, 3), dtype=np.float64)
@@ -282,17 +287,19 @@ def positions_to_hml263(  # pylint: disable=too-many-locals,too-many-statements
     rot_vel[1:] = (rot_vel[1:] + np.pi) % (2.0 * np.pi) - np.pi
     heading = np.cumsum(rot_vel)
 
-    # ── Local-frame positions ─────────────────────────────────────────────────
-    cos_h = np.cos(heading)
-    sin_h = np.sin(heading)
-    rel = positions - positions[:, 0:1]
-    local_x = cos_h[:, None] * rel[:, :, 0] - sin_h[:, None] * rel[:, :, 2]
-    local_y = rel[:, :, 1]
-    local_z = sin_h[:, None] * rel[:, :, 0] + cos_h[:, None] * rel[:, :, 2]
-    local_positions = np.stack([local_x, local_y, local_z], axis=-1)
-
     # ── Ground height ─────────────────────────────────────────────────────────
     ground_y = float(np.min(positions[:, :, 1]))
+
+    # ── Local-frame positions ─────────────────────────────────────────────────
+    # XZ root-relative + heading-rotated; Y absolute above ground (matches
+    # HumanML3D get_rifke convention — recover_from_ric adds only root XZ).
+    cos_h = np.cos(heading)
+    sin_h = np.sin(heading)
+    rel_xz = positions - positions[:, 0:1]
+    local_x = cos_h[:, None] * rel_xz[:, :, 0] - sin_h[:, None] * rel_xz[:, :, 2]
+    local_y = positions[:, :, 1] - ground_y   # absolute height above ground
+    local_z = sin_h[:, None] * rel_xz[:, :, 0] + cos_h[:, None] * rel_xz[:, :, 2]
+    local_positions = np.stack([local_x, local_y, local_z], axis=-1)
 
     # ── Root linear velocity in local frame ───────────────────────────────────
     root_vel_world = np.zeros((n_frames, 3), dtype=np.float64)

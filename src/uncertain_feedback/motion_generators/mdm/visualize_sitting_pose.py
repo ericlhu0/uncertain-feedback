@@ -122,31 +122,20 @@ def _load_model_and_data():
     return model, data, args
 
 
-def _decode_hml263_to_xyz(hml_vec: torch.Tensor, dataset, model) -> np.ndarray:
-    """Decode a single (1, 263) normalized HML vector to (22, 3) XYZ
-    positions."""
-    # inv_transform uses CPU numpy arrays internally; move tensor to CPU first.
+def _decode_hml263_to_xyz(hml_vec: torch.Tensor, dataset) -> np.ndarray:
+    """Decode a single (1, 263) normalized HML vector to (22, 3) XYZ positions.
+
+    Uses recover_from_ric directly (no rot2xyz) — consistent with how
+    sample_leftarm.py visualizes ground-truth input_motions.  rot2xyz would
+    add a second vertical translation on top of the one already embedded in
+    the HML263 root-height feature, lifting the pelvis erroneously.
+    """
     hml_vec = hml_vec.float().cpu()
     unnorm = dataset.dataset.t2m_dataset.inv_transform(
         hml_vec.unsqueeze(0).unsqueeze(0)  # (1, 1, 1, 263)
     ).float()
     ric = recover_from_ric(unnorm, 22)  # (1, 1, 1, 22, 3)
-    ric = ric.view(-1, *ric.shape[2:]).permute(0, 2, 3, 1)  # (1, 22, 3, 1)
-    xyz = model.rot2xyz(
-        x=ric,
-        mask=None,
-        pose_rep="xyz",
-        glob=True,
-        translation=True,
-        jointstype="smpl",
-        vertstrans=True,
-        betas=None,
-        beta=0,
-        glob_rot=None,
-        get_rotations_back=False,
-    )
-    # (1, 22, 3, 1) → (22, 3)
-    return xyz[0, :, :, 0].cpu().numpy()
+    return ric[0, 0, 0].cpu().numpy()  # (22, 3)
 
 
 def _draw_skeleton(  # pylint: disable=too-many-locals
@@ -214,12 +203,12 @@ def main() -> None:
     fk = SmplLeftArmFK()
 
     # Load the sitting pose (263-dim, normalized)
-    sitting_pt = torch.load(MDM_ROOT / "sitting_pose.pt", map_location=dist_util.dev())
+    sitting_pt = torch.load(MDM_ROOT / "demo_final_pose.pt", map_location=dist_util.dev())
     sitting = sitting_pt.squeeze(-1).unsqueeze(0)  # (1, 263)
 
     # --- Panel 1: original pose decoded by MDM ------------------------------
     print("Decoding sitting pose via MDM pipeline…")
-    original_xyz = _decode_hml263_to_xyz(sitting, data, model)  # (22, 3)
+    original_xyz = _decode_hml263_to_xyz(sitting, data)  # (22, 3)
 
     # --- Panel 2: full body reconstructed through our IK → FK pipeline ------
     print("Converting via hml263_to_smpl_body_pose → IK → FK…")
@@ -251,7 +240,7 @@ def main() -> None:
 
     plt.tight_layout(rect=(0, 0.05, 1, 1))
 
-    out_path = Path(__file__).parent / "sitting_pose_comparison.png"
+    out_path = Path(__file__).resolve().parent / "sitting_pose_comparison.png"
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Saved to {out_path}")
     plt.show()

@@ -2,9 +2,7 @@ uv.lock
 .claude/
 env_snapshots/
 amass/
-src/uncertain_feedback/data_collection/demo/**/*.png
-src/uncertain_feedback/data_collection/demo/**/*.jpg
-src/uncertain_feedback/data_collection/demo/**/*.MOV
+src/uncertain_feedback/data_collection/data/
 my_mdm_dataset/
 
 .DS_Store

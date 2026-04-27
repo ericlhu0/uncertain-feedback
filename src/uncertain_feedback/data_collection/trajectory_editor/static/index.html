@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trajectory Editor</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #0f0f1a;
+  color: #e2e8f0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: #1e1e30;
+  border-bottom: 1px solid #2d2d4e;
+  flex-shrink: 0;
+}
+
+header h1 { font-size: 15px; font-weight: 600; color: #a78bfa; }
+
+#status {
+  margin-left: auto;
+  font-size: 12px;
+  color: #94a3b8;
+  min-width: 200px;
+  text-align: right;
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+#viewport {
+  flex: 1;
+  position: relative;
+  cursor: default;
+}
+
+#viewport canvas { display: block; }
+
+.panel {
+  width: 240px;
+  background: #1a1a2e;
+  border-left: 1px solid #2d2d4e;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.section {
+  padding: 12px;
+  border-bottom: 1px solid #2d2d4e;
+}
+
+.section h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7c3aed;
+  margin-bottom: 8px;
+}
+
+label {
+  display: block;
+  font-size: 11px;
+  color: #94a3b8;
+  margin-bottom: 3px;
+}
+
+input[type="text"], input[type="number"] {
+  width: 100%;
+  background: #0f0f1a;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #e2e8f0;
+  padding: 5px 8px;
+  font-size: 12px;
+  margin-bottom: 8px;
+  outline: none;
+}
+
+input[type="text"]:focus, input[type="number"]:focus {
+  border-color: #7c3aed;
+}
+
+button {
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+  margin-bottom: 4px;
+}
+
+.btn-primary {
+  background: #7c3aed;
+  color: white;
+}
+.btn-primary:hover { background: #6d28d9; }
+.btn-primary:disabled { background: #4b2d7e; color: #7c7c9c; cursor: not-allowed; }
+
+.btn-secondary {
+  background: #2d2d4e;
+  color: #c4b5fd;
+  border: 1px solid #4c3b8a;
+}
+.btn-secondary:hover { background: #3d3d5e; }
+
+.btn-danger {
+  background: #7f1d1d;
+  color: #fca5a5;
+}
+.btn-danger:hover { background: #991b1b; }
+
+.btn-export {
+  background: #065f46;
+  color: #6ee7b7;
+}
+.btn-export:hover { background: #047857; }
+.btn-export:disabled { background: #1a3d30; color: #4a7a66; cursor: not-allowed; }
+
+.timeline-wrapper {
+  padding: 10px 16px;
+  background: #1a1a2e;
+  border-top: 1px solid #2d2d4e;
+  flex-shrink: 0;
+}
+
+.timeline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.timeline-header span { font-size: 11px; color: #64748b; }
+.timeline-header strong { font-size: 13px; color: #a78bfa; }
+
+.timeline-track {
+  position: relative;
+  height: 24px;
+  background: #0f0f1a;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  border: 1px solid #2d2d4e;
+}
+
+.timeline-playhead {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: #f59e0b;
+  pointer-events: none;
+}
+
+.kf-marker {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 10px;
+  background: #7c3aed;
+  border: 2px solid #a78bfa;
+  border-radius: 50%;
+  cursor: pointer;
+  z-index: 2;
+}
+.kf-marker:hover { background: #a78bfa; }
+.kf-marker.active { background: #f59e0b; border-color: #fbbf24; }
+
+#frameSlider {
+  width: 100%;
+  margin-top: 2px;
+  accent-color: #7c3aed;
+}
+
+.kf-list {
+  margin-top: 6px;
+  max-height: 80px;
+  overflow-y: auto;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.kf-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.kf-item:hover { background: #2d2d4e; }
+.kf-item.active { background: #3d2d6e; color: #c4b5fd; }
+.kf-del { color: #ef4444; cursor: pointer; font-weight: bold; padding: 0 4px; }
+
+.info-box {
+  padding: 6px 8px;
+  background: #1e293b;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.joint-info {
+  font-size: 11px;
+  color: #7c3aed;
+  padding: 4px 0;
+  min-height: 18px;
+}
+
+.legend {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: #64748b;
+  margin-top: 4px;
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Trajectory Editor</h1>
+  <div class="legend">
+    <span><span class="dot" style="background:#3b82f6"></span> Editable</span>
+    <span><span class="dot" style="background:#888"></span> Fixed</span>
+    <span><span class="dot" style="background:#f59e0b"></span> Selected</span>
+  </div>
+  <div id="status">Load a demo.pt to start</div>
+</header>
+
+<div class="main">
+  <div id="viewport"></div>
+
+  <div class="panel">
+    <!-- Base pose -->
+    <div class="section">
+      <h2>Base Pose</h2>
+      <label>demo.pt path</label>
+      <input type="text" id="ptPath" placeholder="/path/to/demo_pose.pt">
+      <label>HML stats dir</label>
+      <input type="text" id="hmlStatsDir" placeholder="/path/to/HumanML3D">
+      <button class="btn-primary" id="btnLoad">Load Base Pose</button>
+      <div class="joint-info" id="jointInfo">Click an editable joint to select</div>
+    </div>
+
+    <!-- Timeline controls -->
+    <div class="section">
+      <h2>Trajectory</h2>
+      <label>Total frames (40–196)</label>
+      <input type="number" id="totalFrames" value="100" min="40" max="196">
+      <div class="info-box">
+        Frame: <strong id="frameNumDisp">0</strong> &nbsp;/&nbsp;
+        Keyframes: <strong id="kfCount">0</strong>
+      </div>
+      <button class="btn-secondary" id="btnAddKF">Add Keyframe Here</button>
+      <button class="btn-secondary" id="btnClearKF" style="color:#ef4444;border-color:#7f1d1d">Clear All Keyframes</button>
+    </div>
+
+    <!-- Export -->
+    <div class="section">
+      <h2>Export</h2>
+      <label>Caption</label>
+      <input type="text" id="caption" placeholder="person reaches forward">
+      <label>Output directory</label>
+      <input type="text" id="outputDir" placeholder="/path/to/output_dataset">
+      <label>Augmented copies (n_augment)</label>
+      <input type="number" id="nAugment" value="0" min="0" max="50" step="1">
+      <label>Noise std (normalized)</label>
+      <input type="number" id="noiseStd" value="0.05" min="0" max="1" step="0.01">
+      <button class="btn-export" id="btnExport" disabled>Export to MDM Dataset</button>
+      <div id="exportResult" style="font-size:11px;margin-top:6px;color:#6ee7b7;display:none"></div>
+    </div>
+
+    <!-- Replay -->
+    <div class="section">
+      <h2>Replay</h2>
+      <label>.npy path</label>
+      <input type="text" id="npyPath" placeholder="/path/to/000001.npy">
+      <button class="btn-secondary" id="btnLoadTraj">Load Trajectory</button>
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <button class="btn-primary" id="btnPlay" disabled style="flex:1">&#9654; Play</button>
+        <button class="btn-secondary" id="btnStopReplay" style="flex:1">&#9632; Stop</button>
+      </div>
+      <label style="margin-top:6px">Playback FPS</label>
+      <input type="number" id="replayFps" value="20" min="1" max="60">
+      <div id="replayInfo" style="font-size:11px;color:#64748b;margin-top:4px;display:none"></div>
+    </div>
+
+    <!-- Keyframe list -->
+    <div class="section" style="flex:1">
+      <h2>Keyframes</h2>
+      <div class="kf-list" id="kfList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Timeline at bottom -->
+<div class="timeline-wrapper">
+  <div class="timeline-header">
+    <span>Timeline</span>
+    <strong id="frameNum">0</strong>
+  </div>
+  <div class="timeline-track" id="timelineTrack">
+    <div class="timeline-playhead" id="playhead" style="left:0%"></div>
+  </div>
+  <input type="range" id="frameSlider" min="0" max="99" value="0" step="1">
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="/static/editor.js"></script>
+</body>
+</html>

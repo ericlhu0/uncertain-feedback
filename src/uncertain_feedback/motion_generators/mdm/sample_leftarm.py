@@ -40,6 +40,69 @@ from utils.sampler_util import ClassifierFreeSampleModel
 from uncertain_feedback.motion_generators.mdm.mdm_parser_util import edit_args
 
 
+def apply_leftarm_inpainting(
+    model_kwargs: dict,
+    start_pose: "torch.Tensor",
+    n_prefix: int,
+    batch_size: int,
+    n_frames: int,
+    fix_body: bool = True,
+) -> None:
+    """Set inpainted_motion and inpainting_mask on model_kwargs for left-arm generation.
+
+    Args:
+        model_kwargs: MDM model_kwargs dict; modified in-place.
+        start_pose:   (263, 1) HML263 pose tensor on the target device.
+        n_prefix:     Number of leading frames to pin entirely to start_pose.
+        batch_size:   Number of samples in the batch.
+        n_frames:     Total sequence length.
+        fix_body:     If True, freeze all non-left-arm body features for every
+                      frame (in addition to pinning the prefix). If False, only
+                      the prefix frames are constrained.
+    """
+    device = start_pose.device
+
+    inpainted_motion = (
+        start_pose.unsqueeze(0).unsqueeze(-1)
+        .expand(batch_size, -1, 1, n_frames)
+        .clone()
+    )
+    model_kwargs["y"]["inpainted_motion"] = inpainted_motion
+
+    HML_L_ARM_JOINTS = [
+        humanml_utils.HML_JOINT_NAMES.index(name)
+        for name in ["left_shoulder", "left_elbow", "left_wrist"]
+    ]
+    HML_L_ARM_JOINTS_BINARY = np.array(
+        [i not in HML_L_ARM_JOINTS for i in range(humanml_utils.NUM_HML_JOINTS)]
+    )
+    NOT_L_ARM_MASK = np.concatenate(
+        (
+            [True] * (1 + 2 + 1),
+            HML_L_ARM_JOINTS_BINARY[1:].repeat(3),
+            HML_L_ARM_JOINTS_BINARY[1:].repeat(6),
+            HML_L_ARM_JOINTS_BINARY.repeat(3),
+            [True] * 4,
+        )
+    )
+    NOT_L_ARM_MASK = NOT_L_ARM_MASK | humanml_utils.HML_ROOT_MASK
+
+    if fix_body:
+        body_mask = torch.tensor(NOT_L_ARM_MASK, dtype=torch.bool, device=device)
+        inpainting_mask = (
+            body_mask[None, :, None, None]
+            .expand(batch_size, -1, 1, n_frames)
+            .clone()
+        )
+    else:
+        inpainting_mask = torch.zeros(
+            batch_size, 263, 1, n_frames, dtype=torch.bool, device=device
+        )
+
+    inpainting_mask[..., :n_prefix] = True
+    model_kwargs["y"]["inpainting_mask"] = inpainting_mask
+
+
 def main():
     os.chdir(MDM_ROOT / "motion-diffusion-model")
     args = edit_args()
@@ -135,74 +198,17 @@ def main():
     # gt_frames_per_sample = {}
     # model_kwargs['y']['inpainted_motion'] = input_motions
 
-    input_motions = torch.zeros(args.num_samples, 263, 1, n_frames, device="cuda")
-    # TODO: start the guy in a sitting position
-    # TODO: generate the starting position by calling the model!!
     sitting_pose_path = MDM_ROOT / "demo_pose2.pt"
     sitting_pose = torch.load(sitting_pose_path, map_location="cuda")  # (263, 1)
-    input_motions = (
-        sitting_pose.unsqueeze(0).unsqueeze(-1).repeat(args.num_samples, 1, 1, n_frames)
-    )
-    model_kwargs["y"]["inpainted_motion"] = input_motions
     gt_frames_per_sample = {}
-
-    #### NEW STUFF !!
-
-    HML_L_ARM_JOINTS = [
-        humanml_utils.HML_JOINT_NAMES.index(name)
-        for name in ["left_shoulder", "left_elbow", "left_wrist"]
-    ]
-    HML_L_ARM_JOINTS_BINARY = np.array(
-        [i not in HML_L_ARM_JOINTS for i in range(humanml_utils.NUM_HML_JOINTS)]
+    apply_leftarm_inpainting(
+        model_kwargs,
+        start_pose=sitting_pose,
+        n_prefix=1,
+        batch_size=args.num_samples,
+        n_frames=n_frames,
+        fix_body=False,
     )
-
-    NOT_L_ARM_MASK = np.concatenate(
-        (
-            [True] * (1 + 2 + 1),
-            HML_L_ARM_JOINTS_BINARY[1:].repeat(3),
-            HML_L_ARM_JOINTS_BINARY[1:].repeat(6),
-            HML_L_ARM_JOINTS_BINARY.repeat(3),
-            [True] * 4,
-        )
-    )
-    NOT_L_ARM_MASK = NOT_L_ARM_MASK | humanml_utils.HML_ROOT_MASK
-
-    # Inpainting strategy:
-    #   - Frame 0: fix ALL features to the demo pose (seeds the initial state).
-    #   - All other frames: only arm features are free; body+root are inpainted.
-    #   Set FIX_BODY_ALL_FRAMES = False to let the body move freely after frame 0.
-    FIX_BODY_ALL_FRAMES = False
-
-    if FIX_BODY_ALL_FRAMES:
-        body_mask = torch.tensor(
-            NOT_L_ARM_MASK, dtype=torch.bool, device=input_motions.device
-        )
-        model_kwargs["y"]["inpainting_mask"] = (
-            body_mask
-            .unsqueeze(0)
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-            .repeat(
-                input_motions.shape[0],
-                1,
-                input_motions.shape[2],
-                input_motions.shape[3],
-            )
-        )
-    else:
-        # All frames free — model generates everything.
-        model_kwargs["y"]["inpainting_mask"] = torch.zeros(
-            input_motions.shape[0], 263, 1, n_frames,
-            dtype=torch.bool, device=input_motions.device,
-        )
-
-    # Pin the first N_PREFIX frames to the demo pose.
-    # With only 1 frame the model immediately diverges to its prior (standing).
-    # A longer prefix forces the model to stay near the initial pose before transitioning.
-    N_PREFIX = 1
-    model_kwargs["y"]["inpainting_mask"][..., :N_PREFIX] = True
-
-    ####
 
     all_motions = []
     all_lengths = []

@@ -38,6 +38,8 @@ class _VisConfig:
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
     body_pos: np.ndarray | None = None
+    capture: bool = False
+    compact: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +140,22 @@ class SmplLeftArmMPC:
         """The active goal (front of the queue), or ``None`` if the queue is
         empty."""
         return self._goals[0] if self._goals else None
+
+    def get_visualizer(self) -> ArmVisualizer | None:
+        """Return the active live visualizer, or ``None`` if not yet created."""
+        return self._vis
+
+    def close_visualizer(self) -> ArmVisualizer | None:
+        """Close the live window and detach the visualizer.
+
+        Returns the detached visualizer so its recorded frames can be reused
+        (e.g. to prepend pre-MDM frames after generation).
+        """
+        vis = self._vis
+        if vis is not None:
+            vis.close()
+        self._vis = None
+        return vis
 
     def append_goal(self, goal: np.ndarray) -> None:
         """Add a goal to the back of the queue."""
@@ -279,7 +297,10 @@ class SmplLeftArmMPC:
                     self._goals[-1],
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
+                    compact=self._vis_config.compact,
                 )
+                if self._vis_config.capture:
+                    self._vis.start_capture()
             dist = float(np.linalg.norm(next_q - self.current_goal))
             self._vis.update_step(next_q, dist=dist)
 

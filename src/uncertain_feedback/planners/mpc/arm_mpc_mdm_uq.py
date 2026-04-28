@@ -106,6 +106,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         text: str,
         start_pose: np.ndarray | None = None,
         current_arm_aa: np.ndarray | None = None,
+        auto_cluster: int | None = None,
     ) -> None:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
@@ -140,21 +141,25 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         labels = self._clusterer.cluster(trajectories)  # (num_samples,)
         print(f"labels shape: {labels.shape}")
 
-        fk = self._vis_config.fk if self._vis_config is not None else SmplLeftArmFK()
-        spine_pos = self._vis_config.spine_pos if self._vis_config is not None else None
-        spine_aa = self._vis_config.spine_aa if self._vis_config is not None else None
-        body_pos = self._vis_config.body_pos if self._vis_config is not None else None
-        chosen_label = pick_cluster(
-            trajectories,
-            labels,
-            fk=fk,
-            trajectory_fraction=self.trajectory_fraction,
-            spine_pos=spine_pos,
-            spine_aa=spine_aa,
-            body_pos=body_pos,
-            current_arm_aa=current_arm_aa,
-        )
-        print(f"User selected cluster {chosen_label}.")
+        if auto_cluster is not None:
+            chosen_label = int(auto_cluster)
+            print(f"Auto-selected cluster {chosen_label} (headless mode).")
+        else:
+            fk = self._vis_config.fk if self._vis_config is not None else SmplLeftArmFK()
+            spine_pos = self._vis_config.spine_pos if self._vis_config is not None else None
+            spine_aa = self._vis_config.spine_aa if self._vis_config is not None else None
+            body_pos = self._vis_config.body_pos if self._vis_config is not None else None
+            chosen_label = pick_cluster(
+                trajectories,
+                labels,
+                fk=fk,
+                trajectory_fraction=self.trajectory_fraction,
+                spine_pos=spine_pos,
+                spine_aa=spine_aa,
+                body_pos=body_pos,
+                current_arm_aa=current_arm_aa,
+            )
+            print(f"User selected cluster {chosen_label}.")
 
         chosen_mean = trajectories[labels == chosen_label].mean(axis=0)
         # (n_frames, 4, 3)

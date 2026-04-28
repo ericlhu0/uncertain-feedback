@@ -210,7 +210,10 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     body_pos=self._vis_config.body_pos,
+                    compact=self._vis_config.compact,
                 )
+                if self._vis_config.capture:
+                    self._vis.start_capture()
                 if self._mdm_goal is not None:
                     self._vis.update_mdm_goal(self._mdm_goal)
                 if self._preview_q is not None:

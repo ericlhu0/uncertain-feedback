@@ -179,5 +179,23 @@ Additional args vs. the plain MDM+MPC variant:
 - `--n-clusters`: number of trajectory clusters shown in the picker (default 3)
 - `--trajectory-fraction`: fraction of MDM frames to enqueue as MPC waypoints (default 0.75)
 
+### General MPC running script
+```
+MDM_ROOT="/home/elh245/uncertain-feedback/src/uncertain_feedback/motion_generators/mdm"
+CKPT="$MDM_ROOT/motion-diffusion-model/save/my_finetuned_4/model000750500.pt"
+POSE="$MDM_ROOT/demo_pose.pt"
+
+uv run python -m uncertain_feedback.planners.run \
+  --planner arm_mpc_mdm_uq \
+  --model-path "$CKPT" \
+  --pose "$POSE" \
+  --text "raise my left arm" \
+  --diffusion-samples 500 \
+  --auto-cluster 0 \
+  --save "$(pwd)/run_output3.mp4" \
+  --steps 750
+```
+
+
 ## Thanks
 This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code).

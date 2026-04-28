@@ -395,10 +395,13 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         collate_args = [{**arg, "text": text} for arg in collate_args]  # type: ignore[dict-item]
         _, model_kwargs = collate(collate_args)
 
-        # Move mask/lengths tensors to device.
+        # Move mask/lengths tensors to device and expand to num_samples batch.
         for key in ("mask", "lengths"):
             if key in model_kwargs["y"] and hasattr(model_kwargs["y"][key], "to"):
-                model_kwargs["y"][key] = model_kwargs["y"][key].to(dist_util.dev())
+                t = model_kwargs["y"][key].to(dist_util.dev())
+                if num_samples > 1 and t.shape[0] == 1:
+                    t = t.repeat(num_samples, *([1] * (t.dim() - 1)))
+                model_kwargs["y"][key] = t
 
         # --- Inpainting: start pose + left-arm-only mask ----------------------
         start_frame = torch.tensor(

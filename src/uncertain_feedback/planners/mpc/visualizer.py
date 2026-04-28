@@ -84,6 +84,9 @@ _3D_VIEWS = [
     ("p3", 45, -120),
 ]
 
+# Single view used in compact (1-panel) mode — overhead diagonal
+_COMPACT_VIEW = ("Perspective", 65, -90)
+
 
 # 2D orthographic projections
 class _OrthoView(NamedTuple):
@@ -132,10 +135,27 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self.fk = fk if fk is not None else SmplLeftArmFK(smpl_pkl_path)
         # Live-window state; populated by open_live()
         self._live: _LiveState | None = None
+        # Pre-captured RGB frames for fast video saving
+        self._capture_video: bool = False
+        self._frame_bufs: list = []
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def start_capture(self) -> None:
+        """Enable per-step frame buffering so finish_live() can use imageio."""
+        self._capture_video = True
+        self._frame_bufs = []
+
+    def prepend_frames(self, frames: list) -> None:
+        """Prepend pre-captured frames (e.g. from before MDM generation)."""
+        self._frame_bufs = list(frames) + self._frame_bufs
+
+    def close(self) -> None:
+        """Close the live window if open."""
+        if self._live is not None:
+            plt.close(self._live.fig)
 
     def animate(
         self,
@@ -193,6 +213,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
+        compact: bool = False,
     ) -> None:
         """Open an interactive window for live step-by-step visualization.
 
@@ -207,6 +228,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             body_pos:   ``(22, 3)`` world positions for the static body
                         background skeleton.  When provided (e.g. sitting pose)
                         it replaces the default T-pose for the grey backdrop.
+            compact:    If ``True``, build a single 3-D panel instead of the
+                        full 6-panel layout.  Faster to render and encode.
         """
         target_full = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
@@ -218,7 +241,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         plt.ion()
         fig, artists_3d, artists_2d = self._build_figure(
-            target_q, lims, spine3_pos, spine3_aa, body_pos=body_pos
+            target_q, lims, spine3_pos, spine3_aa, body_pos=body_pos, compact=compact
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -280,6 +303,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
         plt.pause(0.0001)
+
+        if self._capture_video:
+            self._live.fig.canvas.draw()
+            w, h = self._live.fig.canvas.get_width_height()
+            buf = np.frombuffer(self._live.fig.canvas.buffer_rgba(), dtype=np.uint8)
+            self._frame_bufs.append(buf.reshape(h, w, 4)[..., :3].copy())
 
     def update_mdm_goal(self, goal_q: np.ndarray) -> None:
         """Draw (or update) the green MDM end-of-trajectory goal marker.
@@ -361,22 +390,16 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
 
-    def finish_live(self, save_path: str) -> None:
+    def finish_live(self, save_path: str, fps: int = 20) -> None:
         """Save the frames recorded during the live session to a video or GIF.
 
-        Must be called after the MPC step loop has finished.  Closes the
-        interactive window, then replays all captured frames through
-        :class:`~matplotlib.animation.FuncAnimation` and delegates to
-        :func:`_save`.
-
-        The interactive window is closed before rendering so that the GUI
-        event loop cannot interfere with frame capture.  The Pillow / ffmpeg
-        writers use ``fig.savefig`` internally, which creates a fresh Agg
-        renderer and is independent of whether the window is open.
+        When :meth:`start_capture` was called before the loop, uses imageio to
+        write pre-captured RGB frames directly — no re-rendering, much faster.
+        Falls back to ``FuncAnimation.save`` otherwise.
 
         Args:
-            save_path: Output file path.  Use ``.gif`` for a GIF or ``.mp4``
-                       for an MP4 video (requires ``ffmpeg``).
+            save_path: Output file path.  Use ``.mp4`` or ``.gif``.
+            fps:       Frames per second for the saved video (imageio path only).
         """
         assert self._live is not None, "finish_live() called before open_live()"
         live = self._live
@@ -384,6 +407,17 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         if not recorded:
             print("No frames recorded; nothing to save.")
             return
+
+        # Fast path: write pre-captured RGBA frames with imageio
+        if self._frame_bufs:
+            try:
+                import imageio  # pylint: disable=import-outside-toplevel
+
+                imageio.mimsave(save_path, self._frame_bufs, fps=fps)
+                print(f"Saved animation to {save_path}")
+                return
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                print(f"imageio save failed ({exc}), falling back to FuncAnimation")
 
         n_steps = len(recorded) - 1
         wrist_trace = np.array([f["positions"][_WRIST_IDX] for f in recorded])
@@ -502,19 +536,27 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,
         body_pos: np.ndarray | None = None,
+        compact: bool = False,
     ) -> tuple[plt.Figure, list[dict], list[dict]]:
-        """Build the figure with static elements drawn and mutable artists
-        created.
+        """Build the figure with static elements drawn and mutable artists created.
 
         Args:
             body_pos: ``(22, 3)`` positions for the grey background body.
-                      Defaults to T-pose when ``None``.
+            compact:  If ``True``, build a single 3-D panel (faster to render).
 
         Returns:
             ``(fig, artists_3d, artists_2d)``
         """
         target_full = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
+
+        if compact:
+            fig = plt.figure(figsize=(8, 8))
+            gs = gridspec.GridSpec(1, 1, figure=fig)
+            artists_3d = self._build_3d_panels(
+                fig, gs, target_full, ref_body, lims, compact=True
+            )
+            return fig, artists_3d, []
 
         fig = plt.figure(figsize=(20, 9))
         gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
@@ -531,9 +573,11 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         target_full: np.ndarray,
         ref_body: np.ndarray,
         lims: list[tuple[float, float]],
+        compact: bool = False,
     ) -> list[dict]:
+        views = [_COMPACT_VIEW] if compact else _3D_VIEWS
         artists: list[dict] = []
-        for col, (title, elev, azim) in enumerate(_3D_VIEWS):
+        for col, (title, elev, azim) in enumerate(views):
             ax: Axes3D = fig.add_subplot(gs[0, col], projection="3d")
             ax.view_init(elev=elev, azim=azim)
             ax.set_title(title, fontsize=9)

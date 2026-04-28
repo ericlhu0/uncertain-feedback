@@ -1,6 +1,9 @@
 uv.lock
 .claude/
 env_snapshots/
+amass/
+src/uncertain_feedback/data_collection/data/
+my_mdm_dataset/
 
 .DS_Store
 .python-version

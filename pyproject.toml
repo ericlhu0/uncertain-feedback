@@ -17,9 +17,9 @@ dependencies = [
    "hydra-core",
    "omegaconf",
    # MDM dependencies
-   "torch>=2.1.0",
-   "torchvision>=0.16.0",
-   "torchaudio>=2.1.0",
+   "torch>=2.7.0",
+   "torchvision>=0.22.0",
+   "torchaudio>=2.7.0",
    "scipy",
    "scikit-learn",
    "h5py",
@@ -41,6 +41,21 @@ dependencies = [
    "pyquaternion",
    "gdown",
    "setuptools<70",
+   "blobfile",
+   # SAM 3D Body inference worker dependencies
+   "timm>=1.0",
+   "einops",
+   "roma",
+   "opencv-python",
+   "yacs",
+   "fvcore",
+   "iopath",
+   "pycocotools",
+   "pytorch-lightning",
+   "pyrender",
+   "braceexpand",
+   "detectron2",
+   "flask",
 ]
 
 [project.optional-dependencies]
@@ -100,17 +115,18 @@ module = [
 ignore_missing_imports = true
 
 [tool.uv]
-extra-build-dependencies = { chumpy = ["pip"] }
+extra-build-dependencies = { chumpy = ["pip"], detectron2 = ["torch", "pip"] }
 
 [[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu121" }
-torchvision = { index = "pytorch-cu121" }
-torchaudio = { index = "pytorch-cu121" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+detectron2 = { git = "https://github.com/facebookresearch/detectron2.git" }
 
 [dependency-groups]
 dev = [

@@ -42,15 +42,12 @@ class XyzPositionClusterer(
         self._random_state = random_state
 
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
-        """Convert ``(num_samples, n_frames, 4, 3)`` → ``(num_samples,
-        n_frames*5*3)``."""
+        """Convert ``(num_samples, n_frames, 4, 3)`` → ``(num_samples, 5*3)``."""
         num_samples, n_frames, _, _ = trajectories.shape
-        features = np.empty((num_samples, n_frames * 5 * 3), dtype=np.float64)
-        for i in range(num_samples):
-            # (n_frames, 4, 3) → fk_batch → (n_frames, 5, 3) → flatten
-            positions = self._fk.fk_batch(trajectories[i])  # (n_frames, 5, 3)
-            features[i] = positions.reshape(-1)
-        return features
+        frame_idx = min(100, n_frames - 1)
+        poses = trajectories[:, frame_idx]  # (num_samples, 4, 3)
+        positions = self._fk.fk_batch(poses)  # (num_samples, 5, 3)
+        return positions.reshape(num_samples, -1).astype(np.float64)
 
     def cluster(self, trajectories: np.ndarray) -> np.ndarray:
         """Cluster trajectories by XYZ joint positions.

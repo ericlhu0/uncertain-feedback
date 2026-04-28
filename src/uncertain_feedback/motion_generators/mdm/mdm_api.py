@@ -127,11 +127,17 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         from utils.sampler_util import ClassifierFreeSampleModel
 
         # Start from model's saved args so all model/diffusion/dataset fields are present.
+        # Fall back to the base model's args.json if the checkpoint has none (e.g. fine-tuned
+        # runs that were saved without writing args.json).
         _args_json = self._model_path.parent / "args.json"
-        _model_args = {}
-        if _args_json.exists():
-            with open(_args_json, encoding="utf-8") as _f:
-                _model_args = json.load(_f)
+        if not _args_json.exists():
+            _args_json = MDM_MODEL_WEIGHTS_PATH.parent / "args.json"
+            print(
+                f"No args.json in {self._model_path.parent.name}/, "
+                f"falling back to base model args: {_args_json}"
+            )
+        with open(_args_json, encoding="utf-8") as _f:
+            _model_args = json.load(_f)
         args = argparse.Namespace(**_model_args)
 
         # Overlay inference config from YAML (inference/sampling/edit settings).
@@ -151,6 +157,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             "pred_len": 0,
             "context_len": 0,
             "use_ema": False,
+            "dataset": "humanml",
         }
         for _k, _dv in _arg_defaults.items():
             if not hasattr(args, _k):

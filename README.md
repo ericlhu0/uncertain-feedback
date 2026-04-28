@@ -93,19 +93,19 @@ uv run python -m train.train_mdm \
 To generate sanity-check samples from a fixed starting pose, use `train_leftarm.py` instead. It accepts the same flags plus three extras:
 ```
 uv run python ../train_leftarm.py \
-    --save_dir ./save/my_finetuned_v1 \
+    --save_dir ./save/my_finetuned \
     --start_pose demo_pose.pt \
     --n_prefix 1 \
     --body_mode both \
     --dataset humanml \
     --resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt \
-    --diffusion_steps 50 \
+    --diffusion_steps 100 \
     --mask_frames \
     --use_ema \
     --batch_size 8 \
-    --num_steps 1000 \
+    --num_steps 700 \
     --save_interval 100 \
-    --lr 1e-4 \
+    --lr 3e-5 \
     --gen_during_training \
     --gen_num_samples 3 \
     --gen_num_repetitions 3

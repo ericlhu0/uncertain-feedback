@@ -142,8 +142,19 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         for _k, _v in _cfg.items():
             setattr(args, _k, _v)
 
-        if args.pred_len == 0:
-            args.pred_len = args.context_len
+        if getattr(args, "pred_len", 0) == 0:
+            args.pred_len = getattr(args, "context_len", 0)
+
+        # Fill in fields that older checkpoints may not have saved in args.json.
+        _arg_defaults = {
+            "unconstrained": False,
+            "pred_len": 0,
+            "context_len": 0,
+            "use_ema": False,
+        }
+        for _k, _dv in _arg_defaults.items():
+            if not hasattr(args, _k):
+                setattr(args, _k, _dv)
 
         fixseed(self._seed)
         dist_util.setup_dist(args.device)

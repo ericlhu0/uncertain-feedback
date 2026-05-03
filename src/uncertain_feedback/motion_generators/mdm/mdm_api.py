@@ -86,7 +86,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
     ) -> None:
         self._model_path = (
             Path(model_path) if model_path is not None else MDM_MODEL_WEIGHTS_PATH
-        )
+        ).resolve()
         self._seed = seed
 
         # Populated lazily by _ensure_loaded().

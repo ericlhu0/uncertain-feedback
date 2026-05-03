@@ -390,6 +390,24 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
 
+    def update_cartesian_target(self, world_pos: np.ndarray) -> None:
+        """Draw (or move) the blue star marking the Cartesian wrist goal.
+
+        Args:
+            world_pos: ``(3,)`` world-space position of the target wrist point.
+        """
+        assert self._live is not None, "update_cartesian_target() called before open_live()"
+        for a3 in self._live.artists3d:
+            a3["cartesian_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
+                [world_pos[0]], [world_pos[1]], [world_pos[2]]
+            )
+        for a2 in self._live.artists2d:
+            a2["cartesian_goal_scat"].set_offsets(
+                [[world_pos[a2["hi"]], world_pos[a2["vi"]]]]
+            )
+        self._live.fig.canvas.draw_idle()
+        self._live.fig.canvas.flush_events()
+
     def finish_live(self, save_path: str, fps: int = 20) -> None:
         """Save the frames recorded during the live session to a video or GIF.
 
@@ -650,6 +668,10 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             preview_scat = ax.scatter(
                 [], [], [], color=_MDM_COLOR, s=30, alpha=0.5, depthshade=False
             )
+            cartesian_goal_scat = ax.scatter(
+                [], [], [], color="royalblue", s=200, marker="*",
+                depthshade=False, zorder=10,
+            )
             artists.append(
                 {
                     "scat": scat,
@@ -661,6 +683,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "mdm_goal_scat": mdm_goal_scat,
                     "preview_lines": preview_lines,
                     "preview_scat": preview_scat,
+                    "cartesian_goal_scat": cartesian_goal_scat,
                 }
             )
         return artists
@@ -746,6 +769,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             preview_scat = ax.scatter(
                 [], [], color=_MDM_COLOR, s=28, alpha=0.5, zorder=4
             )
+            cartesian_goal_scat = ax.scatter(
+                [], [], color="royalblue", s=200, marker="*", zorder=10,
+            )
             artists.append(
                 {
                     "scat": scat,
@@ -757,6 +783,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "mdm_goal_scat": mdm_goal_scat,
                     "preview_lines": preview_lines,
                     "preview_scat": preview_scat,
+                    "cartesian_goal_scat": cartesian_goal_scat,
                 }
             )
         return artists

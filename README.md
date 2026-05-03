@@ -181,19 +181,30 @@ Additional args vs. the plain MDM+MPC variant:
 
 ### General MPC running script
 ```
-MDM_ROOT="/home/elh245/uncertain-feedback/src/uncertain_feedback/motion_generators/mdm"
-CKPT="$MDM_ROOT/motion-diffusion-model/save/my_finetuned_4/model000750500.pt"
-POSE="$MDM_ROOT/demo_pose.pt"
-
 uv run python -m uncertain_feedback.planners.run \
   --planner arm_mpc_mdm_uq \
-  --model-path "$CKPT" \
-  --pose "$POSE" \
+  --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
+  --pose "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt" \
   --text "raise my left arm" \
   --diffusion-samples 500 \
   --auto-cluster 0 \
   --save "$(pwd)/run_output3.mp4" \
   --steps 750
+```
+
+#### with cartesian goal
+```
+uv run python -m uncertain_feedback.planners.run \
+    --planner arm_mpc_cartesian \
+    --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
+    --pose "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt" \
+    --text "raise my left arm" \
+    --goal-pos 0.3 0.5 0.1 \
+    --diffusion-samples 10 \
+    <!-- --auto-cluster 0 \ -->
+    --save out.mp4 \
+    --steps 750 \
+    --live
 ```
 
 

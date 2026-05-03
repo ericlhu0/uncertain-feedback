@@ -26,6 +26,7 @@ import numpy as np
 from uncertain_feedback.consts import MDM_ROOT
 from uncertain_feedback.planners.mpc import (
     ArmVisualizer,
+    LeftArmMPCCartesian,
     LeftArmMPCMDM,
     LeftArmMPCMDMUQ,
     SmplLeftArmFK,
@@ -41,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument(
         "--planner",
-        choices=["arm_mpc", "arm_mpc_mdm", "arm_mpc_mdm_uq"],
+        choices=["arm_mpc", "arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian"],
         default="arm_mpc_mdm_uq",
         help="Planner to run",
     )
@@ -147,6 +148,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # --- Cartesian goal args (arm_mpc_cartesian) ---
+    p.add_argument(
+        "--goal-pos",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        dest="goal_pos",
+        help=(
+            "Target wrist position in spine3-relative coordinates (X Y Z, metres). "
+            "Required for --planner arm_mpc_cartesian."
+        ),
+    )
+
     return p
 
 
@@ -167,7 +182,7 @@ def _get_vis(mpc: SmplLeftArmMPC) -> ArmVisualizer | None:
 def main() -> None:
     args = build_parser().parse_args()
 
-    uses_mdm = args.planner in ("arm_mpc_mdm", "arm_mpc_mdm_uq")
+    uses_mdm = args.planner in ("arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian")
     visualize = args.live or (args.save is not None)
     # Compact (1-panel) rendering when saving without live view — faster to render and encode
     compact = (args.save is not None) and not args.live
@@ -200,7 +215,7 @@ def main() -> None:
 
     # Default goal: arm raised from the initial pose
     default_goal = arm_aa.copy() + np.array(
-        [[0.0, 0.0, 0.0], [0.0, -1.6, 0.8], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        [[0.0, 0.7, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     )
 
     # --- Build planner ---
@@ -222,6 +237,24 @@ def main() -> None:
             spine3_aa=spine3_aa,
             body_pos=body_pos,
             trajectory_fraction=args.trajectory_fraction,
+        )
+    elif args.planner == "arm_mpc_cartesian":
+        if args.goal_pos is None:
+            raise ValueError("--goal-pos X Y Z is required for --planner arm_mpc_cartesian.")
+        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - (
+            spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
+        )
+        print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
+        mpc = LeftArmMPCCartesian(
+            cartesian_goal=np.array(args.goal_pos),
+            initial_arm_aa=arm_aa,
+            **common,
+            spine3_pos=spine3_pos,
+            spine3_aa=spine3_aa,
+            body_pos=body_pos,
+            trajectory_fraction=args.trajectory_fraction,
+            n_diffusion_samples=args.diffusion_samples,
+            n_clusters=args.n_clusters,
         )
     else:
         mpc = LeftArmMPCMDMUQ(

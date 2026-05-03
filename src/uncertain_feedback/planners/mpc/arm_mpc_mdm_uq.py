@@ -111,6 +111,8 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         start_pose: np.ndarray | None = None,
         current_arm_aa: np.ndarray | None = None,
         auto_cluster: int | None = None,
+        mdm_frames: int | None = None,
+        frozen_body: bool = False,
     ) -> None:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
@@ -133,6 +135,10 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                                 the generated motion.  Pass the output of
                                 :meth:`~uncertain_feedback.motion_generators.mdm\
         .mdm_api.MdmMotionGenerator.build_pose_from_arm_aa`.
+                    mdm_frames: Exact number of MDM frames to generate.  ``None``
+                                keeps the generator default.
+                    frozen_body: If ``True``, freeze non-left-arm body features
+                                 during MDM generation.
         """
         print(f"Generating {self._n_diffusion_samples} MDM samples for: '{text}' …")
         generation_t0 = time.perf_counter()
@@ -142,6 +148,8 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                 text,
                 start_pose=start_pose,
                 num_samples=self._n_diffusion_samples,
+                num_frames=mdm_frames,
+                frozen_body=frozen_body,
             )  # (n_diffusion_samples, n_frames, 22, 3)
             trajectories = None
         else:
@@ -150,6 +158,8 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                 text,
                 start_pose=start_pose,
                 num_samples=self._n_diffusion_samples,
+                num_frames=mdm_frames,
+                frozen_body=frozen_body,
             )  # (n_diffusion_samples, n_frames, 4, 3)
         print(
             f"[timing] MDM generation pipeline: {time.perf_counter() - generation_t0:.3f}s"
@@ -267,6 +277,17 @@ if __name__ == "__main__":
         help="Save MDM motion video to this path (e.g. motion.mp4).",
     )
     parser.add_argument(
+        "--mdm-frames",
+        type=int,
+        default=None,
+        help="Exact number of MDM frames to generate (1-196). Default is 120.",
+    )
+    parser.add_argument(
+        "--frozen-body",
+        action="store_true",
+        help="Freeze non-left-arm body features during MDM generation.",
+    )
+    parser.add_argument(
         "--start_pose",
         type=str,
         default="sitting_pose.pt",
@@ -290,7 +311,7 @@ if __name__ == "__main__":
         default=LeftArmMPCMDM.TRAJECTORY_FRACTION,
         help=(
             "Fraction of the MDM trajectory to enqueue (default: "
-            f"{LeftArmMPCMDM.TRAJECTORY_FRACTION:.0%}). "
+            f"{LeftArmMPCMDM.TRAJECTORY_FRACTION * 100:.0f}%%). "
             "Also sets the ghost-arm timestep in the cluster picker."
         ),
     )
@@ -350,7 +371,12 @@ if __name__ == "__main__":
 
     current_pose = gen.build_pose_from_arm_aa(initial_pose, demo_q)
     demo_mpc.query_mdm_with_uncertainty(
-        gen, args.text, start_pose=current_pose, current_arm_aa=demo_q
+        gen,
+        args.text,
+        start_pose=current_pose,
+        current_arm_aa=demo_q,
+        mdm_frames=args.mdm_frames,
+        frozen_body=args.frozen_body,
     )
 
     # If MDM switched the backend to Agg, switch back to interactive.

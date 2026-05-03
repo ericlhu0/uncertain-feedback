@@ -75,6 +75,21 @@ def _sync_cuda_if_needed(torch_module: Any) -> None:
         torch_module.cuda.synchronize()
 
 
+def _resolve_num_frames(
+    motion_length_seconds: float,
+    num_frames: int | None,
+) -> int:
+    """Resolve and validate the MDM sample length in frames."""
+    resolved = (
+        int(motion_length_seconds * _FPS) if num_frames is None else int(num_frames)
+    )
+    if resolved < 1:
+        raise ValueError(f"num_frames must be >= 1, got {resolved}")
+    if resolved > _MAX_FRAMES:
+        raise ValueError(f"num_frames must be <= {_MAX_FRAMES}, got {resolved}")
+    return resolved
+
+
 class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
     """Lazy-loading wrapper for the MDM model.
 
@@ -360,6 +375,8 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         start_pose: np.ndarray | None = None,
         save_path: str | Path | None = None,
         num_samples: int = 1,
+        num_frames: int | None = None,
+        frozen_body: bool = False,
     ) -> np.ndarray:
         """Generate a left arm motion trajectory from a text description.
 
@@ -391,6 +408,13 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             num_samples:           Number of independent diffusion samples to
                                    draw in a single forward pass.  Defaults to
                                    ``1`` (backward-compatible).
+            num_frames:            Exact number of MDM frames to generate.  If
+                                   ``None``, derived from
+                                   ``motion_length_seconds`` at 20 FPS.
+            frozen_body:           If ``True``, inpaint/freeze all non-left-arm
+                                   body features for the full motion.  If
+                                   ``False``, only the first 10 frames are
+                                   locked to ``start_pose``.
 
         Returns:
             ``(n_frames, 4, 3)`` axis-angle trajectory when ``num_samples==1``.
@@ -413,7 +437,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         data = self._data
         args = self._args
 
-        n_frames = min(_MAX_FRAMES, int(motion_length_seconds * _FPS))
+        n_frames = _resolve_num_frames(motion_length_seconds, num_frames)
 
         # --- Build model_kwargs via collate (mirrors sample_leftarm.py) ------
         collate_args = [
@@ -430,7 +454,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                     t = t.repeat(num_samples, *([1] * (t.dim() - 1)))
                 model_kwargs["y"][key] = t
 
-        # --- Inpainting: start pose + left-arm-only mask ----------------------
+        # --- Inpainting: start pose + optional frozen body --------------------
         start_frame = torch.tensor(
             start_pose, dtype=torch.float32, device=dist_util.dev()
         ).unsqueeze(
@@ -443,8 +467,12 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         )
         model_kwargs["y"]["inpainted_motion"] = input_motions
 
+        if frozen_body:
+            mask_np = self._not_l_arm_mask
+        else:
+            mask_np = np.zeros_like(self._not_l_arm_mask, dtype=bool)
         mask_tensor = torch.tensor(
-            self._not_l_arm_mask, dtype=torch.bool, device=input_motions.device
+            mask_np, dtype=torch.bool, device=input_motions.device
         )
         # Expand: (263,) → (num_samples, 263, 1, n_frames)
         model_kwargs["y"]["inpainting_mask"] = (
@@ -558,6 +586,8 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         motion_length_seconds: float = 6.0,
         start_pose: np.ndarray | None = None,
         num_samples: int = 1,
+        num_frames: int | None = None,
+        frozen_body: bool = False,
     ) -> np.ndarray:
         """Generate MDM samples and return SMPL XYZ positions without IK.
 
@@ -584,7 +614,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         data = self._data
         args = self._args
 
-        n_frames = min(_MAX_FRAMES, int(motion_length_seconds * _FPS))
+        n_frames = _resolve_num_frames(motion_length_seconds, num_frames)
 
         collate_args = [
             {"inp": torch.zeros(n_frames), "tokens": None, "lengths": n_frames}
@@ -607,8 +637,12 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         )
         model_kwargs["y"]["inpainted_motion"] = input_motions
 
+        if frozen_body:
+            mask_np = self._not_l_arm_mask
+        else:
+            mask_np = np.zeros_like(self._not_l_arm_mask, dtype=bool)
         mask_tensor = torch.tensor(
-            self._not_l_arm_mask, dtype=torch.bool, device=input_motions.device
+            mask_np, dtype=torch.bool, device=input_motions.device
         )
         model_kwargs["y"]["inpainting_mask"] = (
             mask_tensor.unsqueeze(0)

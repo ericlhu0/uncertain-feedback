@@ -66,7 +66,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                              background skeleton (e.g. sitting pose).
     """
 
-    TRAJECTORY_FRACTION: float = 0.75
+    TRAJECTORY_FRACTION: float = 1
     """Fraction of MDM trajectory frames to enqueue (default 75 %)."""
 
     def __init__(
@@ -75,7 +75,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         advance_threshold: float = 0.1,
-        trajectory_fraction: float = TRAJECTORY_FRACTION,
+        trajectory_fraction: float = 1,
         goals: list[np.ndarray] | None = None,
         goal_threshold: float = 0.1,
         visualize: bool = False,
@@ -268,6 +268,17 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--mdm-frames",
+        type=int,
+        default=None,
+        help="Exact number of MDM frames to generate (1-196). Default is 120.",
+    )
+    parser.add_argument(
+        "--frozen-body",
+        action="store_true",
+        help="Freeze non-left-arm body features during MDM generation.",
+    )
+    parser.add_argument(
         "--start_pose",
         type=str,
         default="sitting_pose.pt",
@@ -336,6 +347,8 @@ if __name__ == "__main__":
         args.text,
         start_pose=current_pose,
         save_path=args.save_motion or None,
+        num_frames=args.mdm_frames,
+        frozen_body=args.frozen_body,
     )  # (n_frames, 4, 3)
     n_frames = trajectory.shape[0]
     cutoff = max(1, round(n_frames * demo_mpc.trajectory_fraction))

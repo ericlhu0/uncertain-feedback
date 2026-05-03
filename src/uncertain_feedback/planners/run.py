@@ -115,6 +115,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save the raw MDM full-body motion video to this path (arm_mpc_mdm only)",
     )
     p.add_argument(
+        "--mdm-frames",
+        type=int,
+        default=None,
+        dest="mdm_frames",
+        help="Exact number of MDM frames to generate (1-196). Default is 120.",
+    )
+    p.add_argument(
+        "--frozen-body",
+        action="store_true",
+        dest="frozen_body",
+        help="Freeze non-left-arm body features during MDM generation.",
+    )
+    p.add_argument(
         "--trajectory-fraction",
         type=float,
         default=LeftArmMPCMDM.TRAJECTORY_FRACTION,
@@ -153,13 +166,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--goal-pos",
         type=float,
         nargs=3,
-        default=None,
+        action="append",
         metavar=("X", "Y", "Z"),
         dest="goal_pos",
         help=(
             "Target wrist position in spine3-relative coordinates (X Y Z, metres). "
+            "Repeat to enqueue multiple goals. "
             "Required for --planner arm_mpc_cartesian."
         ),
+    )
+    p.add_argument(
+        "--cartesian-threshold",
+        type=float,
+        default=0.05,
+        dest="cartesian_threshold",
+        help="Cartesian L2 distance (m) to consider a wrist goal reached (arm_mpc_cartesian only).",
     )
 
     return p
@@ -239,15 +260,17 @@ def main() -> None:
             trajectory_fraction=args.trajectory_fraction,
         )
     elif args.planner == "arm_mpc_cartesian":
-        if args.goal_pos is None:
-            raise ValueError("--goal-pos X Y Z is required for --planner arm_mpc_cartesian.")
-        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - (
-            spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        )
+        if not args.goal_pos:
+            raise ValueError(
+                "--goal-pos X Y Z is required for --planner arm_mpc_cartesian."
+            )
+        _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
+        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = LeftArmMPCCartesian(
-            cartesian_goal=np.array(args.goal_pos),
+            cartesian_goals=[np.array(g) for g in args.goal_pos],
             initial_arm_aa=arm_aa,
+            cartesian_threshold=args.cartesian_threshold,
             **common,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
@@ -270,7 +293,9 @@ def main() -> None:
 
     # Propagate capture / compact flags into the vis config
     if mpc._vis_config is not None:  # pylint: disable=protected-access
-        mpc._vis_config.capture = args.save is not None  # pylint: disable=protected-access
+        mpc._vis_config.capture = (
+            args.save is not None
+        )  # pylint: disable=protected-access
         mpc._vis_config.compact = compact  # pylint: disable=protected-access
 
     # --- MPC loop ---
@@ -296,6 +321,8 @@ def main() -> None:
                     args.text,
                     start_pose=current_pose,
                     save_path=str(args.save_motion) if args.save_motion else None,
+                    num_frames=args.mdm_frames,
+                    frozen_body=args.frozen_body,
                 )
                 n_frames = traj.shape[0]
                 cutoff = max(1, round(n_frames * mpc.trajectory_fraction))
@@ -308,6 +335,8 @@ def main() -> None:
                     start_pose=current_pose,
                     current_arm_aa=q,
                     auto_cluster=args.auto_cluster,
+                    mdm_frames=args.mdm_frames,
+                    frozen_body=args.frozen_body,
                 )
 
             # MDM generation can switch matplotlib to the Agg backend; restore it
@@ -319,8 +348,12 @@ def main() -> None:
     if args.save and visualize:
         vis = _get_vis(mpc)
         if vis is not None:
-            if pre_mdm_vis is not None and pre_mdm_vis._frame_bufs:  # pylint: disable=protected-access
-                vis.prepend_frames(pre_mdm_vis._frame_bufs)  # pylint: disable=protected-access
+            if (
+                pre_mdm_vis is not None and pre_mdm_vis._frame_bufs
+            ):  # pylint: disable=protected-access
+                vis.prepend_frames(
+                    pre_mdm_vis._frame_bufs
+                )  # pylint: disable=protected-access
             vis.finish_live(str(args.save), fps=args.fps)
 
     if args.live:

@@ -1,12 +1,14 @@
-"""MDM+UQ MPC for the SMPL left arm with a Cartesian terminal goal.
+"""MDM+UQ MPC for the SMPL left arm with a Cartesian goal queue.
 
-Extends :class:`LeftArmMPCMDMUQ` so that the terminal goal — reached after
-the MDM-generated trajectory is exhausted — is a **Cartesian wrist position
-relative to the spine3 joint** rather than a joint-angle configuration.
-Rotation is unconstrained; only end-effector position is optimised.
+Extends :class:`LeftArmMPCMDMUQ` so that after the MDM-generated trajectory
+is exhausted the controller works through a queue of **Cartesian wrist
+positions relative to the spine3 joint**.  Rotation is unconstrained; only
+end-effector position is optimised.
 """
 
 from __future__ import annotations
+
+from collections import deque
 
 import numpy as np
 
@@ -22,20 +24,23 @@ from uncertain_feedback.uncertainty.base import TrajectoryClusterer
 
 
 class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
-    """MDM+UQ MPC with a Cartesian terminal goal.
+    """MDM+UQ MPC with a queue of Cartesian wrist goals.
 
     MDM-generated joint-angle waypoints are tracked with the standard
-    joint-angle cost (inherited).  Once the waypoint queue is empty the
-    controller switches to a Cartesian cost: it minimises the L2 distance
-    between the left wrist and ``cartesian_goal``, expressed relative to
-    spine3.  Joint orientations are left unconstrained.
+    joint-angle cost (inherited).  Once that queue empties the controller
+    works through ``cartesian_goals`` in order, minimising the L2 distance
+    between the left wrist and each spine3-relative target position.
+    Joint orientations are left unconstrained.
 
     Args:
-        cartesian_goal:  ``(3,)`` target wrist position in spine3-relative
-                         coordinates (Y-up, metres).
+        cartesian_goals: List of ``(3,)`` target wrist positions in
+                         spine3-relative coordinates (Y-up, metres).
         initial_arm_aa:  ``(4, 3)`` arm axis-angles at run start.  Used as a
                          ghost-arm placeholder in the visualiser while the
-                         goal queue is empty.
+                         MDM waypoint queue is empty.
+        cartesian_threshold: Cartesian L2 distance (metres) below which the
+                         front Cartesian goal is considered reached and the
+                         next one becomes active.  Default 0.05 m.
         horizon:         Look-ahead steps.
         n_mpc_samples:   CEM sample count.
         max_angle_delta: Sampling std dev (radians).
@@ -54,8 +59,9 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
 
     def __init__(
         self,
-        cartesian_goal: np.ndarray,
+        cartesian_goals: list[np.ndarray],
         initial_arm_aa: np.ndarray,
+        cartesian_threshold: float = 0.05,
         horizon: int = 10,
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
@@ -90,7 +96,10 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
             n_clusters=n_clusters,
             clusterer=clusterer,
         )
-        self._cartesian_goal = np.asarray(cartesian_goal, dtype=np.float64)
+        self._cartesian_goals: deque[np.ndarray] = deque(
+            np.asarray(g, dtype=np.float64) for g in cartesian_goals
+        )
+        self._cartesian_threshold = cartesian_threshold
         self._initial_arm_aa = np.asarray(initial_arm_aa, dtype=np.float64)
         self._fk_inst = fk
         self._spine3_pos = (
@@ -105,11 +114,24 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         )
 
     # ------------------------------------------------------------------
+    # Cartesian goal queue management
+    # ------------------------------------------------------------------
+
+    @property
+    def current_cartesian_goal(self) -> np.ndarray | None:
+        """The active Cartesian goal, or ``None`` if the queue is empty."""
+        return self._cartesian_goals[0] if self._cartesian_goals else None
+
+    def append_cartesian_goal(self, goal: np.ndarray) -> None:
+        """Add a Cartesian goal to the back of the queue."""
+        self._cartesian_goals.append(np.asarray(goal, dtype=np.float64))
+
+    # ------------------------------------------------------------------
     # Cartesian cost
     # ------------------------------------------------------------------
 
     def _cartesian_cost(self, q_trajs: np.ndarray) -> np.ndarray:
-        """L2 Cartesian cost: spine3-relative wrist distance to target.
+        """L2 Cartesian cost: spine3-relative wrist distance to current target.
 
         Args:
             q_trajs: ``(N, H+1, 4, 3)`` state trajectories.
@@ -117,12 +139,15 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         Returns:
             ``(N,)`` cost per trajectory.
         """
+        target = self.current_cartesian_goal
+        if target is None:
+            return np.zeros(q_trajs.shape[0])
         terminal_q = q_trajs[:, -1]  # (N, 4, 3)
         positions = self._fk_inst.fk_batch(
             terminal_q, self._spine3_pos, self._spine3_aa
         )  # (N, 5, 3)
         wrist_rel = positions[:, -1] - self._spine3_pos  # (N, 3)
-        return ((wrist_rel - self._cartesian_goal) ** 2).sum(axis=-1)  # (N,)
+        return ((wrist_rel - target) ** 2).sum(axis=-1)  # (N,)
 
     # ------------------------------------------------------------------
     # solve override
@@ -134,7 +159,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         """Return the best first action and full plan.
 
         Delegates to the parent (joint-angle cost) while MDM waypoints are
-        queued.  Switches to Cartesian cost once the queue is empty.
+        queued.  Switches to Cartesian cost once the MDM queue is empty.
         """
         if self._goals:
             return super().solve(current_q)
@@ -179,11 +204,9 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
     ) -> np.ndarray:
         """Perform one MPC step.
 
-        While MDM waypoints are queued, tracks them with joint-angle cost.
-        Unlike the parent, the last waypoint CAN be popped (no ``len > 1``
-        guard), allowing the queue to empty and Cartesian mode to engage.
-
-        Once the queue is empty, optimises toward the Cartesian wrist goal.
+        Tracks MDM waypoints while that queue is non-empty (the last frame can
+        be popped, unlike the parent, so the queue can reach empty).  Then
+        works through the Cartesian goal queue.
         """
         if self._goals:
             return self._mdm_tracking_step(current_q, advance_threshold)
@@ -231,15 +254,20 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
                     self._vis.update_mdm_goal(self._mdm_goal)
                 if self._preview_q is not None:
                     self._vis.update_trajectory_preview(self._preview_q)
-                self._vis.update_cartesian_target(
-                    self._spine3_pos + self._cartesian_goal
-                )
+                if self.current_cartesian_goal is not None:
+                    self._vis.update_cartesian_target(
+                        self._spine3_pos + self.current_cartesian_goal
+                    )
             color = _MDM_COLOR if self._goals else _TARGET_COLOR
             self._vis.update_step(next_q, dist=dist, color=color)
 
         return next_q
 
     def _cartesian_step(self, current_q: np.ndarray) -> np.ndarray:
+        if not self._cartesian_goals:
+            # Nothing left to do — hold position.
+            return np.asarray(current_q, dtype=np.float64)
+
         first_action, _ = self.solve(current_q)
         next_q = _compose_rotvec(
             np.asarray(current_q, dtype=np.float64), first_action
@@ -247,7 +275,15 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
 
         arm_pos = self._fk_inst.fk(next_q, self._spine3_pos, self._spine3_aa)
         wrist_rel = arm_pos[-1] - self._spine3_pos
-        dist = float(np.linalg.norm(wrist_rel - self._cartesian_goal))
+        dist = float(np.linalg.norm(wrist_rel - self.current_cartesian_goal))
+
+        # Advance to next Cartesian goal when current one is reached.
+        if dist < self._cartesian_threshold and len(self._cartesian_goals) > 1:
+            self._cartesian_goals.popleft()
+            self.reset_warmstart()
+            dist = float(
+                np.linalg.norm(wrist_rel - self.current_cartesian_goal)
+            )
 
         if self._vis_config is not None:
             if self._vis is None:
@@ -263,9 +299,9 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
                     self._vis.start_capture()
                 if self._mdm_goal is not None:
                     self._vis.update_mdm_goal(self._mdm_goal)
-                self._vis.update_cartesian_target(
-                    self._spine3_pos + self._cartesian_goal
-                )
+            self._vis.update_cartesian_target(
+                self._spine3_pos + self.current_cartesian_goal
+            )
             self._vis.update_step(next_q, dist=dist, color=_TARGET_COLOR)
 
         return next_q

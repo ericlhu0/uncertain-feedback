@@ -203,7 +203,9 @@ uv run python -m uncertain_feedback.planners.run \
   --diffusion-samples 200 \
   --save out.mp4 \
   --steps 750 \
-  --live
+  --live \
+  --n-clusters 5 \
+  --mdm-frames 100
 ```
 
 

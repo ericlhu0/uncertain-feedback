@@ -8,6 +8,7 @@ chosen cluster label.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ from matplotlib.widgets import Button
 
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_BONE_PAIRS_22,
+    LEFT_ARM_CHAIN_INDICES,
     LEFT_ARM_JOINT_INDICES_22,
     SmplLeftArmFK,
 )
@@ -52,6 +54,18 @@ def _merge_arm(arm_full: np.ndarray, body_pos: np.ndarray | None) -> np.ndarray:
     result = body_pos.copy()
     result[LEFT_ARM_JOINT_INDICES_22] = arm_full[LEFT_ARM_JOINT_INDICES_22]
     return result
+
+
+def _align_arm_to_spine(
+    frame_positions: np.ndarray,
+    display_spine_pos: np.ndarray,
+) -> np.ndarray:
+    """Translate an SMPL frame so its arm chain is anchored at display spine3."""
+    aligned = np.asarray(frame_positions, dtype=np.float64).copy()
+    spine3_j = LEFT_ARM_CHAIN_INDICES[0]
+    offset = np.asarray(display_spine_pos, dtype=np.float64) - aligned[spine3_j]
+    aligned[LEFT_ARM_JOINT_INDICES_22] += offset
+    return aligned
 
 
 def _draw_body(
@@ -235,6 +249,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     cluster_wrist_traces: list[np.ndarray] = []  # (n_frames, 3)
     cluster_counts: list[int] = []
 
+    precompute_t0 = time.perf_counter()
     for k in unique_labels:
         mask = labels == k
         mean_traj = trajectories[mask].mean(axis=0)  # (n_frames, 4, 3)
@@ -260,6 +275,9 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         cluster_individual_previews.append(individual_previews)
         cluster_wrist_traces.append(wrist_trace)
         cluster_counts.append(int(mask.sum()))
+    print(
+        f"[timing] cluster picker precompute: {time.perf_counter() - precompute_t0:.3f}s"
+    )
 
     # Current MPC arm state (same on every cluster panel)
     current_body: np.ndarray | None = None
@@ -283,6 +301,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     # ------------------------------------------------------------------
     # Build figure
     # ------------------------------------------------------------------
+    figure_t0 = time.perf_counter()
     fig, axes, panel_arm_lines, panel_arm_scats = _build_figure(
         unique_labels,
         cluster_body_cutoffs,
@@ -291,6 +310,9 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         lims,
         cluster_individual_previews=cluster_individual_previews,
         current_body=current_body,
+    )
+    print(
+        f"[timing] cluster picker figure build: {time.perf_counter() - figure_t0:.3f}s"
     )
 
     # ------------------------------------------------------------------
@@ -336,7 +358,174 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     if save_path is not None:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
 
+    interaction_t0 = time.perf_counter()
     plt.show(block=True)
+    print(
+        "[timing] cluster picker interaction/display: "
+        f"{time.perf_counter() - interaction_t0:.3f}s"
+    )
+
+    if state["selected"] is None:
+        raise RuntimeError("Window closed without selecting a cluster.")
+
+    return unique_labels[state["selected"]]
+
+
+def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
+    positions: np.ndarray,
+    labels: np.ndarray,
+    fk: SmplLeftArmFK | None = None,
+    save_path: str | Path | None = None,
+    trajectory_fraction: float = 0.75,
+    spine_pos: np.ndarray | None = None,
+    spine_aa: np.ndarray | None = None,
+    body_pos: np.ndarray | None = None,
+    current_arm_aa: np.ndarray | None = None,
+) -> int:
+    """Show a blocking cluster picker from precomputed SMPL XYZ positions.
+
+    Args:
+        positions: ``(num_samples, n_frames, 22, 3)`` global SMPL joint
+            positions.
+        labels: ``(num_samples,)`` integer cluster labels.
+
+    Returns:
+        The integer cluster label chosen by the user.
+    """
+    if fk is None:
+        fk = SmplLeftArmFK()
+
+    positions = np.asarray(positions, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.intp)
+    unique_labels = sorted(set(labels.tolist()))
+
+    cluster_body_cutoffs: list[np.ndarray] = []
+    cluster_individual_previews: list[list[np.ndarray]] = []
+    cluster_wrist_traces: list[np.ndarray] = []
+    cluster_counts: list[int] = []
+
+    precompute_t0 = time.perf_counter()
+    spine3_j = LEFT_ARM_CHAIN_INDICES[0]
+    wrist_j = LEFT_ARM_CHAIN_INDICES[-1]
+    display_spine_pos = (
+        np.asarray(body_pos[spine3_j], dtype=np.float64)
+        if body_pos is not None
+        else (
+            np.asarray(spine_pos, dtype=np.float64)
+            if spine_pos is not None
+            else fk.tpose_spine3_pos
+        )
+    )
+    for k in unique_labels:
+        mask = labels == k
+        mean_positions = positions[mask].mean(axis=0)  # (n_frames, 22, 3)
+        n_frames = mean_positions.shape[0]
+        preview_idx = max(0, round(n_frames * trajectory_fraction) - 1)
+
+        body_cutoff = _merge_arm(
+            _align_arm_to_spine(mean_positions[preview_idx], display_spine_pos),
+            body_pos,
+        )
+        individual_previews = [
+            _merge_arm(
+                _align_arm_to_spine(sample_positions[preview_idx], display_spine_pos),
+                body_pos,
+            )
+            for sample_positions in positions[mask]
+        ]
+        wrist_trace = (
+            mean_positions[:, wrist_j, :]
+            - mean_positions[:, spine3_j, :]
+            + display_spine_pos
+        )
+
+        cluster_body_cutoffs.append(body_cutoff)
+        cluster_individual_previews.append(individual_previews)
+        cluster_wrist_traces.append(wrist_trace)
+        cluster_counts.append(int(mask.sum()))
+    print(
+        "[timing] position cluster picker precompute: "
+        f"{time.perf_counter() - precompute_t0:.3f}s"
+    )
+
+    current_body: np.ndarray | None = None
+    if current_arm_aa is not None:
+        current_body = _merge_arm(
+            fk.full_body_positions(current_arm_aa, spine_pos, spine_aa), body_pos
+        )
+
+    all_cutoffs = np.stack(cluster_body_cutoffs, axis=0).reshape(-1, 3)
+    all_ind_previews = np.vstack([p for ip in cluster_individual_previews for p in ip])
+    all_wrists = np.concatenate(cluster_wrist_traces, axis=0)
+    extra = [current_body.reshape(-1, 3)] if current_body is not None else []
+    all_pts = np.vstack([all_cutoffs, all_ind_previews, all_wrists, *extra])
+    margin = 0.05
+    lims = [
+        (float(all_pts[:, d].min()) - margin, float(all_pts[:, d].max()) + margin)
+        for d in range(3)
+    ]
+
+    figure_t0 = time.perf_counter()
+    fig, axes, panel_arm_lines, panel_arm_scats = _build_figure(
+        unique_labels,
+        cluster_body_cutoffs,
+        cluster_wrist_traces,
+        cluster_counts,
+        lims,
+        cluster_individual_previews=cluster_individual_previews,
+        current_body=current_body,
+    )
+    print(
+        "[timing] position cluster picker figure build: "
+        f"{time.perf_counter() - figure_t0:.3f}s"
+    )
+
+    state: dict = {"selected": None}
+
+    def _set_selected(idx: int) -> None:
+        state["selected"] = idx
+        for i, (arm_lines, arm_scat) in enumerate(
+            zip(panel_arm_lines, panel_arm_scats)
+        ):
+            color = _COLOR_SELECTED if i == idx else _COLOR_ARM
+            for ln in arm_lines:
+                ln.set_color(color)
+            arm_scat.set_color(color)
+            axes[i].set_facecolor("#FFF3E0" if i == idx else "white")
+        fig.canvas.draw_idle()
+
+    def _on_click(event: "matplotlib.backend_bases.MouseEvent") -> None:
+        if event.inaxes is None:
+            return
+        for i, ax in enumerate(axes):
+            if event.inaxes is ax:
+                _set_selected(i)
+                return
+
+    fig.canvas.mpl_connect("button_press_event", _on_click)
+
+    btn_ax = fig.add_axes([0.38, 0.04, 0.24, 0.08])
+    btn = Button(btn_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
+
+    def _on_confirm(_event: object) -> None:
+        if state["selected"] is None:
+            return
+        plt.close(fig)
+
+    btn.on_clicked(_on_confirm)
+    fig.suptitle(
+        "Click a cluster to select it, then click Confirm", fontsize=10, y=0.97
+    )
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    interaction_t0 = time.perf_counter()
+    plt.show(block=True)
+    print(
+        "[timing] position cluster picker interaction/display: "
+        f"{time.perf_counter() - interaction_t0:.3f}s"
+    )
 
     if state["selected"] is None:
         raise RuntimeError("Window closed without selecting a cluster.")

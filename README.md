@@ -195,16 +195,15 @@ uv run python -m uncertain_feedback.planners.run \
 #### with cartesian goal
 ```
 uv run python -m uncertain_feedback.planners.run \
-    --planner arm_mpc_cartesian \
-    --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
-    --pose "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt" \
-    --text "raise my left arm" \
-    --goal-pos 0.3 0.5 0.1 \
-    --diffusion-samples 10 \
-    <!-- --auto-cluster 0 \ -->
-    --save out.mp4 \
-    --steps 750 \
-    --live
+  --planner arm_mpc_cartesian \
+  --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
+  --pose "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt" \
+  --text "raise my left arm" \
+  --goal-pos 0.3 0.5 0 \
+  --diffusion-samples 200 \
+  --save out.mp4 \
+  --steps 750 \
+  --live
 ```
 
 

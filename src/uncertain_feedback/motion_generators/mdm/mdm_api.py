@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -53,10 +54,12 @@ from uncertain_feedback.consts import MDM_MODEL_WEIGHTS_PATH, MDM_ROOT
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     HmlArmFeatureInfo,
     hml263_batch_to_smpl_body_pose,
+    hml263_batch_to_smpl_positions,
     hml263_to_smpl_body_pose,
     smpl_arm_aa_to_hml263_frame,
     smpl_body_pose_to_arm_aa,
     smpl_body_pose_to_positions,
+    smpl_positions_batch_to_body_pose,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
@@ -64,6 +67,12 @@ _MDM_SUBDIR = MDM_ROOT / "motion-diffusion-model"
 
 _MAX_FRAMES = 196  # HumanML3D hard limit
 _FPS = 20  # HumanML3D frame rate
+
+
+def _sync_cuda_if_needed(torch_module: Any) -> None:
+    """Synchronize CUDA before wall-clock timings when a GPU is active."""
+    if torch_module.cuda.is_available():
+        torch_module.cuda.synchronize()
 
 
 class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
@@ -454,6 +463,8 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
 
         # --- Run diffusion sampling ------------------------------------------
         print(f"Generating motion for: '{text}' ({n_frames} frames)…")
+        _sync_cuda_if_needed(torch)
+        diffusion_t0 = time.perf_counter()
         sample = diffusion.p_sample_loop(
             model,
             (num_samples, model.njoints, model.nfeats, n_frames),
@@ -466,6 +477,8 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             noise=None,
             const_noise=False,
         )
+        _sync_cuda_if_needed(torch)
+        print(f"[timing] diffusion sampling: {time.perf_counter() - diffusion_t0:.3f}s")
         # sample: (1, 263, 1, n_frames) — normalized HumanML3D
 
         # --- Optionally save a full-body visualization MP4 -------------------
@@ -514,17 +527,154 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         if num_samples == 1:
             # Single-sample fast path: no ThreadPoolExecutor overhead.
             hml_vec = sample[0, :, 0, :].T  # (n_frames, 263)
+            convert_t0 = time.perf_counter()
             body_pose = hml263_to_smpl_body_pose(
                 hml_vec, data, model, self._fk.tpose_all_joints
             )  # (n_frames, 21, 3)
+            print(
+                "[timing] HML-to-arm conversion: "
+                f"{time.perf_counter() - convert_t0:.3f}s"
+            )
             return smpl_body_pose_to_arm_aa(body_pose)  # (n_frames, 4, 3)
 
         # Batch path: one rot2xyz call + parallel IK across all samples.
         # sample: (num_samples, 263, 1, n_frames) → (num_samples, n_frames, 263)
         hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
+        convert_t0 = time.perf_counter()
         body_pose_batch = hml263_batch_to_smpl_body_pose(
             hml_vecs, data, model, self._fk.tpose_all_joints
         )  # (num_samples, n_frames, 21, 3)
+        print(
+            "[timing] HML-to-arm conversion total: "
+            f"{time.perf_counter() - convert_t0:.3f}s"
+        )
         return smpl_body_pose_to_arm_aa(
             body_pose_batch
         )  # (num_samples, n_frames, 4, 3)
+
+    def generate_left_arm_position_samples(  # pylint: disable=too-many-locals
+        self,
+        text: str,
+        motion_length_seconds: float = 6.0,
+        start_pose: np.ndarray | None = None,
+        num_samples: int = 1,
+    ) -> np.ndarray:
+        """Generate MDM samples and return SMPL XYZ positions without IK.
+
+        This is intended for UQ clustering and preview rendering.  It runs the
+        same batched diffusion process as :meth:`generate_left_arm_trajectory`,
+        then stops after HML recovery / ``rot2xyz`` instead of converting every
+        frame to local arm axis-angles.
+
+        Returns:
+            ``(num_samples, n_frames, 22, 3)`` global SMPL joint positions.
+        """
+        self._ensure_loaded()
+        if num_samples < 1:
+            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
+        assert self._not_l_arm_mask is not None
+
+        # pylint: disable=import-outside-toplevel,import-error
+        import torch
+        from data_loaders.tensors import collate
+
+        dist_util = self._dist_util
+        model = self._model
+        diffusion = self._diffusion
+        data = self._data
+        args = self._args
+
+        n_frames = min(_MAX_FRAMES, int(motion_length_seconds * _FPS))
+
+        collate_args = [
+            {"inp": torch.zeros(n_frames), "tokens": None, "lengths": n_frames}
+        ]
+        collate_args = [{**arg, "text": text} for arg in collate_args]  # type: ignore[dict-item]
+        _, model_kwargs = collate(collate_args)
+
+        for key in ("mask", "lengths"):
+            if key in model_kwargs["y"] and hasattr(model_kwargs["y"][key], "to"):
+                t = model_kwargs["y"][key].to(dist_util.dev())
+                if num_samples > 1 and t.shape[0] == 1:
+                    t = t.repeat(num_samples, *([1] * (t.dim() - 1)))
+                model_kwargs["y"][key] = t
+
+        start_frame = torch.tensor(
+            start_pose, dtype=torch.float32, device=dist_util.dev()
+        ).unsqueeze(-1)
+        input_motions = (
+            start_frame.unsqueeze(0).unsqueeze(-1).repeat(num_samples, 1, 1, n_frames)
+        )
+        model_kwargs["y"]["inpainted_motion"] = input_motions
+
+        mask_tensor = torch.tensor(
+            self._not_l_arm_mask, dtype=torch.bool, device=input_motions.device
+        )
+        model_kwargs["y"]["inpainting_mask"] = (
+            mask_tensor.unsqueeze(0)
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+            .repeat(num_samples, 1, 1, n_frames)
+        )
+        model_kwargs["y"]["inpainting_mask"][..., :10] = True
+
+        model_kwargs["y"]["scale"] = (
+            torch.ones(num_samples, device=dist_util.dev()) * args.guidance_param
+        )
+
+        print(f"Generating motion for: '{text}' ({n_frames} frames)…")
+        _sync_cuda_if_needed(torch)
+        diffusion_t0 = time.perf_counter()
+        sample = diffusion.p_sample_loop(
+            model,
+            (num_samples, model.njoints, model.nfeats, n_frames),
+            clip_denoised=False,
+            model_kwargs=model_kwargs,
+            skip_timesteps=0,
+            init_image=None,
+            progress=True,
+            dump_steps=None,
+            noise=None,
+            const_noise=False,
+        )
+        _sync_cuda_if_needed(torch)
+        print(f"[timing] diffusion sampling: {time.perf_counter() - diffusion_t0:.3f}s")
+
+        convert_t0 = time.perf_counter()
+        hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
+        positions = hml263_batch_to_smpl_positions(hml_vecs, data, model)
+        print(
+            "[timing] HML-to-position conversion total: "
+            f"{time.perf_counter() - convert_t0:.3f}s"
+        )
+        return positions
+
+    def smpl_positions_to_left_arm_trajectory(
+        self, positions: np.ndarray
+    ) -> np.ndarray:
+        """Convert SMPL XYZ positions to a left-arm axis-angle trajectory.
+
+        Args:
+            positions: ``(n_frames, 22, 3)`` or ``(n_samples, n_frames, 22, 3)``
+                global SMPL joint positions.
+
+        Returns:
+            ``(n_frames, 4, 3)`` for a single trajectory, otherwise
+            ``(n_samples, n_frames, 4, 3)``.
+        """
+        self._ensure_loaded()
+        positions = np.asarray(positions, dtype=np.float64)
+        single = positions.ndim == 3
+        if single:
+            positions = positions[None, ...]
+
+        convert_t0 = time.perf_counter()
+        body_pose = smpl_positions_batch_to_body_pose(
+            positions, self._fk.tpose_all_joints
+        )
+        print(
+            "[timing] selected position-to-arm IK total: "
+            f"{time.perf_counter() - convert_t0:.3f}s"
+        )
+        arm_aa = smpl_body_pose_to_arm_aa(body_pose)
+        return arm_aa[0] if single else arm_aa

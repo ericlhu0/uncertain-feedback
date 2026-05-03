@@ -12,6 +12,7 @@ uncertainty-aware MDM trajectory selection via:
 from __future__ import annotations
 
 import argparse
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,7 +20,10 @@ import numpy as np
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.uncertainty.base import TrajectoryClusterer
-from uncertain_feedback.uncertainty.cluster_picker import pick_cluster
+from uncertain_feedback.uncertainty.cluster_picker import (
+    pick_cluster,
+    pick_cluster_positions,
+)
 from uncertain_feedback.uncertainty.xyz_clusterer import XyzPositionClusterer
 
 
@@ -131,38 +135,88 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         .mdm_api.MdmMotionGenerator.build_pose_from_arm_aa`.
         """
         print(f"Generating {self._n_diffusion_samples} MDM samples for: '{text}' …")
-        trajectories = gen.generate_left_arm_trajectory(
-            text,
-            start_pose=start_pose,
-            num_samples=self._n_diffusion_samples,
-        )  # (n_diffusion_samples, n_frames, 4, 3)
+        generation_t0 = time.perf_counter()
+        use_position_uq = hasattr(self._clusterer, "cluster_positions")
+        if use_position_uq:
+            positions = gen.generate_left_arm_position_samples(
+                text,
+                start_pose=start_pose,
+                num_samples=self._n_diffusion_samples,
+            )  # (n_diffusion_samples, n_frames, 22, 3)
+            trajectories = None
+        else:
+            positions = None
+            trajectories = gen.generate_left_arm_trajectory(
+                text,
+                start_pose=start_pose,
+                num_samples=self._n_diffusion_samples,
+            )  # (n_diffusion_samples, n_frames, 4, 3)
+        print(
+            f"[timing] MDM generation pipeline: {time.perf_counter() - generation_t0:.3f}s"
+        )
 
         print("Clustering trajectories …")
-        labels = self._clusterer.cluster(trajectories)  # (num_samples,)
+        cluster_t0 = time.perf_counter()
+        if positions is not None:
+            labels = self._clusterer.cluster_positions(positions)  # type: ignore[attr-defined]
+        else:
+            assert trajectories is not None
+            labels = self._clusterer.cluster(trajectories)
+        print(f"[timing] clustering total: {time.perf_counter() - cluster_t0:.3f}s")
         print(f"labels shape: {labels.shape}")
 
         if auto_cluster is not None:
             chosen_label = int(auto_cluster)
             print(f"Auto-selected cluster {chosen_label} (headless mode).")
         else:
-            fk = self._vis_config.fk if self._vis_config is not None else SmplLeftArmFK()
-            spine_pos = self._vis_config.spine_pos if self._vis_config is not None else None
-            spine_aa = self._vis_config.spine_aa if self._vis_config is not None else None
-            body_pos = self._vis_config.body_pos if self._vis_config is not None else None
-            chosen_label = pick_cluster(
-                trajectories,
-                labels,
-                fk=fk,
-                trajectory_fraction=self.trajectory_fraction,
-                spine_pos=spine_pos,
-                spine_aa=spine_aa,
-                body_pos=body_pos,
-                current_arm_aa=current_arm_aa,
+            fk = (
+                self._vis_config.fk if self._vis_config is not None else SmplLeftArmFK()
+            )
+            spine_pos = (
+                self._vis_config.spine_pos if self._vis_config is not None else None
+            )
+            spine_aa = (
+                self._vis_config.spine_aa if self._vis_config is not None else None
+            )
+            body_pos = (
+                self._vis_config.body_pos if self._vis_config is not None else None
+            )
+            picker_t0 = time.perf_counter()
+            if positions is not None:
+                chosen_label = pick_cluster_positions(
+                    positions,
+                    labels,
+                    fk=fk,
+                    trajectory_fraction=self.trajectory_fraction,
+                    spine_pos=spine_pos,
+                    spine_aa=spine_aa,
+                    body_pos=body_pos,
+                    current_arm_aa=current_arm_aa,
+                )
+            else:
+                assert trajectories is not None
+                chosen_label = pick_cluster(
+                    trajectories,
+                    labels,
+                    fk=fk,
+                    trajectory_fraction=self.trajectory_fraction,
+                    spine_pos=spine_pos,
+                    spine_aa=spine_aa,
+                    body_pos=body_pos,
+                    current_arm_aa=current_arm_aa,
+                )
+            print(
+                f"[timing] cluster picker total: {time.perf_counter() - picker_t0:.3f}s"
             )
             print(f"User selected cluster {chosen_label}.")
 
-        chosen_mean = trajectories[labels == chosen_label].mean(axis=0)
-        # (n_frames, 4, 3)
+        if positions is not None:
+            selected_positions = positions[labels == chosen_label].mean(axis=0)
+            chosen_mean = gen.smpl_positions_to_left_arm_trajectory(selected_positions)
+        else:
+            assert trajectories is not None
+            chosen_mean = trajectories[labels == chosen_label].mean(axis=0)
+        # chosen_mean: (n_frames, 4, 3)
 
         n_frames = chosen_mean.shape[0]
         cutoff = max(1, round(n_frames * self.trajectory_fraction))

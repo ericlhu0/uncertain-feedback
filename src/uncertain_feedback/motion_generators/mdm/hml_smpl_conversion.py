@@ -59,7 +59,9 @@ Inverse pipeline (SMPL → HML, for inpainting)::
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
+from os import cpu_count
 from pathlib import Path
 
 import numpy as np
@@ -409,7 +411,6 @@ def hml263_to_smpl_body_pose(
     """
     # Import here so the module remains importable without MDM on sys.path.
     # pylint: disable=import-outside-toplevel,import-error
-    import torch
     from data_loaders.humanml.scripts.motion_process import recover_from_ric
 
     # inv_transform uses CPU numpy arrays internally; keep tensor on CPU.
@@ -484,17 +485,37 @@ def hml263_batch_to_smpl_body_pose(  # pylint: disable=too-many-locals
     Returns:
         ``(n_samples, n_frames, 21, 3)`` SMPL body_pose axis-angles.
     """
-    # pylint: disable=import-outside-toplevel,import-error
-    from concurrent.futures import ThreadPoolExecutor
+    positions_all = hml263_batch_to_smpl_positions(hml_vecs, dataset, model)
+    return smpl_positions_batch_to_body_pose(positions_all, tpose_22)
 
-    import torch
+
+def hml263_batch_to_smpl_positions(  # pylint: disable=too-many-locals
+    hml_vecs: "torch.Tensor",  # type: ignore[name-defined]  # noqa: F821
+    dataset,
+    model,
+) -> np.ndarray:
+    """Convert normalized HumanML3D vectors to batched SMPL XYZ positions.
+
+    This is the cheap part of the HML → SMPL pipeline.  It avoids the
+    per-frame IK needed to recover local axis-angle rotations, so it is the
+    preferred representation for UQ clustering and preview rendering.
+
+    Args:
+        hml_vecs: ``(n_samples, n_frames, 263)`` normalized HumanML3D tensor.
+        dataset: HumanML3D ``DataLoader`` returned by ``get_dataset_loader``.
+        model:   MDM model — must expose ``model.rot2xyz``.
+
+    Returns:
+        ``(n_samples, n_frames, 22, 3)`` global SMPL joint positions.
+    """
+    # pylint: disable=import-outside-toplevel,import-error
     from data_loaders.humanml.scripts.motion_process import recover_from_ric
 
     hml_vecs = hml_vecs.float().cpu()
-    n_samples, n_frames, _ = hml_vecs.shape
 
     # --- De-normalize all samples at once -----------------------------------
     # inv_transform expects (batch, nfeats=1, seq_len, 263).
+    hml_t0 = time.perf_counter()
     unnorm = dataset.dataset.t2m_dataset.inv_transform(
         hml_vecs.unsqueeze(1)  # (n_samples, 1, n_frames, 263)
     ).float()
@@ -504,8 +525,10 @@ def hml263_batch_to_smpl_body_pose(  # pylint: disable=too-many-locals
     ric = recover_from_ric(unnorm, 22)
     # (n_samples, 22, 3, n_frames)
     ric = ric.view(-1, *ric.shape[2:]).permute(0, 2, 3, 1)
+    print(f"[timing] HML recovery: {time.perf_counter() - hml_t0:.3f}s")
 
     # Single rot2xyz call for the full batch (was n_samples separate calls).
+    rot2xyz_t0 = time.perf_counter()
     xyz = model.rot2xyz(
         x=ric,
         mask=None,
@@ -521,6 +544,28 @@ def hml263_batch_to_smpl_body_pose(  # pylint: disable=too-many-locals
     )
     # xyz: (n_samples, 22, 3, n_frames) → (n_samples, n_frames, 22, 3)
     positions_all: np.ndarray = xyz.permute(0, 3, 1, 2).cpu().numpy()
+    print(f"[timing] rot2xyz: {time.perf_counter() - rot2xyz_t0:.3f}s")
+    return positions_all
+
+
+def smpl_positions_batch_to_body_pose(
+    positions_all: np.ndarray,
+    tpose_22: np.ndarray,
+) -> np.ndarray:
+    """Convert batched SMPL XYZ positions to local axis-angle body poses.
+
+    Args:
+        positions_all: ``(n_samples, n_frames, 22, 3)`` global joint positions.
+        tpose_22:      ``(22, 3)`` T-pose positions.
+
+    Returns:
+        ``(n_samples, n_frames, 21, 3)`` SMPL body_pose axis-angles.
+    """
+    # pylint: disable=import-outside-toplevel
+    from concurrent.futures import ThreadPoolExecutor
+
+    positions_all = np.asarray(positions_all, dtype=np.float64)
+    n_samples, n_frames = positions_all.shape[:2]
 
     # --- IK: parallelise across samples -------------------------------------
     # positions_to_smpl_body_pose is pure numpy/scipy; Rotation.align_vectors
@@ -533,7 +578,14 @@ def hml263_batch_to_smpl_body_pose(  # pylint: disable=too-many-locals
             ]
         )  # (n_frames, 21, 3)
 
-    with ThreadPoolExecutor(max_workers=n_samples) as pool:
+    max_workers = max(1, min(n_samples, cpu_count() or 1))
+    print(
+        f"[timing] IK setup: {n_samples} samples x {n_frames} frames "
+        f"using {max_workers} workers"
+    )
+    ik_t0 = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         body_poses = list(pool.map(_ik_sample, positions_all))
+    print(f"[timing] IK: {time.perf_counter() - ik_t0:.3f}s")
 
     return np.stack(body_poses)  # (n_samples, n_frames, 21, 3)

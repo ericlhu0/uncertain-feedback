@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import (
     CONTROLLED_LEFT_ARM_JOINT_INDICES_22,
     SmplLeftArmFK,
@@ -115,9 +116,11 @@ class SmplLeftArmMPC:
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
         fixed_collar_aa: np.ndarray | None = None,
+        extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
         self._config = _MpcConfig(horizon, n_mpc_samples, max_angle_delta)
         self.visualize = visualize
+        self._extra_costs = extra_costs or CompositeTrajectoryCost()
 
         self._goals: deque[np.ndarray] = deque(
             [np.asarray(g, dtype=np.float64) for g in goals] if goals else []
@@ -208,7 +211,8 @@ class SmplLeftArmMPC:
         Returns:
             ``(N,)`` cost per trajectory.
         """
-        return ((q_trajs[:, -1] - target_q[np.newaxis]) ** 2).sum(axis=(-2, -1))
+        joint_cost = ((q_trajs[:, -1] - target_q[np.newaxis]) ** 2).sum(axis=(-2, -1))
+        return joint_cost + self._extra_costs(q_trajs)
 
     # ------------------------------------------------------------------
     # Public API

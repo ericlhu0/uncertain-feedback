@@ -17,6 +17,7 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.uncertainty.base import TrajectoryClusterer
@@ -79,6 +80,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         n_diffusion_samples: int = 512,
         n_clusters: int = 3,
         clusterer: TrajectoryClusterer | None = None,
+        extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
         super().__init__(
             horizon=horizon,
@@ -94,6 +96,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             spine3_aa=spine3_aa,
             fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
+            extra_costs=extra_costs,
         )
         self._n_diffusion_samples = n_diffusion_samples
         if clusterer is not None:

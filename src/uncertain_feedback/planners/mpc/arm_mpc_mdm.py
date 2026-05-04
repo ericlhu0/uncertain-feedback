@@ -18,10 +18,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_mpc import (
-    SmplLeftArmMPC,
-    _compose_rotvec,
     _VisConfig,
+    _compose_rotvec,
+    SmplLeftArmMPC,
 )
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.planners.mpc.visualizer import (
     _MDM_COLOR,
@@ -84,6 +85,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         spine3_aa: np.ndarray | None = None,
         fixed_collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
+        extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
         # Base sets up _config, _goals deque, _prev_best, _vis.
         # Pass visualize=False; MDM overrides vis config below.
@@ -98,6 +100,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
             fixed_collar_aa=fixed_collar_aa,
+            extra_costs=extra_costs,
         )
         self.advance_threshold = advance_threshold
         self.trajectory_fraction = trajectory_fraction

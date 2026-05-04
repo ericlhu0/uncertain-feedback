@@ -18,6 +18,7 @@ from uncertain_feedback.planners.mpc.arm_mpc import (
 )
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.planners.mpc.visualizer import (
     ArmVisualizer,
@@ -81,6 +82,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         n_diffusion_samples: int = 512,
         n_clusters: int = 3,
         clusterer: TrajectoryClusterer | None = None,
+        extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
         if fk is None:
             raise ValueError("fk is required for LeftArmMPCCartesian.")
@@ -101,6 +103,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
             n_diffusion_samples=n_diffusion_samples,
             n_clusters=n_clusters,
             clusterer=clusterer,
+            extra_costs=extra_costs,
         )
         self._cartesian_goals: deque[np.ndarray] = deque(
             np.asarray(g, dtype=np.float64) for g in cartesian_goals
@@ -158,7 +161,8 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
             terminal_q, self._fixed_collar_aa, self._spine3_pos, self._spine3_aa
         )  # (N, 5, 3)
         wrist_rel = positions[:, -1] - self._spine3_pos  # (N, 3)
-        return ((wrist_rel - target) ** 2).sum(axis=-1)  # (N,)
+        wrist_cost = ((wrist_rel - target) ** 2).sum(axis=-1)  # (N,)
+        return wrist_cost + self._extra_costs(q_trajs)
 
     # ------------------------------------------------------------------
     # solve override

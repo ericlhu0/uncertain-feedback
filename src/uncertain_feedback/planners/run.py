@@ -3,16 +3,16 @@
 Usage examples::
 
     # UQ planner with live GUI (default pose + default text prompt)
-    python -m uncertain_feedback.planners.run --live
+    python -m uncertain_feedback.planners.run --mpc-config mpc.yaml --live
 
     # Save a compact video without watching
-    python -m uncertain_feedback.planners.run --planner arm_mpc_mdm --text "wave left arm" --save out.mp4
+    python -m uncertain_feedback.planners.run --mpc-config mpc.yaml --text "wave left arm" --save out.mp4
 
     # Custom starting pose and arm override
-    python -m uncertain_feedback.planners.run --pose my_pose.pt --arm my_arm.npy --live
+    python -m uncertain_feedback.planners.run --mpc-config mpc.yaml --pose my_pose.pt --arm my_arm.npy --live
 
     # Plain MPC (no MDM)
-    python -m uncertain_feedback.planners.run --planner arm_mpc --live --steps 300
+    python -m uncertain_feedback.planners.run --mpc-config plain_mpc.yaml --live
 """
 
 from __future__ import annotations
@@ -26,12 +26,15 @@ import numpy as np
 from uncertain_feedback.consts import MDM_ROOT
 from uncertain_feedback.planners.mpc import (
     ArmVisualizer,
+    LeftArmCartesianMPCNoMDM,
     LeftArmMPCCartesian,
     LeftArmMPCMDM,
     LeftArmMPCMDMUQ,
     SmplLeftArmFK,
     SmplLeftArmMPC,
 )
+from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.costs import MpcCostContext, build_extra_costs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,10 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
-        "--planner",
-        choices=["arm_mpc", "arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian"],
-        default="arm_mpc_mdm_uq",
-        help="Planner to run",
+        "--mpc-config",
+        type=Path,
+        required=True,
+        dest="mpc_config",
+        help="Required YAML file with MPC planner, controller settings, and costs.",
     )
 
     # --- Model ---
@@ -64,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to body pose .pt file (HML263 format). "
             f"Defaults to {MDM_ROOT}/sitting_pose.pt. "
-            "Ignored for --planner arm_mpc."
+            "Ignored when mpc-config planner is not MDM-backed."
         ),
     )
     p.add_argument(
@@ -76,11 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
             "A legacy (4, 3) file is accepted and its first row fixes the collar."
         ),
     )
-
-    # --- MPC params ---
-    p.add_argument("--steps", type=int, default=750, help="MPC steps to run")
-    p.add_argument("--samples", type=int, default=512, help="CEM sample count")
-    p.add_argument("--horizon", type=int, default=10, help="MPC horizon length")
 
     # --- Visualization ---
     p.add_argument(
@@ -130,62 +129,6 @@ def build_parser() -> argparse.ArgumentParser:
         dest="frozen_body",
         help="Freeze non-left-arm body features during MDM generation.",
     )
-    p.add_argument(
-        "--trajectory-fraction",
-        type=float,
-        default=LeftArmMPCMDM.TRAJECTORY_FRACTION,
-        dest="trajectory_fraction",
-        help="Fraction of MDM trajectory to enqueue",
-    )
-
-    # --- UQ args (arm_mpc_mdm_uq) ---
-    p.add_argument(
-        "--diffusion-samples",
-        type=int,
-        default=128,
-        dest="diffusion_samples",
-        help="Number of MDM diffusion samples to draw for UQ (uq planner only)",
-    )
-    p.add_argument(
-        "--n-clusters",
-        type=int,
-        default=3,
-        dest="n_clusters",
-        help="Number of trajectory clusters (uq planner only)",
-    )
-    p.add_argument(
-        "--auto-cluster",
-        type=int,
-        default=None,
-        dest="auto_cluster",
-        help=(
-            "Skip the interactive cluster picker and use this cluster index (0-based). "
-            "Required when running headlessly (no display)."
-        ),
-    )
-
-    # --- Cartesian goal args (arm_mpc_cartesian) ---
-    p.add_argument(
-        "--goal-pos",
-        type=float,
-        nargs=3,
-        action="append",
-        metavar=("X", "Y", "Z"),
-        dest="goal_pos",
-        help=(
-            "Target wrist position in spine3-relative coordinates (X Y Z, metres). "
-            "Repeat to enqueue multiple goals. "
-            "Required for --planner arm_mpc_cartesian."
-        ),
-    )
-    p.add_argument(
-        "--cartesian-threshold",
-        type=float,
-        default=0.05,
-        dest="cartesian_threshold",
-        help="Cartesian L2 distance (m) to consider a wrist goal reached (arm_mpc_cartesian only).",
-    )
-
     return p
 
 
@@ -205,8 +148,9 @@ def _get_vis(mpc: SmplLeftArmMPC) -> ArmVisualizer | None:
 
 def main() -> None:
     args = build_parser().parse_args()
+    cfg = load_mpc_config(args.mpc_config)
 
-    uses_mdm = args.planner in ("arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian")
+    uses_mdm = cfg.planner in ("arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian")
     visualize = args.live or (args.save is not None)
     # Compact (1-panel) rendering when saving without live view — faster to render and encode
     compact = (args.save is not None) and not args.live
@@ -245,6 +189,18 @@ def main() -> None:
             arm_aa = arm_override
 
     fk = SmplLeftArmFK()
+    cost_context = MpcCostContext(
+        fk=fk,
+        spine3_pos=np.asarray(
+            spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos,
+            dtype=np.float64,
+        ),
+        spine3_aa=np.asarray(
+            spine3_aa if spine3_aa is not None else np.zeros(3), dtype=np.float64
+        ),
+        fixed_collar_aa=np.asarray(fixed_collar_aa, dtype=np.float64),
+    )
+    extra_costs = build_extra_costs(cfg.costs, cost_context)
 
     # Default goal: arm raised from the initial pose
     default_goal = arm_aa.copy() + np.array(
@@ -253,16 +209,23 @@ def main() -> None:
 
     # --- Build planner ---
     common: dict = dict(
-        horizon=args.horizon,
-        n_mpc_samples=args.samples,
+        horizon=cfg.horizon,
+        n_mpc_samples=cfg.n_mpc_samples,
+        max_angle_delta=cfg.max_angle_delta,
+        goal_threshold=cfg.goal_threshold,
         visualize=visualize,
         fk=fk,
+        extra_costs=extra_costs,
     )
 
     mpc: SmplLeftArmMPC
-    if args.planner == "arm_mpc":
-        mpc = SmplLeftArmMPC(**common, goals=[default_goal])
-    elif args.planner == "arm_mpc_mdm":
+    if cfg.planner == "arm_mpc":
+        mpc = SmplLeftArmMPC(
+            **common,
+            goals=[default_goal],
+            fixed_collar_aa=fixed_collar_aa,
+        )
+    elif cfg.planner == "arm_mpc_mdm":
         mpc = LeftArmMPCMDM(
             **common,
             goals=[default_goal],
@@ -270,12 +233,32 @@ def main() -> None:
             spine3_aa=spine3_aa,
             fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
-            trajectory_fraction=args.trajectory_fraction,
+            advance_threshold=cfg.advance_threshold,
+            trajectory_fraction=cfg.trajectory_fraction,
         )
-    elif args.planner == "arm_mpc_cartesian":
-        if not args.goal_pos:
+    elif cfg.planner == "leftarmcartesianmpcnomdm":
+        if not cfg.cartesian.goals:
             raise ValueError(
-                "--goal-pos X Y Z is required for --planner arm_mpc_cartesian."
+                "cartesian.goals is required when planner is leftarmcartesianmpcnomdm."
+            )
+        init_wrist_rel = (
+            fk.fk_controlled(arm_aa, fixed_collar_aa, spine3_pos, spine3_aa)[-1]
+            - fk.tpose_spine3_pos
+        )
+        print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
+        mpc = LeftArmCartesianMPCNoMDM(
+            cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
+            initial_arm_aa=arm_aa,
+            cartesian_threshold=cfg.cartesian.threshold,
+            **common,
+            spine3_pos=spine3_pos,
+            spine3_aa=spine3_aa,
+            fixed_collar_aa=fixed_collar_aa,
+        )
+    elif cfg.planner == "arm_mpc_cartesian":
+        if not cfg.cartesian.goals:
+            raise ValueError(
+                "cartesian.goals is required when planner is arm_mpc_cartesian."
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
         init_wrist_rel = (
@@ -284,17 +267,18 @@ def main() -> None:
         )
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = LeftArmMPCCartesian(
-            cartesian_goals=[np.array(g) for g in args.goal_pos],
+            cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
             initial_arm_aa=arm_aa,
-            cartesian_threshold=args.cartesian_threshold,
+            cartesian_threshold=cfg.cartesian.threshold,
             **common,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
             fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
-            trajectory_fraction=args.trajectory_fraction,
-            n_diffusion_samples=args.diffusion_samples,
-            n_clusters=args.n_clusters,
+            advance_threshold=cfg.advance_threshold,
+            trajectory_fraction=cfg.trajectory_fraction,
+            n_diffusion_samples=cfg.uq.diffusion_samples,
+            n_clusters=cfg.uq.n_clusters,
         )
     else:
         mpc = LeftArmMPCMDMUQ(
@@ -304,9 +288,10 @@ def main() -> None:
             spine3_aa=spine3_aa,
             fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
-            trajectory_fraction=args.trajectory_fraction,
-            n_diffusion_samples=args.diffusion_samples,
-            n_clusters=args.n_clusters,
+            advance_threshold=cfg.advance_threshold,
+            trajectory_fraction=cfg.trajectory_fraction,
+            n_diffusion_samples=cfg.uq.diffusion_samples,
+            n_clusters=cfg.uq.n_clusters,
         )
 
     # Propagate capture / compact flags into the vis config
@@ -323,7 +308,7 @@ def main() -> None:
     mdm_triggered = False
     pre_mdm_vis: ArmVisualizer | None = None
 
-    for step in tqdm(range(args.steps), desc="MPC", unit="step"):
+    for step in tqdm(range(cfg.steps), desc="MPC", unit="step"):
         # Trigger MDM generation at the configured step
         if uses_mdm and args.text and step == args.text_time and not mdm_triggered:
             mdm_triggered = True
@@ -334,7 +319,7 @@ def main() -> None:
 
             current_pose = gen.build_pose_from_arm_aa(initial_pose, q)
 
-            if args.planner == "arm_mpc_mdm":
+            if cfg.planner == "arm_mpc_mdm":
                 traj = gen.generate_left_arm_trajectory(
                     args.text,
                     start_pose=current_pose,
@@ -352,7 +337,7 @@ def main() -> None:
                     args.text,
                     start_pose=current_pose,
                     current_arm_aa=q,
-                    auto_cluster=args.auto_cluster,
+                    auto_cluster=cfg.uq.auto_cluster,
                     mdm_frames=args.mdm_frames,
                     frozen_body=args.frozen_body,
                 )

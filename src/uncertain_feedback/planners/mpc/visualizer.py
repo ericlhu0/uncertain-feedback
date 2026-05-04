@@ -2,8 +2,8 @@
 """3D stick-figure visualizer for the SMPL left arm MPC.
 
 Draws the full 22-joint SMPL skeleton.  Non-arm joints are fixed at the
-T-pose; the left arm joints (collar, shoulder, elbow, wrist) are animated
-by :class:`SmplLeftArmMPC`.
+T-pose; the controlled left arm joints (shoulder, elbow, wrist) are animated
+by :class:`SmplLeftArmMPC`, with the collar fixed separately.
 
 Example::
 
@@ -14,8 +14,8 @@ Example::
     mpc = SmplLeftArmMPC(horizon=10, n_mpc_samples=512)
     vis = ArmVisualizer(fk)
 
-    initial_q = np.zeros((4, 3))
-    target_q  = np.array([[0, 0.3, 0], [0, 0.5, 0], [0, 0, 0.4], [0, 0, 0]])
+    initial_q = np.zeros((3, 3))
+    target_q  = np.array([[0, 0.5, 0], [0, 0, 0.4], [0, 0, 0]])
 
     fig, anim = vis.animate(mpc, initial_q, target_q, n_steps=40)
     plt.show()
@@ -113,6 +113,7 @@ class _LiveState:  # pylint: disable=too-many-instance-attributes
     artists2d: list[dict]
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
+    collar_aa: np.ndarray | None
     wrist_trace: list = dataclasses.field(default_factory=list)
     recorded_frames: list = dataclasses.field(default_factory=list)
     step: int = 0
@@ -172,8 +173,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         Args:
             mpc:        Configured :class:`SmplLeftArmMPC`.
-            initial_q:  ``(4, 3)`` starting axis-angle joint angles.
-            target_q:   ``(4, 3)`` target axis-angle joint angles.
+            initial_q:  ``(3, 3)`` controlled arm axis-angles.
+            target_q:   ``(3, 3)`` target controlled arm axis-angles.
             n_steps:    Number of MPC steps to simulate.
             spine3_pos: ``(3,)`` world position of spine3.
             spine3_aa:  ``(3,)`` world axis-angle of spine3.
@@ -207,11 +208,27 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         return fig, anim
 
+    def _full_body_positions(
+        self,
+        q: np.ndarray,
+        spine3_pos: np.ndarray | None = None,
+        spine3_aa: np.ndarray | None = None,
+        collar_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Compute body positions for either full-arm or controlled-arm state."""
+        q = np.asarray(q, dtype=np.float64)
+        if q.shape[-2] == 3:
+            return self.fk.full_body_positions_controlled(
+                q, collar_aa, spine3_pos, spine3_aa
+            )
+        return self.fk.full_body_positions(q, spine3_pos, spine3_aa)
+
     def open_live(
         self,
         target_q: np.ndarray,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
+        collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         compact: bool = False,
     ) -> None:
@@ -222,7 +239,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         responsive while Python keeps running.
 
         Args:
-            target_q:   ``(4, 3)`` target axis-angle joint angles (drawn static).
+            target_q:   ``(3, 3)`` target controlled arm axis-angles.
             spine3_pos: ``(3,)`` world position of spine3.
             spine3_aa:  ``(3,)`` world axis-angle of spine3.
             body_pos:   ``(22, 3)`` world positions for the static body
@@ -231,7 +248,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             compact:    If ``True``, build a single 3-D panel instead of the
                         full 6-panel layout.  Faster to render and encode.
         """
-        target_full = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
+        target_full = self._full_body_positions(
+            target_q, spine3_pos, spine3_aa, collar_aa
+        )
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
         # Use body reference + target to set axis limits
@@ -241,7 +260,13 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         plt.ion()
         fig, artists_3d, artists_2d = self._build_figure(
-            target_q, lims, spine3_pos, spine3_aa, body_pos=body_pos, compact=compact
+            target_q,
+            lims,
+            spine3_pos,
+            spine3_aa,
+            collar_aa=collar_aa,
+            body_pos=body_pos,
+            compact=compact,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -256,6 +281,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             artists2d=artists_2d,
             spine_pos=spine3_pos,
             spine_aa=spine3_aa,
+            collar_aa=collar_aa,
         )
 
     def update_step(
@@ -267,13 +293,15 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         """Update the live window with the current joint configuration.
 
         Args:
-            q:     ``(4, 3)`` current axis-angle joint angles.
+            q:     ``(3, 3)`` current controlled arm axis-angle joint angles.
             dist:  Distance to target (for title).
             color: Arm color.  Pass ``_MDM_COLOR`` when following an MDM
                    trajectory so the arm is visually distinct.
         """
         assert self._live is not None
-        pos = self.fk.full_body_positions(q, self._live.spine_pos, self._live.spine_aa)
+        pos = self._full_body_positions(
+            q, self._live.spine_pos, self._live.spine_aa, self._live.collar_aa
+        )
         arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
         self._live.wrist_trace.append(pos[_WRIST_IDX])
         trace_color = _MDM_COLOR if color == _MDM_COLOR else _TRACE_COLOR
@@ -318,13 +346,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         times — subsequent calls simply move the marker to the new pose.
 
         Args:
-            goal_q: ``(4, 3)`` axis-angle joint angles for the MDM trajectory's
-                    last frame ``[left_collar, left_shoulder, left_elbow,
-                    left_wrist]``.
+            goal_q: ``(3, 3)`` axis-angle joint angles for the MDM trajectory's
+                    last frame ``[left_shoulder, left_elbow, left_wrist]``.
         """
         assert self._live is not None, "update_mdm_goal() called before open_live()"
-        goal_full = self.fk.full_body_positions(
-            goal_q, self._live.spine_pos, self._live.spine_aa
+        goal_full = self._full_body_positions(
+            goal_q, self._live.spine_pos, self._live.spine_aa, self._live.collar_aa
         )
         arm_pts = goal_full[LEFT_ARM_JOINT_INDICES_22]
 
@@ -359,14 +386,14 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         calls simply move the ghost to the new pose.
 
         Args:
-            preview_q: ``(4, 3)`` axis-angle joint angles for the cutoff frame
-                       ``[left_collar, left_shoulder, left_elbow, left_wrist]``.
+            preview_q: ``(3, 3)`` axis-angle joint angles for the cutoff frame
+                       ``[left_shoulder, left_elbow, left_wrist]``.
         """
         assert (
             self._live is not None
         ), "update_trajectory_preview() called before open_live()"
-        preview_full = self.fk.full_body_positions(
-            preview_q, self._live.spine_pos, self._live.spine_aa
+        preview_full = self._full_body_positions(
+            preview_q, self._live.spine_pos, self._live.spine_aa, self._live.collar_aa
         )
         arm_pts = preview_full[LEFT_ARM_JOINT_INDICES_22]
 
@@ -396,10 +423,14 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         Args:
             world_pos: ``(3,)`` world-space position of the target wrist point.
         """
-        assert self._live is not None, "update_cartesian_target() called before open_live()"
+        assert (
+            self._live is not None
+        ), "update_cartesian_target() called before open_live()"
         for a3 in self._live.artists3d:
             a3["cartesian_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
-                [world_pos[0]], [world_pos[1]], [world_pos[2]]
+                [world_pos[0]],
+                [world_pos[1]],
+                [world_pos[2]],
             )
         for a2 in self._live.artists2d:
             a2["cartesian_goal_scat"].set_offsets(
@@ -487,6 +518,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         target_q: np.ndarray | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
+        collar_aa: np.ndarray | None = None,
         ax: Axes3D | None = None,
     ) -> Axes3D:
         """Plot a single full-body pose with the left arm set by ``q``."""
@@ -494,7 +526,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             fig = plt.figure(figsize=(6, 6))
             ax = fig.add_subplot(111, projection="3d")
 
-        pos = self.fk.full_body_positions(q, spine3_pos, spine3_aa)
+        pos = self._full_body_positions(q, spine3_pos, spine3_aa, collar_aa)
         tpose = self.fk.tpose_all_joints
 
         _draw_bones_3d(ax, tpose, _BODY_BONES, _BODY_COLOR, alpha=0.5, lw=1.5)
@@ -518,7 +550,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         )
 
         if target_q is not None:
-            tgt = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
+            tgt = self._full_body_positions(target_q, spine3_pos, spine3_aa, collar_aa)
             _draw_bones_3d(
                 ax,
                 tgt,
@@ -553,6 +585,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         lims: list[tuple[float, float]],
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,
+        collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         compact: bool = False,
     ) -> tuple[plt.Figure, list[dict], list[dict]]:
@@ -565,7 +598,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         Returns:
             ``(fig, artists_3d, artists_2d)``
         """
-        target_full = self.fk.full_body_positions(target_q, spine3_pos, spine3_aa)
+        target_full = self._full_body_positions(
+            target_q, spine3_pos, spine3_aa, collar_aa
+        )
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
         if compact:
@@ -669,8 +704,14 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 [], [], [], color=_MDM_COLOR, s=30, alpha=0.5, depthshade=False
             )
             cartesian_goal_scat = ax.scatter(
-                [], [], [], color="royalblue", s=200, marker="*",
-                depthshade=False, zorder=10,
+                [],
+                [],
+                [],
+                color="royalblue",
+                s=200,
+                marker="*",
+                depthshade=False,
+                zorder=10,
             )
             artists.append(
                 {
@@ -770,7 +811,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 [], [], color=_MDM_COLOR, s=28, alpha=0.5, zorder=4
             )
             cartesian_goal_scat = ax.scatter(
-                [], [], color="royalblue", s=200, marker="*", zorder=10,
+                [],
+                [],
+                color="royalblue",
+                s=200,
+                marker="*",
+                zorder=10,
             )
             artists.append(
                 {
@@ -803,7 +849,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         frames = []
         for step in range(n_steps + 1):
-            positions = self.fk.full_body_positions(current_q, spine3_pos, spine3_aa)
+            positions = self._full_body_positions(current_q, spine3_pos, spine3_aa)
             dist = float(np.linalg.norm(current_q - target_q))
             frames.append({"q": current_q.copy(), "positions": positions, "dist": dist})
             if step < n_steps:
@@ -826,7 +872,13 @@ def _compute_lims(
     margin: float = 0.05,
 ) -> list[tuple[float, float]]:
     """Compute per-axis limits spanning all frame positions and the target."""
-    target_full = fk.full_body_positions(target_q, spine3_pos, spine3_aa)
+    target_q = np.asarray(target_q, dtype=np.float64)
+    if target_q.shape[-2] == 3:
+        target_full = fk.full_body_positions_controlled(
+            target_q, None, spine3_pos, spine3_aa
+        )
+    else:
+        target_full = fk.full_body_positions(target_q, spine3_pos, spine3_aa)
     all_pts = np.vstack([f["positions"] for f in frames] + [target_full])
     return [
         (all_pts[:, i].min() - margin, all_pts[:, i].max() + margin) for i in range(3)
@@ -995,10 +1047,9 @@ if __name__ == "__main__":
     )
     demo_vis = ArmVisualizer(demo_fk)
 
-    demo_initial_q = np.zeros((4, 3))
+    demo_initial_q = np.zeros((3, 3))
     demo_target_q = np.array(
         [
-            [0.3, 0.3, 0.3],  # left_collar
             [0.0, -1.45, 0.0],  # left_shoulder
             [0.0, 0.0, 0.4],  # left_elbow
             [0.0, 0.0, 0.0],  # left_wrist

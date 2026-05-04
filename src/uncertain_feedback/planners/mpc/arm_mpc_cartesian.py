@@ -19,7 +19,11 @@ from uncertain_feedback.planners.mpc.arm_mpc import (
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
-from uncertain_feedback.planners.mpc.visualizer import ArmVisualizer, _MDM_COLOR, _TARGET_COLOR
+from uncertain_feedback.planners.mpc.visualizer import (
+    ArmVisualizer,
+    _MDM_COLOR,
+    _TARGET_COLOR,
+)
 from uncertain_feedback.uncertainty.base import TrajectoryClusterer
 
 
@@ -35,7 +39,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
     Args:
         cartesian_goals: List of ``(3,)`` target wrist positions in
                          spine3-relative coordinates (Y-up, metres).
-        initial_arm_aa:  ``(4, 3)`` arm axis-angles at run start.  Used as a
+        initial_arm_aa:  ``(3, 3)`` controlled arm axis-angles at run start.  Used as a
                          ghost-arm placeholder in the visualiser while the
                          MDM waypoint queue is empty.
         cartesian_threshold: Cartesian L2 distance (metres) below which the
@@ -72,6 +76,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
+        fixed_collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         n_diffusion_samples: int = 512,
         n_clusters: int = 3,
@@ -91,6 +96,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
             fk=fk,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
+            fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
             n_diffusion_samples=n_diffusion_samples,
             n_clusters=n_clusters,
@@ -110,6 +116,11 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         self._spine3_aa = (
             np.asarray(spine3_aa, dtype=np.float64)
             if spine3_aa is not None
+            else np.zeros(3)
+        )
+        self._fixed_collar_aa = (
+            np.asarray(fixed_collar_aa, dtype=np.float64)
+            if fixed_collar_aa is not None
             else np.zeros(3)
         )
 
@@ -143,8 +154,8 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         if target is None:
             return np.zeros(q_trajs.shape[0])
         terminal_q = q_trajs[:, -1]  # (N, 4, 3)
-        positions = self._fk_inst.fk_batch(
-            terminal_q, self._spine3_pos, self._spine3_aa
+        positions = self._fk_inst.fk_controlled_batch(
+            terminal_q, self._fixed_collar_aa, self._spine3_pos, self._spine3_aa
         )  # (N, 5, 3)
         wrist_rel = positions[:, -1] - self._spine3_pos  # (N, 3)
         return ((wrist_rel - target) ** 2).sum(axis=-1)  # (N,)
@@ -153,9 +164,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
     # solve override
     # ------------------------------------------------------------------
 
-    def solve(
-        self, current_q: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def solve(self, current_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return the best first action and full plan.
 
         Delegates to the parent (joint-angle cost) while MDM waypoints are
@@ -171,9 +180,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
                 [self._prev_best[1:], np.zeros((1, _N_JOINTS, 3))], axis=0
             )
         else:
-            mean = np.zeros(
-                (self._config.horizon, _N_JOINTS, 3), dtype=np.float64
-            )
+            mean = np.zeros((self._config.horizon, _N_JOINTS, 3), dtype=np.float64)
 
         actions = np.random.normal(
             loc=mean,
@@ -219,9 +226,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
     ) -> np.ndarray:
         target_q = self._goals[0]
         first_action, _ = self.solve(current_q)
-        next_q = _compose_rotvec(
-            np.asarray(current_q, dtype=np.float64), first_action
-        )
+        next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
 
         threshold = (
             advance_threshold
@@ -245,6 +250,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
                     vis_goal,
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
+                    collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                 )
@@ -269,11 +275,11 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
             return np.asarray(current_q, dtype=np.float64)
 
         first_action, _ = self.solve(current_q)
-        next_q = _compose_rotvec(
-            np.asarray(current_q, dtype=np.float64), first_action
-        )
+        next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
 
-        arm_pos = self._fk_inst.fk(next_q, self._spine3_pos, self._spine3_aa)
+        arm_pos = self._fk_inst.fk_controlled(
+            next_q, self._fixed_collar_aa, self._spine3_pos, self._spine3_aa
+        )
         wrist_rel = arm_pos[-1] - self._spine3_pos
         dist = float(np.linalg.norm(wrist_rel - self.current_cartesian_goal))
 
@@ -281,9 +287,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         if dist < self._cartesian_threshold and len(self._cartesian_goals) > 1:
             self._cartesian_goals.popleft()
             self.reset_warmstart()
-            dist = float(
-                np.linalg.norm(wrist_rel - self.current_cartesian_goal)
-            )
+            dist = float(np.linalg.norm(wrist_rel - self.current_cartesian_goal))
 
         if self._vis_config is not None:
             if self._vis is None:
@@ -292,6 +296,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
                     self._initial_arm_aa,
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
+                    collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                 )

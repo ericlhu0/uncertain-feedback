@@ -19,8 +19,8 @@ class XyzPositionClusterer(
 ):  # pylint: disable=too-few-public-methods
     """Cluster trajectories by their FK joint-position feature vectors.
 
-        Each trajectory ``(n_frames, 4, 3)`` is converted to XYZ positions via
-        :meth:`~uncertain_feedback.planners.mpc.kinematics.SmplLeftArmFK.fk_batch`,
+        Each trajectory ``(n_frames, 3, 3)`` is converted to XYZ positions via
+        the controlled-arm FK helpers,
         producing ``(n_frames, 5, 3)`` world positions for
         ``[spine3, left_collar, left_shoulder, left_elbow, left_wrist]``.
         These are flattened to a ``(n_frames * 5 * 3,)`` feature vector per
@@ -51,7 +51,10 @@ class XyzPositionClusterer(
         num_samples, n_frames, _, _ = trajectories.shape
         frame_idx = min(100, n_frames - 1)
         poses = trajectories[:, frame_idx]  # (num_samples, 4, 3)
-        positions = self._fk.fk_batch(poses)  # (num_samples, 5, 3)
+        if poses.shape[-2] == 3:
+            positions = self._fk.fk_controlled_batch(poses)
+        else:
+            positions = self._fk.fk_batch(poses)
         return positions.reshape(num_samples, -1).astype(np.float64)
 
     def _fit_predict(self, features: np.ndarray) -> np.ndarray:

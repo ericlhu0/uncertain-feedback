@@ -44,7 +44,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                              Also controls which timestep is shown as a ghost
                              arm in the cluster-picker window.  Defaults to
                              :attr:`~LeftArmMPCMDM.TRAJECTORY_FRACTION`.
-        goals:               Initial list of ``(4, 3)`` target configurations.
+        goals:               Initial list of ``(3, 3)`` target configurations.
         goal_threshold:      Threshold passed to the base class.
         visualize:           If ``True``, open a live matplotlib window.
         fk:                  :class:`SmplLeftArmFK` instance (required when
@@ -74,6 +74,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
+        fixed_collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         n_diffusion_samples: int = 512,
         n_clusters: int = 3,
@@ -91,6 +92,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             fk=fk,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
+            fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
         )
         self._n_diffusion_samples = n_diffusion_samples
@@ -191,6 +193,9 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             body_pos = (
                 self._vis_config.body_pos if self._vis_config is not None else None
             )
+            fixed_collar_aa = (
+                self._vis_config.collar_aa if self._vis_config is not None else None
+            )
             picker_t0 = time.perf_counter()
             if positions is not None:
                 chosen_label = pick_cluster_positions(
@@ -202,6 +207,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     spine_aa=spine_aa,
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
+                    fixed_collar_aa=fixed_collar_aa,
                 )
             else:
                 assert trajectories is not None
@@ -214,6 +220,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     spine_aa=spine_aa,
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
+                    fixed_collar_aa=fixed_collar_aa,
                 )
             print(
                 f"[timing] cluster picker total: {time.perf_counter() - picker_t0:.3f}s"
@@ -328,13 +335,15 @@ if __name__ == "__main__":
 
     gen = MdmMotionGenerator()
     initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
-    initial_arm_aa, initial_body_positions, initial_spine3_aa = gen.decode_pose(
-        initial_pose
-    )
+    (
+        initial_arm_aa,
+        initial_body_positions,
+        initial_spine3_aa,
+        initial_collar_aa,
+    ) = gen.decode_pose_with_collar(initial_pose)
 
     demo_target_q = initial_arm_aa.copy() + np.array(
         [
-            [0.0, 0.0, 0.0],  # left_collar
             [0.0, -1.6, 0.8],  # left_shoulder
             [0.0, 0.0, 0.0],  # left_elbow
             [0.0, 0.0, 0.0],  # left_wrist
@@ -349,6 +358,7 @@ if __name__ == "__main__":
         goals=[demo_target_q],
         spine3_pos=initial_body_positions[9],
         spine3_aa=initial_spine3_aa,
+        fixed_collar_aa=initial_collar_aa,
         body_pos=initial_body_positions,
         n_diffusion_samples=args.diffusion_samples,
         n_clusters=args.n_clusters,

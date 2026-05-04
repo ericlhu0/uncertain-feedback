@@ -33,7 +33,7 @@ FK utility:
     ``smpl_body_pose_to_positions``
         Full-body FK: ``(21, 3)`` SMPL body_pose → ``(22, 3)`` global XYZ.
         Distinct from :class:`~uncertain_feedback.planners.mpc.kinematics.SmplLeftArmFK`
-        which only controls the 4 left-arm joints.
+        which focuses on the left-arm chain.
 
 Conversion pipeline (HML → SMPL)::
 
@@ -42,12 +42,12 @@ Conversion pipeline (HML → SMPL)::
         → (n_frames, 22, 3)  global XYZ joint positions
         → positions_to_smpl_body_pose  [custom IK, per frame]
         → (n_frames, 21, 3)  SMPL body_pose local axis-angles
-        → smpl_body_pose_to_arm_aa  [select 4 arm joints]
-        → (n_frames, 4, 3)  [left_collar, left_shoulder, left_elbow, left_wrist]
+        → smpl_body_pose_to_arm_aa  [select controlled arm joints]
+        → (n_frames, 3, 3)  [left_shoulder, left_elbow, left_wrist]
 
 Inverse pipeline (SMPL → HML, for inpainting)::
 
-    (4, 3)  left-arm axis-angles
+    (3, 3)  controlled left-arm axis-angles
         → rotation matrix → 6D representation       [patch 6D rotation block]
         → collar world rot from base 6D chain        [spine1→spine2→spine3→collar]
         → arm FK relative to actual collar pose      [patch RIC position block]
@@ -88,6 +88,7 @@ from uncertain_feedback.planners.mpc.kinematics import (  # pylint: disable=wron
 #   left_elbow    → joint 18 → body_pose[17]
 #   left_wrist    → joint 20 → body_pose[19]
 ARM_BODY_POSE_INDICES: list[int] = [12, 15, 17, 19]
+CONTROLLED_ARM_BODY_POSE_INDICES: list[int] = [15, 17, 19]
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +139,8 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
     """Patch left-arm axis-angles into a normalized HML263 frame.
 
     Replaces the 6D rotation features, RIC position features, and velocity
-    features for the arm joints (shoulder, elbow, wrist) in a normalized
-    HML263 vector with values derived from ``arm_aa``.
+    features for the controlled arm joints (shoulder, elbow, wrist) in a
+    normalized HML263 vector with values derived from ``arm_aa``.
 
     RIC positions are computed by accumulating the collar's world rotation
     from the base pose's own HML263 6D features (spine1 → spine2 → spine3 →
@@ -153,8 +154,8 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
     Args:
         base_norm:  ``(263,)`` normalized HML263 frame to use as the base
                     (e.g. the sitting pose).
-        arm_aa:     ``(4, 3)`` left-arm axis-angles for
-                    ``[left_collar, left_shoulder, left_elbow, left_wrist]``.
+        arm_aa:     ``(3, 3)`` left-arm axis-angles for
+                    ``[left_shoulder, left_elbow, left_wrist]``.
         arm_info:   Precomputed feature offsets from
                     :class:`HmlArmFeatureInfo`.
         hml_mean:   ``(263,)`` HML263 normalization mean.
@@ -175,15 +176,14 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
     collar_j = SMPL_PARENTS_22[arm_info.l_arm_joints[0]]  # parent of shoulder = 13
     spine3_j = SMPL_PARENTS_22[collar_j]  # parent of collar  =  9
 
-    # --- Patch 6D rotation features: collar + shoulder + elbow + wrist ------
-    # arm_aa: [0=collar, 1=shoulder, 2=elbow, 3=wrist].
-    # Offsets computed from joint indices (no magic numbers).
-    for arm_idx, joint_j in enumerate([collar_j] + list(arm_info.l_arm_joints)):
+    # --- Patch 6D rotation features: shoulder + elbow + wrist ---------------
+    # Collar is fixed from the base/start pose and is not MPC-controlled.
+    for arm_idx, joint_j in enumerate(arm_info.l_arm_joints):
         rot_mat = Rotation.from_rotvec(arm_aa[arm_idx]).as_matrix()
         r6d = np.concatenate([rot_mat[:, 0], rot_mat[:, 1]])  # first two columns → (6,)
         raw[67 + (joint_j - 1) * 6 : 67 + joint_j * 6] = r6d
 
-    # --- Patch RIC position features for collar + shoulder + elbow + wrist --
+    # --- Patch RIC position features for shoulder + elbow + wrist -----------
     # Build spine chain from root up to (and including) spine3.  Walk upward
     # from spine3, then reverse.  The spine is constrained to the base pose
     # by inpainting, so reading its HML263 6D rotations is correct.
@@ -207,17 +207,16 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
             np.stack([b1, b2, b3], axis=1)
         )
 
-    # Collar RIC position: spine3 (base pose) + FK using spine3's world rotation
-    # (the PARENT's rotation places the child; the child's own rotation only
-    # affects where its children end up).
-    spine3_ric = raw[4 + (spine3_j - 1) * 3 : 4 + spine3_j * 3].copy()
-    collar_ric = spine3_ric + spine3_world_rot.apply(
-        tpose_22[collar_j] - tpose_22[spine3_j]
+    collar_ric = raw[4 + (collar_j - 1) * 3 : 4 + collar_j * 3].copy()
+    collar_r6d = raw[67 + (collar_j - 1) * 6 : 67 + collar_j * 6]
+    a1, a2 = collar_r6d[:3], collar_r6d[3:6]
+    b1 = a1 / (np.linalg.norm(a1) + 1e-8)
+    b2 = a2 - np.dot(a2, b1) * b1
+    b2 = b2 / (np.linalg.norm(b2) + 1e-8)
+    b3 = np.cross(b1, b2)
+    collar_world_rot = spine3_world_rot * Rotation.from_matrix(
+        np.stack([b1, b2, b3], axis=1)
     )
-    raw[4 + (collar_j - 1) * 3 : 4 + collar_j * 3] = collar_ric
-
-    # Collar world rotation from arm_aa[0] (not the base pose's collar 6D).
-    collar_world_rot = spine3_world_rot * Rotation.from_rotvec(arm_aa[0])
 
     # Walk collar → shoulder → elbow → wrist.
     # FK rule: child_pos = parent_pos + parent_world_rot.apply(tpose_bone)
@@ -225,7 +224,7 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
     current_rot = collar_world_rot
     current_ric = collar_ric
     for arm_idx, (parent_j, child_j) in enumerate(
-        zip(arm_chain_smpl[:-1], arm_chain_smpl[1:]), start=1
+        zip(arm_chain_smpl[:-1], arm_chain_smpl[1:])
     ):
         tpose_bone = tpose_22[child_j] - tpose_22[parent_j]
         child_ric = current_ric + current_rot.apply(
@@ -238,12 +237,11 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
         current_rot = child_rot
         current_ric = child_ric
 
-    # --- Zero velocity features for collar + shoulder + elbow + wrist -------
+    # --- Zero velocity features for shoulder + elbow + wrist ----------------
     # For a static start pose (the same frame repeated 10×), inter-frame
     # velocity should be zero.  The base frame may carry non-zero velocities
     # from its original motion clip, which would be inconsistent with the
     # patched position/rotation features.
-    raw[193 + collar_j * 3 : 193 + collar_j * 3 + 3] = 0.0
     for vel_offset in arm_info.arm_vel_offsets:
         raw[vel_offset : vel_offset + 3] = 0.0
 
@@ -375,10 +373,15 @@ def smpl_body_pose_to_arm_aa(body_pose: np.ndarray) -> np.ndarray:
         body_pose: ``(..., 21, 3)`` SMPL body_pose.
 
     Returns:
-        ``(..., 4, 3)`` axis-angles for
-        ``[left_collar, left_shoulder, left_elbow, left_wrist]``.
+        ``(..., 3, 3)`` axis-angles for
+        ``[left_shoulder, left_elbow, left_wrist]``.
     """
-    return np.asarray(body_pose)[..., ARM_BODY_POSE_INDICES, :]
+    return np.asarray(body_pose)[..., CONTROLLED_ARM_BODY_POSE_INDICES, :]
+
+
+def smpl_body_pose_to_collar_aa(body_pose: np.ndarray) -> np.ndarray:
+    """Extract the fixed left-collar axis-angle from SMPL body_pose."""
+    return np.asarray(body_pose)[..., ARM_BODY_POSE_INDICES[0], :]
 
 
 # ---------------------------------------------------------------------------

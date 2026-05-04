@@ -71,7 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--arm",
         type=Path,
         default=None,
-        help="Optional .npy file with (4, 3) arm axis-angles to override the pose's arm.",
+        help=(
+            "Optional .npy file with (3, 3) shoulder/elbow/wrist axis-angles. "
+            "A legacy (4, 3) file is accepted and its first row fixes the collar."
+        ),
     )
 
     # --- MPC params ---
@@ -212,6 +215,7 @@ def main() -> None:
     gen = None
     initial_pose = None
     arm_aa: np.ndarray
+    fixed_collar_aa: np.ndarray | None = None
     body_pos: np.ndarray | None = None
     spine3_pos: np.ndarray | None = None
     spine3_aa: np.ndarray | None = None
@@ -224,19 +228,27 @@ def main() -> None:
         gen = MdmMotionGenerator(model_path=args.model_path)
         pose_path = args.pose if args.pose is not None else MDM_ROOT / "sitting_pose.pt"
         initial_pose = gen.load_hml_pose(pose_path)
-        arm_aa, body_pos, spine3_aa = gen.decode_pose(initial_pose)
+        arm_aa, body_pos, spine3_aa, fixed_collar_aa = gen.decode_pose_with_collar(
+            initial_pose
+        )
         spine3_pos = body_pos[9]
     else:
-        arm_aa = np.zeros((4, 3))
+        arm_aa = np.zeros((3, 3))
+        fixed_collar_aa = np.zeros(3)
 
     if args.arm is not None:
-        arm_aa = np.load(args.arm)
+        arm_override = np.load(args.arm)
+        if arm_override.shape == (4, 3):
+            fixed_collar_aa = arm_override[0]
+            arm_aa = arm_override[1:]
+        else:
+            arm_aa = arm_override
 
     fk = SmplLeftArmFK()
 
     # Default goal: arm raised from the initial pose
     default_goal = arm_aa.copy() + np.array(
-        [[0.0, 0.7, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        [[0.0, 0.7, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     )
 
     # --- Build planner ---
@@ -256,6 +268,7 @@ def main() -> None:
             goals=[default_goal],
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
+            fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
             trajectory_fraction=args.trajectory_fraction,
         )
@@ -265,7 +278,10 @@ def main() -> None:
                 "--goal-pos X Y Z is required for --planner arm_mpc_cartesian."
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
+        init_wrist_rel = (
+            fk.fk_controlled(arm_aa, fixed_collar_aa, spine3_pos, spine3_aa)[-1]
+            - _spine3_ref
+        )
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = LeftArmMPCCartesian(
             cartesian_goals=[np.array(g) for g in args.goal_pos],
@@ -274,6 +290,7 @@ def main() -> None:
             **common,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
+            fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
             trajectory_fraction=args.trajectory_fraction,
             n_diffusion_samples=args.diffusion_samples,
@@ -285,6 +302,7 @@ def main() -> None:
             goals=[default_goal],
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
+            fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
             trajectory_fraction=args.trajectory_fraction,
             n_diffusion_samples=args.diffusion_samples,

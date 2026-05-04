@@ -58,6 +58,7 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     hml263_to_smpl_body_pose,
     smpl_arm_aa_to_hml263_frame,
     smpl_body_pose_to_arm_aa,
+    smpl_body_pose_to_collar_aa,
     smpl_body_pose_to_positions,
     smpl_positions_batch_to_body_pose,
 )
@@ -288,9 +289,8 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                   :meth:`load_hml_pose`).
 
         Returns:
-            arm_aa:         ``(4, 3)`` left arm axis-angles for
-                            ``[left_collar, left_shoulder, left_elbow,
-                            left_wrist]``.
+            arm_aa:         ``(3, 3)`` left arm axis-angles for
+                            ``[left_shoulder, left_elbow, left_wrist]``.
             body_positions: ``(22, 3)`` world joint positions for all SMPL
                             joints.
             spine3_aa:      ``(3,)`` world axis-angle of spine3 (joint 9).
@@ -315,7 +315,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         body_pose = hml263_to_smpl_body_pose(
             pose_t, self._data, self._model, self._fk.tpose_all_joints
         )  # (1, 21, 3)
-        arm_aa = smpl_body_pose_to_arm_aa(body_pose[0])  # (4, 3)
+        arm_aa = smpl_body_pose_to_arm_aa(body_pose[0])  # (3, 3)
         body_positions = smpl_body_pose_to_positions(
             body_pose[0], self._fk.tpose_all_joints
         )  # (22, 3)
@@ -332,6 +332,42 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
 
         return arm_aa, body_positions, spine3_aa
 
+    def decode_pose_with_collar(
+        self, pose: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Decode pose and also return the fixed left-collar rotation.
+
+        Returns:
+            ``(arm_aa, body_positions, spine3_aa, collar_aa)`` where
+            ``arm_aa`` is ``(3, 3)`` for
+            ``[left_shoulder, left_elbow, left_wrist]`` and ``collar_aa`` is
+            the start-pose left-collar axis-angle.
+        """
+        self._ensure_loaded()
+        import torch  # pylint: disable=import-outside-toplevel
+        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
+            Rotation,
+        )
+
+        pose_t = torch.tensor(
+            pose, dtype=torch.float32, device=self._dist_util.dev()
+        ).unsqueeze(0)
+        body_pose = hml263_to_smpl_body_pose(
+            pose_t, self._data, self._model, self._fk.tpose_all_joints
+        )
+        arm_aa = smpl_body_pose_to_arm_aa(body_pose[0])
+        collar_aa = smpl_body_pose_to_collar_aa(body_pose[0])
+        body_positions = smpl_body_pose_to_positions(
+            body_pose[0], self._fk.tpose_all_joints
+        )
+        spine3_world_rot = (
+            Rotation.from_rotvec(body_pose[0][2])
+            * Rotation.from_rotvec(body_pose[0][5])
+            * Rotation.from_rotvec(body_pose[0][8])
+        )
+        spine3_aa = spine3_world_rot.as_rotvec()
+        return arm_aa, body_positions, spine3_aa, collar_aa
+
     def build_pose_from_arm_aa(
         self,
         base_pose: np.ndarray,
@@ -347,9 +383,8 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         Args:
             base_pose: ``(263,)`` HML263 feature vector (e.g. sitting pose
                        from :meth:`load_hml_pose`).
-            arm_aa:    ``(4, 3)`` axis-angle for
-                       ``[left_collar, left_shoulder, left_elbow,
-                       left_wrist]``.
+            arm_aa:    ``(3, 3)`` axis-angle for
+                       ``[left_shoulder, left_elbow, left_wrist]``.
 
         Returns:
             ``(263,)`` HML263 feature vector with arm joints patched to

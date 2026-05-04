@@ -15,14 +15,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import (
+    CONTROLLED_LEFT_ARM_JOINT_INDICES_22,
+    SmplLeftArmFK,
+)
 from uncertain_feedback.planners.mpc.visualizer import ArmVisualizer
 
 # ---------------------------------------------------------------------------
 # Joint index constants
 # ---------------------------------------------------------------------------
 
-_N_JOINTS = 4  # number of controlled joints
+_N_JOINTS = len(CONTROLLED_LEFT_ARM_JOINT_INDICES_22)
 
 
 @dataclass
@@ -37,6 +40,7 @@ class _VisConfig:
     fk: SmplLeftArmFK
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
+    collar_aa: np.ndarray | None = None
     body_pos: np.ndarray | None = None
     capture: bool = False
     compact: bool = False
@@ -86,7 +90,8 @@ class SmplLeftArmMPC:
                          ``solve`` call.
         max_angle_delta: Standard deviation of the sampling distribution
                          (radians).
-        goals:           Initial list of ``(4, 3)`` target joint configurations.
+        goals:           Initial list of ``(3, 3)`` target joint configurations
+                         for [left_shoulder, left_elbow, left_wrist].
         goal_threshold:  L2 distance (in rot-vec space) below which the
                          current goal is considered reached (default: 0.01).
         visualize:       If ``True``, open a live matplotlib window and update
@@ -109,6 +114,7 @@ class SmplLeftArmMPC:
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
+        fixed_collar_aa: np.ndarray | None = None,
     ) -> None:
         self._config = _MpcConfig(horizon, n_mpc_samples, max_angle_delta)
         self.visualize = visualize
@@ -121,7 +127,9 @@ class SmplLeftArmMPC:
         if visualize:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")
-            self._vis_config: _VisConfig | None = _VisConfig(fk, spine3_pos, spine3_aa)
+            self._vis_config: _VisConfig | None = _VisConfig(
+                fk, spine3_pos, spine3_aa, fixed_collar_aa
+            )
         else:
             self._vis_config = None
 
@@ -175,11 +183,11 @@ class SmplLeftArmMPC:
         ``actions``.
 
         Args:
-            current_q: ``(4, 3)`` current joint angles.
-            actions:   ``(N, H, 4, 3)`` sampled action sequences.
+            current_q: ``(3, 3)`` current joint angles.
+            actions:   ``(N, H, 3, 3)`` sampled action sequences.
 
         Returns:
-            ``(N, H+1, 4, 3)`` state trajectories (includes initial state).
+            ``(N, H+1, 3, 3)`` state trajectories (includes initial state).
         """
         n_seqs, h_len = actions.shape[0], actions.shape[1]
         q_trajs = np.empty((n_seqs, h_len + 1, _N_JOINTS, 3), dtype=np.float64)
@@ -194,8 +202,8 @@ class SmplLeftArmMPC:
         """Compute terminal cost for each of the N sampled trajectories.
 
         Args:
-            q_trajs:  ``(N, H+1, 4, 3)`` state trajectories.
-            target_q: ``(4, 3)``         target joint configuration.
+            q_trajs:  ``(N, H+1, 3, 3)`` state trajectories.
+            target_q: ``(3, 3)``         target joint configuration.
 
         Returns:
             ``(N,)`` cost per trajectory.
@@ -213,14 +221,14 @@ class SmplLeftArmMPC:
         """Sample action sequences and return the best one.
 
         Args:
-            current_q: ``(4, 3)`` current axis-angle joint angles for
-                       [left_collar, left_shoulder, left_elbow, left_wrist].
+            current_q: ``(3, 3)`` current axis-angle joint angles for
+                       [left_shoulder, left_elbow, left_wrist].
 
         Returns:
             Tuple of:
 
-            - ``first_action`` ``(4, 3)``: best delta to apply at the current step.
-            - ``plan`` ``(H, 4, 3)``: full best action sequence.
+            - ``first_action`` ``(3, 3)``: best delta to apply at the current step.
+            - ``plan`` ``(H, 3, 3)``: full best action sequence.
 
         Raises:
             RuntimeError: If the goal queue is empty.
@@ -274,10 +282,10 @@ class SmplLeftArmMPC:
         updated automatically.
 
         Args:
-            current_q: ``(4, 3)`` current axis-angle joint angles.
+            current_q: ``(3, 3)`` current axis-angle joint angles.
 
         Returns:
-            ``(4, 3)`` updated axis-angle joint angles.
+            ``(3, 3)`` updated axis-angle joint angles.
         """
         first_action, _ = self.solve(current_q)
         next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
@@ -297,6 +305,7 @@ class SmplLeftArmMPC:
                     self._goals[-1],
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
+                    collar_aa=self._vis_config.collar_aa,
                     compact=self._vis_config.compact,
                 )
                 if self._vis_config.capture:
@@ -321,11 +330,10 @@ if __name__ == "__main__":
 
     demo_fk = SmplLeftArmFK()
 
-    demo_initial_q = np.zeros((4, 3))
+    demo_initial_q = np.zeros((3, 3))
     demo_goals = [
         np.array(
             [
-                [0.3, 0.3, 0.3],  # left_collar
                 [0.0, -1.45, 0.0],  # left_shoulder
                 [0.0, 0.0, 0.4],  # left_elbow
                 [0.0, 0.0, 0.0],  # left_wrist
@@ -333,7 +341,6 @@ if __name__ == "__main__":
         ),
         np.array(
             [
-                [0.0, 0.0, 0.0],  # left_collar
                 [0.0, -0.8, 0.0],  # left_shoulder
                 [0.0, 0.0, 0.8],  # left_elbow
                 [0.0, 0.0, 0.0],  # left_wrist

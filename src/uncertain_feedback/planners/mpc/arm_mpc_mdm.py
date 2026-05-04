@@ -53,7 +53,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                              (e.g. ``0.75`` enqueues the first 75 % of
                              frames).  Defaults to
                              :attr:`TRAJECTORY_FRACTION`.
-        goals:               Initial list of ``(4, 3)`` target configurations.
+        goals:               Initial list of ``(3, 3)`` target configurations.
         goal_threshold:      Threshold passed to the base class (used only
                              when ``advance_threshold`` is not overriding).
         visualize:           If ``True``, open a live matplotlib window.
@@ -82,6 +82,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
+        fixed_collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
     ) -> None:
         # Base sets up _config, _goals deque, _prev_best, _vis.
@@ -96,6 +97,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             fk=fk,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
+            fixed_collar_aa=fixed_collar_aa,
         )
         self.advance_threshold = advance_threshold
         self.trajectory_fraction = trajectory_fraction
@@ -103,7 +105,9 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         if visualize:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")
-            self._vis_config = _VisConfig(fk, spine3_pos, spine3_aa, body_pos=body_pos)
+            self._vis_config = _VisConfig(
+                fk, spine3_pos, spine3_aa, fixed_collar_aa, body_pos=body_pos
+            )
 
         # Last frame of the MDM trajectory, shown as a goal marker.
         self._mdm_goal: np.ndarray | None = None
@@ -120,14 +124,14 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
     ) -> None:
         """Push an MDM-generated trajectory into the goal queue.
 
-                Each frame of ``frames`` becomes one ``(4, 3)`` target in the goal
+                Each frame of ``frames`` becomes one ``(3, 3)`` target in the goal
                 queue.  By default the new trajectory is prepended to the *front* of
                 the queue so it executes immediately ahead of any
                 previously queued goals.
 
                 Args:
-                    frames:   ``(n_frames, 4, 3)`` axis-angle trajectory for
-                              ``[left_collar, left_shoulder, left_elbow, left_wrist]``,
+                    frames:   ``(n_frames, 3, 3)`` axis-angle trajectory for
+                              ``[left_shoulder, left_elbow, left_wrist]``,
                               as returned by
                               :meth:`~uncertain_feedback.motion_generators.mdm.mdm_api\
         .MdmMotionGenerator.generate_left_arm_trajectory`.
@@ -150,7 +154,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         when the window first opens.
 
         Args:
-            goal_q: ``(4, 3)`` axis-angle joint angles for the last frame of
+            goal_q: ``(3, 3)`` axis-angle joint angles for the last frame of
                     the MDM-generated trajectory.
         """
         self._mdm_goal = np.asarray(goal_q, dtype=np.float64)
@@ -178,13 +182,13 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         trajectory (queue length > 1) and blue once only the final goal remains.
 
         Args:
-            current_q:         ``(4, 3)`` current axis-angle joint angles.
+            current_q:         ``(3, 3)`` current axis-angle joint angles.
             advance_threshold: Distance (L2 norm) below which the MPC advances
                                to the next queued frame.  Defaults to
                                :attr:`advance_threshold`.
 
         Returns:
-            ``(4, 3)`` updated axis-angle joint angles.
+            ``(3, 3)`` updated axis-angle joint angles.
         """
         target_q = self._goals[0]
         first_action, _ = self.solve(current_q)
@@ -209,6 +213,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                     self._goals[-1],
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
+                    collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                 )
@@ -300,13 +305,15 @@ if __name__ == "__main__":
 
     gen = MdmMotionGenerator()
     initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
-    initial_arm_aa, initial_body_positions, initial_spine3_aa = gen.decode_pose(
-        initial_pose
-    )
+    (
+        initial_arm_aa,
+        initial_body_positions,
+        initial_spine3_aa,
+        initial_collar_aa,
+    ) = gen.decode_pose_with_collar(initial_pose)
 
     demo_target_q = initial_arm_aa.copy() + np.array(
         [
-            [0.0, 0.0, 0.0],  # left_collar
             [0.0, -1.6, 0.8],  # left_shoulder
             [0.0, 0.0, 0.0],  # left_elbow
             [0.0, 0.0, 0.0],  # left_wrist
@@ -321,6 +328,7 @@ if __name__ == "__main__":
         goals=[demo_target_q],
         spine3_pos=initial_body_positions[9],
         spine3_aa=initial_spine3_aa,
+        fixed_collar_aa=initial_collar_aa,
         body_pos=initial_body_positions,
     )
 
@@ -349,7 +357,7 @@ if __name__ == "__main__":
         save_path=args.save_motion or None,
         num_frames=args.mdm_frames,
         frozen_body=args.frozen_body,
-    )  # (n_frames, 4, 3)
+    )  # (n_frames, 3, 3)
     n_frames = trajectory.shape[0]
     cutoff = max(1, round(n_frames * demo_mpc.trajectory_fraction))
     print(

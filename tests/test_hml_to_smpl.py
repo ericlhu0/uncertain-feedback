@@ -16,8 +16,10 @@ import pytest
 
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     ARM_BODY_POSE_INDICES,
+    CONTROLLED_ARM_BODY_POSE_INDICES,
     positions_to_smpl_body_pose,
     smpl_body_pose_to_arm_aa,
+    smpl_body_pose_to_collar_aa,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
@@ -83,9 +85,12 @@ class TestPositionsToSmplBodyPose:
 
             body_pose = positions_to_smpl_body_pose(positions, fk.tpose_all_joints)
             recovered_arm_aa = smpl_body_pose_to_arm_aa(body_pose)
+            recovered_collar_aa = smpl_body_pose_to_collar_aa(body_pose)
 
             original_arm_pos = fk.fk(arm_aa)  # (5, 3)
-            recovered_arm_pos = fk.fk(recovered_arm_aa)  # (5, 3)
+            recovered_arm_pos = fk.fk_controlled(
+                recovered_arm_aa, recovered_collar_aa
+            )  # (5, 3)
             np.testing.assert_allclose(recovered_arm_pos, original_arm_pos, atol=1e-4)
 
     def test_fk_roundtrip_realistic_pose(
@@ -109,19 +114,24 @@ class TestPositionsToSmplBodyPose:
         positions = fk.full_body_positions(arm_aa)
         body_pose = positions_to_smpl_body_pose(positions, fk.tpose_all_joints)
         recovered_arm_aa = smpl_body_pose_to_arm_aa(body_pose)
+        recovered_collar_aa = smpl_body_pose_to_collar_aa(body_pose)
 
         # Joint positions must match — axis-angles may differ (twist ambiguity).
-        np.testing.assert_allclose(fk.fk(recovered_arm_aa), fk.fk(arm_aa), atol=1e-4)
+        np.testing.assert_allclose(
+            fk.fk_controlled(recovered_arm_aa, recovered_collar_aa),
+            fk.fk(arm_aa),
+            atol=1e-4,
+        )
 
 
 class TestSmplBodyPoseToArmAa:
     """Unit tests for smpl_body_pose_to_arm_aa."""
 
     def test_output_shape(self) -> None:
-        """Check that the output shape is (4, 3) for a single frame."""
+        """Check that the output shape is (3, 3) for a single frame."""
         body_pose = np.zeros((21, 3))
         result = smpl_body_pose_to_arm_aa(body_pose)
-        assert result.shape == (4, 3)
+        assert result.shape == (3, 3)
 
     def test_zeros_in_zeros_out(self) -> None:
         """Zero body_pose should yield zero arm axis-angles."""
@@ -130,40 +140,40 @@ class TestSmplBodyPoseToArmAa:
         np.testing.assert_allclose(result, 0.0)
 
     def test_batched_shape(self) -> None:
-        """Check that batched input gives (N, 4, 3) output."""
+        """Check that batched input gives (N, 3, 3) output."""
         body_pose = np.zeros((10, 21, 3))
         result = smpl_body_pose_to_arm_aa(body_pose)
-        assert result.shape == (10, 4, 3)
+        assert result.shape == (10, 3, 3)
 
-    def test_collar_index(self) -> None:
-        """smpl_body_pose_to_arm_aa[0] should be left_collar
-        (body_pose[12])."""
+    def test_collar_is_separate(self) -> None:
+        """Collar is no longer part of MPC-controlled arm_aa."""
         body_pose = np.zeros((21, 3))
         body_pose[ARM_BODY_POSE_INDICES[0]] = [0.1, 0.2, 0.3]  # collar
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        np.testing.assert_allclose(arm_aa[0], [0.1, 0.2, 0.3])
-        np.testing.assert_allclose(arm_aa[1:], 0.0)
+        collar_aa = smpl_body_pose_to_collar_aa(body_pose)
+        np.testing.assert_allclose(arm_aa, 0.0)
+        np.testing.assert_allclose(collar_aa, [0.1, 0.2, 0.3])
 
     def test_shoulder_index(self) -> None:
         """Check that shoulder joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
-        body_pose[ARM_BODY_POSE_INDICES[1]] = [0.4, 0.5, 0.6]  # shoulder
+        body_pose[CONTROLLED_ARM_BODY_POSE_INDICES[0]] = [0.4, 0.5, 0.6]  # shoulder
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        np.testing.assert_allclose(arm_aa[1], [0.4, 0.5, 0.6])
+        np.testing.assert_allclose(arm_aa[0], [0.4, 0.5, 0.6])
 
     def test_elbow_index(self) -> None:
         """Check that elbow joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
-        body_pose[ARM_BODY_POSE_INDICES[2]] = [0.7, 0.8, 0.9]  # elbow
+        body_pose[CONTROLLED_ARM_BODY_POSE_INDICES[1]] = [0.7, 0.8, 0.9]  # elbow
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        np.testing.assert_allclose(arm_aa[2], [0.7, 0.8, 0.9])
+        np.testing.assert_allclose(arm_aa[1], [0.7, 0.8, 0.9])
 
     def test_wrist_index(self) -> None:
         """Check that wrist joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
-        body_pose[ARM_BODY_POSE_INDICES[3]] = [1.0, 1.1, 1.2]  # wrist
+        body_pose[CONTROLLED_ARM_BODY_POSE_INDICES[2]] = [1.0, 1.1, 1.2]  # wrist
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        np.testing.assert_allclose(arm_aa[3], [1.0, 1.1, 1.2])
+        np.testing.assert_allclose(arm_aa[2], [1.0, 1.1, 1.2])
 
     def test_collar_vs_wrist_differ(self) -> None:
         """Distinct joints should produce distinct outputs."""

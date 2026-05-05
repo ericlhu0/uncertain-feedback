@@ -297,6 +297,106 @@ class SmplLeftArmFK:
             )
         return out
 
+    def controlled_aa_from_positions(
+        self,
+        positions: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+        collar_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Project SMPL XYZ arm positions into the fixed MPC arm frame.
+
+        MDM positions may include body/spine/collar rotations that the MPC does
+        not control.  This helper preserves the MDM arm bone directions, but
+        expresses the controlled shoulder/elbow/wrist rotations relative to the
+        fixed spine3 and collar rotations used by the MPC.
+
+        Args:
+            positions: ``(22, 3)`` full SMPL joint positions or ``(5, 3)``
+                arm-chain positions for
+                ``[spine3, left_collar, left_shoulder, left_elbow, left_wrist]``.
+            spine3_aa: Fixed MPC spine3 world axis-angle.  Defaults to identity.
+            collar_aa: Fixed MPC left-collar local axis-angle.  Defaults to
+                identity.
+
+        Returns:
+            ``(3, 3)`` local axis-angles for
+            ``[left_shoulder, left_elbow, left_wrist]``.
+        """
+        positions = np.asarray(positions, dtype=np.float64)
+        if positions.shape[-2:] == (22, 3):
+            arm_positions = positions[LEFT_ARM_CHAIN_INDICES]
+        elif positions.shape[-2:] == (5, 3):
+            arm_positions = positions
+        else:
+            raise ValueError(
+                "positions must have shape (22, 3) or (5, 3), "
+                f"got {positions.shape}"
+            )
+
+        spine3_aa = (
+            np.asarray(spine3_aa, dtype=np.float64)
+            if spine3_aa is not None
+            else np.zeros(3, dtype=np.float64)
+        )
+        collar_aa = (
+            np.asarray(collar_aa, dtype=np.float64)
+            if collar_aa is not None
+            else np.zeros(3, dtype=np.float64)
+        )
+
+        parent_world_rot = Rotation.from_rotvec(spine3_aa) * Rotation.from_rotvec(
+            collar_aa
+        )
+        controlled = np.zeros((3, 3), dtype=np.float64)
+
+        # Controlled joints are shoulder, elbow, wrist.  Each local rotation
+        # maps the corresponding outgoing T-pose bone into the MDM bone
+        # direction, then becomes the parent frame for the next joint.
+        for out_i, bone_i in enumerate(range(1, 4)):
+            actual_bone = arm_positions[bone_i + 1] - arm_positions[bone_i]
+            tpose_bone = self._bone_offsets[bone_i]
+            if np.linalg.norm(actual_bone) < 1e-8:
+                child_world_rot = parent_world_rot
+                local_rot = Rotation.identity()
+            else:
+                child_world_rot, _ = Rotation.align_vectors(
+                    [actual_bone],
+                    [tpose_bone],
+                )
+                local_rot = parent_world_rot.inv() * child_world_rot
+            controlled[out_i] = local_rot.as_rotvec()
+            parent_world_rot = child_world_rot
+
+        return controlled
+
+    def controlled_aa_from_positions_batch(
+        self,
+        positions: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+        collar_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Batched version of :meth:`controlled_aa_from_positions`.
+
+        Args:
+            positions: ``(..., 22, 3)`` or ``(..., 5, 3)`` positions.
+            spine3_aa: Fixed MPC spine3 world axis-angle.
+            collar_aa: Fixed MPC left-collar local axis-angle.
+
+        Returns:
+            ``(..., 3, 3)`` controlled arm axis-angles.
+        """
+        positions = np.asarray(positions, dtype=np.float64)
+        leading = positions.shape[:-2]
+        flat = positions.reshape((-1, *positions.shape[-2:]))
+        out = np.stack(
+            [
+                self.controlled_aa_from_positions(frame, spine3_aa, collar_aa)
+                for frame in flat
+            ],
+            axis=0,
+        )
+        return out.reshape((*leading, 3, 3))
+
     # ------------------------------------------------------------------
     # FK — full body
     # ------------------------------------------------------------------

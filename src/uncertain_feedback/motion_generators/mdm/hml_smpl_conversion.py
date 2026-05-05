@@ -16,7 +16,8 @@ HML → SMPL  (MDM output decoding):
         axis-angle body_pose.
 
     ``smpl_body_pose_to_arm_aa``
-        Extract the 4 left-arm joints from a ``(21, 3)`` body_pose array.
+        Extract the 3 MPC-controlled left-arm joints from a ``(21, 3)``
+        body_pose array.
 
 SMPL → HML  (inpainting / input conditioning):
 

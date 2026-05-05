@@ -6,11 +6,11 @@ max_angle_delta: 0.0025
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 goal_threshold: 0.1
 advance_threshold: 0.1
-trajectory_fraction: 1.0
+trajectory_fraction: 0.7
 
 uq:
   diffusion_samples: 500
-  n_clusters: 8
+  n_clusters: 5
   auto_cluster: null
 
 cartesian:

@@ -22,7 +22,7 @@ Typical usage::
     trajectory = gen.generate_left_arm_trajectory(
         "a person raises their left arm above their head",
         start_pose=current_pose,
-    )  # (n_frames, 4, 3)
+    )  # (n_frames, 3, 3)
 
     # Enqueue trajectory into the MPC.
     mpc.push_trajectory(trajectory)
@@ -412,6 +412,8 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         num_samples: int = 1,
         num_frames: int | None = None,
         frozen_body: bool = False,
+        spine3_aa: np.ndarray | None = None,
+        fixed_collar_aa: np.ndarray | None = None,
     ) -> np.ndarray:
         """Generate a left arm motion trajectory from a text description.
 
@@ -450,10 +452,16 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                                    body features for the full motion.  If
                                    ``False``, only the first 10 frames are
                                    locked to ``start_pose``.
+            spine3_aa:             Optional fixed MPC spine3 world axis-angle.
+                                   When provided with ``fixed_collar_aa``, the
+                                   returned goals are projected into that fixed
+                                   MPC base instead of using MDM's body frame.
+            fixed_collar_aa:       Optional fixed MPC left-collar local
+                                   axis-angle.
 
         Returns:
-            ``(n_frames, 4, 3)`` axis-angle trajectory when ``num_samples==1``.
-            ``(num_samples, n_frames, 4, 3)`` when ``num_samples > 1``.
+            ``(n_frames, 3, 3)`` axis-angle trajectory when ``num_samples==1``.
+            ``(num_samples, n_frames, 3, 3)`` when ``num_samples > 1``.
         """
         self._ensure_loaded()
         if num_samples < 1:
@@ -586,7 +594,23 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             )
             print(f"Saved motion video to {save_path}")
 
-        # --- Convert normalized HML → SMPL body_pose → arm axis-angles ------
+        # --- Convert normalized HML → SMPL body_pose/XYZ → arm axis-angles ---
+        use_fixed_base = spine3_aa is not None or fixed_collar_aa is not None
+        if use_fixed_base:
+            hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
+            convert_t0 = time.perf_counter()
+            positions = hml263_batch_to_smpl_positions(hml_vecs, data, model)
+            arm_aa = self.smpl_positions_to_left_arm_trajectory(
+                positions,
+                spine3_aa=spine3_aa,
+                fixed_collar_aa=fixed_collar_aa,
+            )
+            print(
+                "[timing] HML-to-fixed-base arm conversion total: "
+                f"{time.perf_counter() - convert_t0:.3f}s"
+            )
+            return arm_aa[0] if num_samples == 1 else arm_aa
+
         if num_samples == 1:
             # Single-sample fast path: no ThreadPoolExecutor overhead.
             hml_vec = sample[0, :, 0, :].T  # (n_frames, 263)
@@ -598,7 +622,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                 "[timing] HML-to-arm conversion: "
                 f"{time.perf_counter() - convert_t0:.3f}s"
             )
-            return smpl_body_pose_to_arm_aa(body_pose)  # (n_frames, 4, 3)
+            return smpl_body_pose_to_arm_aa(body_pose)  # (n_frames, 3, 3)
 
         # Batch path: one rot2xyz call + parallel IK across all samples.
         # sample: (num_samples, 263, 1, n_frames) → (num_samples, n_frames, 263)
@@ -613,7 +637,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         )
         return smpl_body_pose_to_arm_aa(
             body_pose_batch
-        )  # (num_samples, n_frames, 4, 3)
+        )  # (num_samples, n_frames, 3, 3)
 
     def generate_left_arm_position_samples(  # pylint: disable=too-many-locals
         self,
@@ -719,17 +743,22 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         return positions
 
     def smpl_positions_to_left_arm_trajectory(
-        self, positions: np.ndarray
+        self,
+        positions: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+        fixed_collar_aa: np.ndarray | None = None,
     ) -> np.ndarray:
         """Convert SMPL XYZ positions to a left-arm axis-angle trajectory.
 
         Args:
             positions: ``(n_frames, 22, 3)`` or ``(n_samples, n_frames, 22, 3)``
                 global SMPL joint positions.
+            spine3_aa: Optional fixed MPC spine3 world axis-angle.
+            fixed_collar_aa: Optional fixed MPC left-collar local axis-angle.
 
         Returns:
-            ``(n_frames, 4, 3)`` for a single trajectory, otherwise
-            ``(n_samples, n_frames, 4, 3)``.
+            ``(n_frames, 3, 3)`` for a single trajectory, otherwise
+            ``(n_samples, n_frames, 3, 3)``.
         """
         self._ensure_loaded()
         positions = np.asarray(positions, dtype=np.float64)
@@ -738,6 +767,18 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             positions = positions[None, ...]
 
         convert_t0 = time.perf_counter()
+        if spine3_aa is not None or fixed_collar_aa is not None:
+            arm_aa = self._fk.controlled_aa_from_positions_batch(
+                positions,
+                spine3_aa=spine3_aa,
+                collar_aa=fixed_collar_aa,
+            )
+            print(
+                "[timing] selected position-to-fixed-base arm IK total: "
+                f"{time.perf_counter() - convert_t0:.3f}s"
+            )
+            return arm_aa[0] if single else arm_aa
+
         body_pose = smpl_positions_batch_to_body_pose(
             positions, self._fk.tpose_all_joints
         )

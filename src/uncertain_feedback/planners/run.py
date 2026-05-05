@@ -366,6 +366,8 @@ def main() -> None:
                     save_path=str(args.save_motion) if args.save_motion else None,
                     num_frames=args.mdm_frames,
                     frozen_body=args.frozen_body,
+                    spine3_aa=spine3_aa,
+                    fixed_collar_aa=fixed_collar_aa,
                 )
                 n_frames = traj.shape[0]
                 cutoff = max(1, round(n_frames * mpc.trajectory_fraction))

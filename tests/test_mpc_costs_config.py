@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesian
+from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -20,6 +22,7 @@ from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
     ArmMPCCartesianNoMDM,
 )
+from uncertain_feedback.uncertainty.base import TrajectoryClusterer
 
 
 def _write_config(tmp_path, body: str):
@@ -77,6 +80,56 @@ class _FixedCost:
     def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
         assert q_trajs.shape[0] == self._values.shape[0]
         return self._values
+
+
+class _FakePositionClusterer(TrajectoryClusterer):
+    """Cluster all fake position samples into one group."""
+
+    def cluster(self, trajectories: np.ndarray) -> np.ndarray:
+        """Unused trajectory clustering path."""
+        _ = trajectories
+        raise AssertionError("position test should call cluster_positions")
+
+    def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
+        """Assign all position samples to cluster 0."""
+        assert positions.shape[0] == 2
+        return np.zeros(2, dtype=np.intp)
+
+
+class _FakePositionGenerator:
+    """Minimal fake for the UQ position-generation path."""
+
+    def __init__(self, positions: np.ndarray, trajectory: np.ndarray) -> None:
+        self.positions = positions
+        self.trajectory = trajectory
+        self.received_spine3_aa: np.ndarray | None = None
+        self.received_fixed_collar_aa: np.ndarray | None = None
+
+    def generate_left_arm_position_samples(
+        self,
+        text: str,
+        start_pose: np.ndarray | None = None,
+        num_samples: int = 1,
+        num_frames: int | None = None,
+        frozen_body: bool = False,
+    ) -> np.ndarray:
+        """Return deterministic fake MDM XYZ samples."""
+        assert text
+        assert num_samples == self.positions.shape[0]
+        _ = start_pose, num_frames, frozen_body
+        return self.positions
+
+    def smpl_positions_to_left_arm_trajectory(
+        self,
+        positions: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+        fixed_collar_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Record the base used to convert selected positions."""
+        np.testing.assert_allclose(positions, self.positions.mean(axis=0))
+        self.received_spine3_aa = spine3_aa
+        self.received_fixed_collar_aa = fixed_collar_aa
+        return self.trajectory
 
 
 def test_non_mdm_initial_pose_defaults_to_tpose_without_loading_generator() -> None:
@@ -396,6 +449,37 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
     )
     expected_cost = ((wrist_rel - cartesian_goal) ** 2).sum()
     np.testing.assert_allclose(mpc._cartesian_cost(q_trajs), [expected_cost])
+
+
+def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
+    """Selected UQ position means are projected into the fixed MPC base."""
+    fk = SmplLeftArmFK()
+    spine3_aa = np.array([0.1, -0.2, 0.05], dtype=np.float64)
+    fixed_collar_aa = np.array([0.3, 0.1, -0.1], dtype=np.float64)
+    positions = np.zeros((2, 3, 22, 3), dtype=np.float64)
+    trajectory = np.arange(27, dtype=np.float64).reshape(3, 3, 3) * 0.01
+    gen = _FakePositionGenerator(positions, trajectory)
+    mpc = LeftArmMPCMDMUQ(
+        fk=fk,
+        spine3_aa=spine3_aa,
+        fixed_collar_aa=fixed_collar_aa,
+        n_diffusion_samples=2,
+        clusterer=_FakePositionClusterer(),
+    )
+
+    mpc.query_mdm_with_uncertainty(
+        cast(Any, gen),
+        "raise my left arm up",
+        start_pose=np.zeros(263),
+        auto_cluster=0,
+    )
+
+    assert gen.received_spine3_aa is not None
+    assert gen.received_fixed_collar_aa is not None
+    assert mpc.current_goal is not None
+    np.testing.assert_allclose(gen.received_spine3_aa, spine3_aa)
+    np.testing.assert_allclose(gen.received_fixed_collar_aa, fixed_collar_aa)
+    np.testing.assert_allclose(mpc.current_goal, trajectory[0])
 
 
 def test_no_mdm_cartesian_mpc_adds_extra_costs() -> None:

@@ -148,6 +148,8 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         print(f"Generating {self._n_diffusion_samples} MDM samples for: '{text}' …")
         generation_t0 = time.perf_counter()
         use_position_uq = hasattr(self._clusterer, "cluster_positions")
+        base_spine_aa = self._mdm_spine3_aa
+        base_collar_aa = self._mdm_fixed_collar_aa
         if use_position_uq:
             positions = gen.generate_left_arm_position_samples(
                 text,
@@ -165,7 +167,9 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                 num_samples=self._n_diffusion_samples,
                 num_frames=mdm_frames,
                 frozen_body=frozen_body,
-            )  # (n_diffusion_samples, n_frames, 4, 3)
+                spine3_aa=base_spine_aa,
+                fixed_collar_aa=base_collar_aa,
+            )  # (n_diffusion_samples, n_frames, 3, 3)
         print(
             f"[timing] MDM generation pipeline: {time.perf_counter() - generation_t0:.3f}s"
         )
@@ -188,17 +192,15 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                 self._vis_config.fk if self._vis_config is not None else SmplLeftArmFK()
             )
             spine_pos = (
-                self._vis_config.spine_pos if self._vis_config is not None else None
+                self._mdm_spine3_pos
+                if self._mdm_spine3_pos is not None
+                else fk.tpose_spine3_pos
             )
-            spine_aa = (
-                self._vis_config.spine_aa if self._vis_config is not None else None
-            )
+            spine_aa = base_spine_aa
             body_pos = (
                 self._vis_config.body_pos if self._vis_config is not None else None
             )
-            fixed_collar_aa = (
-                self._vis_config.collar_aa if self._vis_config is not None else None
-            )
+            fixed_collar_aa = base_collar_aa
             picker_t0 = time.perf_counter()
             if positions is not None:
                 chosen_label = pick_cluster_positions(
@@ -232,11 +234,15 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
 
         if positions is not None:
             selected_positions = positions[labels == chosen_label].mean(axis=0)
-            chosen_mean = gen.smpl_positions_to_left_arm_trajectory(selected_positions)
+            chosen_mean = gen.smpl_positions_to_left_arm_trajectory(
+                selected_positions,
+                spine3_aa=base_spine_aa,
+                fixed_collar_aa=base_collar_aa,
+            )
         else:
             assert trajectories is not None
             chosen_mean = trajectories[labels == chosen_label].mean(axis=0)
-        # chosen_mean: (n_frames, 4, 3)
+        # chosen_mean: (n_frames, 3, 3)
 
         n_frames = chosen_mean.shape[0]
         cutoff = max(1, round(n_frames * self.trajectory_fraction))

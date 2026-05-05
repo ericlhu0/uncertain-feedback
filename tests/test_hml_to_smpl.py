@@ -21,7 +21,10 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_body_pose_to_arm_aa,
     smpl_body_pose_to_collar_aa,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import (
+    LEFT_ARM_CHAIN_INDICES,
+    SmplLeftArmFK,
+)
 
 _SMPL_PKL = (
     Path(__file__).parent.parent
@@ -122,6 +125,52 @@ class TestPositionsToSmplBodyPose:
             fk.fk(arm_aa),
             atol=1e-4,
         )
+
+    def test_fixed_base_projection_preserves_target_bone_directions(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
+        """Project MDM XYZ into a different fixed collar/spine base."""
+        mdm_spine_aa = np.array([0.2, -0.1, 0.05])
+        mdm_collar_aa = np.array([0.15, -0.05, 0.1])
+        target_arm_aa = np.array(
+            [
+                [0.0, -1.0, 0.2],
+                [0.1, 0.2, 0.7],
+                [-0.1, 0.05, 0.2],
+            ],
+            dtype=np.float64,
+        )
+        mdm_positions = fk.full_body_positions_controlled(
+            target_arm_aa,
+            mdm_collar_aa,
+            fk.tpose_spine3_pos,
+            mdm_spine_aa,
+        )
+
+        fixed_spine_aa = np.array([-0.1, 0.15, 0.05])
+        fixed_collar_aa = np.array([-0.2, 0.05, -0.1])
+        projected_arm_aa = fk.controlled_aa_from_positions(
+            mdm_positions,
+            spine3_aa=fixed_spine_aa,
+            collar_aa=fixed_collar_aa,
+        )
+        projected_positions = fk.fk_controlled(
+            projected_arm_aa,
+            fixed_collar_aa,
+            fk.tpose_spine3_pos,
+            fixed_spine_aa,
+        )
+
+        mdm_chain = mdm_positions[LEFT_ARM_CHAIN_INDICES]
+        mdm_controlled_bones = np.diff(mdm_chain, axis=0)[1:]
+        projected_controlled_bones = np.diff(projected_positions, axis=0)[1:]
+        mdm_dirs = mdm_controlled_bones / np.linalg.norm(
+            mdm_controlled_bones, axis=1, keepdims=True
+        )
+        projected_dirs = projected_controlled_bones / np.linalg.norm(
+            projected_controlled_bones, axis=1, keepdims=True
+        )
+        np.testing.assert_allclose(projected_dirs, mdm_dirs, atol=1e-5)
 
 
 class TestSmplBodyPoseToArmAa:

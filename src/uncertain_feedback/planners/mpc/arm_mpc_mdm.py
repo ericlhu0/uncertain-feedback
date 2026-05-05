@@ -106,6 +106,21 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         self.advance_threshold = advance_threshold
         self.trajectory_fraction = trajectory_fraction
         self.visualize = visualize
+        self._mdm_spine3_pos = (
+            np.asarray(spine3_pos, dtype=np.float64)
+            if spine3_pos is not None
+            else None
+        )
+        self._mdm_spine3_aa = (
+            np.asarray(spine3_aa, dtype=np.float64)
+            if spine3_aa is not None
+            else np.zeros(3, dtype=np.float64)
+        )
+        self._mdm_fixed_collar_aa = (
+            np.asarray(fixed_collar_aa, dtype=np.float64)
+            if fixed_collar_aa is not None
+            else np.zeros(3, dtype=np.float64)
+        )
         if visualize:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")

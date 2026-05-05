@@ -38,8 +38,11 @@ _COLOR_ARM = "#4878CF"
 _COLOR_SELECTED = "#E87722"
 _COLOR_TRACE = "#888888"  # wrist trace
 _COLOR_CURRENT = "#AAAAAA"  # current MPC arm state
-_ELEV = 120
-_AZIM = -90
+_PANEL_VIEWS = [
+    ("Front", 20, -90),
+    ("Side", 20, 0),
+    ("Overhead", 70, -90),
+]
 
 
 def _merge_arm(arm_full: np.ndarray, body_pos: np.ndarray | None) -> np.ndarray:
@@ -137,16 +140,27 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
         list[list[np.ndarray]] | None
     ) = None,  # each list of (22, 3)
     current_body: np.ndarray | None = None,  # (22, 3) current MPC arm state
-) -> tuple["Figure", list["Axes3D"], list[list], list]:
+) -> tuple["Figure", list[list["Axes3D"]], list[list], list[list]]:
     n_clusters = len(unique_labels)
+    n_views = len(_PANEL_VIEWS)
     fig_w = max(4 * n_clusters, 8)
-    fig = plt.figure(figsize=(fig_w, 5.5))
+    fig = plt.figure(figsize=(fig_w, 3.5 * n_views + 1.0))
     fig.patch.set_facecolor("#F5F5F5")
 
     gs = fig.add_gridspec(
-        1, n_clusters, bottom=0.18, top=0.92, left=0.04, right=0.96, wspace=0.05
+        n_views,
+        n_clusters,
+        bottom=0.12,
+        top=0.92,
+        left=0.04,
+        right=0.96,
+        wspace=0.05,
+        hspace=0.16,
     )
-    axes = [fig.add_subplot(gs[0, i], projection="3d") for i in range(n_clusters)]
+    axes_by_cluster = [
+        [fig.add_subplot(gs[row, col], projection="3d") for row in range(n_views)]
+        for col in range(n_clusters)
+    ]
 
     panel_arm_lines: list[list] = []
     panel_arm_scats: list = []
@@ -154,63 +168,75 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     for idx, (k, body_cutoff, wrist_trace, count) in enumerate(
         zip(unique_labels, cluster_body_cutoffs, cluster_wrist_traces, cluster_counts)
     ):
-        ax = axes[idx]
-        ax.view_init(elev=_ELEV, azim=_AZIM)  # type: ignore[attr-defined]
-        ax.set_xlim(*lims[0])
-        ax.set_ylim(*lims[1])
-        ax.set_zlim(*lims[2])  # type: ignore[attr-defined]
-        ax.set_xlabel("X", fontsize=7)
-        ax.set_ylabel("Y", fontsize=7)
-        ax.set_zlabel("Z", fontsize=7)  # type: ignore[attr-defined]
-        ax.tick_params(labelsize=6)
-        ax.set_title(f"Cluster {k}\n({count} samples)", fontsize=9, pad=4)
+        cluster_lines = []
+        cluster_scats = []
+        for view_idx, (view_name, elev, azim) in enumerate(_PANEL_VIEWS):
+            ax = axes_by_cluster[idx][view_idx]
+            ax.view_init(elev=elev, azim=azim)  # type: ignore[attr-defined]
+            ax.set_xlim(*lims[0])
+            ax.set_ylim(*lims[1])
+            ax.set_zlim(*lims[2])  # type: ignore[attr-defined]
+            ax.set_xlabel("X", fontsize=7)
+            ax.set_ylabel("Y", fontsize=7)
+            ax.set_zlabel("Z", fontsize=7)  # type: ignore[attr-defined]
+            ax.tick_params(labelsize=6)
+            if view_idx == 0:
+                ax.set_title(
+                    f"Cluster {k} ({count} samples)\n{view_name}",
+                    fontsize=9,
+                    pad=4,
+                )
+            else:
+                ax.set_title(view_name, fontsize=9, pad=4)
 
-        # Wrist trace (static grey)
-        ax.plot(
-            wrist_trace[:, 0],
-            wrist_trace[:, 1],
-            wrist_trace[:, 2],
-            linestyle=":",
-            color=_COLOR_TRACE,
-            linewidth=1.0,
-            alpha=0.7,
-        )
+            # Wrist trace (static grey)
+            ax.plot(
+                wrist_trace[:, 0],
+                wrist_trace[:, 1],
+                wrist_trace[:, 2],
+                linestyle=":",
+                color=_COLOR_TRACE,
+                linewidth=1.0,
+                alpha=0.7,
+            )
 
-        # Individual ghost arms (one per sample in cluster), very faint
-        if cluster_individual_previews is not None:
-            for body_ind in cluster_individual_previews[idx]:
+            # Individual ghost arms (one per sample in cluster), very faint
+            if cluster_individual_previews is not None:
+                for body_ind in cluster_individual_previews[idx]:
+                    _draw_bones_3d(
+                        ax,
+                        body_ind,
+                        LEFT_ARM_BONE_PAIRS_22,
+                        _COLOR_ARM,
+                        alpha=0.12,
+                        lw=1.2,
+                    )
+
+            # Current MPC arm state (grey, drawn behind the cluster arm)
+            if current_body is not None:
                 _draw_bones_3d(
                     ax,
-                    body_ind,
+                    current_body,
                     LEFT_ARM_BONE_PAIRS_22,
-                    _COLOR_ARM,
-                    alpha=0.12,
-                    lw=1.2,
+                    _COLOR_CURRENT,
+                    alpha=0.9,
+                    lw=2.2,
+                )
+                ax.scatter(  # type: ignore[misc]
+                    *current_body[LEFT_ARM_JOINT_INDICES_22].T,
+                    color=_COLOR_CURRENT,
+                    s=28,
+                    depthshade=False,
                 )
 
-        # Current MPC arm state (grey, drawn behind the cluster arm)
-        if current_body is not None:
-            _draw_bones_3d(
-                ax,
-                current_body,
-                LEFT_ARM_BONE_PAIRS_22,
-                _COLOR_CURRENT,
-                alpha=0.9,
-                lw=2.2,
-            )
-            ax.scatter(  # type: ignore[misc]
-                *current_body[LEFT_ARM_JOINT_INDICES_22].T,
-                color=_COLOR_CURRENT,
-                s=28,
-                depthshade=False,
-            )
+            # Solid mean arm at trajectory-fraction cutoff (the pose that will be enqueued)
+            arm_lines, arm_scat = _draw_body(ax, body_cutoff, _COLOR_ARM)
+            cluster_lines.extend(arm_lines)
+            cluster_scats.append(arm_scat)
+        panel_arm_lines.append(cluster_lines)
+        panel_arm_scats.append(cluster_scats)
 
-        # Solid mean arm at trajectory-fraction cutoff (the pose that will be enqueued)
-        arm_lines, arm_scat = _draw_body(ax, body_cutoff, _COLOR_ARM)
-        panel_arm_lines.append(arm_lines)
-        panel_arm_scats.append(arm_scat)
-
-    return fig, axes, panel_arm_lines, panel_arm_scats
+    return fig, axes_by_cluster, panel_arm_lines, panel_arm_scats
 
 
 def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
@@ -281,7 +307,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     precompute_t0 = time.perf_counter()
     for k in unique_labels:
         mask = labels == k
-        mean_traj = trajectories[mask].mean(axis=0)  # (n_frames, 4, 3)
+        mean_traj = trajectories[mask].mean(axis=0)  # (n_frames, 3, 3)
         n_frames = mean_traj.shape[0]
         # Mean body at trajectory-fraction cutoff frame (the pose that gets enqueued)
         preview_idx = max(0, round(n_frames * trajectory_fraction) - 1)
@@ -339,7 +365,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     # Build figure
     # ------------------------------------------------------------------
     figure_t0 = time.perf_counter()
-    fig, axes, panel_arm_lines, panel_arm_scats = _build_figure(
+    fig, axes_by_cluster, panel_arm_lines, panel_arm_scats = _build_figure(
         unique_labels,
         cluster_body_cutoffs,
         cluster_wrist_traces,
@@ -359,21 +385,23 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
 
     def _set_selected(idx: int) -> None:
         state["selected"] = idx
-        for i, (arm_lines, arm_scat) in enumerate(
+        for i, (arm_lines, arm_scats) in enumerate(
             zip(panel_arm_lines, panel_arm_scats)
         ):
             color = _COLOR_SELECTED if i == idx else _COLOR_ARM
             for ln in arm_lines:
                 ln.set_color(color)
-            arm_scat.set_color(color)
-            axes[i].set_facecolor("#FFF3E0" if i == idx else "white")
+            for arm_scat in arm_scats:
+                arm_scat.set_color(color)
+            for ax in axes_by_cluster[i]:
+                ax.set_facecolor("#FFF3E0" if i == idx else "white")
         fig.canvas.draw_idle()
 
     def _on_click(event: "matplotlib.backend_bases.MouseEvent") -> None:
         if event.inaxes is None:
             return
-        for i, ax in enumerate(axes):
-            if event.inaxes is ax:
+        for i, cluster_axes in enumerate(axes_by_cluster):
+            if event.inaxes in cluster_axes:
                 _set_selected(i)
                 return
 
@@ -444,7 +472,6 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
 
     precompute_t0 = time.perf_counter()
     spine3_j = LEFT_ARM_CHAIN_INDICES[0]
-    wrist_j = LEFT_ARM_CHAIN_INDICES[-1]
     display_spine_pos = (
         np.asarray(body_pos[spine3_j], dtype=np.float64)
         if body_pos is not None
@@ -459,23 +486,45 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
         mean_positions = positions[mask].mean(axis=0)  # (n_frames, 22, 3)
         n_frames = mean_positions.shape[0]
         preview_idx = max(0, round(n_frames * trajectory_fraction) - 1)
+        mean_arm_aa = fk.controlled_aa_from_positions_batch(
+            mean_positions,
+            spine3_aa=spine_aa,
+            collar_aa=fixed_collar_aa,
+        )
 
         body_cutoff = _merge_arm(
-            _align_arm_to_spine(mean_positions[preview_idx], display_spine_pos),
+            _full_body_positions_for_arm(
+                fk,
+                mean_arm_aa[preview_idx],
+                display_spine_pos,
+                spine_aa,
+                fixed_collar_aa,
+            ),
             body_pos,
         )
         individual_previews = [
             _merge_arm(
-                _align_arm_to_spine(sample_positions[preview_idx], display_spine_pos),
+                _full_body_positions_for_arm(
+                    fk,
+                    fk.controlled_aa_from_positions(
+                        sample_positions[preview_idx],
+                        spine3_aa=spine_aa,
+                        collar_aa=fixed_collar_aa,
+                    ),
+                    display_spine_pos,
+                    spine_aa,
+                    fixed_collar_aa,
+                ),
                 body_pos,
             )
             for sample_positions in positions[mask]
         ]
-        wrist_trace = (
-            mean_positions[:, wrist_j, :]
-            - mean_positions[:, spine3_j, :]
-            + display_spine_pos
-        )
+        wrist_trace = fk.fk_controlled_batch(
+            mean_arm_aa,
+            fixed_collar_aa,
+            display_spine_pos,
+            spine_aa,
+        )[:, -1, :]
 
         cluster_body_cutoffs.append(body_cutoff)
         cluster_individual_previews.append(individual_previews)
@@ -507,7 +556,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
     ]
 
     figure_t0 = time.perf_counter()
-    fig, axes, panel_arm_lines, panel_arm_scats = _build_figure(
+    fig, axes_by_cluster, panel_arm_lines, panel_arm_scats = _build_figure(
         unique_labels,
         cluster_body_cutoffs,
         cluster_wrist_traces,
@@ -525,21 +574,23 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
 
     def _set_selected(idx: int) -> None:
         state["selected"] = idx
-        for i, (arm_lines, arm_scat) in enumerate(
+        for i, (arm_lines, arm_scats) in enumerate(
             zip(panel_arm_lines, panel_arm_scats)
         ):
             color = _COLOR_SELECTED if i == idx else _COLOR_ARM
             for ln in arm_lines:
                 ln.set_color(color)
-            arm_scat.set_color(color)
-            axes[i].set_facecolor("#FFF3E0" if i == idx else "white")
+            for arm_scat in arm_scats:
+                arm_scat.set_color(color)
+            for ax in axes_by_cluster[i]:
+                ax.set_facecolor("#FFF3E0" if i == idx else "white")
         fig.canvas.draw_idle()
 
     def _on_click(event: "matplotlib.backend_bases.MouseEvent") -> None:
         if event.inaxes is None:
             return
-        for i, ax in enumerate(axes):
-            if event.inaxes is ax:
+        for i, cluster_axes in enumerate(axes_by_cluster):
+            if event.inaxes in cluster_axes:
                 _set_selected(i)
                 return
 

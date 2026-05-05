@@ -47,10 +47,10 @@ class XyzPositionClusterer(
         self._random_state = random_state
 
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
-        """Convert ``(num_samples, n_frames, 4, 3)`` → ``(num_samples, 5*3)``."""
+        """Convert arm trajectories to ``(num_samples, 5*3)`` XYZ features."""
         num_samples, n_frames, _, _ = trajectories.shape
         frame_idx = min(100, n_frames - 1)
-        poses = trajectories[:, frame_idx]  # (num_samples, 4, 3)
+        poses = trajectories[:, frame_idx]  # (num_samples, 3-or-4, 3)
         if poses.shape[-2] == 3:
             positions = self._fk.fk_controlled_batch(poses)
         else:
@@ -72,7 +72,9 @@ class XyzPositionClusterer(
         """Cluster trajectories by XYZ joint positions.
 
         Args:
-            trajectories: ``(num_samples, n_frames, 4, 3)`` axis-angle batch.
+            trajectories: ``(num_samples, n_frames, 3, 3)`` controlled
+                axis-angle batch. Legacy full-arm ``(..., 4, 3)`` batches are
+                also accepted.
 
         Returns:
             ``(num_samples,)`` integer labels in ``[0, n_clusters)``.

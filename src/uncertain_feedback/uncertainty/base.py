@@ -10,9 +10,10 @@ import numpy as np
 class TrajectoryClusterer(ABC):  # pylint: disable=too-few-public-methods
     """Cluster a batch of arm trajectories into integer labels.
 
-    Subclasses implement :meth:`cluster` to map a ``(num_samples, n_frames,
-    4, 3)`` axis-angle trajectory batch to a ``(num_samples,)`` array of
-    integer cluster labels.
+    Subclasses implement :meth:`cluster` to map a controlled
+    ``(num_samples, n_frames, 3, 3)`` axis-angle trajectory batch to a
+    ``(num_samples,)`` array of integer cluster labels.  Legacy full-arm
+    ``(..., 4, 3)`` batches may also be accepted by concrete implementations.
     """
 
     @abstractmethod
@@ -20,7 +21,7 @@ class TrajectoryClusterer(ABC):  # pylint: disable=too-few-public-methods
         """Assign integer cluster labels to a batch of trajectories.
 
                 Args:
-                    trajectories: ``(num_samples, n_frames, 4, 3)`` axis-angle
+                    trajectories: ``(num_samples, n_frames, 3, 3)`` axis-angle
                                   trajectory batch, as returned by
                                   :meth:`~uncertain_feedback.motion_generators.mdm\
         .mdm_api.MdmMotionGenerator.generate_left_arm_trajectory` with

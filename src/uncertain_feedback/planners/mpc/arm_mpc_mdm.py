@@ -100,6 +100,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
             fixed_collar_aa=fixed_collar_aa,
+            body_pos=body_pos,
             extra_costs=extra_costs,
         )
         self.advance_threshold = advance_threshold
@@ -289,10 +290,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--start_pose",
         type=str,
-        default="sitting_pose.pt",
+        default="demo_pose.pt",
         help=(
             "Name of the .pt file in MDM_ROOT to use as the initial pose"
-            " (default: sitting_pose.pt)"
+            " (default: demo_pose.pt)"
         ),
     )
     args = parser.parse_args()

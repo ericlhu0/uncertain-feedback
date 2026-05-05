@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from argparse import Namespace
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesian
 from uncertain_feedback.planners.mpc.config import load_mpc_config
@@ -13,8 +17,8 @@ from uncertain_feedback.planners.mpc.costs import (
     build_extra_costs,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
-from uncertain_feedback.planners.mpc.left_arm_cartesian_mpc_no_mdm import (
-    LeftArmCartesianMPCNoMDM,
+from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
+    ArmMPCCartesianNoMDM,
 )
 
 
@@ -44,6 +48,28 @@ def _cost_context(fk: SmplLeftArmFK) -> MpcCostContext:
     )
 
 
+class _FakeMotionGenerator:
+    def __init__(self, expected_pose_path: Path) -> None:
+        self.expected_pose_path = expected_pose_path
+        self.loaded_pose = np.arange(263, dtype=np.float64)
+        self.body_pos = np.arange(66, dtype=np.float64).reshape(22, 3)
+
+    def load_hml_pose(self, path: Path) -> np.ndarray:
+        assert path == self.expected_pose_path
+        return self.loaded_pose
+
+    def decode_pose_with_collar(
+        self, pose: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        np.testing.assert_allclose(pose, self.loaded_pose)
+        return (
+            np.ones((3, 3)),
+            self.body_pos,
+            np.array([0.1, 0.2, 0.3]),
+            np.array([0.4, 0.5, 0.6]),
+        )
+
+
 class _FixedCost:
     def __init__(self, values: list[float]) -> None:
         self._values = np.asarray(values, dtype=np.float64)
@@ -51,6 +77,81 @@ class _FixedCost:
     def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
         assert q_trajs.shape[0] == self._values.shape[0]
         return self._values
+
+
+def test_non_mdm_initial_pose_defaults_to_tpose_without_loading_generator() -> None:
+    args = Namespace(pose=None, model_path=None)
+
+    def factory(_model_path):
+        raise AssertionError("non-MDM without --pose should not load MDM resources")
+
+    gen, state = planner_run._load_initial_pose_state(
+        args, uses_mdm=False, motion_generator_factory=factory
+    )
+
+    assert gen is None
+    np.testing.assert_allclose(state.arm_aa, np.zeros((3, 3)))
+    np.testing.assert_allclose(state.fixed_collar_aa, np.zeros(3))
+    assert state.body_pos is None
+    assert state.spine3_pos is None
+    assert state.spine3_aa is None
+    assert state.hml_pose is None
+
+
+def test_non_mdm_initial_pose_uses_pose_when_provided(tmp_path) -> None:
+    pose_path = tmp_path / "pose.pt"
+    model_path = tmp_path / "model.pt"
+    fake_gen = _FakeMotionGenerator(expected_pose_path=pose_path)
+    args = Namespace(pose=pose_path, model_path=model_path)
+
+    def factory(received_model_path):
+        assert received_model_path == model_path
+        return fake_gen
+
+    gen, state = planner_run._load_initial_pose_state(
+        args, uses_mdm=False, motion_generator_factory=factory
+    )
+
+    assert gen is fake_gen
+    np.testing.assert_allclose(state.arm_aa, np.ones((3, 3)))
+    np.testing.assert_allclose(state.fixed_collar_aa, [0.4, 0.5, 0.6])
+    np.testing.assert_allclose(state.body_pos, fake_gen.body_pos)
+    np.testing.assert_allclose(state.spine3_pos, fake_gen.body_pos[9])
+    np.testing.assert_allclose(state.spine3_aa, [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)
+
+
+def test_initial_pose_uses_config_pose_when_cli_pose_is_omitted(tmp_path) -> None:
+    pose_path = tmp_path / "config_pose.pt"
+    fake_gen = _FakeMotionGenerator(expected_pose_path=pose_path)
+    args = Namespace(pose=None, model_path=None)
+
+    gen, state = planner_run._load_initial_pose_state(
+        args,
+        uses_mdm=False,
+        config_pose=pose_path,
+        motion_generator_factory=lambda _model_path: fake_gen,
+    )
+
+    assert gen is fake_gen
+    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)
+
+
+def test_initial_pose_cli_pose_overrides_config_pose(tmp_path) -> None:
+    cli_pose_path = tmp_path / "cli_pose.pt"
+    config_pose_path = tmp_path / "config_pose.pt"
+    fake_gen = _FakeMotionGenerator(expected_pose_path=cli_pose_path)
+    args = Namespace(pose=cli_pose_path, model_path=None)
+
+    gen, state = planner_run._load_initial_pose_state(
+        args,
+        uses_mdm=False,
+        config_pose=config_pose_path,
+        motion_generator_factory=lambda _model_path: fake_gen,
+    )
+
+    assert gen is fake_gen
+    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)
 
 
 def test_load_mpc_config_with_elbow_height(tmp_path) -> None:
@@ -128,11 +229,12 @@ def test_load_mpc_config_accepts_no_mdm_cartesian_planner(tmp_path) -> None:
     path = _write_config(
         tmp_path,
         """
-planner: leftarmcartesianmpcnomdm
+planner: arm_mpc_cartesian_no_mdm
 steps: 2
 horizon: 3
 n_mpc_samples: 4
 max_angle_delta: 0.0025
+pose: src/uncertain_feedback/motion_generators/mdm/demo_pose.pt
 cartesian:
   goals:
     - [0.1, 0.2, 0.3]
@@ -141,7 +243,8 @@ cartesian:
 
     cfg = load_mpc_config(path)
 
-    assert cfg.planner == "leftarmcartesianmpcnomdm"
+    assert cfg.planner == "arm_mpc_cartesian_no_mdm"
+    assert cfg.pose == Path("src/uncertain_feedback/motion_generators/mdm/demo_pose.pt")
     assert cfg.cartesian.goals == [[0.1, 0.2, 0.3]]
 
 
@@ -261,12 +364,46 @@ def test_cartesian_mpc_adds_extra_costs() -> None:
     np.testing.assert_allclose(mpc._cartesian_cost(q_trajs), [4.0, 5.0])
 
 
+def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
+    fk = SmplLeftArmFK()
+    spine3_pos = np.array([0.25, 1.0, -0.3], dtype=np.float64)
+    spine3_aa = np.zeros(3, dtype=np.float64)
+    fixed_collar_aa = np.zeros(3, dtype=np.float64)
+    cartesian_goal = np.array([0.3, 0.5, 0.1], dtype=np.float64)
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    mpc = LeftArmMPCCartesian(
+        cartesian_goals=[cartesian_goal],
+        initial_arm_aa=np.zeros((3, 3)),
+        fk=fk,
+        spine3_pos=spine3_pos,
+        spine3_aa=spine3_aa,
+        fixed_collar_aa=fixed_collar_aa,
+    )
+
+    target_world_before = mpc._spine3_pos + mpc.current_cartesian_goal
+    mdm_endpoint = np.zeros((3, 3), dtype=np.float64)
+    mdm_endpoint[0, 1] = 1.0
+    mpc.set_mdm_goal(mdm_endpoint)
+    mpc.push_trajectory(np.stack([np.zeros((3, 3)), mdm_endpoint]))
+    target_world_after = mpc._spine3_pos + mpc.current_cartesian_goal
+
+    np.testing.assert_allclose(target_world_after, target_world_before)
+    wrist_rel = (
+        fk.fk_controlled(
+            np.zeros((3, 3)), fixed_collar_aa, spine3_pos, spine3_aa
+        )[-1]
+        - spine3_pos
+    )
+    expected_cost = ((wrist_rel - cartesian_goal) ** 2).sum()
+    np.testing.assert_allclose(mpc._cartesian_cost(q_trajs), [expected_cost])
+
+
 def test_no_mdm_cartesian_mpc_adds_extra_costs() -> None:
     fk = SmplLeftArmFK()
     q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
     wrist_rel = fk.fk_controlled(np.zeros((3, 3)))[-1] - fk.tpose_spine3_pos
     extra_costs = CompositeTrajectoryCost([_FixedCost([6.0, 7.0])])
-    mpc = LeftArmCartesianMPCNoMDM(
+    mpc = ArmMPCCartesianNoMDM(
         cartesian_goals=[wrist_rel],
         initial_arm_aa=np.zeros((3, 3)),
         fk=fk,

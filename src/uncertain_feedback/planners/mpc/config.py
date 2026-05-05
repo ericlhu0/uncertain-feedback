@@ -15,7 +15,7 @@ PLANNER_CHOICES = {
     "arm_mpc_mdm",
     "arm_mpc_mdm_uq",
     "arm_mpc_cartesian",
-    "leftarmcartesianmpcnomdm",
+    "arm_mpc_cartesian_no_mdm",
 }
 
 
@@ -39,6 +39,7 @@ class MpcRunConfig:
     horizon: int
     n_mpc_samples: int
     max_angle_delta: float
+    pose: Path | None
     goal_threshold: float
     advance_threshold: float
     trajectory_fraction: float
@@ -70,6 +71,14 @@ def _float(value: Any, name: str) -> float:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} must be a number.") from exc
+
+
+def _optional_path(value: Any, name: str) -> Path | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a path string.")
+    return Path(value)
 
 
 def load_mpc_config(path: Path) -> MpcRunConfig:
@@ -113,6 +122,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         horizon=_positive_int(data.get("horizon"), "horizon"),
         n_mpc_samples=_positive_int(data.get("n_mpc_samples"), "n_mpc_samples"),
         max_angle_delta=_float(data.get("max_angle_delta"), "max_angle_delta"),
+        pose=_optional_path(data.get("pose"), "pose"),
         goal_threshold=_float(data.get("goal_threshold", 0.01), "goal_threshold"),
         advance_threshold=_float(
             data.get("advance_threshold", 0.1), "advance_threshold"

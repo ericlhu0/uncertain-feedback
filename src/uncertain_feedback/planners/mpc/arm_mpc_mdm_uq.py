@@ -300,7 +300,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--start_pose",
         type=str,
-        default="sitting_pose.pt",
+        default="demo_pose.pt",
         help="Name of the .pt file in MDM_ROOT to use as the initial pose.",
     )
     parser.add_argument(

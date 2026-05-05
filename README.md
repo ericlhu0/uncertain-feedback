@@ -137,76 +137,168 @@ uv run python ../sample_leftarm.py \
 `--model_path` is always relative to `motion-diffusion-model/` regardless of cwd (the script does an internal `os.chdir`). Output videos are saved under `save/my_finetuned_v1/edit_*/`. (1s = 20 frames)
 
 
-## Running Experiments
+## Running MPC Experiments
 
-Three planner variants are available in `src/uncertain_feedback/planners/mpc/`. All commands run from the **repo root**. The `--start_pose` argument is a filename resolved against `MDM_ROOT` (`src/uncertain_feedback/motion_generators/mdm/`) internally — it does not depend on cwd.
+Use the unified runner from the repo root:
+```
+uv run python -m uncertain_feedback.planners.run --mpc-config path/to/mpc.yaml
+```
 
-### Base MPC (baseline, no MDM)
-```
-uv run python -m uncertain_feedback.planners.mpc.arm_mpc \
-  --steps 500 \
-  --samples 256 \
-  --horizon 10
-```
-No model weights required. Moves the left arm to hardcoded goals with live matplotlib visualization.
+Controller settings now live in the required YAML file passed with `--mpc-config`.
+The initial whole-body HML pose can be set with `pose:` in the YAML. Runtime
+inputs still stay on the command line: `--model-path`, `--arm`, `--text`,
+`--text-time`, `--save`, `--live`, `--mdm-frames`, and `--frozen-body`.
+`--pose` is still accepted as an override for the YAML pose.
 
-### MDM + MPC (no uncertainty quantification)
-```
-uv run python -m uncertain_feedback.planners.mpc.arm_mpc_mdm \
-  --text "raise my left arm" \
-  --text_time 0 \
-  --steps 750 \
-  --start_pose sitting_pose.pt \
-  --save arm_mdm.mp4
-```
-Key args: `--text` (motion description), `--text_time` (MPC step at which MDM is triggered, default 0), `--start_pose` (`.pt` filename in `MDM_ROOT`), `--save` (output mp4/gif), `--save_motion` (save the raw MDM motion video separately).
+Supported YAML `planner` values:
+- `arm_mpc`: joint-space MPC only, no MDM.
+- `arm_mpc_mdm`: one MDM trajectory, then MPC tracks it.
+- `arm_mpc_mdm_uq`: multiple MDM samples, clustering/picker, then MPC tracks the selected mean.
+- `arm_mpc_cartesian`: MDM/UQ first, then Cartesian wrist-goal MPC.
+- `arm_mpc_cartesian_no_mdm`: Cartesian wrist-goal MPC only, no MDM and no UQ.
 
-### MDM + MPC + Uncertainty Quantification (main experiment)
+### Minimal Joint-Space MPC Config
+Save as `src/uncertain_feedback/planners/mpc/configs/mpc_plain.yaml`:
+```yaml
+planner: arm_mpc
+steps: 500
+horizon: 10
+n_mpc_samples: 256
+max_angle_delta: 0.001
+goal_threshold: 0.01
 ```
-uv run python -m uncertain_feedback.planners.mpc.arm_mpc_mdm_uq \
-  --text "raise my left arm" \
-  --text_time 0 \
-  --steps 750 \
-  --diffusion-samples 128 \
-  --n-clusters 3 \
-  --start_pose sitting_pose.pt \
-  --save arm_uq.mp4
-```
-Generates `--diffusion-samples` MDM trajectories, clusters them into `--n-clusters` groups via KMeans, opens an interactive matplotlib cluster-picker window (blocks until you click a cluster panel), then tracks the mean of the chosen cluster with MPC.
 
-Additional args vs. the plain MDM+MPC variant:
-- `--diffusion-samples`: number of MDM samples to draw (default 128; more = better coverage, slower)
-- `--n-clusters`: number of trajectory clusters shown in the picker (default 3)
-- `--trajectory-fraction`: fraction of MDM frames to enqueue as MPC waypoints (default 0.75)
-
-### General MPC running script
-```
+Run:
+```bash
 uv run python -m uncertain_feedback.planners.run \
-  --planner arm_mpc_mdm_uq \
-  --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
-  --pose "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt" \
-  --text "raise my left arm" \
-  --diffusion-samples 500 \
-  --auto-cluster 0 \
-  --save "$(pwd)/run_output3.mp4" \
-  --steps 750
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mpc_plain.yaml \
+  --live
 ```
 
-#### with cartesian goal
+### MDM + UQ Config
+Save as `src/uncertain_feedback/planners/mpc/configs/mpc_mdm_uq.yaml`:
+```yaml
+planner: arm_mpc_mdm_uq
+steps: 750
+horizon: 10
+n_mpc_samples: 512
+max_angle_delta: 0.0025
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
+goal_threshold: 0.1
+advance_threshold: 0.1
+trajectory_fraction: 1.0
+
+uq:
+  diffusion_samples: 128
+  n_clusters: 3
+  auto_cluster: null
 ```
+
+Run with an interactive cluster picker:
+```bash
 uv run python -m uncertain_feedback.planners.run \
-  --planner arm_mpc_cartesian \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mpc_mdm_uq.yaml \
   --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
-  --pose "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt" \
   --text "raise my left arm" \
-  --goal-pos 0.3 0.5 0 \
-  --diffusion-samples 200 \
+  --mdm-frames 100 \
   --save out.mp4 \
-  --steps 750 \
-  --live \
-  --n-clusters 5 \
-  --mdm-frames 100
+  --live
 ```
+
+For headless runs, set `uq.auto_cluster` in the YAML:
+```yaml
+uq:
+  diffusion_samples: 128
+  n_clusters: 3
+  auto_cluster: 0
+```
+
+### Cartesian MPC With MDM/UQ
+This planner first follows the selected/generated MDM arm trajectory, then switches
+to Cartesian wrist goals.
+
+Save as `src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm.yaml`:
+```yaml
+planner: arm_mpc_cartesian
+steps: 750
+horizon: 10
+n_mpc_samples: 512
+max_angle_delta: 0.0025
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
+goal_threshold: 0.1
+advance_threshold: 0.1
+trajectory_fraction: 1.0
+
+uq:
+  diffusion_samples: 200
+  n_clusters: 5
+  auto_cluster: null
+
+cartesian:
+  goals:
+    - [0.3, 0.5, 0.0]
+  threshold: 0.05
+```
+
+Run:
+```bash
+uv run python -m uncertain_feedback.planners.run \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm.yaml \
+  --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
+  --text "raise my left arm" \
+  --mdm-frames 100 \
+  --save out.mp4 \
+  --live
+```
+
+### Cartesian MPC Without MDM or UQ
+Use `arm_mpc_cartesian_no_mdm` when you want direct Cartesian wrist-goal MPC only.
+This path does not generate motion or run clustering. If you set an HML `pose:`,
+the runner decodes that pose once to initialize the arm, collar, spine, and
+background body.
+
+Save as `src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm.yaml`:
+```yaml
+planner: arm_mpc_cartesian_no_mdm
+steps: 750
+horizon: 10
+n_mpc_samples: 512
+max_angle_delta: 0.0025
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
+goal_threshold: 0.1
+
+cartesian:
+  goals:
+    - [0.3, 0.5, 0.1]
+  threshold: 0.05
+```
+
+Run:
+```bash
+uv run python -m uncertain_feedback.planners.run \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm.yaml \
+  --live
+```
+
+### Optional Elbow-Height Cost
+Any MPC YAML can include an `elbow_height` cost. Heights are spine3-relative Y
+coordinates in metres. The cost is zero inside `[min, max]`, penalizes violations
+across the predicted rollout, and adds a progress penalty if the elbow starts
+outside the range and moves farther out.
+
+```yaml
+costs:
+  elbow_height:
+    min: 0.10
+    max: 0.45
+    weight: 100.0
+    progress_weight: 100.0  # optional; defaults to weight
+```
+
+`--arm` can override the starting arm state with a `.npy` file. The preferred
+shape is `(3, 3)` for `[left_shoulder, left_elbow, left_wrist]`. Legacy `(4, 3)`
+files are accepted; the first row fixes the left collar and the remaining rows
+control shoulder, elbow, and wrist.
 
 
 ## Thanks

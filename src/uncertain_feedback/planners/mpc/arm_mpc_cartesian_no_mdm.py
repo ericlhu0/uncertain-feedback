@@ -1,4 +1,4 @@
-"""Pure Cartesian MPC for the SMPL left arm with no MDM or UQ."""
+"""Pure Cartesian MPC for the controlled SMPL arm with no MDM or UQ."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.planners.mpc.visualizer import ArmVisualizer, _TARGET_COLOR
 
 
-class LeftArmCartesianMPCNoMDM(SmplLeftArmMPC):
+class ArmMPCCartesianNoMDM(SmplLeftArmMPC):
     """Pure Cartesian wrist-goal MPC with no motion generation or UQ."""
 
     def __init__(
@@ -37,7 +37,7 @@ class LeftArmCartesianMPCNoMDM(SmplLeftArmMPC):
         extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
         if fk is None:
-            raise ValueError("fk is required for LeftArmCartesianMPCNoMDM.")
+            raise ValueError("fk is required for ArmMPCCartesianNoMDM.")
         super().__init__(
             horizon=horizon,
             n_mpc_samples=n_mpc_samples,

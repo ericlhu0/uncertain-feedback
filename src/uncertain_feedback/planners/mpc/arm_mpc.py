@@ -102,6 +102,8 @@ class SmplLeftArmMPC:
                          ``visualize=True``).
         spine3_pos:      ``(3,)`` world position of spine3 (optional).
         spine3_aa:       ``(3,)`` world axis-angle of spine3 (optional).
+        body_pos:        ``(22, 3)`` background skeleton joint positions
+                         (optional).
     """
 
     def __init__(
@@ -116,6 +118,7 @@ class SmplLeftArmMPC:
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
         fixed_collar_aa: np.ndarray | None = None,
+        body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
         self._config = _MpcConfig(horizon, n_mpc_samples, max_angle_delta)
@@ -131,7 +134,7 @@ class SmplLeftArmMPC:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")
             self._vis_config: _VisConfig | None = _VisConfig(
-                fk, spine3_pos, spine3_aa, fixed_collar_aa
+                fk, spine3_pos, spine3_aa, fixed_collar_aa, body_pos=body_pos
             )
         else:
             self._vis_config = None
@@ -310,6 +313,7 @@ class SmplLeftArmMPC:
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     collar_aa=self._vis_config.collar_aa,
+                    body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                 )
                 if self._vis_config.capture:

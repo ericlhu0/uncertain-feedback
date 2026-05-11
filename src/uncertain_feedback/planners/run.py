@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
 from uncertain_feedback.consts import MDM_ROOT
 from uncertain_feedback.planners.mpc import (
@@ -36,7 +37,15 @@ from uncertain_feedback.planners.mpc import (
     SmplLeftArmMPC,
 )
 from uncertain_feedback.planners.mpc.config import load_mpc_config
-from uncertain_feedback.planners.mpc.costs import MpcCostContext, build_extra_costs
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    ElbowHeightCost,
+    MpcCostContext,
+    build_extra_costs,
+    compute_elbow_heights,
+    replace_cost_in_composite,
+    update_elbow_cost,
+)
 
 _MDM_PLANNERS = {"arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian"}
 
@@ -86,9 +95,7 @@ def _load_initial_pose_state(
     factory = motion_generator_factory or _make_motion_generator
     gen = factory(args.model_path)
     hml_pose = gen.load_hml_pose(pose_path)
-    arm_aa, body_pos, spine3_aa, fixed_collar_aa = gen.decode_pose_with_collar(
-        hml_pose
-    )
+    arm_aa, body_pos, spine3_aa, fixed_collar_aa = gen.decode_pose_with_collar(hml_pose)
     return gen, _InitialPoseState(
         arm_aa=np.asarray(arm_aa, dtype=np.float64),
         fixed_collar_aa=np.asarray(fixed_collar_aa, dtype=np.float64),
@@ -203,6 +210,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="frozen_body",
         help="Freeze non-left-arm body features during MDM generation.",
     )
+    p.add_argument(
+        "--preference-output",
+        type=Path,
+        default="learned.yaml",
+        dest="preference_output",
+        help=(
+            "Where to save a YAML copy with learned preference costs. "
+            "Defaults to <mpc-config stem>_learned.yaml next to the input config."
+        ),
+    )
     return p
 
 
@@ -218,6 +235,89 @@ def _restore_interactive_backend() -> None:
 
 def _get_vis(mpc: SmplLeftArmMPC) -> ArmVisualizer | None:
     return mpc.get_visualizer()
+
+
+def _find_elbow_cost(composite: CompositeTrajectoryCost) -> ElbowHeightCost | None:
+    """Return the first ElbowHeightCost in the composite, or None."""
+    for term in composite._terms:
+        if isinstance(term, ElbowHeightCost):
+            return term
+    return None
+
+
+def _apply_preference_update(
+    mpc: SmplLeftArmMPC,
+    mdm_traj: np.ndarray,
+    q_history: list[np.ndarray],
+    context: MpcCostContext,
+    alpha: float,
+    window: int,
+) -> ElbowHeightCost | None:
+    """Update elbow cost bounds from MDM/MPC trajectory discrepancy, if applicable."""
+    elbow_cost = _find_elbow_cost(mpc._extra_costs)  # pylint: disable=protected-access
+    if elbow_cost is None:
+        return None
+    if not q_history:
+        return None
+    recent_q = np.array(q_history[-window:])
+    mpc_heights = compute_elbow_heights(recent_q, context)
+    mdm_heights = compute_elbow_heights(mdm_traj, context)
+    mdm_lo, mdm_hi = np.percentile(mdm_heights, [5.0, 95.0])
+    mpc_mean = float(mpc_heights.mean())
+    mdm_mean = float(mdm_heights.mean())
+    if np.isclose(mpc_mean, mdm_mean):
+        side = "none"
+    elif mpc_mean < mdm_mean:
+        side = "min"
+    else:
+        side = "max"
+    updated = update_elbow_cost(elbow_cost, mdm_heights, mpc_heights, alpha=alpha)
+    print(
+        f"[preference] elbow bounds updated: "
+        f"[{elbow_cost.min_height:.3f}, {elbow_cost.max_height:.3f}] → "
+        f"[{updated.min_height:.3f}, {updated.max_height:.3f}]  "
+        f"(side={side} mdm_range=[{mdm_lo:.3f}, {mdm_hi:.3f}] "
+        f"mpc_mean={mpc_mean:.3f}, mdm_mean={mdm_mean:.3f})"
+    )
+    mpc.set_extra_costs(
+        replace_cost_in_composite(mpc._extra_costs, updated)
+    )  # pylint: disable=protected-access
+    return updated
+
+
+def _default_preference_output_path(config_path: Path) -> Path:
+    """Return the default learned-preference YAML path for an input config."""
+    return config_path.with_name(f"{config_path.stem}_learned{config_path.suffix}")
+
+
+def _save_learned_preference_yaml(
+    input_path: Path,
+    output_path: Path,
+    learned_elbow_cost: ElbowHeightCost,
+) -> None:
+    """Save a config copy with learned elbow-height preference parameters."""
+    with open(input_path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    data = raw if isinstance(raw, dict) else {}
+
+    costs = data.get("costs")
+    if not isinstance(costs, dict):
+        costs = {}
+        data["costs"] = costs
+    elbow = costs.get("elbow_height")
+    if not isinstance(elbow, dict):
+        elbow = {}
+        costs["elbow_height"] = elbow
+
+    elbow["min"] = float(learned_elbow_cost.min_height)
+    elbow["max"] = float(learned_elbow_cost.max_height)
+    elbow["weight"] = float(learned_elbow_cost.weight)
+    elbow["progress_weight"] = float(learned_elbow_cost.progress_weight)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+    print(f"[preference] saved learned preference YAML: {output_path}")
 
 
 def main() -> None:
@@ -334,19 +434,18 @@ def main() -> None:
             n_clusters=cfg.uq.n_clusters,
         )
 
-    # Propagate capture / compact flags into the vis config
-    if mpc._vis_config is not None:  # pylint: disable=protected-access
-        mpc._vis_config.capture = (
-            args.save is not None
-        )  # pylint: disable=protected-access
-        mpc._vis_config.compact = compact  # pylint: disable=protected-access
+    mpc.set_visualization_mode(capture=args.save is not None, compact=compact)
 
     # --- MPC loop ---
     from tqdm import tqdm  # pylint: disable=import-outside-toplevel
 
     q = arm_aa.copy()
+    q_history: list[np.ndarray] = []
     mdm_triggered = False
     pre_mdm_vis: ArmVisualizer | None = None
+    preference_output_path = args.preference_output or _default_preference_output_path(
+        args.mpc_config
+    )
 
     for step in tqdm(range(cfg.steps), desc="MPC", unit="step"):
         # Trigger MDM generation at the configured step
@@ -369,12 +468,30 @@ def main() -> None:
                     spine3_aa=spine3_aa,
                     fixed_collar_aa=fixed_collar_aa,
                 )
+                if cfg.preference_learning:
+                    learned_elbow_cost = _apply_preference_update(
+                        mpc,
+                        traj,
+                        q_history,
+                        cost_context,
+                        alpha=cfg.preference_alpha,
+                        window=cfg.preference_window,
+                    )
+                    if learned_elbow_cost is not None:
+                        _save_learned_preference_yaml(
+                            args.mpc_config, preference_output_path, learned_elbow_cost
+                        )
+                else:
+                    print(
+                        "[preference] learning disabled; generated trajectory "
+                        "will not update elbow bounds"
+                    )
                 n_frames = traj.shape[0]
                 cutoff = max(1, round(n_frames * mpc.trajectory_fraction))
                 mpc.set_mdm_goal(traj[cutoff - 1])
                 mpc.push_trajectory(traj[:cutoff])
             else:
-                mpc.query_mdm_with_uncertainty(
+                traj = mpc.query_mdm_with_uncertainty(
                     gen,
                     args.text,
                     start_pose=current_pose,
@@ -383,11 +500,30 @@ def main() -> None:
                     mdm_frames=args.mdm_frames,
                     frozen_body=args.frozen_body,
                 )
+                if cfg.preference_learning:
+                    learned_elbow_cost = _apply_preference_update(
+                        mpc,
+                        traj,
+                        q_history,
+                        cost_context,
+                        alpha=cfg.preference_alpha,
+                        window=cfg.preference_window,
+                    )
+                    if learned_elbow_cost is not None:
+                        _save_learned_preference_yaml(
+                            args.mpc_config, preference_output_path, learned_elbow_cost
+                        )
+                else:
+                    print(
+                        "[preference] learning disabled; generated trajectory "
+                        "will not update elbow bounds"
+                    )
 
             # MDM generation can switch matplotlib to the Agg backend; restore it
             _restore_interactive_backend()
 
         q = mpc.step(q)
+        q_history.append(q)
 
     # --- Save video ---
     if args.save and visualize:

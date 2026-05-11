@@ -118,7 +118,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         auto_cluster: int | None = None,
         mdm_frames: int | None = None,
         frozen_body: bool = False,
-    ) -> None:
+    ) -> np.ndarray:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
                 The full pipeline:
@@ -252,6 +252,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         )
         self.set_mdm_goal(chosen_mean[cutoff - 1])
         self.push_trajectory(chosen_mean[:cutoff])
+        return chosen_mean
 
 
 # ---------------------------------------------------------------------------

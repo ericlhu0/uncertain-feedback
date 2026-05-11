@@ -295,6 +295,9 @@ costs:
     progress_weight: 100.0  # optional; defaults to weight
 ```
 
+When MDM is enabled, set `preference_learning: false` to keep the configured
+elbow-height bounds fixed after generated trajectories.
+
 `--arm` can override the starting arm state with a `.npy` file. The preferred
 shape is `(3, 3)` for `[left_shoulder, left_elbow, left_wrist]`. Legacy `(4, 3)`
 files are accepted; the first row fixes the left collar and the remaining rows

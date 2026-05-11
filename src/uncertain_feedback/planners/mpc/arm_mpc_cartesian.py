@@ -8,18 +8,13 @@ end-effector position is optimised.
 
 from __future__ import annotations
 
-from collections import deque
-
 import numpy as np
 
-from uncertain_feedback.planners.mpc.arm_mpc import (
-    _N_JOINTS,
-    _compose_rotvec,
-)
+from uncertain_feedback.planners.mpc.arm_mpc_cartesian_base import _CartesianGoalsMixin
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, _compose_rotvec
 from uncertain_feedback.planners.mpc.visualizer import (
     ArmVisualizer,
     _MDM_COLOR,
@@ -28,7 +23,7 @@ from uncertain_feedback.planners.mpc.visualizer import (
 from uncertain_feedback.uncertainty.base import TrajectoryClusterer
 
 
-class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
+class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
     """MDM+UQ MPC with a queue of Cartesian wrist goals.
 
     MDM-generated joint-angle waypoints are tracked with the standard
@@ -105,64 +100,10 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
             clusterer=clusterer,
             extra_costs=extra_costs,
         )
-        self._cartesian_goals: deque[np.ndarray] = deque(
-            np.asarray(g, dtype=np.float64) for g in cartesian_goals
+        self._init_cartesian(
+            cartesian_goals, initial_arm_aa, cartesian_threshold,
+            fk, spine3_pos, spine3_aa, fixed_collar_aa,
         )
-        self._cartesian_threshold = cartesian_threshold
-        self._initial_arm_aa = np.asarray(initial_arm_aa, dtype=np.float64)
-        self._fk_inst = fk
-        self._spine3_pos = (
-            np.asarray(spine3_pos, dtype=np.float64)
-            if spine3_pos is not None
-            else fk.tpose_spine3_pos
-        )
-        self._spine3_aa = (
-            np.asarray(spine3_aa, dtype=np.float64)
-            if spine3_aa is not None
-            else np.zeros(3)
-        )
-        self._fixed_collar_aa = (
-            np.asarray(fixed_collar_aa, dtype=np.float64)
-            if fixed_collar_aa is not None
-            else np.zeros(3)
-        )
-
-    # ------------------------------------------------------------------
-    # Cartesian goal queue management
-    # ------------------------------------------------------------------
-
-    @property
-    def current_cartesian_goal(self) -> np.ndarray | None:
-        """The active Cartesian goal, or ``None`` if the queue is empty."""
-        return self._cartesian_goals[0] if self._cartesian_goals else None
-
-    def append_cartesian_goal(self, goal: np.ndarray) -> None:
-        """Add a Cartesian goal to the back of the queue."""
-        self._cartesian_goals.append(np.asarray(goal, dtype=np.float64))
-
-    # ------------------------------------------------------------------
-    # Cartesian cost
-    # ------------------------------------------------------------------
-
-    def _cartesian_cost(self, q_trajs: np.ndarray) -> np.ndarray:
-        """L2 Cartesian cost: spine3-relative wrist distance to current target.
-
-        Args:
-            q_trajs: ``(N, H+1, 4, 3)`` state trajectories.
-
-        Returns:
-            ``(N,)`` cost per trajectory.
-        """
-        target = self.current_cartesian_goal
-        if target is None:
-            return np.zeros(q_trajs.shape[0])
-        terminal_q = q_trajs[:, -1]  # (N, 4, 3)
-        positions = self._fk_inst.fk_controlled_batch(
-            terminal_q, self._fixed_collar_aa, self._spine3_pos, self._spine3_aa
-        )  # (N, 5, 3)
-        wrist_rel = positions[:, -1] - self._spine3_pos  # (N, 3)
-        wrist_cost = ((wrist_rel - target) ** 2).sum(axis=-1)  # (N,)
-        return wrist_cost + self._extra_costs(q_trajs)
 
     # ------------------------------------------------------------------
     # solve override
@@ -176,33 +117,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
         """
         if self._goals:
             return super().solve(current_q)
-
-        current_q = np.asarray(current_q, dtype=np.float64)
-
-        if self._prev_best is not None:
-            mean = np.concatenate(
-                [self._prev_best[1:], np.zeros((1, _N_JOINTS, 3))], axis=0
-            )
-        else:
-            mean = np.zeros((self._config.horizon, _N_JOINTS, 3), dtype=np.float64)
-
-        actions = np.random.normal(
-            loc=mean,
-            scale=self._config.max_angle_delta,
-            size=(
-                self._config.n_mpc_samples,
-                self._config.horizon,
-                _N_JOINTS,
-                3,
-            ),
-        )
-        q_trajs = self._rollout(current_q, actions)
-        costs = self._cartesian_cost(q_trajs)
-
-        best_idx = np.argmin(costs)
-        best_plan = actions[best_idx]
-        self._prev_best = best_plan
-        return best_plan[0], best_plan
+        return self._cartesian_solve(current_q)
 
     # ------------------------------------------------------------------
     # step override
@@ -257,6 +172,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
                     collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
+                    elbow_height_range=self._elbow_height_world_range(),
                 )
                 if self._vis_config.capture:
                     self._vis.start_capture()
@@ -303,6 +219,7 @@ class LeftArmMPCCartesian(LeftArmMPCMDMUQ):
                     collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
+                    elbow_height_range=self._elbow_height_world_range(),
                 )
                 if self._vis_config.capture:
                     self._vis.start_capture()

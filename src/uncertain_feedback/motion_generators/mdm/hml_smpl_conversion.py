@@ -220,7 +220,8 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
     )
 
     # Walk collar → shoulder → elbow → wrist.
-    # FK rule: child_pos = parent_pos + parent_world_rot.apply(tpose_bone)
+    # FK rule (child convention, matches MDM Skeleton / SmplLeftArmFK):
+    # child_rot is composed first, then used to transform the outgoing bone.
     arm_chain_smpl = [collar_j] + list(arm_info.l_arm_joints)
     current_rot = collar_world_rot
     current_ric = collar_ric
@@ -228,12 +229,12 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
         zip(arm_chain_smpl[:-1], arm_chain_smpl[1:])
     ):
         tpose_bone = tpose_22[child_j] - tpose_22[parent_j]
-        child_ric = current_ric + current_rot.apply(
-            tpose_bone
-        )  # parent rot → child pos
         child_rot = current_rot * Rotation.from_rotvec(
             arm_aa[arm_idx]
         )  # child world rot
+        child_ric = current_ric + child_rot.apply(
+            tpose_bone
+        )  # child rot → child pos
         raw[4 + (child_j - 1) * 3 : 4 + child_j * 3] = child_ric
         current_rot = child_rot
         current_ric = child_ric

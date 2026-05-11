@@ -53,6 +53,7 @@ import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3d projection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_BONE_PAIRS_22,
@@ -71,6 +72,7 @@ _BODY_COLOR = "#aaaaaa"
 _TARGET_COLOR = "royalblue"
 _TRACE_COLOR = "cornflowerblue"
 _MDM_COLOR = "darkorange"  # arm color when following an MDM trajectory
+_ELBOW_RANGE_COLOR = "red"
 
 _BODY_BONES = [p for p in SMPL_BONE_PAIRS_22 if p not in LEFT_ARM_BONE_PAIRS_22]
 _BODY_JOINTS = [j for j in range(22) if j not in LEFT_ARM_JOINT_INDICES_22]
@@ -114,6 +116,7 @@ class _LiveState:  # pylint: disable=too-many-instance-attributes
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
     collar_aa: np.ndarray | None
+    elbow_height_range: tuple[float, float] | None = None
     wrist_trace: list = dataclasses.field(default_factory=list)
     recorded_frames: list = dataclasses.field(default_factory=list)
     step: int = 0
@@ -231,6 +234,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         compact: bool = False,
+        elbow_height_range: tuple[float, float] | None = None,
     ) -> None:
         """Open an interactive window for live step-by-step visualization.
 
@@ -247,6 +251,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                         it replaces the default T-pose for the grey backdrop.
             compact:    If ``True``, build a single 3-D panel instead of the
                         full 6-panel layout.  Faster to render and encode.
+            elbow_height_range: Optional ``(min_y, max_y)`` world-space Y bounds
+                        for acceptable elbow height, shown as red planes.
         """
         target_full = self._full_body_positions(
             target_q, spine3_pos, spine3_aa, collar_aa
@@ -257,6 +263,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         all_pts = np.vstack([ref_body, target_full])
         mg = 0.15
         lims = [(all_pts[:, i].min() - mg, all_pts[:, i].max() + mg) for i in range(3)]
+        if elbow_height_range is not None:
+            low_y, high_y = elbow_height_range
+            lims[1] = (
+                min(lims[1][0], low_y - mg),
+                max(lims[1][1], high_y + mg),
+            )
 
         plt.ion()
         fig, artists_3d, artists_2d = self._build_figure(
@@ -267,6 +279,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             collar_aa=collar_aa,
             body_pos=body_pos,
             compact=compact,
+            elbow_height_range=elbow_height_range,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -282,6 +295,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             spine_pos=spine3_pos,
             spine_aa=spine3_aa,
             collar_aa=collar_aa,
+            elbow_height_range=elbow_height_range,
         )
 
     def update_step(
@@ -439,6 +453,28 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
 
+    def update_elbow_height_range(
+        self,
+        elbow_height_range: tuple[float, float] | None,
+    ) -> None:
+        """Draw or update red planes marking acceptable elbow-height bounds.
+
+        Args:
+            elbow_height_range: ``(min_y, max_y)`` world-space Y bounds, or
+                ``None`` to hide the range.
+        """
+        assert (
+            self._live is not None
+        ), "update_elbow_height_range() called before open_live()"
+        self._live.elbow_height_range = elbow_height_range
+        _update_elbow_height_artists(
+            self._live.artists3d,
+            self._live.artists2d,
+            elbow_height_range,
+        )
+        self._live.fig.canvas.draw_idle()
+        self._live.fig.canvas.flush_events()
+
     def finish_live(self, save_path: str, fps: int = 20) -> None:
         """Save the frames recorded during the live session to a video or GIF.
 
@@ -588,6 +624,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         compact: bool = False,
+        elbow_height_range: tuple[float, float] | None = None,
     ) -> tuple[plt.Figure, list[dict], list[dict]]:
         """Build the figure with static elements drawn and mutable artists created.
 
@@ -607,7 +644,13 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             fig = plt.figure(figsize=(8, 8))
             gs = gridspec.GridSpec(1, 1, figure=fig)
             artists_3d = self._build_3d_panels(
-                fig, gs, target_full, ref_body, lims, compact=True
+                fig,
+                gs,
+                target_full,
+                ref_body,
+                lims,
+                compact=True,
+                elbow_height_range=elbow_height_range,
             )
             return fig, artists_3d, []
 
@@ -615,8 +658,22 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
         fig.suptitle("SMPL Left Arm MPC (CEM)", fontsize=13, y=1.01)
 
-        artists_3d = self._build_3d_panels(fig, gs, target_full, ref_body, lims)
-        artists_2d = self._build_2d_panels(fig, gs, target_full, ref_body, lims)
+        artists_3d = self._build_3d_panels(
+            fig,
+            gs,
+            target_full,
+            ref_body,
+            lims,
+            elbow_height_range=elbow_height_range,
+        )
+        artists_2d = self._build_2d_panels(
+            fig,
+            gs,
+            target_full,
+            ref_body,
+            lims,
+            elbow_height_range=elbow_height_range,
+        )
         return fig, artists_3d, artists_2d
 
     def _build_3d_panels(  # pylint: disable=too-many-locals
@@ -627,6 +684,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         ref_body: np.ndarray,
         lims: list[tuple[float, float]],
         compact: bool = False,
+        elbow_height_range: tuple[float, float] | None = None,
     ) -> list[dict]:
         views = [_COMPACT_VIEW] if compact else _3D_VIEWS
         artists: list[dict] = []
@@ -641,6 +699,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.set_xlim(*lims[0])
             ax.set_ylim(*lims[1])
             ax.set_zlim(*lims[2])
+            elbow_planes = _add_elbow_height_planes_3d(
+                ax, lims, elbow_height_range
+            )
 
             _draw_bones_3d(ax, ref_body, _BODY_BONES, _BODY_COLOR, alpha=0.45, lw=1.2)
             ax.scatter(
@@ -725,6 +786,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "preview_lines": preview_lines,
                     "preview_scat": preview_scat,
                     "cartesian_goal_scat": cartesian_goal_scat,
+                    "elbow_planes": elbow_planes,
                 }
             )
         return artists
@@ -736,6 +798,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         target_full: np.ndarray,
         ref_body: np.ndarray,
         lims: list[tuple[float, float]],
+        elbow_height_range: tuple[float, float] | None = None,
     ) -> list[dict]:
         artists: list[dict] = []
         for col, view in enumerate(_ORTHO_VIEWS):
@@ -747,6 +810,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.set_xlim(*lims[view.hi])
             ax.set_ylim(*lims[view.vi])
             ax.tick_params(labelsize=7)
+            elbow_height_lines = _add_elbow_height_lines_2d(
+                ax, view, elbow_height_range
+            )
 
             _draw_bones_2d(
                 ax,
@@ -823,6 +889,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "scat": scat,
                     "lines": lines,
                     "trace": trace,
+                    "ax": ax,
                     "hi": view.hi,
                     "vi": view.vi,
                     "mdm_goal_lines": mdm_goal_lines,
@@ -830,6 +897,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "preview_lines": preview_lines,
                     "preview_scat": preview_scat,
                     "cartesian_goal_scat": cartesian_goal_scat,
+                    "elbow_height_lines": elbow_height_lines,
                 }
             )
         return artists
@@ -968,6 +1036,92 @@ def _update_artists(  # pylint: disable=too-many-locals
         if len(wrist_trace):
             a2["trace"].set_data(wrist_trace[:, a2["hi"]], wrist_trace[:, a2["vi"]])
             a2["trace"].set_color(trace_color)
+
+
+def _elbow_plane_vertices(
+    lims: list[tuple[float, float]],
+    y_value: float,
+) -> list[list[tuple[float, float, float]]]:
+    x0, x1 = lims[0]
+    z0, z1 = lims[2]
+    return [[(x0, y_value, z0), (x1, y_value, z0), (x1, y_value, z1), (x0, y_value, z1)]]
+
+
+def _add_elbow_height_planes_3d(
+    ax: Axes3D,
+    lims: list[tuple[float, float]],
+    elbow_height_range: tuple[float, float] | None,
+) -> list[Poly3DCollection]:
+    y_values = elbow_height_range if elbow_height_range is not None else (0.0, 0.0)
+    visible = elbow_height_range is not None
+    planes = []
+    for y_value in y_values:
+        plane = Poly3DCollection(
+            _elbow_plane_vertices(lims, y_value),
+            facecolors=_ELBOW_RANGE_COLOR,
+            edgecolors=_ELBOW_RANGE_COLOR,
+            alpha=0.12,
+            linewidths=0.8,
+            visible=visible,
+        )
+        ax.add_collection3d(plane)
+        planes.append(plane)
+    return planes
+
+
+def _add_elbow_height_lines_2d(
+    ax: plt.Axes,
+    view: _OrthoView,
+    elbow_height_range: tuple[float, float] | None,
+) -> list:
+    if view.vi != 1:
+        return []
+    y_values = elbow_height_range if elbow_height_range is not None else (0.0, 0.0)
+    visible = elbow_height_range is not None
+    return [
+        ax.axhline(
+            y_value,
+            color=_ELBOW_RANGE_COLOR,
+            alpha=0.55,
+            linewidth=1.0,
+            linestyle="--",
+            visible=visible,
+        )
+        for y_value in y_values
+    ]
+
+
+def _update_elbow_height_artists(
+    artists_3d: list[dict],
+    artists_2d: list[dict],
+    elbow_height_range: tuple[float, float] | None,
+) -> None:
+    visible = elbow_height_range is not None
+    y_values = elbow_height_range if elbow_height_range is not None else (0.0, 0.0)
+    for a3 in artists_3d:
+        ax = a3["ax"]
+        if elbow_height_range is not None:
+            y0, y1 = ax.get_ylim3d()
+            low_y, high_y = elbow_height_range
+            if low_y < y0 or high_y > y1:
+                ax.set_ylim3d(min(y0, low_y - 0.05), max(y1, high_y + 0.05))
+        lims = [
+            tuple(ax.get_xlim3d()),
+            tuple(ax.get_ylim3d()),
+            tuple(ax.get_zlim3d()),
+        ]
+        for plane, y_value in zip(a3["elbow_planes"], y_values):
+            plane.set_verts(_elbow_plane_vertices(lims, y_value))
+            plane.set_visible(visible)
+    for a2 in artists_2d:
+        if elbow_height_range is not None and a2["vi"] == 1:
+            y0, y1 = a2["ax"].get_ylim()
+            low_y, high_y = elbow_height_range
+            if low_y < y0 or high_y > y1:
+                a2["ax"].set_ylim(min(y0, low_y - 0.05), max(y1, high_y + 0.05))
+        for line, y_value in zip(a2["elbow_height_lines"], y_values):
+            line.set_ydata([y_value, y_value])
+            line.set_visible(visible)
 
 
 def _draw_bones_3d(

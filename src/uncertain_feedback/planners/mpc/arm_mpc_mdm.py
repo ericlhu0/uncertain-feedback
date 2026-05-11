@@ -19,11 +19,13 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_mpc import (
     _VisConfig,
-    _compose_rotvec,
     SmplLeftArmMPC,
 )
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import (
+    SmplLeftArmFK,
+    _compose_rotvec,
+)
 from uncertain_feedback.planners.mpc.visualizer import (
     _MDM_COLOR,
     _TARGET_COLOR,
@@ -143,10 +145,11 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
     ) -> None:
         """Push an MDM-generated trajectory into the goal queue.
 
-                Each frame of ``frames`` becomes one ``(3, 3)`` target in the goal
-                queue.  By default the new trajectory is prepended to the *front* of
-                the queue so it executes immediately ahead of any
-                previously queued goals.
+                Frame 0, every 10th frame after that, and the final frame of
+                ``frames`` become ``(3, 3)`` targets in the goal queue.  By
+                default the new trajectory is prepended to the *front* of the
+                queue so it executes immediately ahead of any previously queued
+                goals.
 
                 Args:
                     frames:   ``(n_frames, 3, 3)`` axis-angle trajectory for
@@ -156,10 +159,16 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         .MdmMotionGenerator.generate_left_arm_trajectory`.
         """
         frames = np.asarray(frames, dtype=np.float64)
+        queued_frames = frames[::10]
+        if (frames.shape[0] - 1) % 10 != 0:
+            queued_frames = np.concatenate(
+                [queued_frames, frames[-1:]],
+                axis=0,
+            )
         # extendleft reverses the iterable, so reverse first to preserve order.
-        self._goals.extendleft(frames[::-1])
+        self._goals.extendleft(queued_frames[::-1])
         # Notify live visualiser of the new preview frame (last enqueued frame).
-        preview_q = frames[-1].copy()
+        preview_q = queued_frames[-1].copy()
         self._preview_q = preview_q
         if self._vis is not None:
             self._vis.update_trajectory_preview(preview_q)
@@ -235,6 +244,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                     collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
+                    elbow_height_range=self._elbow_height_world_range(),
                 )
                 if self._vis_config.capture:
                     self._vis.start_capture()

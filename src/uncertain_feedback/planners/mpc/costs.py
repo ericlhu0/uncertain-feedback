@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 import numpy as np
 
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+
+_JOINT_BEFORE_WRIST_POS_IDX = -2
 
 
 class TrajectoryCost(Protocol):
@@ -87,7 +90,7 @@ class ElbowHeightCost:
             self.context.spine3_pos,
             self.context.spine3_aa,
         )
-        return positions[:, 3, 1] - self.context.spine3_pos[1]
+        return positions[:, _JOINT_BEFORE_WRIST_POS_IDX, 1] - self.context.spine3_pos[1]
 
     def _range_violation(self, elbow_height: np.ndarray) -> np.ndarray:
         low_violation = np.maximum(self.min_height - elbow_height, 0.0)
@@ -137,3 +140,99 @@ COST_BUILDERS: dict[str, CostBuilder] = {
 def available_cost_names() -> set[str]:
     """Return registered YAML cost keys."""
     return set(COST_BUILDERS)
+
+
+# ---------------------------------------------------------------------------
+# Preference learning utilities
+# ---------------------------------------------------------------------------
+
+
+def compute_elbow_heights(
+    trajectory: np.ndarray,
+    context: MpcCostContext,
+) -> np.ndarray:
+    """Return spine3-relative elbow Y-heights for each frame in a trajectory.
+
+    Args:
+        trajectory: ``(N, 3, 3)`` axis-angle frames (shoulder/elbow/wrist).
+        context:    Shared FK context with spine3 position and collar angle.
+
+    Returns:
+        ``(N,)`` elbow heights relative to spine3.
+    """
+    positions = context.fk.fk_controlled_batch(
+        trajectory,
+        context.fixed_collar_aa,
+        context.spine3_pos,
+        context.spine3_aa,
+    )
+    return positions[:, _JOINT_BEFORE_WRIST_POS_IDX, 1] - context.spine3_pos[1]
+
+
+def update_elbow_cost(
+    cost: ElbowHeightCost,
+    mdm_heights: np.ndarray,
+    mpc_heights: np.ndarray,
+    alpha: float = 0.5,
+    low_pct: float = 5.0,
+    high_pct: float = 95.0,
+) -> ElbowHeightCost:
+    """Return a new :class:`ElbowHeightCost` with one side updated from MDM.
+
+    Compares where MPC was naturally operating (``mpc_heights``) against where MDM
+    demonstrated the elbow should be (``mdm_heights``). If MPC was lower than MDM,
+    snap only the lower bound to MDM's robust lower percentile. If MPC was higher
+    than MDM, snap only the upper bound to MDM's robust upper percentile.
+
+    Args:
+        cost:        Existing cost to update from.
+        mdm_heights: ``(n,)`` elbow heights from the MDM trajectory.
+        mpc_heights: ``(n,)`` elbow heights from recent executed MPC steps.
+        alpha:       Accepted for config compatibility; unused by this snap update.
+        low_pct:     Percentile used for MDM's robust lower bound.
+        high_pct:    Percentile used for MDM's robust upper bound.
+
+    Returns:
+        New frozen :class:`ElbowHeightCost` with updated ``min_height`` / ``max_height``.
+    """
+    _ = alpha
+    mdm_lo, mdm_hi = np.percentile(mdm_heights, [low_pct, high_pct])
+    mdm_lo = float(mdm_lo)
+    mdm_hi = float(mdm_hi)
+    mdm_mean = float(np.mean(mdm_heights))
+    mpc_mean = float(np.mean(mpc_heights))
+
+    new_min = cost.min_height
+    new_max = cost.max_height
+    if np.isclose(mpc_mean, mdm_mean):
+        return cost
+    if mpc_mean < mdm_mean:
+        new_min = mdm_lo
+    else:
+        new_max = mdm_hi
+    if new_min >= new_max:
+        new_min = mdm_lo
+        new_max = mdm_hi
+    return dataclasses.replace(cost, min_height=new_min, max_height=new_max)
+
+
+def replace_cost_in_composite(
+    composite: CompositeTrajectoryCost,
+    new_term: TrajectoryCost,
+) -> CompositeTrajectoryCost:
+    """Return a new composite with the first term of the same type replaced.
+
+    If no term of ``type(new_term)`` exists in the composite, ``new_term`` is
+    appended.
+    """
+    replaced = False
+    updated: list[TrajectoryCost] = []
+    for term in composite._terms:
+        if not replaced and type(term) is type(new_term):
+            updated.append(new_term)
+            replaced = True
+        else:
+            updated.append(term)
+    if not replaced:
+        updated.append(new_term)
+    return CompositeTrajectoryCost(updated)

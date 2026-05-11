@@ -6,10 +6,12 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+import yaml
 
 from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesian
+from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
@@ -17,6 +19,8 @@ from uncertain_feedback.planners.mpc.costs import (
     ElbowHeightCost,
     MpcCostContext,
     build_extra_costs,
+    compute_elbow_heights,
+    update_elbow_cost,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
@@ -224,6 +228,41 @@ costs:
     assert cfg.planner == "arm_mpc"
     assert cfg.steps == 2
     assert cfg.costs == {"elbow_height": {"min": 0.1, "max": 0.45, "weight": 100}}
+    assert cfg.preference_learning is True
+
+
+def test_load_mpc_config_can_disable_preference_learning(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+preference_learning: false
+preference_alpha: 0.25
+preference_window: 10
+costs:
+  elbow_height:
+    min: 0.1
+    max: 0.45
+    weight: 100
+"""),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.preference_learning is False
+    assert cfg.preference_alpha == 0.25
+    assert cfg.preference_window == 10
+
+
+def test_load_mpc_config_rejects_invalid_preference_learning(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+preference_learning: maybe
+"""),
+    )
+
+    with pytest.raises(ValueError, match="preference_learning must be a boolean"):
+        load_mpc_config(path)
 
 
 def test_load_mpc_config_rejects_unknown_cost(tmp_path) -> None:
@@ -335,6 +374,95 @@ def test_elbow_height_cost_penalizes_outside_range() -> None:
     assert cost(q_trajs)[0] > 0.9
 
 
+def test_compute_elbow_heights_uses_joint_before_wrist() -> None:
+    fk = SmplLeftArmFK()
+    context = _cost_context(fk)
+    trajectory = np.zeros((1, 3, 3), dtype=np.float64)
+    trajectory[0, 0, 2] = 1.0
+    positions = fk.fk_controlled_batch(
+        trajectory,
+        context.fixed_collar_aa,
+        context.spine3_pos,
+        context.spine3_aa,
+    )
+
+    learned_height = compute_elbow_heights(trajectory, context)[0]
+    joint_before_wrist_height = positions[0, -2, 1] - context.spine3_pos[1]
+    wrist_height = positions[0, -1, 1] - context.spine3_pos[1]
+
+    np.testing.assert_allclose(learned_height, joint_before_wrist_height)
+    assert not np.isclose(learned_height, wrist_height)
+
+
+def test_update_elbow_cost_low_mpc_updates_only_min_to_mdm_5th() -> None:
+    cost = ElbowHeightCost(
+        min_height=0.0,
+        max_height=100.0,
+        weight=1.0,
+        progress_weight=1.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+    mdm_heights = np.linspace(50.0, 150.0, 21)
+    mpc_heights = np.linspace(0.0, 20.0, 21)
+
+    updated = update_elbow_cost(cost, mdm_heights, mpc_heights, alpha=0.0)
+
+    np.testing.assert_allclose(updated.min_height, 55.0)
+    np.testing.assert_allclose(updated.max_height, cost.max_height)
+
+
+def test_update_elbow_cost_high_mpc_updates_only_max_to_mdm_95th() -> None:
+    cost = ElbowHeightCost(
+        min_height=0.0,
+        max_height=100.0,
+        weight=1.0,
+        progress_weight=1.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+    mdm_heights = np.linspace(-50.0, 50.0, 21)
+    mpc_heights = np.linspace(100.0, 120.0, 21)
+
+    updated = update_elbow_cost(cost, mdm_heights, mpc_heights, alpha=0.0)
+
+    np.testing.assert_allclose(updated.min_height, cost.min_height)
+    np.testing.assert_allclose(updated.max_height, 45.0)
+
+
+def test_update_elbow_cost_equal_means_leaves_bounds_unchanged() -> None:
+    cost = ElbowHeightCost(
+        min_height=0.0,
+        max_height=1.0,
+        weight=1.0,
+        progress_weight=1.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+    mdm_heights = np.array([0.0, 0.5, 1.0], dtype=np.float64)
+    mpc_heights = np.array([0.25, 0.5, 0.75], dtype=np.float64)
+
+    updated = update_elbow_cost(cost, mdm_heights, mpc_heights, alpha=1.0)
+
+    assert updated is cost
+    np.testing.assert_allclose(updated.min_height, cost.min_height)
+    np.testing.assert_allclose(updated.max_height, cost.max_height)
+
+
+def test_update_elbow_cost_inverted_side_update_falls_back_to_mdm_range() -> None:
+    cost = ElbowHeightCost(
+        min_height=0.0,
+        max_height=0.4,
+        weight=1.0,
+        progress_weight=1.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+    mdm_heights = np.linspace(0.5, 1.5, 21)
+    mpc_heights = np.linspace(-1.0, 0.0, 21)
+
+    updated = update_elbow_cost(cost, mdm_heights, mpc_heights)
+
+    np.testing.assert_allclose(updated.min_height, 0.55)
+    np.testing.assert_allclose(updated.max_height, 1.45)
+
+
 def test_elbow_height_cost_scores_entire_rollout_not_only_terminal() -> None:
     fk = SmplLeftArmFK()
     context = _cost_context(fk)
@@ -393,6 +521,59 @@ def test_elbow_height_progress_penalty_only_penalizes_getting_worse_outside() ->
     np.testing.assert_allclose(costs[1], 0.0)
 
 
+def test_default_preference_output_path_uses_learned_suffix(tmp_path) -> None:
+    config_path = tmp_path / "arm_mpc_cartesian_mdm.yaml"
+
+    output_path = planner_run._default_preference_output_path(config_path)
+
+    assert output_path == tmp_path / "arm_mpc_cartesian_mdm_learned.yaml"
+
+
+def test_save_learned_preference_yaml_updates_elbow_cost(tmp_path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        """
+planner: arm_mpc_cartesian
+steps: 2
+horizon: 3
+n_mpc_samples: 4
+max_angle_delta: 0.0025
+preference_alpha: 0.25
+cartesian:
+  goals:
+    - [0.1, 0.2, 0.3]
+costs:
+  elbow_height:
+    min: 0.1
+    max: 0.4
+    weight: 12.0
+    progress_weight: 5.0
+""",
+    )
+    output_path = tmp_path / "learned.yaml"
+    learned = ElbowHeightCost(
+        min_height=0.2,
+        max_height=0.6,
+        weight=12.0,
+        progress_weight=5.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+
+    planner_run._save_learned_preference_yaml(config_path, output_path, learned)
+
+    with open(output_path, encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+    assert saved["planner"] == "arm_mpc_cartesian"
+    assert saved["preference_alpha"] == 0.25
+    assert saved["cartesian"]["goals"] == [[0.1, 0.2, 0.3]]
+    assert saved["costs"]["elbow_height"] == {
+        "min": 0.2,
+        "max": 0.6,
+        "weight": 12.0,
+        "progress_weight": 5.0,
+    }
+
+
 def test_joint_space_mpc_adds_extra_costs() -> None:
     q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
     target_q = np.zeros((3, 3), dtype=np.float64)
@@ -442,13 +623,35 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
 
     np.testing.assert_allclose(target_world_after, target_world_before)
     wrist_rel = (
-        fk.fk_controlled(
-            np.zeros((3, 3)), fixed_collar_aa, spine3_pos, spine3_aa
-        )[-1]
+        fk.fk_controlled(np.zeros((3, 3)), fixed_collar_aa, spine3_pos, spine3_aa)[-1]
         - spine3_pos
     )
     expected_cost = ((wrist_rel - cartesian_goal) ** 2).sum()
     np.testing.assert_allclose(mpc._cartesian_cost(q_trajs), [expected_cost])
+
+
+def test_mdm_push_trajectory_enqueues_every_tenth_frame_and_endpoint() -> None:
+    frames = np.arange(23 * 3 * 3, dtype=np.float64).reshape(23, 3, 3)
+    mpc = LeftArmMPCMDM()
+
+    mpc.push_trajectory(frames)
+
+    assert len(mpc._goals) == 4
+    for queued, expected in zip(mpc._goals, frames[[0, 10, 20, 22]]):
+        np.testing.assert_allclose(queued, expected)
+    np.testing.assert_allclose(mpc._preview_q, frames[22])
+
+
+def test_mdm_push_trajectory_does_not_duplicate_stride_endpoint() -> None:
+    frames = np.arange(21 * 3 * 3, dtype=np.float64).reshape(21, 3, 3)
+    mpc = LeftArmMPCMDM()
+
+    mpc.push_trajectory(frames)
+
+    assert len(mpc._goals) == 3
+    for queued, expected in zip(mpc._goals, frames[[0, 10, 20]]):
+        np.testing.assert_allclose(queued, expected)
+    np.testing.assert_allclose(mpc._preview_q, frames[20])
 
 
 def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:

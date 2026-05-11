@@ -86,6 +86,25 @@ LEFT_ARM_CHAIN_NAMES = [
     "left_wrist",
 ]
 
+# Number of joints MPC controls (shoulder, elbow, wrist)
+_N_JOINTS = len(CONTROLLED_LEFT_ARM_JOINT_INDICES_22)
+
+
+def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
+    """Compose axis-angle rotations element-wise: R_new = R_delta ∘ R_q.
+
+    Args:
+        rotvec: ``(..., 3)`` current axis-angle vectors.
+        delta:  ``(..., 3)`` delta axis-angle vectors.
+
+    Returns:
+        ``(..., 3)`` composed axis-angle vectors.
+    """
+    flat_q = rotvec.reshape(-1, 3)
+    flat_d = delta.reshape(-1, 3)
+    composed = (Rotation.from_rotvec(flat_d) * Rotation.from_rotvec(flat_q)).as_rotvec()
+    return composed.reshape(rotvec.shape)
+
 
 class SmplLeftArmFK:
     """Forward kinematics for the SMPL left arm.

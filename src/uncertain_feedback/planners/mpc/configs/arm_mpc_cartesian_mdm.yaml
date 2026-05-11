@@ -1,12 +1,12 @@
 planner: arm_mpc_cartesian
-steps: 500
+steps: 350
 horizon: 10
 n_mpc_samples: 512
 max_angle_delta: 0.0025
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 goal_threshold: 0.1
 advance_threshold: 0.1
-trajectory_fraction: 0.7
+trajectory_fraction: 1
 
 uq:
   diffusion_samples: 500
@@ -19,9 +19,12 @@ cartesian:
   threshold: 0.05
 
 # Optional:
-# costs:
-#   elbow_height:
-#     min: 0.10
-#     max: 0.45
-#     weight: 100.0
-#     progress_weight: 100.0
+preference_learning: false
+preference_alpha: 0
+
+costs:
+  elbow_height:
+    min: -0.25
+    max: 0.45
+    weight: 100.0
+    progress_weight: 100.0

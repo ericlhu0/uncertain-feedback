@@ -13,27 +13,17 @@ from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    ElbowHeightCost,
+)
 from uncertain_feedback.planners.mpc.kinematics import (
-    CONTROLLED_LEFT_ARM_JOINT_INDICES_22,
     SmplLeftArmFK,
+    _N_JOINTS,
+    _compose_rotvec,
 )
 from uncertain_feedback.planners.mpc.visualizer import ArmVisualizer
-
-# ---------------------------------------------------------------------------
-# Joint index constants
-# ---------------------------------------------------------------------------
-
-_N_JOINTS = len(CONTROLLED_LEFT_ARM_JOINT_INDICES_22)
-
-
-@dataclass
-class _MpcConfig:
-    horizon: int
-    n_mpc_samples: int
-    max_angle_delta: float
 
 
 @dataclass
@@ -45,27 +35,6 @@ class _VisConfig:
     body_pos: np.ndarray | None = None
     capture: bool = False
     compact: bool = False
-
-
-# ---------------------------------------------------------------------------
-# Helper: batched SO(3) composition
-# ---------------------------------------------------------------------------
-
-
-def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
-    """Compose axis-angle rotations element-wise: R_new = R_delta ∘ R_q.
-
-    Args:
-        rotvec: ``(..., 3)`` current axis-angle vectors.
-        delta:  ``(..., 3)`` delta axis-angle vectors.
-
-    Returns:
-        ``(..., 3)`` composed axis-angle vectors.
-    """
-    flat_q = rotvec.reshape(-1, 3)
-    flat_d = delta.reshape(-1, 3)
-    composed = (Rotation.from_rotvec(flat_d) * Rotation.from_rotvec(flat_q)).as_rotvec()
-    return composed.reshape(rotvec.shape)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +90,9 @@ class SmplLeftArmMPC:
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
-        self._config = _MpcConfig(horizon, n_mpc_samples, max_angle_delta)
+        self._horizon = horizon
+        self._n_mpc_samples = n_mpc_samples
+        self._max_angle_delta = max_angle_delta
         self.visualize = visualize
         self._extra_costs = extra_costs or CompositeTrajectoryCost()
 
@@ -170,6 +141,29 @@ class SmplLeftArmMPC:
             vis.close()
         self._vis = None
         return vis
+
+    def set_extra_costs(self, costs: CompositeTrajectoryCost) -> None:
+        """Replace the active extra cost terms (e.g. after a preference update)."""
+        self._extra_costs = costs
+        if self._vis is not None:
+            self._vis.update_elbow_height_range(self._elbow_height_world_range())
+
+    def _elbow_height_world_range(self) -> tuple[float, float] | None:
+        """Return configured elbow-height bounds as world-space Y coordinates."""
+        for term in self._extra_costs._terms:  # pylint: disable=protected-access
+            if isinstance(term, ElbowHeightCost):
+                spine_y = float(term.context.spine3_pos[1])
+                return (
+                    spine_y + float(term.min_height),
+                    spine_y + float(term.max_height),
+                )
+        return None
+
+    def set_visualization_mode(self, capture: bool, compact: bool) -> None:
+        """Set capture and compact flags on the vis config (call before first step)."""
+        if self._vis_config is not None:
+            self._vis_config.capture = capture
+            self._vis_config.compact = compact
 
     def append_goal(self, goal: np.ndarray) -> None:
         """Add a goal to the back of the queue."""
@@ -253,12 +247,12 @@ class SmplLeftArmMPC:
                 [self._prev_best[1:], np.zeros((1, _N_JOINTS, 3))], axis=0
             )
         else:
-            mean = np.zeros((self._config.horizon, _N_JOINTS, 3), dtype=np.float64)
+            mean = np.zeros((self._horizon, _N_JOINTS, 3), dtype=np.float64)
 
         actions = np.random.normal(
             loc=mean,
-            scale=self._config.max_angle_delta,
-            size=(self._config.n_mpc_samples, self._config.horizon, _N_JOINTS, 3),
+            scale=self._max_angle_delta,
+            size=(self._n_mpc_samples, self._horizon, _N_JOINTS, 3),
         )
 
         q_trajs = self._rollout(current_q, actions)
@@ -315,6 +309,7 @@ class SmplLeftArmMPC:
                     collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
+                    elbow_height_range=self._elbow_height_world_range(),
                 )
                 if self._vis_config.capture:
                     self._vis.start_capture()

@@ -46,6 +46,9 @@ class MpcRunConfig:
     uq: UqConfig
     cartesian: CartesianConfig
     costs: dict[str, dict[str, Any]]
+    preference_learning: bool = True
+    preference_alpha: float = 0.5
+    preference_window: int = 50
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -71,6 +74,18 @@ def _float(value: Any, name: str) -> float:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} must be a number.") from exc
+
+
+def _bool(value: Any, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "on", "1"}:
+            return True
+        if normalized in {"false", "no", "off", "0"}:
+            return False
+    raise ValueError(f"{name} must be a boolean.")
 
 
 def _optional_path(value: Any, name: str) -> Path | None:
@@ -148,4 +163,13 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             ),
         ),
         costs=costs,
+        preference_learning=_bool(
+            data.get("preference_learning", True), "preference_learning"
+        ),
+        preference_alpha=_float(
+            data.get("preference_alpha", 0.5), "preference_alpha"
+        ),
+        preference_window=_positive_int(
+            data.get("preference_window", 50), "preference_window"
+        ),
     )

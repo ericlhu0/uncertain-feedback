@@ -115,7 +115,6 @@ class _LiveState:  # pylint: disable=too-many-instance-attributes
     artists2d: list[dict]
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
-    collar_aa: np.ndarray | None
     elbow_height_range: tuple[float, float] | None = None
     wrist_trace: list = dataclasses.field(default_factory=list)
     recorded_frames: list = dataclasses.field(default_factory=list)
@@ -216,22 +215,17 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         q: np.ndarray,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
-        collar_aa: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Compute body positions for either full-arm or controlled-arm state."""
-        q = np.asarray(q, dtype=np.float64)
-        if q.shape[-2] == 3:
-            return self.fk.full_body_positions_controlled(
-                q, collar_aa, spine3_pos, spine3_aa
-            )
-        return self.fk.full_body_positions(q, spine3_pos, spine3_aa)
+        """Compute full 22-joint body positions from (3,3) arm axis-angles."""
+        return self.fk.full_body_positions(
+            np.asarray(q, dtype=np.float64), spine3_pos, spine3_aa
+        )
 
     def open_live(
         self,
         target_q: np.ndarray,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
-        collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         compact: bool = False,
         elbow_height_range: tuple[float, float] | None = None,
@@ -254,9 +248,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             elbow_height_range: Optional ``(min_y, max_y)`` world-space Y bounds
                         for acceptable elbow height, shown as red planes.
         """
-        target_full = self._full_body_positions(
-            target_q, spine3_pos, spine3_aa, collar_aa
-        )
+        target_full = self._full_body_positions(target_q, spine3_pos, spine3_aa)
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
         # Use body reference + target to set axis limits
@@ -276,7 +268,6 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             lims,
             spine3_pos,
             spine3_aa,
-            collar_aa=collar_aa,
             body_pos=body_pos,
             compact=compact,
             elbow_height_range=elbow_height_range,
@@ -294,7 +285,6 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             artists2d=artists_2d,
             spine_pos=spine3_pos,
             spine_aa=spine3_aa,
-            collar_aa=collar_aa,
             elbow_height_range=elbow_height_range,
         )
 
@@ -313,9 +303,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                    trajectory so the arm is visually distinct.
         """
         assert self._live is not None
-        pos = self._full_body_positions(
-            q, self._live.spine_pos, self._live.spine_aa, self._live.collar_aa
-        )
+        pos = self._full_body_positions(q, self._live.spine_pos, self._live.spine_aa)
         arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
         self._live.wrist_trace.append(pos[_WRIST_IDX])
         trace_color = _MDM_COLOR if color == _MDM_COLOR else _TRACE_COLOR
@@ -365,7 +353,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         """
         assert self._live is not None, "update_mdm_goal() called before open_live()"
         goal_full = self._full_body_positions(
-            goal_q, self._live.spine_pos, self._live.spine_aa, self._live.collar_aa
+            goal_q, self._live.spine_pos, self._live.spine_aa
         )
         arm_pts = goal_full[LEFT_ARM_JOINT_INDICES_22]
 
@@ -407,7 +395,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             self._live is not None
         ), "update_trajectory_preview() called before open_live()"
         preview_full = self._full_body_positions(
-            preview_q, self._live.spine_pos, self._live.spine_aa, self._live.collar_aa
+            preview_q, self._live.spine_pos, self._live.spine_aa
         )
         arm_pts = preview_full[LEFT_ARM_JOINT_INDICES_22]
 
@@ -554,7 +542,6 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         target_q: np.ndarray | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
-        collar_aa: np.ndarray | None = None,
         ax: Axes3D | None = None,
     ) -> Axes3D:
         """Plot a single full-body pose with the left arm set by ``q``."""
@@ -562,7 +549,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             fig = plt.figure(figsize=(6, 6))
             ax = fig.add_subplot(111, projection="3d")
 
-        pos = self._full_body_positions(q, spine3_pos, spine3_aa, collar_aa)
+        pos = self._full_body_positions(q, spine3_pos, spine3_aa)
         tpose = self.fk.tpose_all_joints
 
         _draw_bones_3d(ax, tpose, _BODY_BONES, _BODY_COLOR, alpha=0.5, lw=1.5)
@@ -586,7 +573,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         )
 
         if target_q is not None:
-            tgt = self._full_body_positions(target_q, spine3_pos, spine3_aa, collar_aa)
+            tgt = self._full_body_positions(target_q, spine3_pos, spine3_aa)
             _draw_bones_3d(
                 ax,
                 tgt,
@@ -621,7 +608,6 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         lims: list[tuple[float, float]],
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,
-        collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         compact: bool = False,
         elbow_height_range: tuple[float, float] | None = None,
@@ -635,9 +621,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         Returns:
             ``(fig, artists_3d, artists_2d)``
         """
-        target_full = self._full_body_positions(
-            target_q, spine3_pos, spine3_aa, collar_aa
-        )
+        target_full = self._full_body_positions(target_q, spine3_pos, spine3_aa)
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
         if compact:
@@ -941,12 +925,7 @@ def _compute_lims(
 ) -> list[tuple[float, float]]:
     """Compute per-axis limits spanning all frame positions and the target."""
     target_q = np.asarray(target_q, dtype=np.float64)
-    if target_q.shape[-2] == 3:
-        target_full = fk.full_body_positions_controlled(
-            target_q, None, spine3_pos, spine3_aa
-        )
-    else:
-        target_full = fk.full_body_positions(target_q, spine3_pos, spine3_aa)
+    target_full = fk.full_body_positions(target_q, spine3_pos, spine3_aa)
     all_pts = np.vstack([f["positions"] for f in frames] + [target_full])
     return [
         (all_pts[:, i].min() - margin, all_pts[:, i].max() + margin) for i in range(3)

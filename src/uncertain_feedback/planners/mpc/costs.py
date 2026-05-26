@@ -27,7 +27,6 @@ class MpcCostContext:
     fk: SmplLeftArmFK
     spine3_pos: np.ndarray
     spine3_aa: np.ndarray
-    fixed_collar_aa: np.ndarray
 
 
 class CompositeTrajectoryCost:
@@ -84,9 +83,8 @@ class ElbowHeightCost:
         return range_cost + progress_cost
 
     def _elbow_heights(self, arm_aa: np.ndarray) -> np.ndarray:
-        positions = self.context.fk.fk_controlled_batch(
+        positions = self.context.fk.fk_batch(
             arm_aa,
-            self.context.fixed_collar_aa,
             self.context.spine3_pos,
             self.context.spine3_aa,
         )
@@ -160,9 +158,8 @@ def compute_elbow_heights(
     Returns:
         ``(N,)`` elbow heights relative to spine3.
     """
-    positions = context.fk.fk_controlled_batch(
+    positions = context.fk.fk_batch(
         trajectory,
-        context.fixed_collar_aa,
         context.spine3_pos,
         context.spine3_aa,
     )

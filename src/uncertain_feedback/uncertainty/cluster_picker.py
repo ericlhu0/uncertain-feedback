@@ -76,25 +76,17 @@ def _full_body_positions_for_arm(
     arm_aa: np.ndarray,
     spine_pos: np.ndarray | None,
     spine_aa: np.ndarray | None,
-    fixed_collar_aa: np.ndarray | None,
 ) -> np.ndarray:
-    arm_aa = np.asarray(arm_aa, dtype=np.float64)
-    if arm_aa.shape[-2] == 3:
-        return fk.full_body_positions_controlled(
-            arm_aa, fixed_collar_aa, spine_pos, spine_aa
-        )
-    return fk.full_body_positions(arm_aa, spine_pos, spine_aa)
+    return fk.full_body_positions(
+        np.asarray(arm_aa, dtype=np.float64), spine_pos, spine_aa
+    )
 
 
 def _fk_batch_for_arm(
     fk: SmplLeftArmFK,
     arm_aa: np.ndarray,
-    fixed_collar_aa: np.ndarray | None,
 ) -> np.ndarray:
-    arm_aa = np.asarray(arm_aa, dtype=np.float64)
-    if arm_aa.shape[-2] == 3:
-        return fk.fk_controlled_batch(arm_aa, fixed_collar_aa)
-    return fk.fk_batch(arm_aa)
+    return fk.fk_batch(np.asarray(arm_aa, dtype=np.float64))
 
 
 def _draw_body(
@@ -249,7 +241,6 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     spine_aa: np.ndarray | None = None,
     body_pos: np.ndarray | None = None,
     current_arm_aa: np.ndarray | None = None,
-    fixed_collar_aa: np.ndarray | None = None,
 ) -> int:
     """Show a blocking window to let the user pick a trajectory cluster.
 
@@ -263,9 +254,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     * Dotted wrist trace of the cluster mean trajectory.
 
     Args:
-        trajectories:        ``(num_samples, n_frames, 3, 3)`` controlled arm
-                             axis-angle batch. Legacy ``(num_samples, n_frames, 4, 3)``
-                             full-arm batches are also accepted.
+        trajectories:        ``(num_samples, n_frames, 3, 3)`` arm axis-angle batch.
         labels:              ``(num_samples,)`` integer cluster labels (0-based).
         fk:                  FK instance.  Defaults to :class:`SmplLeftArmFK`.
         save_path:           If given, save a PNG of the initial window here
@@ -313,22 +302,20 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         preview_idx = max(0, round(n_frames * trajectory_fraction) - 1)
         body_cutoff = _merge_arm(
             _full_body_positions_for_arm(
-                fk, mean_traj[preview_idx], spine_pos, spine_aa, fixed_collar_aa
+                fk, mean_traj[preview_idx], spine_pos, spine_aa
             ),
             body_pos,
         )  # (22, 3)
         # Per-sample ghost arm body poses at the cutoff frame
         individual_previews = [
             _merge_arm(
-                _full_body_positions_for_arm(
-                    fk, traj[preview_idx], spine_pos, spine_aa, fixed_collar_aa
-                ),
+                _full_body_positions_for_arm(fk, traj[preview_idx], spine_pos, spine_aa),
                 body_pos,
             )  # (22, 3)
             for traj in trajectories[mask]
         ]
         # Wrist trace from arm-chain FK
-        arm_positions = _fk_batch_for_arm(fk, mean_traj, fixed_collar_aa)
+        arm_positions = _fk_batch_for_arm(fk, mean_traj)
         wrist_trace = arm_positions[:, -1, :]  # (n_frames, 3)
 
         cluster_body_cutoffs.append(body_cutoff)
@@ -343,9 +330,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     current_body: np.ndarray | None = None
     if current_arm_aa is not None:
         current_body = _merge_arm(
-            _full_body_positions_for_arm(
-                fk, current_arm_aa, spine_pos, spine_aa, fixed_collar_aa
-            ),
+            _full_body_positions_for_arm(fk, current_arm_aa, spine_pos, spine_aa),
             body_pos,
         )
 
@@ -446,7 +431,6 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
     spine_aa: np.ndarray | None = None,
     body_pos: np.ndarray | None = None,
     current_arm_aa: np.ndarray | None = None,
-    fixed_collar_aa: np.ndarray | None = None,
 ) -> int:
     """Show a blocking cluster picker from precomputed SMPL XYZ positions.
 
@@ -486,19 +470,14 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
         mean_positions = positions[mask].mean(axis=0)  # (n_frames, 22, 3)
         n_frames = mean_positions.shape[0]
         preview_idx = max(0, round(n_frames * trajectory_fraction) - 1)
-        mean_arm_aa = fk.controlled_aa_from_positions_batch(
+        mean_arm_aa = fk.arm_aa_from_positions_batch(
             mean_positions,
             spine3_aa=spine_aa,
-            collar_aa=fixed_collar_aa,
         )
 
         body_cutoff = _merge_arm(
             _full_body_positions_for_arm(
-                fk,
-                mean_arm_aa[preview_idx],
-                display_spine_pos,
-                spine_aa,
-                fixed_collar_aa,
+                fk, mean_arm_aa[preview_idx], display_spine_pos, spine_aa
             ),
             body_pos,
         )
@@ -506,24 +485,19 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
             _merge_arm(
                 _full_body_positions_for_arm(
                     fk,
-                    fk.controlled_aa_from_positions(
+                    fk.arm_aa_from_positions(
                         sample_positions[preview_idx],
                         spine3_aa=spine_aa,
-                        collar_aa=fixed_collar_aa,
                     ),
                     display_spine_pos,
                     spine_aa,
-                    fixed_collar_aa,
                 ),
                 body_pos,
             )
             for sample_positions in positions[mask]
         ]
-        wrist_trace = fk.fk_controlled_batch(
-            mean_arm_aa,
-            fixed_collar_aa,
-            display_spine_pos,
-            spine_aa,
+        wrist_trace = fk.fk_batch(
+            mean_arm_aa, display_spine_pos, spine_aa
         )[:, -1, :]
 
         cluster_body_cutoffs.append(body_cutoff)
@@ -538,9 +512,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
     current_body: np.ndarray | None = None
     if current_arm_aa is not None:
         current_body = _merge_arm(
-            _full_body_positions_for_arm(
-                fk, current_arm_aa, spine_pos, spine_aa, fixed_collar_aa
-            ),
+            _full_body_positions_for_arm(fk, current_arm_aa, spine_pos, spine_aa),
             body_pos,
         )
 

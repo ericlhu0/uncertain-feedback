@@ -111,11 +111,7 @@ def _apply_arm_override(state: _InitialPoseState, arm_path: Path | None) -> None
         return
 
     arm_override = np.load(arm_path)
-    if arm_override.shape == (4, 3):
-        state.fixed_collar_aa = np.asarray(arm_override[0], dtype=np.float64)
-        state.arm_aa = np.asarray(arm_override[1:], dtype=np.float64)
-    else:
-        state.arm_aa = np.asarray(arm_override, dtype=np.float64)
+    state.arm_aa = np.asarray(arm_override, dtype=np.float64)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -156,10 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--arm",
         type=Path,
         default=None,
-        help=(
-            "Optional .npy file with (3, 3) shoulder/elbow/wrist axis-angles. "
-            "A legacy (4, 3) file is accepted and its first row fixes the collar."
-        ),
+        help="Optional .npy file with (3, 3) shoulder/elbow/wrist axis-angles.",
     )
 
     # --- Visualization ---
@@ -334,12 +327,12 @@ def main() -> None:
     _apply_arm_override(initial_state, args.arm)
     initial_pose = initial_state.hml_pose
     arm_aa = initial_state.arm_aa
-    fixed_collar_aa = initial_state.fixed_collar_aa
     body_pos = initial_state.body_pos
     spine3_pos = initial_state.spine3_pos
     spine3_aa = initial_state.spine3_aa
 
     fk = SmplLeftArmFK()
+    fk.collar_aa = initial_state.fixed_collar_aa
     cost_context = MpcCostContext(
         fk=fk,
         spine3_pos=np.asarray(
@@ -349,7 +342,6 @@ def main() -> None:
         spine3_aa=np.asarray(
             spine3_aa if spine3_aa is not None else np.zeros(3), dtype=np.float64
         ),
-        fixed_collar_aa=np.asarray(fixed_collar_aa, dtype=np.float64),
     )
     extra_costs = build_extra_costs(cfg.costs, cost_context)
 
@@ -368,7 +360,6 @@ def main() -> None:
         fk=fk,
         spine3_pos=spine3_pos,
         spine3_aa=spine3_aa,
-        fixed_collar_aa=fixed_collar_aa,
         body_pos=body_pos,
         extra_costs=extra_costs,
     )
@@ -393,7 +384,7 @@ def main() -> None:
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
         init_wrist_rel = (
-            fk.fk_controlled(arm_aa, fixed_collar_aa, spine3_pos, spine3_aa)[-1]
+            fk.fk(arm_aa, spine3_pos, spine3_aa)[-1]
             - _spine3_ref
         )
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
@@ -410,7 +401,7 @@ def main() -> None:
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
         init_wrist_rel = (
-            fk.fk_controlled(arm_aa, fixed_collar_aa, spine3_pos, spine3_aa)[-1]
+            fk.fk(arm_aa, spine3_pos, spine3_aa)[-1]
             - _spine3_ref
         )
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
@@ -466,7 +457,6 @@ def main() -> None:
                     num_frames=args.mdm_frames,
                     frozen_body=args.frozen_body,
                     spine3_aa=spine3_aa,
-                    fixed_collar_aa=fixed_collar_aa,
                 )
                 if cfg.preference_learning:
                     learned_elbow_cost = _apply_preference_update(

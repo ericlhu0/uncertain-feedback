@@ -50,11 +50,8 @@ class XyzPositionClusterer(
         """Convert arm trajectories to ``(num_samples, 5*3)`` XYZ features."""
         num_samples, n_frames, _, _ = trajectories.shape
         frame_idx = min(100, n_frames - 1)
-        poses = trajectories[:, frame_idx]  # (num_samples, 3-or-4, 3)
-        if poses.shape[-2] == 3:
-            positions = self._fk.fk_controlled_batch(poses)
-        else:
-            positions = self._fk.fk_batch(poses)
+        poses = trajectories[:, frame_idx]  # (num_samples, 3, 3)
+        positions = self._fk.fk_batch(poses)
         return positions.reshape(num_samples, -1).astype(np.float64)
 
     def _fit_predict(self, features: np.ndarray) -> np.ndarray:
@@ -72,9 +69,7 @@ class XyzPositionClusterer(
         """Cluster trajectories by XYZ joint positions.
 
         Args:
-            trajectories: ``(num_samples, n_frames, 3, 3)`` controlled
-                axis-angle batch. Legacy full-arm ``(..., 4, 3)`` batches are
-                also accepted.
+            trajectories: ``(num_samples, n_frames, 3, 3)`` axis-angle batch.
 
         Returns:
             ``(num_samples,)`` integer labels in ``[0, n_clusters)``.

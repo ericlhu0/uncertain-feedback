@@ -51,7 +51,6 @@ def _cost_context(fk: SmplLeftArmFK) -> MpcCostContext:
         fk=fk,
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3),
-        fixed_collar_aa=np.zeros(3),
     )
 
 
@@ -107,7 +106,6 @@ class _FakePositionGenerator:
         self.positions = positions
         self.trajectory = trajectory
         self.received_spine3_aa: np.ndarray | None = None
-        self.received_fixed_collar_aa: np.ndarray | None = None
 
     def generate_left_arm_position_samples(
         self,
@@ -127,12 +125,10 @@ class _FakePositionGenerator:
         self,
         positions: np.ndarray,
         spine3_aa: np.ndarray | None = None,
-        fixed_collar_aa: np.ndarray | None = None,
     ) -> np.ndarray:
         """Record the base used to convert selected positions."""
         np.testing.assert_allclose(positions, self.positions.mean(axis=0))
         self.received_spine3_aa = spine3_aa
-        self.received_fixed_collar_aa = fixed_collar_aa
         return self.trajectory
 
 
@@ -344,7 +340,7 @@ def test_elbow_height_cost_zero_inside_range() -> None:
     fk = SmplLeftArmFK()
     q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
     context = _cost_context(fk)
-    elbow_height = fk.fk_controlled(np.zeros((3, 3)))[3, 1] - context.spine3_pos[1]
+    elbow_height = fk.fk(np.zeros((3, 3)))[3, 1] - context.spine3_pos[1]
 
     cost = ElbowHeightCost(
         min_height=elbow_height - 0.01,
@@ -361,7 +357,7 @@ def test_elbow_height_cost_penalizes_outside_range() -> None:
     fk = SmplLeftArmFK()
     q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
     context = _cost_context(fk)
-    elbow_height = fk.fk_controlled(np.zeros((3, 3)))[3, 1] - context.spine3_pos[1]
+    elbow_height = fk.fk(np.zeros((3, 3)))[3, 1] - context.spine3_pos[1]
 
     cost = ElbowHeightCost(
         min_height=elbow_height + 0.1,
@@ -379,9 +375,8 @@ def test_compute_elbow_heights_uses_joint_before_wrist() -> None:
     context = _cost_context(fk)
     trajectory = np.zeros((1, 3, 3), dtype=np.float64)
     trajectory[0, 0, 2] = 1.0
-    positions = fk.fk_controlled_batch(
+    positions = fk.fk_batch(
         trajectory,
-        context.fixed_collar_aa,
         context.spine3_pos,
         context.spine3_aa,
     )
@@ -469,7 +464,7 @@ def test_elbow_height_cost_scores_entire_rollout_not_only_terminal() -> None:
     inside = np.zeros((3, 3), dtype=np.float64)
     high = np.zeros((3, 3), dtype=np.float64)
     high[0, 2] = 1.0
-    elbow_height = fk.fk_controlled(inside)[3, 1] - context.spine3_pos[1]
+    elbow_height = fk.fk(inside)[3, 1] - context.spine3_pos[1]
     q_trajs = np.array(
         [
             [inside, high, inside],
@@ -586,7 +581,7 @@ def test_joint_space_mpc_adds_extra_costs() -> None:
 def test_cartesian_mpc_adds_extra_costs() -> None:
     fk = SmplLeftArmFK()
     q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
-    wrist_rel = fk.fk_controlled(np.zeros((3, 3)))[-1] - fk.tpose_spine3_pos
+    wrist_rel = fk.fk(np.zeros((3, 3)))[-1] - fk.tpose_spine3_pos
     extra_costs = CompositeTrajectoryCost([_FixedCost([4.0, 5.0])])
     mpc = LeftArmMPCCartesian(
         cartesian_goals=[wrist_rel],
@@ -602,7 +597,6 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
     fk = SmplLeftArmFK()
     spine3_pos = np.array([0.25, 1.0, -0.3], dtype=np.float64)
     spine3_aa = np.zeros(3, dtype=np.float64)
-    fixed_collar_aa = np.zeros(3, dtype=np.float64)
     cartesian_goal = np.array([0.3, 0.5, 0.1], dtype=np.float64)
     q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
     mpc = LeftArmMPCCartesian(
@@ -611,7 +605,6 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
         fk=fk,
         spine3_pos=spine3_pos,
         spine3_aa=spine3_aa,
-        fixed_collar_aa=fixed_collar_aa,
     )
 
     target_world_before = mpc._spine3_pos + mpc.current_cartesian_goal
@@ -622,10 +615,7 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
     target_world_after = mpc._spine3_pos + mpc.current_cartesian_goal
 
     np.testing.assert_allclose(target_world_after, target_world_before)
-    wrist_rel = (
-        fk.fk_controlled(np.zeros((3, 3)), fixed_collar_aa, spine3_pos, spine3_aa)[-1]
-        - spine3_pos
-    )
+    wrist_rel = fk.fk(np.zeros((3, 3)), spine3_pos, spine3_aa)[-1] - spine3_pos
     expected_cost = ((wrist_rel - cartesian_goal) ** 2).sum()
     np.testing.assert_allclose(mpc._cartesian_cost(q_trajs), [expected_cost])
 
@@ -655,17 +645,16 @@ def test_mdm_push_trajectory_does_not_duplicate_stride_endpoint() -> None:
 
 
 def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
-    """Selected UQ position means are projected into the fixed MPC base."""
+    """Selected UQ position means are projected into the fixed MPC spine base."""
     fk = SmplLeftArmFK()
     spine3_aa = np.array([0.1, -0.2, 0.05], dtype=np.float64)
-    fixed_collar_aa = np.array([0.3, 0.1, -0.1], dtype=np.float64)
+    fk.collar_aa = np.array([0.3, 0.1, -0.1], dtype=np.float64)
     positions = np.zeros((2, 3, 22, 3), dtype=np.float64)
     trajectory = np.arange(27, dtype=np.float64).reshape(3, 3, 3) * 0.01
     gen = _FakePositionGenerator(positions, trajectory)
     mpc = LeftArmMPCMDMUQ(
         fk=fk,
         spine3_aa=spine3_aa,
-        fixed_collar_aa=fixed_collar_aa,
         n_diffusion_samples=2,
         clusterer=_FakePositionClusterer(),
     )
@@ -678,17 +667,15 @@ def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
     )
 
     assert gen.received_spine3_aa is not None
-    assert gen.received_fixed_collar_aa is not None
     assert mpc.current_goal is not None
     np.testing.assert_allclose(gen.received_spine3_aa, spine3_aa)
-    np.testing.assert_allclose(gen.received_fixed_collar_aa, fixed_collar_aa)
     np.testing.assert_allclose(mpc.current_goal, trajectory[0])
 
 
 def test_no_mdm_cartesian_mpc_adds_extra_costs() -> None:
     fk = SmplLeftArmFK()
     q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
-    wrist_rel = fk.fk_controlled(np.zeros((3, 3)))[-1] - fk.tpose_spine3_pos
+    wrist_rel = fk.fk(np.zeros((3, 3)))[-1] - fk.tpose_spine3_pos
     extra_costs = CompositeTrajectoryCost([_FixedCost([6.0, 7.0])])
     mpc = ArmMPCCartesianNoMDM(
         cartesian_goals=[wrist_rel],

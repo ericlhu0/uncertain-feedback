@@ -207,15 +207,17 @@ def smpl_params_to_hml263(  # pylint: disable=too-many-locals,too-many-statement
             (height < foot_height_thresh) & (speed < foot_vel_thresh)
         ).astype(np.float32)
 
-    # ── Step 9: 6D rotations via IK on local positions ───────────────────────
-    rotations_6d = np.zeros((n_frames, 21, 6), dtype=np.float64)
-    bp_21 = body_pose[:, :63].reshape(n_frames, 21, 3)  # (N, 21, 3)
-    del bp_21  # unused — we re-derive from IK on local positions
-    for t in range(n_frames):
-        bp_local = positions_to_smpl_body_pose(local_positions[t], tpose_22)  # (21, 3)
-        for j in range(21):
-            mat = Rotation.from_rotvec(bp_local[j]).as_matrix()  # (3, 3)
-            rotations_6d[t, j] = np.concatenate([mat[:, 0], mat[:, 1]])
+    # ── Step 9: 6D rotations directly from input body_pose ───────────────────
+    # HML263 6D features are local body_pose rotations in 6D form.  Heading
+    # cancels in parent-relative space (local = parent_world.inv() * child_world),
+    # so heading-local local rotations equal world-frame local rotations for all
+    # 21 non-root joints.  No FK→IK roundtrip is needed.
+    bp_21 = body_pose[:, :63].reshape(n_frames, 21, 3)  # (n_frames, 21, 3)
+    mats = Rotation.from_rotvec(bp_21.reshape(-1, 3)).as_matrix().reshape(
+        n_frames, 21, 3, 3
+    )
+    # 6D = [col0 | col1] for each matrix
+    rotations_6d = np.concatenate([mats[..., 0], mats[..., 1]], axis=-1)  # (n_frames, 21, 6)
 
     # ── Assemble HML263 ───────────────────────────────────────────────────────
     features = np.zeros((n_frames, 263), dtype=np.float32)

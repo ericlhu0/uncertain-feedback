@@ -28,7 +28,6 @@ class _CartesianGoalsMixin:
         fk: SmplLeftArmFK,
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,
-        fixed_collar_aa: np.ndarray | None,
     ) -> None:
         self._cartesian_goals: deque[np.ndarray] = deque(
             np.asarray(g, dtype=np.float64) for g in cartesian_goals
@@ -44,11 +43,6 @@ class _CartesianGoalsMixin:
         self._spine3_aa = (
             np.asarray(spine3_aa, dtype=np.float64)
             if spine3_aa is not None
-            else np.zeros(3)
-        )
-        self._fixed_collar_aa = (
-            np.asarray(fixed_collar_aa, dtype=np.float64)
-            if fixed_collar_aa is not None
             else np.zeros(3)
         )
 
@@ -74,8 +68,8 @@ class _CartesianGoalsMixin:
         if target is None:
             return np.zeros(q_trajs.shape[0])
         terminal_q = q_trajs[:, -1]
-        positions = self._fk_inst.fk_controlled_batch(
-            terminal_q, self._fixed_collar_aa, self._spine3_pos, self._spine3_aa
+        positions = self._fk_inst.fk_batch(
+            terminal_q, self._spine3_pos, self._spine3_aa
         )
         wrist_rel = positions[:, -1] - self._spine3_pos
         wrist_cost = ((wrist_rel - target) ** 2).sum(axis=-1)

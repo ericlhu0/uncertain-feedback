@@ -31,7 +31,6 @@ class _VisConfig:
     fk: SmplLeftArmFK
     spine_pos: np.ndarray | None
     spine_aa: np.ndarray | None
-    collar_aa: np.ndarray | None = None
     body_pos: np.ndarray | None = None
     capture: bool = False
     compact: bool = False
@@ -86,7 +85,6 @@ class SmplLeftArmMPC:
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
-        fixed_collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
@@ -101,11 +99,13 @@ class SmplLeftArmMPC:
         )
         self._goal_threshold = goal_threshold
 
+        self._fk: SmplLeftArmFK = fk if fk is not None else SmplLeftArmFK()
+
         if visualize:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")
             self._vis_config: _VisConfig | None = _VisConfig(
-                fk, spine3_pos, spine3_aa, fixed_collar_aa, body_pos=body_pos
+                fk, spine3_pos, spine3_aa, body_pos=body_pos
             )
         else:
             self._vis_config = None
@@ -306,7 +306,6 @@ class SmplLeftArmMPC:
                     self._goals[-1],
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
-                    collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                     elbow_height_range=self._elbow_height_world_range(),

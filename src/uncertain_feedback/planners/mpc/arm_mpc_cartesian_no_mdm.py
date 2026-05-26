@@ -27,7 +27,6 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
-        fixed_collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
@@ -43,13 +42,12 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
             fk=fk,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
-            fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
             extra_costs=extra_costs,
         )
         self._init_cartesian(
             cartesian_goals, initial_arm_aa, cartesian_threshold,
-            fk, spine3_pos, spine3_aa, fixed_collar_aa,
+            fk, spine3_pos, spine3_aa,
         )
 
     def solve(self, current_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -64,8 +62,8 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
         first_action, _ = self.solve(current_q)
         next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
 
-        arm_pos = self._fk_inst.fk_controlled(
-            next_q, self._fixed_collar_aa, self._spine3_pos, self._spine3_aa
+        arm_pos = self._fk_inst.fk(
+            next_q, self._spine3_pos, self._spine3_aa
         )
         wrist_rel = arm_pos[-1] - self._spine3_pos
         dist = float(np.linalg.norm(wrist_rel - self.current_cartesian_goal))
@@ -82,7 +80,6 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
                     self._initial_arm_aa,
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
-                    collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                     elbow_height_range=self._elbow_height_world_range(),

@@ -75,7 +75,6 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
-        fixed_collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         n_diffusion_samples: int = 512,
         n_clusters: int = 3,
@@ -94,7 +93,6 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             fk=fk,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
-            fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
             extra_costs=extra_costs,
         )
@@ -102,8 +100,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         if clusterer is not None:
             self._clusterer = clusterer
         else:
-            _fk = fk if fk is not None else SmplLeftArmFK()
-            self._clusterer = XyzPositionClusterer(n_clusters, fk=_fk)
+            self._clusterer = XyzPositionClusterer(n_clusters, fk=self._fk)
 
     # ------------------------------------------------------------------
     # UQ pipeline
@@ -149,7 +146,6 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         generation_t0 = time.perf_counter()
         use_position_uq = hasattr(self._clusterer, "cluster_positions")
         base_spine_aa = self._mdm_spine3_aa
-        base_collar_aa = self._mdm_fixed_collar_aa
         if use_position_uq:
             positions = gen.generate_left_arm_position_samples(
                 text,
@@ -168,7 +164,6 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                 num_frames=mdm_frames,
                 frozen_body=frozen_body,
                 spine3_aa=base_spine_aa,
-                fixed_collar_aa=base_collar_aa,
             )  # (n_diffusion_samples, n_frames, 3, 3)
         print(
             f"[timing] MDM generation pipeline: {time.perf_counter() - generation_t0:.3f}s"
@@ -188,9 +183,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             chosen_label = int(auto_cluster)
             print(f"Auto-selected cluster {chosen_label} (headless mode).")
         else:
-            fk = (
-                self._vis_config.fk if self._vis_config is not None else SmplLeftArmFK()
-            )
+            fk = self._fk
             spine_pos = (
                 self._mdm_spine3_pos
                 if self._mdm_spine3_pos is not None
@@ -200,7 +193,6 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             body_pos = (
                 self._vis_config.body_pos if self._vis_config is not None else None
             )
-            fixed_collar_aa = base_collar_aa
             picker_t0 = time.perf_counter()
             if positions is not None:
                 chosen_label = pick_cluster_positions(
@@ -212,7 +204,6 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     spine_aa=spine_aa,
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
-                    fixed_collar_aa=fixed_collar_aa,
                 )
             else:
                 assert trajectories is not None
@@ -225,7 +216,6 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     spine_aa=spine_aa,
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
-                    fixed_collar_aa=fixed_collar_aa,
                 )
             print(
                 f"[timing] cluster picker total: {time.perf_counter() - picker_t0:.3f}s"
@@ -237,7 +227,6 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             chosen_mean = gen.smpl_positions_to_left_arm_trajectory(
                 selected_positions,
                 spine3_aa=base_spine_aa,
-                fixed_collar_aa=base_collar_aa,
             )
         else:
             assert trajectories is not None
@@ -351,6 +340,7 @@ if __name__ == "__main__":
         initial_spine3_aa,
         initial_collar_aa,
     ) = gen.decode_pose_with_collar(initial_pose)
+    demo_fk.collar_aa = np.asarray(initial_collar_aa, dtype=np.float64)
 
     demo_target_q = initial_arm_aa.copy() + np.array(
         [
@@ -368,7 +358,6 @@ if __name__ == "__main__":
         goals=[demo_target_q],
         spine3_pos=initial_body_positions[9],
         spine3_aa=initial_spine3_aa,
-        fixed_collar_aa=initial_collar_aa,
         body_pos=initial_body_positions,
         n_diffusion_samples=args.diffusion_samples,
         n_clusters=args.n_clusters,

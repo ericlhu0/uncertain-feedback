@@ -64,10 +64,8 @@ SMPL_BONE_PAIRS_22 = [(p, c) for c, p in enumerate(SMPL_PARENTS_22) if p >= 0]
 # Left arm joints in the 22-joint skeleton (collar through wrist)
 LEFT_ARM_JOINT_INDICES_22 = [13, 16, 18, 20]
 
-# Joints controlled by MPC.  The left collar is part of the rendered/FK arm
-# chain but is held fixed from the start pose instead of optimized.
-CONTROLLED_LEFT_ARM_JOINT_INDICES_22 = [16, 18, 20]
-CONTROLLED_LEFT_ARM_NAMES = [
+# Names of the 3 MPC-controlled joints (shoulder, elbow, wrist)
+LEFT_ARM_NAMES = [
     "left_shoulder",
     "left_elbow",
     "left_wrist",
@@ -87,7 +85,7 @@ LEFT_ARM_CHAIN_NAMES = [
 ]
 
 # Number of joints MPC controls (shoulder, elbow, wrist)
-_N_JOINTS = len(CONTROLLED_LEFT_ARM_JOINT_INDICES_22)
+_N_JOINTS = 3
 
 
 def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
@@ -112,6 +110,13 @@ class SmplLeftArmFK:
     Loads T-pose data from the SMPL neutral PKL file once at construction time.
     Subsequent FK calls are pure numpy/scipy operations.
 
+    The collar rotation is stored as :attr:`collar_aa` (default: zeros for
+    T-pose) and is applied automatically by all FK methods.  Set it once after
+    loading the initial body pose:
+
+        fk = SmplLeftArmFK()
+        fk.collar_aa = fixed_collar_aa  # from decode_pose_with_collar()
+
     Args:
         smpl_pkl_path: Path to ``SMPL_NEUTRAL.pkl``.  Defaults to the copy
                        inside the MDM submodule.
@@ -124,6 +129,7 @@ class SmplLeftArmFK:
         self._bone_offsets, self._tpose_joints, self._tpose_22 = self._load_from_pkl(
             pkl_path
         )
+        self.collar_aa: np.ndarray = np.zeros(3, dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Loading
@@ -196,9 +202,11 @@ class SmplLeftArmFK:
         rotation at joint *i* — which includes joint *i*'s own local rotation —
         transforms the bone that ends at joint *i*.
 
+        The collar rotation is taken from :attr:`collar_aa`.
+
         Args:
-            arm_aa:     ``(4, 3)`` axis-angle for
-                        [left_collar, left_shoulder, left_elbow, left_wrist].
+            arm_aa:     ``(3, 3)`` axis-angle for
+                        [left_shoulder, left_elbow, left_wrist].
             spine3_pos: ``(3,)`` world position of spine3.  Defaults to the
                         SMPL T-pose spine3 position.
             spine3_aa:  ``(3,)`` world axis-angle of spine3.  Defaults to
@@ -220,12 +228,15 @@ class SmplLeftArmFK:
             else np.zeros(3)
         )
 
+        # Build full 4-joint array: [collar, shoulder, elbow, wrist]
+        full_aa = np.concatenate([self.collar_aa[None], arm_aa], axis=0)
+
         positions = np.empty((5, 3), dtype=np.float64)
         positions[0] = spine3_pos
 
         t_rot = Rotation.from_rotvec(spine3_aa)
         for i in range(4):
-            t_rot = t_rot * Rotation.from_rotvec(arm_aa[i])
+            t_rot = t_rot * Rotation.from_rotvec(full_aa[i])
             positions[i + 1] = positions[i] + t_rot.apply(self._bone_offsets[i])
 
         return positions
@@ -239,7 +250,7 @@ class SmplLeftArmFK:
         """Batched FK over N arm configurations.
 
         Args:
-            arm_aa:     ``(N, 4, 3)`` axis-angle arrays.
+            arm_aa:     ``(N, 3, 3)`` axis-angle arrays.
             spine3_pos: ``(3,)`` — same for all samples.
             spine3_aa:  ``(3,)`` — same for all samples.
 
@@ -253,74 +264,10 @@ class SmplLeftArmFK:
             out[i] = self.fk(arm_aa[i], spine3_pos, spine3_aa)
         return out
 
-    def fk_controlled(
-        self,
-        controlled_aa: np.ndarray,
-        collar_aa: np.ndarray | None = None,
-        spine3_pos: np.ndarray | None = None,
-        spine3_aa: np.ndarray | None = None,
-    ) -> np.ndarray:
-        """Compute arm-chain positions from the 3 MPC-controlled joints.
-
-        Args:
-            controlled_aa: ``(3, 3)`` axis-angle for
-                [left_shoulder, left_elbow, left_wrist].
-            collar_aa: ``(3,)`` fixed left-collar axis-angle from the start
-                pose.  Defaults to zero rotation.
-            spine3_pos: ``(3,)`` world position of spine3.
-            spine3_aa: ``(3,)`` world axis-angle of spine3.
-
-        Returns:
-            ``(5, 3)`` world positions of
-            [spine3, left_collar, left_shoulder, left_elbow, left_wrist].
-        """
-        controlled_aa = np.asarray(controlled_aa, dtype=np.float64)
-        collar_aa = (
-            np.asarray(collar_aa, dtype=np.float64)
-            if collar_aa is not None
-            else np.zeros(3, dtype=np.float64)
-        )
-        full_arm_aa = np.concatenate([collar_aa[None, :], controlled_aa], axis=0)
-        return self.fk(full_arm_aa, spine3_pos, spine3_aa)
-
-    def fk_controlled_batch(
-        self,
-        controlled_aa: np.ndarray,
-        collar_aa: np.ndarray | None = None,
-        spine3_pos: np.ndarray | None = None,
-        spine3_aa: np.ndarray | None = None,
-    ) -> np.ndarray:
-        """Batched FK over 3-joint MPC-controlled arm configurations.
-
-        Args:
-            controlled_aa: ``(N, 3, 3)`` controlled axis-angle arrays.
-            collar_aa: ``(3,)`` fixed collar rotation, or ``(N, 3)`` per sample.
-            spine3_pos: ``(3,)`` — same for all samples.
-            spine3_aa: ``(3,)`` — same for all samples.
-
-        Returns:
-            ``(N, 5, 3)`` world positions.
-        """
-        controlled_aa = np.asarray(controlled_aa, dtype=np.float64)
-        n_configs = controlled_aa.shape[0]
-        collar_arr = (
-            np.asarray(collar_aa, dtype=np.float64)
-            if collar_aa is not None
-            else np.zeros(3, dtype=np.float64)
-        )
-        out = np.empty((n_configs, 5, 3), dtype=np.float64)
-        for i in range(n_configs):
-            collar_i = collar_arr[i] if collar_arr.ndim == 2 else collar_arr
-            out[i] = self.fk_controlled(
-                controlled_aa[i], collar_i, spine3_pos, spine3_aa
-            )
-        return out
-
-    def controlled_aa_from_positions(
+    def arm_aa_from_positions(
         self,
         positions: np.ndarray,
         spine3_aa: np.ndarray | None = None,
-        collar_aa: np.ndarray | None = None,
     ) -> np.ndarray:
         """Project SMPL XYZ arm positions into the fixed MPC arm frame.
 
@@ -329,13 +276,13 @@ class SmplLeftArmFK:
         expresses the controlled shoulder/elbow/wrist rotations relative to the
         fixed spine3 and collar rotations used by the MPC.
 
+        The collar rotation is taken from :attr:`collar_aa`.
+
         Args:
             positions: ``(22, 3)`` full SMPL joint positions or ``(5, 3)``
                 arm-chain positions for
                 ``[spine3, left_collar, left_shoulder, left_elbow, left_wrist]``.
             spine3_aa: Fixed MPC spine3 world axis-angle.  Defaults to identity.
-            collar_aa: Fixed MPC left-collar local axis-angle.  Defaults to
-                identity.
 
         Returns:
             ``(3, 3)`` local axis-angles for
@@ -357,14 +304,9 @@ class SmplLeftArmFK:
             if spine3_aa is not None
             else np.zeros(3, dtype=np.float64)
         )
-        collar_aa = (
-            np.asarray(collar_aa, dtype=np.float64)
-            if collar_aa is not None
-            else np.zeros(3, dtype=np.float64)
-        )
 
         parent_world_rot = Rotation.from_rotvec(spine3_aa) * Rotation.from_rotvec(
-            collar_aa
+            self.collar_aa
         )
         controlled = np.zeros((3, 3), dtype=np.float64)
 
@@ -388,28 +330,26 @@ class SmplLeftArmFK:
 
         return controlled
 
-    def controlled_aa_from_positions_batch(
+    def arm_aa_from_positions_batch(
         self,
         positions: np.ndarray,
         spine3_aa: np.ndarray | None = None,
-        collar_aa: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Batched version of :meth:`controlled_aa_from_positions`.
+        """Batched version of :meth:`arm_aa_from_positions`.
 
         Args:
             positions: ``(..., 22, 3)`` or ``(..., 5, 3)`` positions.
             spine3_aa: Fixed MPC spine3 world axis-angle.
-            collar_aa: Fixed MPC left-collar local axis-angle.
 
         Returns:
-            ``(..., 3, 3)`` controlled arm axis-angles.
+            ``(..., 3, 3)`` arm axis-angles.
         """
         positions = np.asarray(positions, dtype=np.float64)
         leading = positions.shape[:-2]
         flat = positions.reshape((-1, *positions.shape[-2:]))
         out = np.stack(
             [
-                self.controlled_aa_from_positions(frame, spine3_aa, collar_aa)
+                self.arm_aa_from_positions(frame, spine3_aa)
                 for frame in flat
             ],
             axis=0,
@@ -426,15 +366,15 @@ class SmplLeftArmFK:
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return all 22 joint positions with the left arm updated by
-        ``arm_aa``.
+        """Return all 22 joint positions with the left arm updated by ``arm_aa``.
 
         All non-arm joints remain at their SMPL T-pose positions.  The five
         arm-chain joints (spine3, collar, shoulder, elbow, wrist) are
-        recomputed via FK.
+        recomputed via FK.  The collar rotation is taken from :attr:`collar_aa`.
 
         Args:
-            arm_aa:     ``(4, 3)`` axis-angle for the 4-joint arm chain.
+            arm_aa:     ``(3, 3)`` axis-angle for [left_shoulder, left_elbow,
+                        left_wrist].
             spine3_pos: ``(3,)`` spine3 world position.
             spine3_aa:  ``(3,)`` spine3 world axis-angle.
 
@@ -443,33 +383,6 @@ class SmplLeftArmFK:
         """
         all_pos = self._tpose_22.copy()
         arm_pos = self.fk(arm_aa, spine3_pos, spine3_aa)  # (5, 3)
-        # Map arm chain back into the 22-joint array
-        for local_i, global_i in enumerate(LEFT_ARM_CHAIN_INDICES):
-            if global_i < 22:
-                all_pos[global_i] = arm_pos[local_i]
-        return all_pos
-
-    def full_body_positions_controlled(
-        self,
-        controlled_aa: np.ndarray,
-        collar_aa: np.ndarray | None = None,
-        spine3_pos: np.ndarray | None = None,
-        spine3_aa: np.ndarray | None = None,
-    ) -> np.ndarray:
-        """Return all 22 joint positions with a fixed-collar controlled arm.
-
-        Args:
-            controlled_aa: ``(3, 3)`` axis-angle for the 3 MPC-controlled
-                joints [left_shoulder, left_elbow, left_wrist].
-            collar_aa: ``(3,)`` fixed left-collar axis-angle from the start pose.
-            spine3_pos: ``(3,)`` spine3 world position.
-            spine3_aa: ``(3,)`` spine3 world axis-angle.
-
-        Returns:
-            ``(22, 3)`` world positions for all 22 body joints.
-        """
-        all_pos = self._tpose_22.copy()
-        arm_pos = self.fk_controlled(controlled_aa, collar_aa, spine3_pos, spine3_aa)
         for local_i, global_i in enumerate(LEFT_ARM_CHAIN_INDICES):
             if global_i < 22:
                 all_pos[global_i] = arm_pos[local_i]

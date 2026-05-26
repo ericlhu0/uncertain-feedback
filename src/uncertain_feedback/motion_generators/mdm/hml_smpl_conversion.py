@@ -88,8 +88,8 @@ from uncertain_feedback.planners.mpc.kinematics import (  # pylint: disable=wron
 #   left_shoulder → joint 16 → body_pose[15]
 #   left_elbow    → joint 18 → body_pose[17]
 #   left_wrist    → joint 20 → body_pose[19]
-ARM_BODY_POSE_INDICES: list[int] = [12, 15, 17, 19]
-CONTROLLED_ARM_BODY_POSE_INDICES: list[int] = [15, 17, 19]
+COLLAR_BODY_POSE_INDEX: int = 12
+ARM_BODY_POSE_INDICES: list[int] = [15, 17, 19]
 
 
 # ---------------------------------------------------------------------------
@@ -378,12 +378,12 @@ def smpl_body_pose_to_arm_aa(body_pose: np.ndarray) -> np.ndarray:
         ``(..., 3, 3)`` axis-angles for
         ``[left_shoulder, left_elbow, left_wrist]``.
     """
-    return np.asarray(body_pose)[..., CONTROLLED_ARM_BODY_POSE_INDICES, :]
+    return np.asarray(body_pose)[..., ARM_BODY_POSE_INDICES, :]
 
 
 def smpl_body_pose_to_collar_aa(body_pose: np.ndarray) -> np.ndarray:
     """Extract the fixed left-collar axis-angle from SMPL body_pose."""
-    return np.asarray(body_pose)[..., ARM_BODY_POSE_INDICES[0], :]
+    return np.asarray(body_pose)[..., COLLAR_BODY_POSE_INDEX, :]
 
 
 # ---------------------------------------------------------------------------
@@ -391,107 +391,86 @@ def smpl_body_pose_to_collar_aa(body_pose: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def _6d_to_body_pose(rot6d: np.ndarray) -> np.ndarray:
+    """Convert 6D rotation features to SMPL body_pose axis-angles (vectorized).
+
+    HML263 [67:193] stores 21 joints × 6 values = the first two columns of
+    each joint's rotation matrix.  Heading cancels in parent-relative space, so
+    these 6D values are exactly the local body_pose rotations — no FK or IK is
+    needed to decode them.
+
+    Args:
+        rot6d: ``(..., 21, 6)`` 6D rotation features.
+
+    Returns:
+        ``(..., 21, 3)`` SMPL body_pose axis-angles.
+    """
+    a1 = rot6d[..., :3]  # first column
+    a2 = rot6d[..., 3:]  # second column
+    b1 = a1 / (np.linalg.norm(a1, axis=-1, keepdims=True) + 1e-8)
+    b2 = a2 - (a2 * b1).sum(-1, keepdims=True) * b1
+    b2 = b2 / (np.linalg.norm(b2, axis=-1, keepdims=True) + 1e-8)
+    b3 = np.cross(b1, b2)
+    R = np.stack([b1, b2, b3], axis=-1)  # (..., 21, 3, 3) — cols are b1, b2, b3
+    lead = R.shape[:-2]
+    return Rotation.from_matrix(R.reshape(-1, 3, 3)).as_rotvec().reshape(*lead, 3)
+
+
 def hml263_to_smpl_body_pose(
     hml_vec: "torch.Tensor",  # type: ignore[name-defined]  # noqa: F821
     dataset,
-    model,
-    tpose_22: np.ndarray,
 ) -> np.ndarray:
     """Convert normalized HumanML3D vectors to SMPL body_pose.
 
-    This function chains the MDM de-normalization and reconstruction pipeline
-    (``inv_transform`` → ``recover_from_ric`` → ``rot2xyz``) with the
-    minimum-rotation IK provided by :func:`positions_to_smpl_body_pose`.
+    Reads the 6D rotation block [67:193] from the de-normalized HML263 vector
+    directly.  No positions, no ``rot2xyz``, no IK — heading cancels in
+    parent-relative space so the 6D block is already body_pose in 6D form.
 
     Args:
-        hml_vec:  ``(n_frames, 263)`` normalized HumanML3D motion tensor.
-        dataset:  HumanML3D ``DataLoader`` returned by ``get_dataset_loader``
-                  — accesses ``dataset.dataset.t2m_dataset.inv_transform``.
-        model:    MDM model — must expose ``model.rot2xyz``.
-        tpose_22: ``(22, 3)`` T-pose positions, e.g. from
-                  :attr:`SmplLeftArmFK.tpose_all_joints`.
+        hml_vec: ``(n_frames, 263)`` normalized HumanML3D motion tensor.
+        dataset: HumanML3D ``DataLoader`` — accesses
+                 ``dataset.dataset.t2m_dataset.inv_transform``.
 
     Returns:
         ``(n_frames, 21, 3)`` SMPL body_pose axis-angles.
     """
-    # Import here so the module remains importable without MDM on sys.path.
-    # pylint: disable=import-outside-toplevel,import-error
-    from data_loaders.humanml.scripts.motion_process import recover_from_ric
-
-    # inv_transform uses CPU numpy arrays internally; keep tensor on CPU.
     hml_vec = hml_vec.float().cpu()
     n_frames = hml_vec.shape[0]
 
-    # --- De-normalize -------------------------------------------------------
-    # inv_transform expects (batch, nfeats=1, seq_len, 263).
-    # dataset is a DataLoader; the underlying Dataset is at dataset.dataset.
     unnorm = dataset.dataset.t2m_dataset.inv_transform(
         hml_vec.unsqueeze(0).unsqueeze(0)  # (1, 1, n_frames, 263)
     ).float()
 
-    # --- Recover global XYZ positions ---------------------------------------
-    # recover_from_ric: (1, 1, n_frames, 263) → (1, 1, n_frames, 22, 3)
-    ric = recover_from_ric(unnorm, 22)
-    # (1, 22, 3, n_frames)
-    ric = ric.view(-1, *ric.shape[2:]).permute(0, 2, 3, 1)
-
-    # rot2xyz applies the full SMPL FK and returns absolute world positions.
-    xyz = model.rot2xyz(
-        x=ric,
-        mask=None,
-        pose_rep="xyz",
-        glob=True,
-        translation=True,
-        jointstype="smpl",
-        vertstrans=True,
-        betas=None,
-        beta=0,
-        glob_rot=None,
-        get_rotations_back=False,
-    )
-    # xyz: (1, 22, 3, n_frames) → (n_frames, 22, 3)
-    positions_seq: np.ndarray = xyz[0].permute(2, 0, 1).cpu().numpy()
-
-    # --- IK: positions → SMPL body_pose ------------------------------------
-    body_pose = np.stack(
-        [
-            positions_to_smpl_body_pose(positions_seq[t], tpose_22)
-            for t in range(n_frames)
-        ],
-        axis=0,
-    )  # (n_frames, 21, 3)
-
-    return body_pose
+    rot6d = unnorm[0, 0, :, 67:193].numpy().reshape(n_frames, 21, 6)
+    return _6d_to_body_pose(rot6d)  # (n_frames, 21, 3)
 
 
-def hml263_batch_to_smpl_body_pose(  # pylint: disable=too-many-locals
+def hml263_batch_to_smpl_body_pose(
     hml_vecs: "torch.Tensor",  # type: ignore[name-defined]  # noqa: F821
     dataset,
-    model,
-    tpose_22: np.ndarray,
 ) -> np.ndarray:
     """Batched variant of :func:`hml263_to_smpl_body_pose`.
 
-    Processes all ``n_samples`` trajectories in a single ``rot2xyz`` GPU call
-    instead of one call per sample, then parallelises the per-frame IK across
-    samples with :class:`~concurrent.futures.ThreadPoolExecutor`.
-
-    ``Rotation.align_vectors`` (used inside :func:`positions_to_smpl_body_pose`)
-    releases the GIL, so thread-level parallelism gives real speed-up here.
+    Reads 6D rotation features directly from the de-normalized HML263 block —
+    no ``rot2xyz`` GPU call and no per-frame IK.
 
     Args:
-        hml_vecs:  ``(n_samples, n_frames, 263)`` normalized HumanML3D tensor.
-        dataset:   HumanML3D ``DataLoader`` returned by ``get_dataset_loader``
-                   — accesses ``dataset.dataset.t2m_dataset.inv_transform``.
-        model:     MDM model — must expose ``model.rot2xyz``.
-        tpose_22:  ``(22, 3)`` T-pose positions, e.g. from
-                   :attr:`SmplLeftArmFK.tpose_all_joints`.
+        hml_vecs: ``(n_samples, n_frames, 263)`` normalized HumanML3D tensor.
+        dataset:  HumanML3D ``DataLoader`` — accesses
+                  ``dataset.dataset.t2m_dataset.inv_transform``.
 
     Returns:
         ``(n_samples, n_frames, 21, 3)`` SMPL body_pose axis-angles.
     """
-    positions_all = hml263_batch_to_smpl_positions(hml_vecs, dataset, model)
-    return smpl_positions_batch_to_body_pose(positions_all, tpose_22)
+    hml_vecs = hml_vecs.float().cpu()
+    n_samples, n_frames = hml_vecs.shape[0], hml_vecs.shape[1]
+
+    unnorm = dataset.dataset.t2m_dataset.inv_transform(
+        hml_vecs.unsqueeze(1)  # (n_samples, 1, n_frames, 263)
+    ).float()
+
+    rot6d = unnorm[:, 0, :, 67:193].numpy().reshape(n_samples, n_frames, 21, 6)
+    return _6d_to_body_pose(rot6d)  # (n_samples, n_frames, 21, 3)
 
 
 def hml263_batch_to_smpl_positions(  # pylint: disable=too-many-locals

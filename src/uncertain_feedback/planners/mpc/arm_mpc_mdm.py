@@ -85,7 +85,6 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         fk: SmplLeftArmFK | None = None,
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
-        fixed_collar_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
@@ -101,7 +100,6 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             fk=fk,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
-            fixed_collar_aa=fixed_collar_aa,
             body_pos=body_pos,
             extra_costs=extra_costs,
         )
@@ -118,16 +116,11 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             if spine3_aa is not None
             else np.zeros(3, dtype=np.float64)
         )
-        self._mdm_fixed_collar_aa = (
-            np.asarray(fixed_collar_aa, dtype=np.float64)
-            if fixed_collar_aa is not None
-            else np.zeros(3, dtype=np.float64)
-        )
         if visualize:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")
             self._vis_config = _VisConfig(
-                fk, spine3_pos, spine3_aa, fixed_collar_aa, body_pos=body_pos
+                fk, spine3_pos, spine3_aa, body_pos=body_pos
             )
 
         # Last frame of the MDM trajectory, shown as a goal marker.
@@ -241,7 +234,6 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                     self._goals[-1],
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
-                    collar_aa=self._vis_config.collar_aa,
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                     elbow_height_range=self._elbow_height_world_range(),
@@ -340,6 +332,7 @@ if __name__ == "__main__":
         initial_spine3_aa,
         initial_collar_aa,
     ) = gen.decode_pose_with_collar(initial_pose)
+    demo_fk.collar_aa = np.asarray(initial_collar_aa, dtype=np.float64)
 
     demo_target_q = initial_arm_aa.copy() + np.array(
         [
@@ -357,7 +350,6 @@ if __name__ == "__main__":
         goals=[demo_target_q],
         spine3_pos=initial_body_positions[9],
         spine3_aa=initial_spine3_aa,
-        fixed_collar_aa=initial_collar_aa,
         body_pos=initial_body_positions,
     )
 

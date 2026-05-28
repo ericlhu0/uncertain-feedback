@@ -293,10 +293,23 @@ costs:
     max: 0.45
     weight: 100.0
     progress_weight: 100.0  # optional; defaults to weight
+
+  elbow_flexion_angle:
+    min: 0.40
+    max: 1.80
+    weight: 50.0
+
+  shoulder_abduction_angle:
+    min: 0.10
+    max: 1.20
+    weight: 50.0
 ```
 
 When MDM is enabled, set `preference_learning: false` to keep the configured
-elbow-height bounds fixed after generated trajectories.
+preference bounds fixed after generated trajectories. Angle costs are in
+radians; `elbow_flexion_angle` uses the controlled elbow rotation magnitude,
+and `shoulder_abduction_angle` uses the upper-arm angle away from torso-down in
+the spine3 frame.
 
 `--arm` can override the starting arm state with a `.npy` file. The preferred
 shape is `(3, 3)` for `[left_shoulder, left_elbow, left_wrist]`. Legacy `(4, 3)`

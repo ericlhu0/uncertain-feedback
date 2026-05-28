@@ -39,12 +39,11 @@ from uncertain_feedback.planners.mpc import (
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    ElbowHeightCost,
+    LearnablePreferenceCost,
     MpcCostContext,
     build_extra_costs,
-    compute_elbow_heights,
     replace_cost_in_composite,
-    update_elbow_cost,
+    update_preference_cost,
 )
 
 _MDM_PLANNERS = {"arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian"}
@@ -230,12 +229,15 @@ def _get_vis(mpc: SmplLeftArmMPC) -> ArmVisualizer | None:
     return mpc.get_visualizer()
 
 
-def _find_elbow_cost(composite: CompositeTrajectoryCost) -> ElbowHeightCost | None:
-    """Return the first ElbowHeightCost in the composite, or None."""
-    for term in composite._terms:
-        if isinstance(term, ElbowHeightCost):
-            return term
-    return None
+def _iter_learnable_costs(
+    composite: CompositeTrajectoryCost,
+) -> list[LearnablePreferenceCost]:
+    """Return all configured preference costs that support learned bounds."""
+    costs: list[LearnablePreferenceCost] = []
+    for term in composite.terms():
+        if isinstance(term, LearnablePreferenceCost):
+            costs.append(term)
+    return costs
 
 
 def _apply_preference_update(
@@ -245,37 +247,48 @@ def _apply_preference_update(
     context: MpcCostContext,
     alpha: float,
     window: int,
-) -> ElbowHeightCost | None:
-    """Update elbow cost bounds from MDM/MPC trajectory discrepancy, if applicable."""
-    elbow_cost = _find_elbow_cost(mpc._extra_costs)  # pylint: disable=protected-access
-    if elbow_cost is None:
-        return None
+) -> list[LearnablePreferenceCost]:
+    """Update configured preference bounds from MDM/MPC discrepancy."""
+    _ = context
+    costs = _iter_learnable_costs(mpc._extra_costs)  # pylint: disable=protected-access
+    if not costs:
+        return []
     if not q_history:
-        return None
+        return []
     recent_q = np.array(q_history[-window:])
-    mpc_heights = compute_elbow_heights(recent_q, context)
-    mdm_heights = compute_elbow_heights(mdm_traj, context)
-    mdm_lo, mdm_hi = np.percentile(mdm_heights, [5.0, 95.0])
-    mpc_mean = float(mpc_heights.mean())
-    mdm_mean = float(mdm_heights.mean())
-    if np.isclose(mpc_mean, mdm_mean):
-        side = "none"
-    elif mpc_mean < mdm_mean:
-        side = "min"
-    else:
-        side = "max"
-    updated = update_elbow_cost(elbow_cost, mdm_heights, mpc_heights, alpha=alpha)
-    print(
-        f"[preference] elbow bounds updated: "
-        f"[{elbow_cost.min_height:.3f}, {elbow_cost.max_height:.3f}] → "
-        f"[{updated.min_height:.3f}, {updated.max_height:.3f}]  "
-        f"(side={side} mdm_range=[{mdm_lo:.3f}, {mdm_hi:.3f}] "
-        f"mpc_mean={mpc_mean:.3f}, mdm_mean={mdm_mean:.3f})"
-    )
-    mpc.set_extra_costs(
-        replace_cost_in_composite(mpc._extra_costs, updated)
-    )  # pylint: disable=protected-access
-    return updated
+    updated_costs: list[LearnablePreferenceCost] = []
+    extra_costs = mpc._extra_costs  # pylint: disable=protected-access
+
+    for cost in costs:
+        mpc_values = cost.feature_values(recent_q)
+        mdm_values = cost.feature_values(mdm_traj)
+        mdm_lo, mdm_hi = np.percentile(mdm_values, [5.0, 95.0])
+        mpc_mean = float(mpc_values.mean())
+        mdm_mean = float(mdm_values.mean())
+        if np.isclose(mpc_mean, mdm_mean):
+            side = "none"
+        elif mpc_mean < mdm_mean:
+            side = "min"
+        else:
+            side = "max"
+        updated = update_preference_cost(
+            cost,
+            mdm_values,
+            mpc_values,
+            alpha=alpha,
+        )
+        print(
+            f"[preference] {cost.cost_name} bounds updated: "
+            f"[{cost.min_value:.3f}, {cost.max_value:.3f}] -> "
+            f"[{updated.min_value:.3f}, {updated.max_value:.3f}]  "
+            f"(side={side} mdm_range=[{mdm_lo:.3f}, {mdm_hi:.3f}] "
+            f"mpc_mean={mpc_mean:.3f}, mdm_mean={mdm_mean:.3f})"
+        )
+        extra_costs = replace_cost_in_composite(extra_costs, updated)
+        updated_costs.append(updated)
+
+    mpc.set_extra_costs(extra_costs)
+    return updated_costs
 
 
 def _default_preference_output_path(config_path: Path) -> Path:
@@ -286,9 +299,9 @@ def _default_preference_output_path(config_path: Path) -> Path:
 def _save_learned_preference_yaml(
     input_path: Path,
     output_path: Path,
-    learned_elbow_cost: ElbowHeightCost,
+    learned_costs: LearnablePreferenceCost | list[LearnablePreferenceCost],
 ) -> None:
-    """Save a config copy with learned elbow-height preference parameters."""
+    """Save a config copy with learned preference parameters."""
     with open(input_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     data = raw if isinstance(raw, dict) else {}
@@ -297,15 +310,21 @@ def _save_learned_preference_yaml(
     if not isinstance(costs, dict):
         costs = {}
         data["costs"] = costs
-    elbow = costs.get("elbow_height")
-    if not isinstance(elbow, dict):
-        elbow = {}
-        costs["elbow_height"] = elbow
 
-    elbow["min"] = float(learned_elbow_cost.min_height)
-    elbow["max"] = float(learned_elbow_cost.max_height)
-    elbow["weight"] = float(learned_elbow_cost.weight)
-    elbow["progress_weight"] = float(learned_elbow_cost.progress_weight)
+    normalized_costs = (
+        [learned_costs]
+        if isinstance(learned_costs, LearnablePreferenceCost)
+        else learned_costs
+    )
+    for learned_cost in normalized_costs:
+        cost_data = costs.get(learned_cost.cost_name)
+        if not isinstance(cost_data, dict):
+            cost_data = {}
+            costs[learned_cost.cost_name] = cost_data
+        cost_data["min"] = float(learned_cost.min_value)
+        cost_data["max"] = float(learned_cost.max_value)
+        cost_data["weight"] = float(learned_cost.weight)
+        cost_data["progress_weight"] = float(learned_cost.progress_weight)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -383,10 +402,7 @@ def main() -> None:
                 "cartesian.goals is required when planner is arm_mpc_cartesian_no_mdm."
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        init_wrist_rel = (
-            fk.fk(arm_aa, spine3_pos, spine3_aa)[-1]
-            - _spine3_ref
-        )
+        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = ArmMPCCartesianNoMDM(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
@@ -400,10 +416,7 @@ def main() -> None:
                 "cartesian.goals is required when planner is arm_mpc_cartesian."
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        init_wrist_rel = (
-            fk.fk(arm_aa, spine3_pos, spine3_aa)[-1]
-            - _spine3_ref
-        )
+        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = LeftArmMPCCartesian(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
@@ -459,7 +472,7 @@ def main() -> None:
                     spine3_aa=spine3_aa,
                 )
                 if cfg.preference_learning:
-                    learned_elbow_cost = _apply_preference_update(
+                    learned_costs = _apply_preference_update(
                         mpc,
                         traj,
                         q_history,
@@ -467,9 +480,9 @@ def main() -> None:
                         alpha=cfg.preference_alpha,
                         window=cfg.preference_window,
                     )
-                    if learned_elbow_cost is not None:
+                    if learned_costs:
                         _save_learned_preference_yaml(
-                            args.mpc_config, preference_output_path, learned_elbow_cost
+                            args.mpc_config, preference_output_path, learned_costs
                         )
                 else:
                     print(
@@ -491,7 +504,7 @@ def main() -> None:
                     frozen_body=args.frozen_body,
                 )
                 if cfg.preference_learning:
-                    learned_elbow_cost = _apply_preference_update(
+                    learned_costs = _apply_preference_update(
                         mpc,
                         traj,
                         q_history,
@@ -499,9 +512,9 @@ def main() -> None:
                         alpha=cfg.preference_alpha,
                         window=cfg.preference_window,
                     )
-                    if learned_elbow_cost is not None:
+                    if learned_costs:
                         _save_learned_preference_yaml(
-                            args.mpc_config, preference_output_path, learned_elbow_cost
+                            args.mpc_config, preference_output_path, learned_costs
                         )
                 else:
                     print(

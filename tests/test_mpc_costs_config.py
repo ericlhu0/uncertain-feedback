@@ -16,11 +16,16 @@ from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
+    ElbowFlexionAngleCost,
     ElbowHeightCost,
     MpcCostContext,
+    ShoulderAbductionAngleCost,
     build_extra_costs,
+    compute_elbow_flexion_angles,
     compute_elbow_heights,
+    compute_shoulder_abduction_angles,
     update_elbow_cost,
+    update_preference_cost,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
@@ -227,6 +232,36 @@ costs:
     assert cfg.preference_learning is True
 
 
+def test_load_mpc_config_with_elbow_flexion_and_shoulder_abduction(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+costs:
+  elbow_flexion_angle:
+    min: 0.4
+    max: 1.8
+    weight: 50
+  shoulder_abduction_angle:
+    min: 0.1
+    max: 1.2
+    weight: 60
+    progress_weight: 20
+"""),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.costs == {
+        "elbow_flexion_angle": {"min": 0.4, "max": 1.8, "weight": 50},
+        "shoulder_abduction_angle": {
+            "min": 0.1,
+            "max": 1.2,
+            "weight": 60,
+            "progress_weight": 20,
+        },
+    }
+
+
 def test_load_mpc_config_can_disable_preference_learning(tmp_path) -> None:
     path = _write_config(
         tmp_path,
@@ -370,6 +405,64 @@ def test_elbow_height_cost_penalizes_outside_range() -> None:
     assert cost(q_trajs)[0] > 0.9
 
 
+def test_elbow_flexion_angle_cost_zero_inside_range() -> None:
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    cost = ElbowFlexionAngleCost(
+        min_angle=0.0,
+        max_angle=0.1,
+        weight=100.0,
+        progress_weight=100.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+
+    np.testing.assert_allclose(cost(q_trajs), [0.0])
+
+
+def test_elbow_flexion_angle_cost_penalizes_outside_range() -> None:
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    cost = ElbowFlexionAngleCost(
+        min_angle=0.4,
+        max_angle=0.5,
+        weight=100.0,
+        progress_weight=100.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+
+    assert cost(q_trajs)[0] > 1.0
+
+
+def test_shoulder_abduction_angle_cost_zero_inside_range() -> None:
+    fk = SmplLeftArmFK()
+    context = _cost_context(fk)
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    abduction = compute_shoulder_abduction_angles(q_trajs[:, 0], context)[0]
+    cost = ShoulderAbductionAngleCost(
+        min_angle=abduction - 0.01,
+        max_angle=abduction + 0.01,
+        weight=100.0,
+        progress_weight=100.0,
+        context=context,
+    )
+
+    np.testing.assert_allclose(cost(q_trajs), [0.0])
+
+
+def test_shoulder_abduction_angle_cost_penalizes_outside_range() -> None:
+    fk = SmplLeftArmFK()
+    context = _cost_context(fk)
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    abduction = compute_shoulder_abduction_angles(q_trajs[:, 0], context)[0]
+    cost = ShoulderAbductionAngleCost(
+        min_angle=abduction + 0.1,
+        max_angle=abduction + 0.2,
+        weight=100.0,
+        progress_weight=100.0,
+        context=context,
+    )
+
+    assert cost(q_trajs)[0] > 0.9
+
+
 def test_compute_elbow_heights_uses_joint_before_wrist() -> None:
     fk = SmplLeftArmFK()
     context = _cost_context(fk)
@@ -387,6 +480,30 @@ def test_compute_elbow_heights_uses_joint_before_wrist() -> None:
 
     np.testing.assert_allclose(learned_height, joint_before_wrist_height)
     assert not np.isclose(learned_height, wrist_height)
+
+
+def test_compute_elbow_flexion_angles_uses_elbow_joint_row() -> None:
+    context = _cost_context(SmplLeftArmFK())
+    trajectory = np.zeros((1, 3, 3), dtype=np.float64)
+    trajectory[0, 0, 2] = 2.0
+    trajectory[0, 1, 0] = 0.3
+    trajectory[0, 2, 1] = 4.0
+
+    learned_flexion = compute_elbow_flexion_angles(trajectory, context)[0]
+
+    np.testing.assert_allclose(learned_flexion, 0.3)
+
+
+def test_compute_shoulder_abduction_angles_changes_with_upper_arm_direction() -> None:
+    context = _cost_context(SmplLeftArmFK())
+    neutral = np.zeros((1, 3, 3), dtype=np.float64)
+    abducted = np.zeros((1, 3, 3), dtype=np.float64)
+    abducted[0, 0, 2] = 0.7
+
+    neutral_angle = compute_shoulder_abduction_angles(neutral, context)[0]
+    abducted_angle = compute_shoulder_abduction_angles(abducted, context)[0]
+
+    assert not np.isclose(neutral_angle, abducted_angle)
 
 
 def test_update_elbow_cost_low_mpc_updates_only_min_to_mdm_5th() -> None:
@@ -458,6 +575,40 @@ def test_update_elbow_cost_inverted_side_update_falls_back_to_mdm_range() -> Non
     np.testing.assert_allclose(updated.max_height, 1.45)
 
 
+def test_update_preference_cost_low_mpc_updates_only_min_to_mdm_5th() -> None:
+    cost = ElbowFlexionAngleCost(
+        min_angle=0.0,
+        max_angle=100.0,
+        weight=1.0,
+        progress_weight=1.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+    mdm_values = np.linspace(50.0, 150.0, 21)
+    mpc_values = np.linspace(0.0, 20.0, 21)
+
+    updated = update_preference_cost(cost, mdm_values, mpc_values, alpha=0.0)
+
+    np.testing.assert_allclose(updated.min_value, 55.0)
+    np.testing.assert_allclose(updated.max_value, cost.max_value)
+
+
+def test_update_preference_cost_high_mpc_updates_only_max_to_mdm_95th() -> None:
+    cost = ShoulderAbductionAngleCost(
+        min_angle=0.0,
+        max_angle=100.0,
+        weight=1.0,
+        progress_weight=1.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+    mdm_values = np.linspace(-50.0, 50.0, 21)
+    mpc_values = np.linspace(100.0, 120.0, 21)
+
+    updated = update_preference_cost(cost, mdm_values, mpc_values, alpha=0.0)
+
+    np.testing.assert_allclose(updated.min_value, cost.min_value)
+    np.testing.assert_allclose(updated.max_value, 45.0)
+
+
 def test_elbow_height_cost_scores_entire_rollout_not_only_terminal() -> None:
     fk = SmplLeftArmFK()
     context = _cost_context(fk)
@@ -524,7 +675,7 @@ def test_default_preference_output_path_uses_learned_suffix(tmp_path) -> None:
     assert output_path == tmp_path / "arm_mpc_cartesian_mdm_learned.yaml"
 
 
-def test_save_learned_preference_yaml_updates_elbow_cost(tmp_path) -> None:
+def test_save_learned_preference_yaml_updates_multiple_costs(tmp_path) -> None:
     config_path = _write_config(
         tmp_path,
         """
@@ -543,18 +694,46 @@ costs:
     max: 0.4
     weight: 12.0
     progress_weight: 5.0
+  elbow_flexion_angle:
+    min: 0.4
+    max: 1.8
+    weight: 50.0
+  shoulder_abduction_angle:
+    min: 0.1
+    max: 1.2
+    weight: 60.0
+    progress_weight: 20.0
 """,
     )
     output_path = tmp_path / "learned.yaml"
-    learned = ElbowHeightCost(
+    context = _cost_context(SmplLeftArmFK())
+    learned_height = ElbowHeightCost(
         min_height=0.2,
         max_height=0.6,
         weight=12.0,
         progress_weight=5.0,
-        context=_cost_context(SmplLeftArmFK()),
+        context=context,
+    )
+    learned_flexion = ElbowFlexionAngleCost(
+        min_angle=0.5,
+        max_angle=1.5,
+        weight=50.0,
+        progress_weight=50.0,
+        context=context,
+    )
+    learned_abduction = ShoulderAbductionAngleCost(
+        min_angle=0.2,
+        max_angle=1.0,
+        weight=60.0,
+        progress_weight=20.0,
+        context=context,
     )
 
-    planner_run._save_learned_preference_yaml(config_path, output_path, learned)
+    planner_run._save_learned_preference_yaml(
+        config_path,
+        output_path,
+        [learned_height, learned_flexion, learned_abduction],
+    )
 
     with open(output_path, encoding="utf-8") as f:
         saved = yaml.safe_load(f)
@@ -566,6 +745,18 @@ costs:
         "max": 0.6,
         "weight": 12.0,
         "progress_weight": 5.0,
+    }
+    assert saved["costs"]["elbow_flexion_angle"] == {
+        "min": 0.5,
+        "max": 1.5,
+        "weight": 50.0,
+        "progress_weight": 50.0,
+    }
+    assert saved["costs"]["shoulder_abduction_angle"] == {
+        "min": 0.2,
+        "max": 1.0,
+        "weight": 60.0,
+        "progress_weight": 20.0,
     }
 
 

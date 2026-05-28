@@ -12,14 +12,19 @@ uncertainty-aware MDM trajectory selection via:
 from __future__ import annotations
 
 import argparse
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.uncertainty.base import TrajectoryClusterer
-from uncertain_feedback.uncertainty.cluster_picker import pick_cluster
+from uncertain_feedback.uncertainty.cluster_picker import (
+    pick_cluster,
+    pick_cluster_positions,
+)
 from uncertain_feedback.uncertainty.xyz_clusterer import XyzPositionClusterer
 
 
@@ -40,7 +45,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                              Also controls which timestep is shown as a ghost
                              arm in the cluster-picker window.  Defaults to
                              :attr:`~LeftArmMPCMDM.TRAJECTORY_FRACTION`.
-        goals:               Initial list of ``(4, 3)`` target configurations.
+        goals:               Initial list of ``(3, 3)`` target configurations.
         goal_threshold:      Threshold passed to the base class.
         visualize:           If ``True``, open a live matplotlib window.
         fk:                  :class:`SmplLeftArmFK` instance (required when
@@ -74,6 +79,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         n_diffusion_samples: int = 512,
         n_clusters: int = 3,
         clusterer: TrajectoryClusterer | None = None,
+        extra_costs: CompositeTrajectoryCost | None = None,
     ) -> None:
         super().__init__(
             horizon=horizon,
@@ -88,13 +94,13 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
             body_pos=body_pos,
+            extra_costs=extra_costs,
         )
         self._n_diffusion_samples = n_diffusion_samples
         if clusterer is not None:
             self._clusterer = clusterer
         else:
-            _fk = fk if fk is not None else SmplLeftArmFK()
-            self._clusterer = XyzPositionClusterer(n_clusters, fk=_fk)
+            self._clusterer = XyzPositionClusterer(n_clusters, fk=self._fk)
 
     # ------------------------------------------------------------------
     # UQ pipeline
@@ -106,7 +112,10 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         text: str,
         start_pose: np.ndarray | None = None,
         current_arm_aa: np.ndarray | None = None,
-    ) -> None:
+        auto_cluster: int | None = None,
+        mdm_frames: int | None = None,
+        frozen_body: bool = False,
+    ) -> np.ndarray:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
                 The full pipeline:
@@ -128,36 +137,101 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                                 the generated motion.  Pass the output of
                                 :meth:`~uncertain_feedback.motion_generators.mdm\
         .mdm_api.MdmMotionGenerator.build_pose_from_arm_aa`.
+                    mdm_frames: Exact number of MDM frames to generate.  ``None``
+                                keeps the generator default.
+                    frozen_body: If ``True``, freeze non-left-arm body features
+                                 during MDM generation.
         """
         print(f"Generating {self._n_diffusion_samples} MDM samples for: '{text}' …")
-        trajectories = gen.generate_left_arm_trajectory(
-            text,
-            start_pose=start_pose,
-            num_samples=self._n_diffusion_samples,
-        )  # (n_diffusion_samples, n_frames, 4, 3)
+        generation_t0 = time.perf_counter()
+        use_position_uq = hasattr(self._clusterer, "cluster_positions")
+        base_spine_aa = self._mdm_spine3_aa
+        if use_position_uq:
+            positions = gen.generate_left_arm_position_samples(
+                text,
+                start_pose=start_pose,
+                num_samples=self._n_diffusion_samples,
+                num_frames=mdm_frames,
+                frozen_body=frozen_body,
+            )  # (n_diffusion_samples, n_frames, 22, 3)
+            trajectories = None
+        else:
+            positions = None
+            trajectories = gen.generate_left_arm_trajectory(
+                text,
+                start_pose=start_pose,
+                num_samples=self._n_diffusion_samples,
+                num_frames=mdm_frames,
+                frozen_body=frozen_body,
+                spine3_aa=base_spine_aa,
+            )  # (n_diffusion_samples, n_frames, 3, 3)
+        print(
+            f"[timing] MDM generation pipeline: {time.perf_counter() - generation_t0:.3f}s"
+        )
 
         print("Clustering trajectories …")
-        labels = self._clusterer.cluster(trajectories)  # (num_samples,)
+        cluster_t0 = time.perf_counter()
+        if positions is not None:
+            labels = self._clusterer.cluster_positions(positions)  # type: ignore[attr-defined]
+        else:
+            assert trajectories is not None
+            labels = self._clusterer.cluster(trajectories)
+        print(f"[timing] clustering total: {time.perf_counter() - cluster_t0:.3f}s")
         print(f"labels shape: {labels.shape}")
 
-        fk = self._vis_config.fk if self._vis_config is not None else SmplLeftArmFK()
-        spine_pos = self._vis_config.spine_pos if self._vis_config is not None else None
-        spine_aa = self._vis_config.spine_aa if self._vis_config is not None else None
-        body_pos = self._vis_config.body_pos if self._vis_config is not None else None
-        chosen_label = pick_cluster(
-            trajectories,
-            labels,
-            fk=fk,
-            trajectory_fraction=self.trajectory_fraction,
-            spine_pos=spine_pos,
-            spine_aa=spine_aa,
-            body_pos=body_pos,
-            current_arm_aa=current_arm_aa,
-        )
-        print(f"User selected cluster {chosen_label}.")
+        if auto_cluster is not None:
+            chosen_label = int(auto_cluster)
+            print(f"Auto-selected cluster {chosen_label} (headless mode).")
+        else:
+            fk = self._fk
+            spine_pos = (
+                self._mdm_spine3_pos
+                if self._mdm_spine3_pos is not None
+                else fk.tpose_spine3_pos
+            )
+            spine_aa = base_spine_aa
+            body_pos = (
+                self._vis_config.body_pos if self._vis_config is not None else None
+            )
+            picker_t0 = time.perf_counter()
+            if positions is not None:
+                chosen_label = pick_cluster_positions(
+                    positions,
+                    labels,
+                    fk=fk,
+                    trajectory_fraction=self.trajectory_fraction,
+                    spine_pos=spine_pos,
+                    spine_aa=spine_aa,
+                    body_pos=body_pos,
+                    current_arm_aa=current_arm_aa,
+                )
+            else:
+                assert trajectories is not None
+                chosen_label = pick_cluster(
+                    trajectories,
+                    labels,
+                    fk=fk,
+                    trajectory_fraction=self.trajectory_fraction,
+                    spine_pos=spine_pos,
+                    spine_aa=spine_aa,
+                    body_pos=body_pos,
+                    current_arm_aa=current_arm_aa,
+                )
+            print(
+                f"[timing] cluster picker total: {time.perf_counter() - picker_t0:.3f}s"
+            )
+            print(f"User selected cluster {chosen_label}.")
 
-        chosen_mean = trajectories[labels == chosen_label].mean(axis=0)
-        # (n_frames, 4, 3)
+        if positions is not None:
+            selected_positions = positions[labels == chosen_label].mean(axis=0)
+            chosen_mean = gen.smpl_positions_to_left_arm_trajectory(
+                selected_positions,
+                spine3_aa=base_spine_aa,
+            )
+        else:
+            assert trajectories is not None
+            chosen_mean = trajectories[labels == chosen_label].mean(axis=0)
+        # chosen_mean: (n_frames, 3, 3)
 
         n_frames = chosen_mean.shape[0]
         cutoff = max(1, round(n_frames * self.trajectory_fraction))
@@ -167,6 +241,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         )
         self.set_mdm_goal(chosen_mean[cutoff - 1])
         self.push_trajectory(chosen_mean[:cutoff])
+        return chosen_mean
 
 
 # ---------------------------------------------------------------------------
@@ -208,9 +283,20 @@ if __name__ == "__main__":
         help="Save MDM motion video to this path (e.g. motion.mp4).",
     )
     parser.add_argument(
+        "--mdm-frames",
+        type=int,
+        default=None,
+        help="Exact number of MDM frames to generate (1-196). Default is 120.",
+    )
+    parser.add_argument(
+        "--frozen-body",
+        action="store_true",
+        help="Freeze non-left-arm body features during MDM generation.",
+    )
+    parser.add_argument(
         "--start_pose",
         type=str,
-        default="sitting_pose.pt",
+        default="demo_pose.pt",
         help="Name of the .pt file in MDM_ROOT to use as the initial pose.",
     )
     parser.add_argument(
@@ -231,7 +317,7 @@ if __name__ == "__main__":
         default=LeftArmMPCMDM.TRAJECTORY_FRACTION,
         help=(
             "Fraction of the MDM trajectory to enqueue (default: "
-            f"{LeftArmMPCMDM.TRAJECTORY_FRACTION:.0%}). "
+            f"{LeftArmMPCMDM.TRAJECTORY_FRACTION * 100:.0f}%%). "
             "Also sets the ghost-arm timestep in the cluster picker."
         ),
     )
@@ -248,13 +334,16 @@ if __name__ == "__main__":
 
     gen = MdmMotionGenerator()
     initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
-    initial_arm_aa, initial_body_positions, initial_spine3_aa = gen.decode_pose(
-        initial_pose
-    )
+    (
+        initial_arm_aa,
+        initial_body_positions,
+        initial_spine3_aa,
+        initial_collar_aa,
+    ) = gen.decode_pose_with_collar(initial_pose)
+    demo_fk.collar_aa = np.asarray(initial_collar_aa, dtype=np.float64)
 
     demo_target_q = initial_arm_aa.copy() + np.array(
         [
-            [0.0, 0.0, 0.0],  # left_collar
             [0.0, -1.6, 0.8],  # left_shoulder
             [0.0, 0.0, 0.0],  # left_elbow
             [0.0, 0.0, 0.0],  # left_wrist
@@ -291,7 +380,12 @@ if __name__ == "__main__":
 
     current_pose = gen.build_pose_from_arm_aa(initial_pose, demo_q)
     demo_mpc.query_mdm_with_uncertainty(
-        gen, args.text, start_pose=current_pose, current_arm_aa=demo_q
+        gen,
+        args.text,
+        start_pose=current_pose,
+        current_arm_aa=demo_q,
+        mdm_frames=args.mdm_frames,
+        frozen_body=args.frozen_body,
     )
 
     # If MDM switched the backend to Agg, switch back to interactive.

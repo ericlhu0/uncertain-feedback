@@ -16,10 +16,17 @@ import pytest
 
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     ARM_BODY_POSE_INDICES,
+    COLLAR_BODY_POSE_INDEX,
+    HmlArmFeatureInfo,
     positions_to_smpl_body_pose,
+    smpl_arm_aa_to_hml263_frame,
     smpl_body_pose_to_arm_aa,
+    smpl_body_pose_to_collar_aa,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import (
+    LEFT_ARM_CHAIN_INDICES,
+    SmplLeftArmFK,
+)
 
 _SMPL_PKL = (
     Path(__file__).parent.parent
@@ -78,13 +85,18 @@ class TestPositionsToSmplBodyPose:
         positions."""
         rng = np.random.default_rng(42)
         for _ in range(10):
-            arm_aa = rng.uniform(-0.5, 0.5, (4, 3))
+            arm_aa_4 = rng.uniform(-0.5, 0.5, (4, 3))
+            collar_aa = arm_aa_4[0]
+            arm_aa = arm_aa_4[1:]
+            fk.collar_aa = collar_aa
             positions = fk.full_body_positions(arm_aa)  # (22, 3)
 
             body_pose = positions_to_smpl_body_pose(positions, fk.tpose_all_joints)
             recovered_arm_aa = smpl_body_pose_to_arm_aa(body_pose)
+            recovered_collar_aa = smpl_body_pose_to_collar_aa(body_pose)
 
             original_arm_pos = fk.fk(arm_aa)  # (5, 3)
+            fk.collar_aa = recovered_collar_aa
             recovered_arm_pos = fk.fk(recovered_arm_aa)  # (5, 3)
             np.testing.assert_allclose(recovered_arm_pos, original_arm_pos, atol=1e-4)
 
@@ -98,30 +110,83 @@ class TestPositionsToSmplBodyPose:
         we check is that FK(recovered_aa) reproduces the same joint
         positions as FK(arm_aa).
         """
+        collar_aa = np.array([0.3, 0.3, 0.3])
         arm_aa = np.array(
             [
-                [0.3, 0.3, 0.3],  # left_collar
                 [0.0, -1.45, 0.0],  # left_shoulder
                 [0.0, 0.0, 0.4],  # left_elbow
                 [0.0, 0.0, 0.0],  # left_wrist
             ]
         )
+        fk.collar_aa = collar_aa
         positions = fk.full_body_positions(arm_aa)
         body_pose = positions_to_smpl_body_pose(positions, fk.tpose_all_joints)
         recovered_arm_aa = smpl_body_pose_to_arm_aa(body_pose)
+        recovered_collar_aa = smpl_body_pose_to_collar_aa(body_pose)
 
         # Joint positions must match — axis-angles may differ (twist ambiguity).
-        np.testing.assert_allclose(fk.fk(recovered_arm_aa), fk.fk(arm_aa), atol=1e-4)
+        original_pos = fk.fk(arm_aa)
+        fk.collar_aa = recovered_collar_aa
+        np.testing.assert_allclose(
+            fk.fk(recovered_arm_aa),
+            original_pos,
+            atol=1e-4,
+        )
+
+    def test_fixed_base_projection_preserves_target_bone_directions(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
+        """Project MDM XYZ into a different fixed collar/spine base."""
+        mdm_spine_aa = np.array([0.2, -0.1, 0.05])
+        mdm_collar_aa = np.array([0.15, -0.05, 0.1])
+        target_arm_aa = np.array(
+            [
+                [0.0, -1.0, 0.2],
+                [0.1, 0.2, 0.7],
+                [-0.1, 0.05, 0.2],
+            ],
+            dtype=np.float64,
+        )
+        fk.collar_aa = mdm_collar_aa
+        mdm_positions = fk.full_body_positions(
+            target_arm_aa,
+            fk.tpose_spine3_pos,
+            mdm_spine_aa,
+        )
+
+        fixed_spine_aa = np.array([-0.1, 0.15, 0.05])
+        fixed_collar_aa = np.array([-0.2, 0.05, -0.1])
+        fk.collar_aa = fixed_collar_aa
+        projected_arm_aa = fk.arm_aa_from_positions(
+            mdm_positions,
+            spine3_aa=fixed_spine_aa,
+        )
+        projected_positions = fk.fk(
+            projected_arm_aa,
+            fk.tpose_spine3_pos,
+            fixed_spine_aa,
+        )
+
+        mdm_chain = mdm_positions[LEFT_ARM_CHAIN_INDICES]
+        mdm_controlled_bones = np.diff(mdm_chain, axis=0)[1:]
+        projected_controlled_bones = np.diff(projected_positions, axis=0)[1:]
+        mdm_dirs = mdm_controlled_bones / np.linalg.norm(
+            mdm_controlled_bones, axis=1, keepdims=True
+        )
+        projected_dirs = projected_controlled_bones / np.linalg.norm(
+            projected_controlled_bones, axis=1, keepdims=True
+        )
+        np.testing.assert_allclose(projected_dirs, mdm_dirs, atol=1e-5)
 
 
 class TestSmplBodyPoseToArmAa:
     """Unit tests for smpl_body_pose_to_arm_aa."""
 
     def test_output_shape(self) -> None:
-        """Check that the output shape is (4, 3) for a single frame."""
+        """Check that the output shape is (3, 3) for a single frame."""
         body_pose = np.zeros((21, 3))
         result = smpl_body_pose_to_arm_aa(body_pose)
-        assert result.shape == (4, 3)
+        assert result.shape == (3, 3)
 
     def test_zeros_in_zeros_out(self) -> None:
         """Zero body_pose should yield zero arm axis-angles."""
@@ -130,48 +195,104 @@ class TestSmplBodyPoseToArmAa:
         np.testing.assert_allclose(result, 0.0)
 
     def test_batched_shape(self) -> None:
-        """Check that batched input gives (N, 4, 3) output."""
+        """Check that batched input gives (N, 3, 3) output."""
         body_pose = np.zeros((10, 21, 3))
         result = smpl_body_pose_to_arm_aa(body_pose)
-        assert result.shape == (10, 4, 3)
+        assert result.shape == (10, 3, 3)
 
-    def test_collar_index(self) -> None:
-        """smpl_body_pose_to_arm_aa[0] should be left_collar
-        (body_pose[12])."""
+    def test_collar_is_separate(self) -> None:
+        """Collar is no longer part of MPC-controlled arm_aa."""
         body_pose = np.zeros((21, 3))
-        body_pose[ARM_BODY_POSE_INDICES[0]] = [0.1, 0.2, 0.3]  # collar
+        body_pose[COLLAR_BODY_POSE_INDEX] = [0.1, 0.2, 0.3]  # collar
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        np.testing.assert_allclose(arm_aa[0], [0.1, 0.2, 0.3])
-        np.testing.assert_allclose(arm_aa[1:], 0.0)
+        collar_aa = smpl_body_pose_to_collar_aa(body_pose)
+        np.testing.assert_allclose(arm_aa, 0.0)
+        np.testing.assert_allclose(collar_aa, [0.1, 0.2, 0.3])
 
     def test_shoulder_index(self) -> None:
         """Check that shoulder joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
-        body_pose[ARM_BODY_POSE_INDICES[1]] = [0.4, 0.5, 0.6]  # shoulder
+        body_pose[ARM_BODY_POSE_INDICES[0]] = [0.4, 0.5, 0.6]  # shoulder
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        np.testing.assert_allclose(arm_aa[1], [0.4, 0.5, 0.6])
+        np.testing.assert_allclose(arm_aa[0], [0.4, 0.5, 0.6])
 
     def test_elbow_index(self) -> None:
         """Check that elbow joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
-        body_pose[ARM_BODY_POSE_INDICES[2]] = [0.7, 0.8, 0.9]  # elbow
+        body_pose[ARM_BODY_POSE_INDICES[1]] = [0.7, 0.8, 0.9]  # elbow
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        np.testing.assert_allclose(arm_aa[2], [0.7, 0.8, 0.9])
+        np.testing.assert_allclose(arm_aa[1], [0.7, 0.8, 0.9])
 
     def test_wrist_index(self) -> None:
         """Check that wrist joint is correctly extracted."""
         body_pose = np.zeros((21, 3))
-        body_pose[ARM_BODY_POSE_INDICES[3]] = [1.0, 1.1, 1.2]  # wrist
+        body_pose[ARM_BODY_POSE_INDICES[2]] = [1.0, 1.1, 1.2]  # wrist
         arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        np.testing.assert_allclose(arm_aa[3], [1.0, 1.1, 1.2])
+        np.testing.assert_allclose(arm_aa[2], [1.0, 1.1, 1.2])
 
     def test_collar_vs_wrist_differ(self) -> None:
         """Distinct joints should produce distinct outputs."""
         collar_bp = np.zeros((21, 3))
-        collar_bp[ARM_BODY_POSE_INDICES[0]] = [0.3, 0.0, 0.0]
+        collar_bp[COLLAR_BODY_POSE_INDEX] = [0.3, 0.0, 0.0]
         wrist_bp = np.zeros((21, 3))
-        wrist_bp[ARM_BODY_POSE_INDICES[3]] = [0.3, 0.0, 0.0]
+        wrist_bp[ARM_BODY_POSE_INDICES[2]] = [0.3, 0.0, 0.0]
         assert not np.allclose(
             smpl_body_pose_to_arm_aa(collar_bp),
             smpl_body_pose_to_arm_aa(wrist_bp),
         )
+
+
+@pytest.mark.skipif(
+    not _SMPL_PKL.exists(),
+    reason="SMPL_NEUTRAL.pkl not available",
+)
+class TestSmplArmAaToHml263FrameRic:
+    """Regression test: RIC positions must use child FK convention.
+
+    Constructs a base frame with identity spine/collar rotations and T-pose
+    RIC positions.  With spine3_world_rot=identity the expected shoulder,
+    elbow, and wrist RIC values are FK world positions minus T-pose root —
+    which only holds when the child rotation is applied to the bone offset,
+    not the parent rotation.
+    """
+
+    def test_ric_positions_match_fk(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
+        tpose = fk.tpose_all_joints  # (22, 3)
+        tpose_root = tpose[0]
+
+        # Base frame: all zeros except identity 6D for spine chain and collar,
+        # and T-pose collar RIC.
+        raw = np.zeros(263)
+        identity_r6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        collar_j = 13
+        for j in [3, 6, 9, collar_j]:
+            raw[67 + (j - 1) * 6 : 67 + j * 6] = identity_r6d
+        raw[4 + (collar_j - 1) * 3 : 4 + collar_j * 3] = tpose[collar_j] - tpose_root
+
+        arm_info = HmlArmFeatureInfo(
+            l_arm_joints=[16, 18, 20],
+            arm_6d_offsets=[67 + 15 * 6, 67 + 17 * 6, 67 + 19 * 6],
+            arm_vel_offsets=[193 + 16 * 3, 193 + 18 * 3, 193 + 20 * 3],
+        )
+
+        arm_aa = np.array(
+            [[0.0, -0.8, 0.3], [0.0, 0.5, 0.0], [0.1, 0.0, 0.2]], dtype=np.float64
+        )
+        out_raw = smpl_arm_aa_to_hml263_frame(
+            raw, arm_aa, arm_info, np.zeros(263), np.ones(263), fk
+        )
+
+        # FK with identity spine3/collar → world positions of arm chain joints.
+        fk.collar_aa = np.zeros(3)
+        fk_positions = fk.fk(
+            arm_aa,
+            spine3_pos=tpose[9],
+            spine3_aa=np.zeros(3),
+        )  # (5, 3): [spine3, collar, shoulder, elbow, wrist]
+
+        for arm_idx, child_j in enumerate([16, 18, 20]):
+            ric = out_raw[4 + (child_j - 1) * 3 : 4 + child_j * 3]
+            expected = fk_positions[arm_idx + 2] - tpose_root
+            np.testing.assert_allclose(ric, expected, atol=1e-10)

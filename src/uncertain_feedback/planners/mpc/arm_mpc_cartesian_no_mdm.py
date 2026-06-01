@@ -8,7 +8,10 @@ from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_base import _CartesianGoalsMixin
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, _compose_rotvec
-from uncertain_feedback.planners.mpc.visualizer import ArmVisualizer, _TARGET_COLOR
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from uncertain_feedback.utils.plot import ArmVisualizer
 
 
 class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
@@ -74,6 +77,7 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
             dist = float(np.linalg.norm(wrist_rel - self.current_cartesian_goal))
 
         if self._vis_config is not None:
+            from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
@@ -89,6 +93,6 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
             self._vis.update_cartesian_target(
                 self._spine3_pos + self.current_cartesian_goal
             )
-            self._vis.update_step(next_q, dist=dist, color=_TARGET_COLOR)
+            self._vis.update_step(next_q, dist=dist, color=ArmVisualizer.TARGET_COLOR)
 
         return next_q

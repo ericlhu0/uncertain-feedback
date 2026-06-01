@@ -32,13 +32,13 @@ import yaml
 from uncertain_feedback.consts import MDM_ROOT
 from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDM,
-    ArmVisualizer,
     LeftArmMPCCartesian,
     LeftArmMPCMDM,
     LeftArmMPCMDMUQ,
     SmplLeftArmFK,
     SmplLeftArmMPC,
 )
+from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import UqClusterResult
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (

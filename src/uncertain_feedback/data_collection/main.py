@@ -14,26 +14,7 @@ from uncertain_feedback.data_collection import (
     MhrToHml263Config,
     MhrToHml263Pipeline,
 )
-from uncertain_feedback.planners.mpc.kinematics import SMPL_BONE_PAIRS_22
-
-
-# ── Copy _draw_skeleton inline (it's not exported) ───────────────────────────
-def draw_skeleton(skeleton_ax, joint_positions, title="", highlight_joints=None):
-    """Draw a 3D skeleton on *skeleton_ax* from 22-joint SMPL positions."""
-    highlight_joints = highlight_joints or set()
-    for parent, child in SMPL_BONE_PAIRS_22:
-        is_arm = parent in highlight_joints or child in highlight_joints
-        skeleton_ax.plot(
-            [joint_positions[parent, 0], joint_positions[child, 0]],
-            [joint_positions[parent, 2], joint_positions[child, 2]],
-            [joint_positions[parent, 1], joint_positions[child, 1]],
-            color="#e05c2a" if is_arm else "#4a90d9",
-        )
-    skeleton_ax.set_title(title)
-    skeleton_ax.set_xlabel("X")
-    skeleton_ax.set_ylabel("Z")
-    skeleton_ax.set_zlabel("Y")
-    skeleton_ax.view_init(elev=10, azim=-60)
+from uncertain_feedback.utils.plot import ArmVisualizer
 
 
 # ── Run pipeline ──────────────────────────────────────────────────────────────
@@ -57,7 +38,7 @@ frames_to_plot = [0, len(positions) // 2, -1]
 fig = plt.figure(figsize=(5 * len(frames_to_plot), 5))
 for i, t in enumerate(frames_to_plot):
     ax = fig.add_subplot(1, len(frames_to_plot), i + 1, projection="3d")
-    draw_skeleton(ax, positions[t], title=f"Frame {t}")  # type: ignore[no-untyped-call]
+    ArmVisualizer.draw_smpl_skeleton(ax, positions[t], title=f"Frame {t}")
 plt.tight_layout()
 plt.savefig("smpl_poses.png", dpi=150)
 print("Saved smpl_poses.png")

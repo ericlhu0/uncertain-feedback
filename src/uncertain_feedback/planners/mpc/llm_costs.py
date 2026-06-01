@@ -16,6 +16,7 @@ from uncertain_feedback.planners.mpc.costs import (
     TrajectoryCost,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.utils.plot import ArmVisualizer
 
 # Canonical names first (used for summaries); short aliases follow.
 _JOINT_NAMES = {
@@ -384,7 +385,10 @@ def _render_overlay(context: GeneratedCostContext, path: Path) -> None:
         ],
         fontsize=7, loc="upper left",
     )
-    _format_3d_axis(ax, np.concatenate([positions.reshape(-1, 3), current], axis=0))
+    ArmVisualizer.format_3d_axis(ax, np.concatenate([positions.reshape(-1, 3), current], axis=0))
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -405,14 +409,3 @@ def _plot_arm(
     )
 
 
-def _format_3d_axis(ax: Any, points: np.ndarray) -> None:
-    mins = np.min(points, axis=0)
-    maxs = np.max(points, axis=0)
-    center = (mins + maxs) / 2.0
-    radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
-    ax.set_xlim(center[0] - radius, center[0] + radius)
-    ax.set_ylim(center[1] - radius, center[1] + radius)
-    ax.set_zlim(center[2] - radius, center[2] + radius)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")

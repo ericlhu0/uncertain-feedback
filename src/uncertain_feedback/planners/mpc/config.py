@@ -33,6 +33,24 @@ class CartesianConfig:
 
 
 @dataclass(frozen=True)
+class LlmCostClusterExperimentConfig:
+    enabled: bool = False
+    rollout_steps: int | None = None
+
+
+@dataclass(frozen=True)
+class LlmCostConfig:
+    enabled: bool = False
+    model: str | None = None
+    strict: bool = False
+    artifact_dir: Path = Path("llm_cost_artifacts")
+    use_images: bool = True
+    cluster_experiment: LlmCostClusterExperimentConfig = field(
+        default_factory=LlmCostClusterExperimentConfig
+    )
+
+
+@dataclass(frozen=True)
 class MpcRunConfig:
     planner: str
     steps: int
@@ -46,6 +64,7 @@ class MpcRunConfig:
     uq: UqConfig
     cartesian: CartesianConfig
     costs: dict[str, dict[str, Any]]
+    llm_cost: LlmCostConfig
     preference_learning: bool = True
     preference_alpha: float = 0.5
     preference_window: int = 50
@@ -96,6 +115,25 @@ def _optional_path(value: Any, name: str) -> Path | None:
     return Path(value)
 
 
+def _optional_str(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string or null.")
+    return value
+
+
+def _str_list(value: Any, name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list of strings.")
+    out: list[str] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"{name}[{idx}] must be a string.")
+        out.append(item)
+    return out
+
+
 def load_mpc_config(path: Path) -> MpcRunConfig:
     """Load required MPC controller settings from YAML."""
     with open(path, encoding="utf-8") as f:
@@ -111,6 +149,11 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     uq_data = _mapping(data.get("uq"), "uq")
     cartesian_data = _mapping(data.get("cartesian"), "cartesian")
     cost_data = _mapping(data.get("costs"), "costs")
+    llm_cost_data = _mapping(data.get("llm_cost"), "llm_cost")
+    llm_cluster_data = _mapping(
+        llm_cost_data.get("cluster_experiment"),
+        "llm_cost.cluster_experiment",
+    )
 
     goals = cartesian_data.get("goals", [])
     if goals is None:
@@ -163,12 +206,39 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             ),
         ),
         costs=costs,
+        llm_cost=LlmCostConfig(
+            enabled=_bool(llm_cost_data.get("enabled", False), "llm_cost.enabled"),
+            model=_optional_str(llm_cost_data.get("model"), "llm_cost.model"),
+            strict=_bool(llm_cost_data.get("strict", False), "llm_cost.strict"),
+            artifact_dir=Path(
+                _optional_str(
+                    llm_cost_data.get("artifact_dir", "llm_cost_artifacts"),
+                    "llm_cost.artifact_dir",
+                )
+                or "llm_cost_artifacts"
+            ),
+            use_images=_bool(
+                llm_cost_data.get("use_images", True), "llm_cost.use_images"
+            ),
+            cluster_experiment=LlmCostClusterExperimentConfig(
+                enabled=_bool(
+                    llm_cluster_data.get("enabled", False),
+                    "llm_cost.cluster_experiment.enabled",
+                ),
+                rollout_steps=(
+                    None
+                    if llm_cluster_data.get("rollout_steps") is None
+                    else _positive_int(
+                        llm_cluster_data.get("rollout_steps"),
+                        "llm_cost.cluster_experiment.rollout_steps",
+                    )
+                ),
+            ),
+        ),
         preference_learning=_bool(
             data.get("preference_learning", True), "preference_learning"
         ),
-        preference_alpha=_float(
-            data.get("preference_alpha", 0.5), "preference_alpha"
-        ),
+        preference_alpha=_float(data.get("preference_alpha", 0.5), "preference_alpha"),
         preference_window=_positive_int(
             data.get("preference_window", 50), "preference_window"
         ),

@@ -230,12 +230,23 @@ def build_llm_cost_prompt(
         if image_description:
             image_section += f"\n\nImage description: {image_description}"
     return f"""
-You generate Python source for an MPC trajectory cost for a SMPL left arm.
+You are a robot controller assisting a person with mobility limitations with arm movements. Your task is to generate a Python cost function that encodes caregiver preferences — what an experienced caregiver would prioritize when helping their care recipient perform this motion. Think in terms of: where should the arm reach (end goal), is the arm being kept comfortable and supported throughout, is the motion smooth, does the arm make meaningful progress toward the goal.
 
 Instruction:
 {instruction}
 
 {image_section}
+
+Guidelines:
+- DO: use the MDM trajectory summaries to extract the *intent* behind the motion — e.g. how high the person wants to reach (wrist z max), where they want the arm to end (end positions), how much lateral reach is involved. Use these numbers as concrete targets for preference-based costs.
+- DO: ground each cost term numerically in the generated trajectory data. The MDM trajectory tells you what this person's version of the instruction means quantitatively — treat those numbers as the caregiver's understanding of the goal, not as a trajectory to imitate. You may draw targets from any part of the trajectory — start, end, or mid-trajectory — if that best represents the preference (e.g. "elbow should reach at least height X mid-motion" if the preference is about a transient pose like arm elevation).
+- DO: write costs grounded in what a caregiver would consider: reaching a goal, keeping the arm supported, avoiding uncomfortable positions, smooth motion.
+- DO NOT: imitate the trajectory's shape or timing — no Gaussian time peaks tied to specific arc positions, no sweep patterns that encode the MDM trajectory geometry, no costs that enforce a specific mid-trajectory path.
+- DO NOT: write costs that only make sense as "follow this exact path." A caregiver cares about where the arm ends up and whether it's comfortable throughout, not about replicating the specific arc the MDM generated.
+
+Framing examples:
+- Caregiver-style (good): "Help the arm reach a comfortable height. Reward wrist ending above its starting height using the MDM end position as the target, penalize an uncomfortable elbow below the shoulder, keep motion smooth."
+- Trajectory-imitation (avoid): "Apply a Gaussian reward peaking at mid-horizon to encourage the upward arc, then enforce a leftward descending sweep to match the MDM path."
 
 Runtime API:
 - Define exactly: def cost(q_trajs, context, params):
@@ -244,17 +255,31 @@ Runtime API:
 - context.fk_rollouts(q_trajs) returns positions with shape
   (n_rollouts, horizon + 1, 5, 3) for spine3, left_collar, left_shoulder,
   left_elbow, left_wrist.
-- context.mdm_traj and context.mdm_positions contain the generated motion.
-- context.current_q/current_positions and context.recent_q/recent_positions are
-  available.
+- context.mdm_positions has shape (T, 5, 3) — a numpy array. Use numpy
+  indexing only: context.mdm_positions[:, 4, 2] gives wrist z over the MDM
+  trajectory; context.mdm_positions[-1, 4, :] gives the final wrist position.
+  Do NOT use dict-style access like context.mdm_positions['left_wrist'] — it
+  will raise a TypeError at runtime.
+- context.current_positions has shape (5, 3) — a numpy array. Use numpy
+  indexing: context.current_positions[4] gives the current wrist position.
+  Do NOT use dict-style access.
 - context.joint_index(name) accepts spine3, collar, shoulder, elbow, wrist and
-  left_* aliases.
+  left_* aliases and returns an integer index (0–4).
+- If you need statistics such as maximum wrist z during the MDM trajectory,
+  read those values from the Summaries section below and encode them as
+  hardcoded floats or params in your cost function — do not try to compute
+  them from context.mdm_positions using dict-style access.
+- context.mdm_traj and context.recent_q/recent_positions are also available
+  as numpy arrays.
 - np is available. Do not import anything.
 - Return a finite numpy array with shape (n_rollouts,).
+- Smoothness terms: if you compute velocity as q_trajs[:, 1:] - q_trajs[:, :-1],
+  use np.sum(...) / max(T, 1) instead of np.mean to avoid NaN on empty slices.
 
 Hard requirements:
 - Return only JSON with keys: description, code, params.
 - Prefer costs over future timesteps q_trajs[:, 1:], not only the initial state.
+- The description field must state the caregiver preference the cost encodes in plain human language — how a caregiver would explain what they are trying to achieve. Do not describe the code structure or mathematical approach.
 
 Summaries:
 {json.dumps(summaries, indent=2, sort_keys=True)}

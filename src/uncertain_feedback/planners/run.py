@@ -402,7 +402,7 @@ def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-lo
         )
         validation_q = np.repeat(
             current_q[np.newaxis, np.newaxis],
-            repeats=2,
+            repeats=11,
             axis=1,
         )
         generated_cost(validation_q)

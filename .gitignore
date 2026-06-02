@@ -6,6 +6,7 @@ amass/
 src/uncertain_feedback/data_collection/data/
 my_mdm_dataset/
 memory/
+llm_cost_artifacts/
 
 .DS_Store
 .python-version

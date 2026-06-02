@@ -23,7 +23,10 @@ from uncertain_feedback.planners.mpc.kinematics import (
     _N_JOINTS,
     _compose_rotvec,
 )
-from uncertain_feedback.planners.mpc.visualizer import ArmVisualizer
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from uncertain_feedback.utils.plot import ArmVisualizer
 
 
 @dataclass
@@ -301,6 +304,7 @@ class SmplLeftArmMPC:
 
         if self._vis_config is not None:
             if self._vis is None:
+                from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
                     self._goals[-1],

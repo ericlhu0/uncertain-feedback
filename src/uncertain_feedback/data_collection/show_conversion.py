@@ -44,7 +44,8 @@ from uncertain_feedback.data_collection.smpl_to_hml263 import (
     load_hml_stats,
     positions_to_hml263,
 )
-from uncertain_feedback.planners.mpc.kinematics import SMPL_BONE_PAIRS_22, SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.utils.plot import ArmVisualizer
 
 _LEFT_ARM_JOINTS = {13, 16, 18, 20}
 _BG = "#1a1a2e"
@@ -94,43 +95,6 @@ def _hml263_to_local_positions(
 # ---------------------------------------------------------------------------
 
 
-def _draw_skeleton(ax: Any, positions: np.ndarray, title: str = "") -> None:
-    """Draw a 3D skeleton on *ax* from 22-joint SMPL positions."""
-    for parent, child in SMPL_BONE_PAIRS_22:
-        is_arm = parent in _LEFT_ARM_JOINTS or child in _LEFT_ARM_JOINTS
-        ax.plot(
-            [positions[parent, 0], positions[child, 0]],
-            [positions[parent, 2], positions[child, 2]],
-            [positions[parent, 1], positions[child, 1]],
-            color="#e05c2a" if is_arm else "#4a90d9",
-            linewidth=2,
-        )
-    ax.scatter(
-        positions[:, 0],
-        positions[:, 2],
-        positions[:, 1],
-        color=_FG,
-        s=12,
-        zorder=5,
-    )
-
-    # Equal-aspect bounding box
-    xyz = np.stack([positions[:, 0], positions[:, 2], positions[:, 1]], axis=1)
-    mid = (xyz.max(0) + xyz.min(0)) / 2
-    half = (xyz.max(0) - xyz.min(0)).max() / 2 + 0.05
-    ax.set_xlim(mid[0] - half, mid[0] + half)
-    ax.set_ylim(mid[1] - half, mid[1] + half)
-    ax.set_zlim(mid[2] - half, mid[2] + half)
-
-    ax.set_title(title, color=_FG, fontsize=9, pad=4)
-    ax.set_xlabel("X", color=_FG, fontsize=7)
-    ax.set_ylabel("Z", color=_FG, fontsize=7)
-    ax.set_zlabel("Y", color=_FG, fontsize=7)
-    ax.tick_params(colors=_FG, labelsize=6)
-    ax.xaxis.pane.set_alpha(0.05)
-    ax.yaxis.pane.set_alpha(0.05)
-    ax.zaxis.pane.set_alpha(0.05)
-    ax.view_init(elev=10, azim=-60)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +185,17 @@ def main() -> None:  # pylint: disable=too-many-locals
         # ── Bottom row: HML263 skeleton ──────────────────────────────────────
         ax_sk = fig.add_subplot(2, n_show, n_show + col + 1, projection="3d")
         ax_sk.set_facecolor(_BG)
-        _draw_skeleton(ax_sk, positions[t], title="HML263 pose (local frame)")
+        ArmVisualizer.draw_smpl_skeleton(
+            ax_sk, positions[t], title="HML263 pose (local frame)",
+            highlight_joints=_LEFT_ARM_JOINTS,
+        )
+        ax_sk.set_title("HML263 pose (local frame)", color=_FG, fontsize=9, pad=4)
+        ax_sk.set_xlabel("X", color=_FG, fontsize=7)
+        ax_sk.set_ylabel("Z", color=_FG, fontsize=7)
+        ax_sk.set_zlabel("Y", color=_FG, fontsize=7)
+        ax_sk.tick_params(colors=_FG, labelsize=6)
+        for pane in (ax_sk.xaxis.pane, ax_sk.yaxis.pane, ax_sk.zaxis.pane):
+            pane.set_alpha(0.05)
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     plt.savefig(str(args.output_path), dpi=150, bbox_inches="tight", facecolor=_BG)

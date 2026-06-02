@@ -26,11 +26,10 @@ from uncertain_feedback.planners.mpc.kinematics import (
     SmplLeftArmFK,
     _compose_rotvec,
 )
-from uncertain_feedback.planners.mpc.visualizer import (
-    _MDM_COLOR,
-    _TARGET_COLOR,
-    ArmVisualizer,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from uncertain_feedback.utils.plot import ArmVisualizer
 
 # ---------------------------------------------------------------------------
 # MDM-extended MPC
@@ -228,6 +227,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             dist = float(np.linalg.norm(next_q - target_q))
 
         if self._vis_config is not None:
+            from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
@@ -244,7 +244,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                     self._vis.update_mdm_goal(self._mdm_goal)
                 if self._preview_q is not None:
                     self._vis.update_trajectory_preview(self._preview_q)
-            color = _TARGET_COLOR if len(self._goals) <= 1 else _MDM_COLOR
+            color = ArmVisualizer.TARGET_COLOR if len(self._goals) <= 1 else ArmVisualizer.MDM_COLOR
             self._vis.update_step(next_q, dist=dist, color=color)
 
         return next_q

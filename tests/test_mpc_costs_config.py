@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,17 +13,32 @@ from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesian
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
-from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
-from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import (
+    LeftArmMPCMDMUQ,
+    UqClusterResult,
+)
+from uncertain_feedback.planners.mpc.config import LlmCostConfig, load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
+    ElbowFlexionAngleCost,
     ElbowHeightCost,
     MpcCostContext,
+    ShoulderAbductionAngleCost,
     build_extra_costs,
+    compute_elbow_flexion_angles,
     compute_elbow_heights,
+    compute_shoulder_abduction_angles,
     update_elbow_cost,
+    update_preference_cost,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.llm_costs import (
+    GeneratedCostValidationError,
+    GeneratedPythonCost,
+    build_generated_cost_context,
+    parse_llm_cost_response,
+    render_prompt_images,
+)
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
     ArmMPCCartesianNoMDM,
 )
@@ -99,6 +115,48 @@ class _FakePositionClusterer(TrajectoryClusterer):
         return np.zeros(2, dtype=np.intp)
 
 
+class _TwoTrajectoryClusterer(TrajectoryClusterer):
+    """Split four fake trajectory samples into two deterministic clusters."""
+
+    def cluster(self, trajectories: np.ndarray) -> np.ndarray:
+        assert trajectories.shape[0] == 4
+        return np.array([0, 0, 1, 1], dtype=np.intp)
+
+
+class _FakeLlmModel:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.received_images: list[str] | None = None
+
+    def get_full_output(self, text_input: str, image_input=None) -> str:
+        self.received_images = image_input
+        # image description call — return a plain string
+        if "Runtime API" not in text_input:
+            return "The arm moves upward in an arc."
+        return self.response
+
+
+class _FakeSequenceLlmModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_full_output(self, text_input: str, image_input=None) -> str:
+        if "Runtime API" not in text_input:
+            return "The arm moves upward."
+        self.calls += 1
+        return json.dumps(
+            {
+                "description": f"fake generated cost {self.calls}",
+                "params": {"weight": 1.0},
+                "code": (
+                    "def cost(q_trajs, context, params):\n"
+                    "    future = q_trajs[:, 1:, 0, 0]\n"
+                    "    return params['weight'] * np.mean(future ** 2, axis=1)\n"
+                ),
+            }
+        )
+
+
 class _FakePositionGenerator:
     """Minimal fake for the UQ position-generation path."""
 
@@ -130,6 +188,27 @@ class _FakePositionGenerator:
         np.testing.assert_allclose(positions, self.positions.mean(axis=0))
         self.received_spine3_aa = spine3_aa
         return self.trajectory
+
+
+class _FakeTrajectoryGenerator:
+    """Minimal fake for the UQ trajectory-generation path."""
+
+    def __init__(self, trajectories: np.ndarray) -> None:
+        self.trajectories = trajectories
+
+    def generate_left_arm_trajectory(
+        self,
+        text: str,
+        start_pose: np.ndarray | None = None,
+        num_samples: int = 1,
+        num_frames: int | None = None,
+        frozen_body: bool = False,
+        spine3_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        assert text
+        assert num_samples == self.trajectories.shape[0]
+        _ = start_pose, num_frames, frozen_body, spine3_aa
+        return self.trajectories
 
 
 def test_non_mdm_initial_pose_defaults_to_tpose_without_loading_generator() -> None:
@@ -225,6 +304,36 @@ costs:
     assert cfg.steps == 2
     assert cfg.costs == {"elbow_height": {"min": 0.1, "max": 0.45, "weight": 100}}
     assert cfg.preference_learning is True
+
+
+def test_load_mpc_config_with_elbow_flexion_and_shoulder_abduction(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+costs:
+  elbow_flexion_angle:
+    min: 0.4
+    max: 1.8
+    weight: 50
+  shoulder_abduction_angle:
+    min: 0.1
+    max: 1.2
+    weight: 60
+    progress_weight: 20
+"""),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.costs == {
+        "elbow_flexion_angle": {"min": 0.4, "max": 1.8, "weight": 50},
+        "shoulder_abduction_angle": {
+            "min": 0.1,
+            "max": 1.2,
+            "weight": 60,
+            "progress_weight": 20,
+        },
+    }
 
 
 def test_load_mpc_config_can_disable_preference_learning(tmp_path) -> None:
@@ -370,6 +479,64 @@ def test_elbow_height_cost_penalizes_outside_range() -> None:
     assert cost(q_trajs)[0] > 0.9
 
 
+def test_elbow_flexion_angle_cost_zero_inside_range() -> None:
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    cost = ElbowFlexionAngleCost(
+        min_angle=0.0,
+        max_angle=0.1,
+        weight=100.0,
+        progress_weight=100.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+
+    np.testing.assert_allclose(cost(q_trajs), [0.0])
+
+
+def test_elbow_flexion_angle_cost_penalizes_outside_range() -> None:
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    cost = ElbowFlexionAngleCost(
+        min_angle=0.4,
+        max_angle=0.5,
+        weight=100.0,
+        progress_weight=100.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+
+    assert cost(q_trajs)[0] > 1.0
+
+
+def test_shoulder_abduction_angle_cost_zero_inside_range() -> None:
+    fk = SmplLeftArmFK()
+    context = _cost_context(fk)
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    abduction = compute_shoulder_abduction_angles(q_trajs[:, 0], context)[0]
+    cost = ShoulderAbductionAngleCost(
+        min_angle=abduction - 0.01,
+        max_angle=abduction + 0.01,
+        weight=100.0,
+        progress_weight=100.0,
+        context=context,
+    )
+
+    np.testing.assert_allclose(cost(q_trajs), [0.0])
+
+
+def test_shoulder_abduction_angle_cost_penalizes_outside_range() -> None:
+    fk = SmplLeftArmFK()
+    context = _cost_context(fk)
+    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    abduction = compute_shoulder_abduction_angles(q_trajs[:, 0], context)[0]
+    cost = ShoulderAbductionAngleCost(
+        min_angle=abduction + 0.1,
+        max_angle=abduction + 0.2,
+        weight=100.0,
+        progress_weight=100.0,
+        context=context,
+    )
+
+    assert cost(q_trajs)[0] > 0.9
+
+
 def test_compute_elbow_heights_uses_joint_before_wrist() -> None:
     fk = SmplLeftArmFK()
     context = _cost_context(fk)
@@ -387,6 +554,30 @@ def test_compute_elbow_heights_uses_joint_before_wrist() -> None:
 
     np.testing.assert_allclose(learned_height, joint_before_wrist_height)
     assert not np.isclose(learned_height, wrist_height)
+
+
+def test_compute_elbow_flexion_angles_uses_elbow_joint_row() -> None:
+    context = _cost_context(SmplLeftArmFK())
+    trajectory = np.zeros((1, 3, 3), dtype=np.float64)
+    trajectory[0, 0, 2] = 2.0
+    trajectory[0, 1, 0] = 0.3
+    trajectory[0, 2, 1] = 4.0
+
+    learned_flexion = compute_elbow_flexion_angles(trajectory, context)[0]
+
+    np.testing.assert_allclose(learned_flexion, 0.3)
+
+
+def test_compute_shoulder_abduction_angles_changes_with_upper_arm_direction() -> None:
+    context = _cost_context(SmplLeftArmFK())
+    neutral = np.zeros((1, 3, 3), dtype=np.float64)
+    abducted = np.zeros((1, 3, 3), dtype=np.float64)
+    abducted[0, 0, 2] = 0.7
+
+    neutral_angle = compute_shoulder_abduction_angles(neutral, context)[0]
+    abducted_angle = compute_shoulder_abduction_angles(abducted, context)[0]
+
+    assert not np.isclose(neutral_angle, abducted_angle)
 
 
 def test_update_elbow_cost_low_mpc_updates_only_min_to_mdm_5th() -> None:
@@ -458,6 +649,40 @@ def test_update_elbow_cost_inverted_side_update_falls_back_to_mdm_range() -> Non
     np.testing.assert_allclose(updated.max_height, 1.45)
 
 
+def test_update_preference_cost_low_mpc_updates_only_min_to_mdm_5th() -> None:
+    cost = ElbowFlexionAngleCost(
+        min_angle=0.0,
+        max_angle=100.0,
+        weight=1.0,
+        progress_weight=1.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+    mdm_values = np.linspace(50.0, 150.0, 21)
+    mpc_values = np.linspace(0.0, 20.0, 21)
+
+    updated = update_preference_cost(cost, mdm_values, mpc_values, alpha=0.0)
+
+    np.testing.assert_allclose(updated.min_value, 55.0)
+    np.testing.assert_allclose(updated.max_value, cost.max_value)
+
+
+def test_update_preference_cost_high_mpc_updates_only_max_to_mdm_95th() -> None:
+    cost = ShoulderAbductionAngleCost(
+        min_angle=0.0,
+        max_angle=100.0,
+        weight=1.0,
+        progress_weight=1.0,
+        context=_cost_context(SmplLeftArmFK()),
+    )
+    mdm_values = np.linspace(-50.0, 50.0, 21)
+    mpc_values = np.linspace(100.0, 120.0, 21)
+
+    updated = update_preference_cost(cost, mdm_values, mpc_values, alpha=0.0)
+
+    np.testing.assert_allclose(updated.min_value, cost.min_value)
+    np.testing.assert_allclose(updated.max_value, 45.0)
+
+
 def test_elbow_height_cost_scores_entire_rollout_not_only_terminal() -> None:
     fk = SmplLeftArmFK()
     context = _cost_context(fk)
@@ -524,7 +749,7 @@ def test_default_preference_output_path_uses_learned_suffix(tmp_path) -> None:
     assert output_path == tmp_path / "arm_mpc_cartesian_mdm_learned.yaml"
 
 
-def test_save_learned_preference_yaml_updates_elbow_cost(tmp_path) -> None:
+def test_save_learned_preference_yaml_updates_multiple_costs(tmp_path) -> None:
     config_path = _write_config(
         tmp_path,
         """
@@ -543,18 +768,46 @@ costs:
     max: 0.4
     weight: 12.0
     progress_weight: 5.0
+  elbow_flexion_angle:
+    min: 0.4
+    max: 1.8
+    weight: 50.0
+  shoulder_abduction_angle:
+    min: 0.1
+    max: 1.2
+    weight: 60.0
+    progress_weight: 20.0
 """,
     )
     output_path = tmp_path / "learned.yaml"
-    learned = ElbowHeightCost(
+    context = _cost_context(SmplLeftArmFK())
+    learned_height = ElbowHeightCost(
         min_height=0.2,
         max_height=0.6,
         weight=12.0,
         progress_weight=5.0,
-        context=_cost_context(SmplLeftArmFK()),
+        context=context,
+    )
+    learned_flexion = ElbowFlexionAngleCost(
+        min_angle=0.5,
+        max_angle=1.5,
+        weight=50.0,
+        progress_weight=50.0,
+        context=context,
+    )
+    learned_abduction = ShoulderAbductionAngleCost(
+        min_angle=0.2,
+        max_angle=1.0,
+        weight=60.0,
+        progress_weight=20.0,
+        context=context,
     )
 
-    planner_run._save_learned_preference_yaml(config_path, output_path, learned)
+    planner_run._save_learned_preference_yaml(
+        config_path,
+        output_path,
+        [learned_height, learned_flexion, learned_abduction],
+    )
 
     with open(output_path, encoding="utf-8") as f:
         saved = yaml.safe_load(f)
@@ -566,6 +819,18 @@ costs:
         "max": 0.6,
         "weight": 12.0,
         "progress_weight": 5.0,
+    }
+    assert saved["costs"]["elbow_flexion_angle"] == {
+        "min": 0.5,
+        "max": 1.5,
+        "weight": 50.0,
+        "progress_weight": 50.0,
+    }
+    assert saved["costs"]["shoulder_abduction_angle"] == {
+        "min": 0.2,
+        "max": 1.0,
+        "weight": 60.0,
+        "progress_weight": 20.0,
     }
 
 
@@ -672,6 +937,34 @@ def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
     np.testing.assert_allclose(mpc.current_goal, trajectory[0])
 
 
+def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
+    trajectories = np.zeros((4, 3, 3, 3), dtype=np.float64)
+    trajectories[0] = 0.0
+    trajectories[1] = 0.2
+    trajectories[2] = 1.0
+    trajectories[3] = 1.2
+    gen = _FakeTrajectoryGenerator(trajectories)
+    mpc = LeftArmMPCMDMUQ(
+        n_diffusion_samples=4,
+        clusterer=_TwoTrajectoryClusterer(),
+    )
+
+    chosen = mpc.query_mdm_with_uncertainty(
+        cast(Any, gen),
+        "move differently",
+        start_pose=np.zeros(263),
+        auto_cluster=1,
+    )
+
+    result = mpc.last_uq_result
+    assert result is not None
+    assert result.chosen_label == 1
+    assert sorted(result.cluster_means) == [0, 1]
+    np.testing.assert_allclose(result.cluster_means[0], np.full((3, 3, 3), 0.1))
+    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
+    np.testing.assert_allclose(chosen, result.chosen_mean)
+
+
 def test_no_mdm_cartesian_mpc_adds_extra_costs() -> None:
     fk = SmplLeftArmFK()
     q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
@@ -685,3 +978,238 @@ def test_no_mdm_cartesian_mpc_adds_extra_costs() -> None:
     )
 
     np.testing.assert_allclose(mpc._cartesian_cost(q_trajs), [6.0, 7.0])
+
+
+def test_load_mpc_config_with_llm_cost(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+llm_cost:
+  enabled: true
+  model: gpt-test
+  strict: true
+  artifact_dir: artifacts
+  use_images: false
+  cluster_experiment:
+    enabled: true
+    rollout_steps: 3
+"""),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.llm_cost.enabled is True
+    assert cfg.llm_cost.model == "gpt-test"
+    assert cfg.llm_cost.strict is True
+    assert cfg.llm_cost.artifact_dir == Path("artifacts")
+    assert cfg.llm_cost.use_images is False
+    assert cfg.llm_cost.cluster_experiment.enabled is True
+    assert cfg.llm_cost.cluster_experiment.rollout_steps == 3
+
+
+def test_llm_artifact_run_dir_resolves_relative_to_base_dir(tmp_path) -> None:
+    run_dir = planner_run._llm_artifact_run_dir(
+        tmp_path,
+        Path("llm_cost_artifacts"),
+    )
+
+    assert run_dir.parent == tmp_path / "llm_cost_artifacts"
+
+
+def test_generated_python_cost_executes_with_fk_context() -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+    code = """
+def cost(q_trajs, context, params):
+    positions = context.fk_rollouts(q_trajs)
+    elbow = positions[:, 1:, context.joint_index('elbow')]
+    target = params['target_elbow_y']
+    violation = np.maximum(target - elbow[:, :, 1], 0.0)
+    return params['weight'] * np.mean(violation ** 2, axis=1)
+"""
+    generated = GeneratedPythonCost(
+        code=code,
+        params={"target_elbow_y": 10.0, "weight": 2.0},
+        context=context,
+    )
+    q_trajs = np.zeros((2, 3, 3, 3), dtype=np.float64)
+
+    costs = generated(q_trajs)
+
+    assert costs.shape == (2,)
+    assert np.all(costs > 0.0)
+
+
+def test_generated_python_cost_rejects_bad_shape() -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+    generated = GeneratedPythonCost(
+        code="def cost(q_trajs, context, params):\n    return np.zeros((q_trajs.shape[0], 1))",
+        params={},
+        context=context,
+    )
+
+    with pytest.raises(GeneratedCostValidationError, match="shape"):
+        generated(np.zeros((2, 3, 3, 3), dtype=np.float64))
+
+
+def test_prompt_images_render_overlay(tmp_path) -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((4, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+
+    paths = render_prompt_images(context, tmp_path)
+
+    assert [path.name for path in paths] == ["overlay.png"]
+    assert paths[0].exists() and paths[0].stat().st_size > 0
+
+
+def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
+    fk = SmplLeftArmFK()
+    context = _cost_context(fk)
+    mdm_traj = np.zeros((3, 3, 3), dtype=np.float64)
+    generated_context = build_generated_cost_context(
+        context,
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=mdm_traj,
+        q_history=[],
+        window=5,
+    )
+    response = {
+        "description": "penalize elbow below target height",
+        "params": {"target_elbow_height": 0.1, "weight": 10.0},
+        "code": "def cost(q_trajs, context, params):\n    positions = context.fk_rollouts(q_trajs)\n    elbow = positions[:, 1:, context.joint_index('elbow')]\n    violation = np.maximum(params['target_elbow_height'] - elbow[:, :, 1], 0.0)\n    return params['weight'] * np.mean(violation ** 2, axis=1)\n",
+    }
+    fake_model = _FakeLlmModel(json.dumps(response))
+    mpc = SmplLeftArmMPC(goals=[np.zeros((3, 3))])
+    llm_cfg = LlmCostConfig(
+        enabled=True,
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    generated = planner_run._apply_llm_generated_cost(
+        mpc,
+        "raise the elbow",
+        mdm_traj,
+        np.zeros((3, 3), dtype=np.float64),
+        [],
+        context,
+        llm_cfg,
+        tmp_path,
+        history_window=5,
+        llm_model_factory=lambda _model_name: fake_model,
+    )
+
+    assert generated is not None
+    assert len(mpc._extra_costs.terms()) == 1
+    artifact_dirs = list((tmp_path / "artifacts").iterdir())
+    assert len(artifact_dirs) == 1
+    assert (artifact_dirs[0] / "prompt.txt").exists()
+    assert (artifact_dirs[0] / "cost.py").exists()
+    assert fake_model.received_images is not None
+
+
+def test_llm_cluster_experiment_generates_bundle_and_rollout_per_cluster(
+    tmp_path,
+) -> None:
+    cfg = load_mpc_config(
+        _write_config(
+            tmp_path,
+            """
+planner: arm_mpc_cartesian
+steps: 4
+horizon: 2
+n_mpc_samples: 3
+max_angle_delta: 0.001
+goal_threshold: 0.1
+advance_threshold: 0.1
+trajectory_fraction: 1.0
+cartesian:
+  goals:
+    - [0.0, 0.0, 0.0]
+llm_cost:
+  enabled: true
+  artifact_dir: artifacts
+  use_images: false
+  cluster_experiment:
+    enabled: true
+    rollout_steps: 2
+""",
+        )
+    )
+    fk = SmplLeftArmFK()
+    context = _cost_context(fk)
+    cluster_means = {
+        0: np.zeros((3, 3, 3), dtype=np.float64),
+        1: np.full((3, 3, 3), 0.05, dtype=np.float64),
+    }
+    uq_result = UqClusterResult(
+        chosen_label=1,
+        labels=np.array([0, 0, 1, 1], dtype=np.intp),
+        cluster_means=cluster_means,
+    )
+    mpc = SmplLeftArmMPC(goals=[np.zeros((3, 3), dtype=np.float64)])
+    fake_model = _FakeSequenceLlmModel()
+
+    selected = planner_run._run_llm_cluster_experiment(
+        mpc,
+        cfg,
+        "prefer the demonstrated shape",
+        uq_result,
+        np.zeros((3, 3), dtype=np.float64),
+        [],
+        context,
+        tmp_path,
+        history_window=5,
+        remaining_steps=3,
+        body_pos=None,
+        spine3_pos=fk.tpose_spine3_pos,
+        spine3_aa=np.zeros(3, dtype=np.float64),
+        llm_model_factory=lambda _model_name: fake_model,
+    )
+
+    assert selected is not None
+    assert fake_model.calls == 2
+    assert len(mpc._extra_costs.terms()) == 1
+    root_dirs = list((tmp_path / "artifacts").iterdir())
+    assert len(root_dirs) == 1
+    root = root_dirs[0]
+    assert (root / "selected_cluster.txt").read_text(encoding="utf-8").strip() == "1"
+    for label in (0, 1):
+        cluster_dir = root / f"cluster_{label}"
+        assert (cluster_dir / "prompt.txt").exists()
+        assert (cluster_dir / "cost.py").exists()
+        assert (cluster_dir / "rollout.npy").exists()
+        assert (cluster_dir / "metrics.json").exists()
+        rollout = np.load(cluster_dir / "rollout.npy")
+        assert rollout.shape == (3, 3, 3)
+    with open(root / "comparison_summary.json", encoding="utf-8") as f:
+        summary = json.load(f)
+    assert summary["selected_cluster"] == 1
+    assert summary["cluster_ids"] == [0, 1]
+    assert set(summary["clusters"]) == {"0", "1"}
+    assert summary["clusters"]["0"]["validation"]["ok"] is True
+    assert summary["clusters"]["1"]["rollout_metrics"]["steps_completed"] == 2
+
+
+def test_parse_llm_cost_response_accepts_markdown_json() -> None:
+    response = parse_llm_cost_response(
+        '```json\n{"description":"d","code":"def cost(q_trajs, context, params):\\n    return np.zeros(q_trajs.shape[0])","params":{}}\n```'
+    )
+
+    assert response.description == "d"
+    assert "def cost" in response.code

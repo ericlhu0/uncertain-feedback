@@ -1,0 +1,39 @@
+planner: arm_mpc_cartesian
+steps: 350
+horizon: 10
+n_mpc_samples: 512
+max_angle_delta: 0.0025
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
+goal_threshold: 0.1
+advance_threshold: 0.1
+trajectory_fraction: 1
+
+uq:
+  diffusion_samples: 250
+  n_clusters: 3
+  auto_cluster: 0
+
+cartesian:
+  goals:
+    - [-0.15, 0.05, -0.1]
+  threshold: 0.05
+
+preference_learning: false
+preference_alpha: 0
+
+llm_cost:
+  enabled: true
+  model: gpt-5.4
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true
+  cluster_experiment:
+    enabled: true
+    rollout_steps: null
+
+costs:
+  elbow_height:
+    min: -0.25
+    max: 0.45
+    weight: 100.0
+    progress_weight: 100.0

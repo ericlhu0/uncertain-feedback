@@ -1,14 +1,24 @@
-# pylint: disable=duplicate-code
-"""3D stick-figure visualizer for the SMPL left arm MPC.
+"""Plotting utilities for the SMPL left arm.
 
-Draws the full 22-joint SMPL skeleton.  Non-arm joints are fixed at the
-T-pose; the controlled left arm joints (shoulder, elbow, wrist) are animated
-by :class:`SmplLeftArmMPC`, with the collar fixed separately.
+All plotting functionality lives on :class:`ArmVisualizer`, either as instance
+methods for stateful MPC visualization or as static methods for one-shot drawing.
 
-Example::
+Static utilities (no instantiation required)::
 
-    from uncertain_feedback.planners.mpc import SmplLeftArmMPC, SmplLeftArmFK, ArmVisualizer
+    import matplotlib.pyplot as plt
     import numpy as np
+    from uncertain_feedback.utils.plot import ArmVisualizer
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+    ArmVisualizer.draw_smpl_skeleton(ax, positions)          # (22, 3) joint positions
+    ArmVisualizer.format_3d_axis(ax, positions[:, [0, 2, 1]])
+    ArmVisualizer.draw_bones_3d(ax, positions, bone_pairs, color="blue")
+
+Live MPC visualization::
+
+    from uncertain_feedback.planners.mpc import SmplLeftArmMPC, SmplLeftArmFK
+    from uncertain_feedback.utils.plot import ArmVisualizer
 
     fk  = SmplLeftArmFK()
     mpc = SmplLeftArmMPC(horizon=10, n_mpc_samples=512)
@@ -67,16 +77,9 @@ from uncertain_feedback.planners.mpc.kinematics import (
 if TYPE_CHECKING:
     from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 
-# Visual style
-_BODY_COLOR = "#aaaaaa"
-_TARGET_COLOR = "royalblue"
+# Internal style constants
 _TRACE_COLOR = "cornflowerblue"
-_MDM_COLOR = "darkorange"  # arm color when following an MDM trajectory
 _ELBOW_RANGE_COLOR = "red"
-
-_BODY_BONES = [p for p in SMPL_BONE_PAIRS_22 if p not in LEFT_ARM_BONE_PAIRS_22]
-_BODY_JOINTS = [j for j in range(22) if j not in LEFT_ARM_JOINT_INDICES_22]
-
 _WRIST_IDX = 20  # left_wrist in the 22-joint array
 
 # 3D camera angles: (title, elev, azim)
@@ -124,11 +127,127 @@ class _LiveState:  # pylint: disable=too-many-instance-attributes
 class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
     """Animate the full SMPL skeleton with the left arm driven by MPC.
 
+    All plotting utilities are available as static methods and do not require
+    an instance.  The instance methods handle stateful live visualization.
+
     Args:
         fk:            :class:`SmplLeftArmFK` instance.  If ``None``, one is
                        created with the default SMPL model path.
         smpl_pkl_path: Passed to :class:`SmplLeftArmFK` when ``fk`` is ``None``.
     """
+
+    # Public color / geometry constants
+    BODY_COLOR: str = "#aaaaaa"
+    TARGET_COLOR: str = "royalblue"
+    MDM_COLOR: str = "darkorange"
+    BODY_BONES: list = [p for p in SMPL_BONE_PAIRS_22 if p not in LEFT_ARM_BONE_PAIRS_22]
+    BODY_JOINTS: list = [j for j in range(22) if j not in LEFT_ARM_JOINT_INDICES_22]
+
+    # ------------------------------------------------------------------
+    # Static drawing utilities
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def draw_bones_3d(
+        ax: Axes3D,
+        positions: np.ndarray,
+        bone_pairs: list[tuple[int, int]],
+        color: str,
+        alpha: float = 1.0,
+        lw: float = 2.0,
+        linestyle: str = "-",
+        label: str | None = None,
+    ) -> None:
+        """Draw line segments connecting joints in 3D."""
+        for i, (pi, ci) in enumerate(bone_pairs):
+            seg = positions[[pi, ci]]
+            ax.plot(
+                seg[:, 0],
+                seg[:, 1],
+                seg[:, 2],
+                color=color,
+                alpha=alpha,
+                linewidth=lw,
+                linestyle=linestyle,
+                label=label if i == 0 else None,
+            )
+
+    @staticmethod
+    def format_3d_axis(ax: Axes3D, points: np.ndarray) -> None:
+        """Set equal-aspect cube limits on a 3D axes to fit *points*.
+
+        Args:
+            ax:     Matplotlib 3D axes to update.
+            points: ``(N, 3)`` array of points in the axes' coordinate system.
+        """
+        mins = np.min(points, axis=0)
+        maxs = np.max(points, axis=0)
+        center = (mins + maxs) / 2.0
+        radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
+        ax.set_xlim(center[0] - radius, center[0] + radius)
+        ax.set_ylim(center[1] - radius, center[1] + radius)
+        ax.set_zlim(center[2] - radius, center[2] + radius)
+
+    @staticmethod
+    def draw_smpl_skeleton(
+        ax: Axes3D,
+        positions: np.ndarray,
+        title: str = "",
+        highlight_joints: set | None = None,
+    ) -> None:
+        """Draw a 22-joint SMPL skeleton on a 3D axes.
+
+        Positions are in SMPL Y-up world coordinates; the plot displays
+        with Z up (``xlabel="X"``, ``ylabel="Z"``, ``zlabel="Y"``).
+
+        Args:
+            ax:               Matplotlib 3D axes.
+            positions:        ``(22, 3)`` joint world positions (SMPL Y-up).
+            title:            Axes title.
+            highlight_joints: Joint indices to draw in arm color ``#e05c2a``.
+                              All others use body color ``#4a90d9``.
+        """
+        highlight_joints = highlight_joints or set()
+        arm_color = "#e05c2a"
+        body_color = "#4a90d9"
+
+        # Draw bones
+        for parent, child in SMPL_BONE_PAIRS_22:
+            is_arm = parent in highlight_joints or child in highlight_joints
+            color = arm_color if is_arm else body_color
+            lw = 2.5 if is_arm else 1.5
+            ax.plot(
+                [positions[parent, 0], positions[child, 0]],
+                [positions[parent, 2], positions[child, 2]],
+                [positions[parent, 1], positions[child, 1]],
+                color=color,
+                linewidth=lw,
+            )
+
+        # Draw joints
+        for j in range(22):
+            is_arm = j in highlight_joints
+            ax.scatter(
+                positions[j, 0],
+                positions[j, 2],
+                positions[j, 1],
+                c=arm_color if is_arm else body_color,
+                s=40 if is_arm else 20,
+                zorder=5,
+            )
+
+        ax.set_title(title, fontsize=11)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Z")
+        ax.set_zlabel("Y")
+        ax.view_init(elev=10, azim=-60)
+
+        # Equal-aspect ratio using XZY-reordered points to match plot axes
+        ArmVisualizer.format_3d_axis(ax, positions[:, [0, 2, 1]])
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     def __init__(
         self,
@@ -292,21 +411,21 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self,
         q: np.ndarray,
         dist: float,
-        color: str = _TARGET_COLOR,
+        color: str = TARGET_COLOR,
     ) -> None:
         """Update the live window with the current joint configuration.
 
         Args:
             q:     ``(3, 3)`` current controlled arm axis-angle joint angles.
             dist:  Distance to target (for title).
-            color: Arm color.  Pass ``_MDM_COLOR`` when following an MDM
-                   trajectory so the arm is visually distinct.
+            color: Arm color.  Pass ``ArmVisualizer.MDM_COLOR`` when following
+                   an MDM trajectory so the arm is visually distinct.
         """
         assert self._live is not None
         pos = self._full_body_positions(q, self._live.spine_pos, self._live.spine_aa)
         arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
         self._live.wrist_trace.append(pos[_WRIST_IDX])
-        trace_color = _MDM_COLOR if color == _MDM_COLOR else _TRACE_COLOR
+        trace_color = ArmVisualizer.MDM_COLOR if color == ArmVisualizer.MDM_COLOR else _TRACE_COLOR
         self._live.recorded_frames.append(
             {
                 "positions": pos.copy(),
@@ -341,11 +460,10 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             self._frame_bufs.append(buf.reshape(h, w, 4)[..., :3].copy())
 
     def update_mdm_goal(self, goal_q: np.ndarray) -> None:
-        """Draw (or update) the green MDM end-of-trajectory goal marker.
+        """Draw (or update) the MDM end-of-trajectory goal marker.
 
-        Computes full body positions for ``goal_q`` and updates the green
-        dashed arm skeleton artists in every panel.  Safe to call multiple
-        times — subsequent calls simply move the marker to the new pose.
+        Computes full body positions for ``goal_q`` and updates the dashed
+        arm skeleton artists in every panel.  Safe to call multiple times.
 
         Args:
             goal_q: ``(3, 3)`` axis-angle joint angles for the MDM trajectory's
@@ -384,8 +502,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         Called automatically by
         :meth:`~uncertain_feedback.planners.mpc.arm_mpc_mdm.LeftArmMPCMDM.push_trajectory`
         to show the arm pose at the enqueued cutoff timestep (e.g. 75 % through
-        the generated trajectory).  Safe to call multiple times — subsequent
-        calls simply move the ghost to the new pose.
+        the generated trajectory).  Safe to call multiple times.
 
         Args:
             preview_q: ``(3, 3)`` axis-angle joint angles for the cutoff frame
@@ -508,7 +625,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 step=k,
                 n_steps=n_steps,
                 dist=recorded[k]["dist"],
-                color=recorded[k].get("color", _TARGET_COLOR),
+                color=recorded[k].get("color", ArmVisualizer.TARGET_COLOR),
                 trace_color=recorded[k].get("trace_color", _TRACE_COLOR),
             )
             all_artists = []
@@ -552,33 +669,39 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         pos = self._full_body_positions(q, spine3_pos, spine3_aa)
         tpose = self.fk.tpose_all_joints
 
-        _draw_bones_3d(ax, tpose, _BODY_BONES, _BODY_COLOR, alpha=0.5, lw=1.5)
-        ax.scatter(  # type: ignore[misc]
-            *tpose[_BODY_JOINTS].T, color=_BODY_COLOR, s=20, alpha=0.5, depthshade=False
+        ArmVisualizer.draw_bones_3d(
+            ax, tpose, ArmVisualizer.BODY_BONES, ArmVisualizer.BODY_COLOR, alpha=0.5, lw=1.5
         )
-        _draw_bones_3d(
+        ax.scatter(  # type: ignore[misc]
+            *tpose[ArmVisualizer.BODY_JOINTS].T,
+            color=ArmVisualizer.BODY_COLOR,
+            s=20,
+            alpha=0.5,
+            depthshade=False,
+        )
+        ArmVisualizer.draw_bones_3d(
             ax,
             pos,
             LEFT_ARM_BONE_PAIRS_22,
-            _TARGET_COLOR,
+            ArmVisualizer.TARGET_COLOR,
             alpha=1.0,
             lw=2,
             label="current",
         )
         ax.scatter(  # type: ignore[misc]
             *pos[LEFT_ARM_JOINT_INDICES_22].T,
-            color=_TARGET_COLOR,
+            color=ArmVisualizer.TARGET_COLOR,
             s=45,
             depthshade=False,
         )
 
         if target_q is not None:
             tgt = self._full_body_positions(target_q, spine3_pos, spine3_aa)
-            _draw_bones_3d(
+            ArmVisualizer.draw_bones_3d(
                 ax,
                 tgt,
                 LEFT_ARM_BONE_PAIRS_22,
-                _TARGET_COLOR,
+                ArmVisualizer.TARGET_COLOR,
                 alpha=0.4,
                 lw=2,
                 linestyle="--",
@@ -586,7 +709,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             )
             ax.scatter(  # type: ignore[misc]
                 *tgt[LEFT_ARM_JOINT_INDICES_22].T,
-                color=_TARGET_COLOR,
+                color=ArmVisualizer.TARGET_COLOR,
                 s=35,
                 alpha=0.4,
                 depthshade=False,
@@ -683,23 +806,23 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.set_xlim(*lims[0])
             ax.set_ylim(*lims[1])
             ax.set_zlim(*lims[2])
-            elbow_planes = _add_elbow_height_planes_3d(
-                ax, lims, elbow_height_range
-            )
+            elbow_planes = _add_elbow_height_planes_3d(ax, lims, elbow_height_range)
 
-            _draw_bones_3d(ax, ref_body, _BODY_BONES, _BODY_COLOR, alpha=0.45, lw=1.2)
+            ArmVisualizer.draw_bones_3d(
+                ax, ref_body, ArmVisualizer.BODY_BONES, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2
+            )
             ax.scatter(
-                *ref_body[_BODY_JOINTS].T,
-                color=_BODY_COLOR,
+                *ref_body[ArmVisualizer.BODY_JOINTS].T,
+                color=ArmVisualizer.BODY_COLOR,
                 s=14,
                 alpha=0.45,
                 depthshade=False,
             )
-            _draw_bones_3d(
+            ArmVisualizer.draw_bones_3d(
                 ax,
                 target_full,
                 LEFT_ARM_BONE_PAIRS_22,
-                _TARGET_COLOR,
+                ArmVisualizer.TARGET_COLOR,
                 alpha=0.4,
                 lw=1.8,
                 linestyle="--",
@@ -707,7 +830,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             )
             ax.scatter(
                 *target_full[LEFT_ARM_JOINT_INDICES_22].T,
-                color=_TARGET_COLOR,
+                color=ArmVisualizer.TARGET_COLOR,
                 s=30,
                 alpha=0.4,
                 depthshade=False,
@@ -719,34 +842,32 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 [],
                 [],
                 [],
-                color=_TARGET_COLOR,
+                color=ArmVisualizer.TARGET_COLOR,
                 s=40,
                 depthshade=False,
                 zorder=5,
                 label="current" if col == 0 else None,
             )
             lines = [
-                ax.plot([], [], [], color=_TARGET_COLOR, lw=1.8)[0]
+                ax.plot([], [], [], color=ArmVisualizer.TARGET_COLOR, lw=1.8)[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             (trace,) = ax.plot(
                 [], [], [], color=_TRACE_COLOR, lw=1, alpha=0.6, linestyle=":"
             )
-            # Green MDM goal (initially invisible — populated by update_mdm_goal)
             mdm_goal_lines = [
-                ax.plot([], [], [], color=_MDM_COLOR, lw=1.8, linestyle="--")[0]
+                ax.plot([], [], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, linestyle="--")[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             mdm_goal_scat = ax.scatter(
-                [], [], [], color=_MDM_COLOR, s=30, alpha=0.6, depthshade=False
+                [], [], [], color=ArmVisualizer.MDM_COLOR, s=30, alpha=0.6, depthshade=False
             )
-            # Ghost arm at trajectory-fraction timestep (solid, 0.5 alpha)
             preview_lines = [
-                ax.plot([], [], [], color=_MDM_COLOR, lw=1.8, alpha=0.5)[0]
+                ax.plot([], [], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, alpha=0.5)[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             preview_scat = ax.scatter(
-                [], [], [], color=_MDM_COLOR, s=30, alpha=0.5, depthshade=False
+                [], [], [], color=ArmVisualizer.MDM_COLOR, s=30, alpha=0.5, depthshade=False
             )
             cartesian_goal_scat = ax.scatter(
                 [],
@@ -794,24 +915,22 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.set_xlim(*lims[view.hi])
             ax.set_ylim(*lims[view.vi])
             ax.tick_params(labelsize=7)
-            elbow_height_lines = _add_elbow_height_lines_2d(
-                ax, view, elbow_height_range
-            )
+            elbow_height_lines = _add_elbow_height_lines_2d(ax, view, elbow_height_range)
 
             _draw_bones_2d(
                 ax,
                 ref_body,
-                _BODY_BONES,
+                ArmVisualizer.BODY_BONES,
                 view.hi,
                 view.vi,
-                _BODY_COLOR,
+                ArmVisualizer.BODY_COLOR,
                 alpha=0.45,
                 lw=1.2,
             )
             ax.scatter(
-                ref_body[_BODY_JOINTS, view.hi],
-                ref_body[_BODY_JOINTS, view.vi],
-                color=_BODY_COLOR,
+                ref_body[ArmVisualizer.BODY_JOINTS, view.hi],
+                ref_body[ArmVisualizer.BODY_JOINTS, view.vi],
+                color=ArmVisualizer.BODY_COLOR,
                 s=14,
                 alpha=0.45,
                 zorder=3,
@@ -822,7 +941,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 LEFT_ARM_BONE_PAIRS_22,
                 view.hi,
                 view.vi,
-                _TARGET_COLOR,
+                ArmVisualizer.TARGET_COLOR,
                 alpha=0.4,
                 lw=1.8,
                 linestyle="--",
@@ -830,35 +949,33 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.scatter(
                 target_full[LEFT_ARM_JOINT_INDICES_22, view.hi],
                 target_full[LEFT_ARM_JOINT_INDICES_22, view.vi],
-                color=_TARGET_COLOR,
+                color=ArmVisualizer.TARGET_COLOR,
                 s=28,
                 alpha=0.4,
                 zorder=4,
             )
 
-            scat = ax.scatter([], [], color=_TARGET_COLOR, s=35, zorder=5)
+            scat = ax.scatter([], [], color=ArmVisualizer.TARGET_COLOR, s=35, zorder=5)
             lines = [
-                ax.plot([], [], color=_TARGET_COLOR, lw=1.8)[0]
+                ax.plot([], [], color=ArmVisualizer.TARGET_COLOR, lw=1.8)[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             (trace,) = ax.plot(
                 [], [], color=_TRACE_COLOR, lw=1, alpha=0.6, linestyle=":"
             )
-            # Green MDM goal (initially invisible — populated by update_mdm_goal)
             mdm_goal_lines = [
-                ax.plot([], [], color=_MDM_COLOR, lw=1.8, linestyle="--")[0]
+                ax.plot([], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, linestyle="--")[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             mdm_goal_scat = ax.scatter(
-                [], [], color=_MDM_COLOR, s=28, alpha=0.6, zorder=4
+                [], [], color=ArmVisualizer.MDM_COLOR, s=28, alpha=0.6, zorder=4
             )
-            # Ghost arm at trajectory-fraction timestep (solid, 0.5 alpha)
             preview_lines = [
-                ax.plot([], [], color=_MDM_COLOR, lw=1.8, alpha=0.5)[0]
+                ax.plot([], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, alpha=0.5)[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             preview_scat = ax.scatter(
-                [], [], color=_MDM_COLOR, s=28, alpha=0.5, zorder=4
+                [], [], color=ArmVisualizer.MDM_COLOR, s=28, alpha=0.5, zorder=4
             )
             cartesian_goal_scat = ax.scatter(
                 [],
@@ -911,7 +1028,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
 
 # ---------------------------------------------------------------------------
-# Drawing helpers
+# Module-level drawing helpers (private, used internally by ArmVisualizer)
 # ---------------------------------------------------------------------------
 
 
@@ -938,8 +1055,7 @@ def _make_frame_updater(
     artists_2d: list[dict],
     n_steps: int,
 ):
-    """Return a FuncAnimation update callback that closes over the given
-    data."""
+    """Return a FuncAnimation update callback that closes over the given data."""
     wrist_trace = np.array([f["positions"][_WRIST_IDX] for f in frames])
 
     def update(k: int):
@@ -956,7 +1072,7 @@ def _make_frame_updater(
             step=k,
             n_steps=n_steps,
             dist=dist,
-            color=frames[k].get("color", _TARGET_COLOR),
+            color=frames[k].get("color", ArmVisualizer.TARGET_COLOR),
             trace_color=frames[k].get("trace_color", _TRACE_COLOR),
         )
         all_artists = []
@@ -978,7 +1094,7 @@ def _update_artists(  # pylint: disable=too-many-locals
     step: int,
     n_steps: int | None,
     dist: float,
-    color: str = _TARGET_COLOR,
+    color: str = ArmVisualizer.TARGET_COLOR,
     trace_color: str = _TRACE_COLOR,
 ) -> None:
     """Update all mutable artists for a single frame/step."""
@@ -1103,30 +1219,6 @@ def _update_elbow_height_artists(
             line.set_visible(visible)
 
 
-def _draw_bones_3d(
-    ax: Axes3D,
-    positions: np.ndarray,
-    bone_pairs: list[tuple[int, int]],
-    color: str,
-    alpha: float = 1.0,
-    lw: float = 2.0,
-    linestyle: str = "-",
-    label: str | None = None,
-) -> None:
-    for i, (pi, ci) in enumerate(bone_pairs):
-        seg = positions[[pi, ci]]
-        ax.plot(
-            seg[:, 0],
-            seg[:, 1],
-            seg[:, 2],
-            color=color,
-            alpha=alpha,
-            linewidth=lw,
-            linestyle=linestyle,
-            label=label if i == 0 else None,
-        )
-
-
 def _draw_bones_2d(
     ax: plt.Axes,
     positions: np.ndarray,
@@ -1197,6 +1289,3 @@ if __name__ == "__main__":
         interval=demo_args.interval,
         save_path=demo_args.save,
     )
-    plt.show()
-    # Keep references alive until show() returns
-    del demo_fig, demo_anim

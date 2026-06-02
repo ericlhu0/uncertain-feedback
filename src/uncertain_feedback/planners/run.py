@@ -18,9 +18,12 @@ Usage examples::
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,22 +32,31 @@ import yaml
 from uncertain_feedback.consts import MDM_ROOT
 from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDM,
-    ArmVisualizer,
     LeftArmMPCCartesian,
     LeftArmMPCMDM,
     LeftArmMPCMDMUQ,
     SmplLeftArmFK,
     SmplLeftArmMPC,
 )
-from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.utils.plot import ArmVisualizer
+from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import UqClusterResult
+from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    ElbowHeightCost,
+    LearnablePreferenceCost,
     MpcCostContext,
     build_extra_costs,
-    compute_elbow_heights,
     replace_cost_in_composite,
-    update_elbow_cost,
+    update_preference_cost,
+)
+from uncertain_feedback.planners.mpc.llm_costs import (
+    GeneratedPythonCost,
+    _IMAGE_DESCRIPTION_PROMPT,
+    build_generated_cost_context,
+    build_llm_cost_prompt,
+    build_motion_summaries,
+    parse_llm_cost_response,
+    render_prompt_images,
 )
 
 _MDM_PLANNERS = {"arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian"}
@@ -230,12 +242,15 @@ def _get_vis(mpc: SmplLeftArmMPC) -> ArmVisualizer | None:
     return mpc.get_visualizer()
 
 
-def _find_elbow_cost(composite: CompositeTrajectoryCost) -> ElbowHeightCost | None:
-    """Return the first ElbowHeightCost in the composite, or None."""
-    for term in composite._terms:
-        if isinstance(term, ElbowHeightCost):
-            return term
-    return None
+def _iter_learnable_costs(
+    composite: CompositeTrajectoryCost,
+) -> list[LearnablePreferenceCost]:
+    """Return all configured preference costs that support learned bounds."""
+    costs: list[LearnablePreferenceCost] = []
+    for term in composite.terms():
+        if isinstance(term, LearnablePreferenceCost):
+            costs.append(term)
+    return costs
 
 
 def _apply_preference_update(
@@ -245,37 +260,48 @@ def _apply_preference_update(
     context: MpcCostContext,
     alpha: float,
     window: int,
-) -> ElbowHeightCost | None:
-    """Update elbow cost bounds from MDM/MPC trajectory discrepancy, if applicable."""
-    elbow_cost = _find_elbow_cost(mpc._extra_costs)  # pylint: disable=protected-access
-    if elbow_cost is None:
-        return None
+) -> list[LearnablePreferenceCost]:
+    """Update configured preference bounds from MDM/MPC discrepancy."""
+    _ = context
+    costs = _iter_learnable_costs(mpc._extra_costs)  # pylint: disable=protected-access
+    if not costs:
+        return []
     if not q_history:
-        return None
+        return []
     recent_q = np.array(q_history[-window:])
-    mpc_heights = compute_elbow_heights(recent_q, context)
-    mdm_heights = compute_elbow_heights(mdm_traj, context)
-    mdm_lo, mdm_hi = np.percentile(mdm_heights, [5.0, 95.0])
-    mpc_mean = float(mpc_heights.mean())
-    mdm_mean = float(mdm_heights.mean())
-    if np.isclose(mpc_mean, mdm_mean):
-        side = "none"
-    elif mpc_mean < mdm_mean:
-        side = "min"
-    else:
-        side = "max"
-    updated = update_elbow_cost(elbow_cost, mdm_heights, mpc_heights, alpha=alpha)
-    print(
-        f"[preference] elbow bounds updated: "
-        f"[{elbow_cost.min_height:.3f}, {elbow_cost.max_height:.3f}] → "
-        f"[{updated.min_height:.3f}, {updated.max_height:.3f}]  "
-        f"(side={side} mdm_range=[{mdm_lo:.3f}, {mdm_hi:.3f}] "
-        f"mpc_mean={mpc_mean:.3f}, mdm_mean={mdm_mean:.3f})"
-    )
-    mpc.set_extra_costs(
-        replace_cost_in_composite(mpc._extra_costs, updated)
-    )  # pylint: disable=protected-access
-    return updated
+    updated_costs: list[LearnablePreferenceCost] = []
+    extra_costs = mpc._extra_costs  # pylint: disable=protected-access
+
+    for cost in costs:
+        mpc_values = cost.feature_values(recent_q)
+        mdm_values = cost.feature_values(mdm_traj)
+        mdm_lo, mdm_hi = np.percentile(mdm_values, [5.0, 95.0])
+        mpc_mean = float(mpc_values.mean())
+        mdm_mean = float(mdm_values.mean())
+        if np.isclose(mpc_mean, mdm_mean):
+            side = "none"
+        elif mpc_mean < mdm_mean:
+            side = "min"
+        else:
+            side = "max"
+        updated = update_preference_cost(
+            cost,
+            mdm_values,
+            mpc_values,
+            alpha=alpha,
+        )
+        print(
+            f"[preference] {cost.cost_name} bounds updated: "
+            f"[{cost.min_value:.3f}, {cost.max_value:.3f}] -> "
+            f"[{updated.min_value:.3f}, {updated.max_value:.3f}]  "
+            f"(side={side} mdm_range=[{mdm_lo:.3f}, {mdm_hi:.3f}] "
+            f"mpc_mean={mpc_mean:.3f}, mdm_mean={mdm_mean:.3f})"
+        )
+        extra_costs = replace_cost_in_composite(extra_costs, updated)
+        updated_costs.append(updated)
+
+    mpc.set_extra_costs(extra_costs)
+    return updated_costs
 
 
 def _default_preference_output_path(config_path: Path) -> Path:
@@ -283,12 +309,387 @@ def _default_preference_output_path(config_path: Path) -> Path:
     return config_path.with_name(f"{config_path.stem}_learned{config_path.suffix}")
 
 
+def _make_llm_model(model_name: str) -> Any:
+    """Build the cost-generator LLM wrapper."""
+    from uncertain_feedback.llm import (
+        OpenAIModel,
+    )  # pylint: disable=import-outside-toplevel
+
+    return OpenAIModel(
+        model=model_name,
+        system_prompt=(
+            "You generate safe, vectorized Python MPC trajectory cost functions. "
+            "Return only the requested JSON object."
+        ),
+        temperature=0.2,
+        max_tokens=1800,
+    )
+
+
+def _llm_artifact_run_dir(base_dir: Path, artifact_dir: Path) -> Path:
+    """Return a unique artifact directory for one LLM-cost generation."""
+    root = artifact_dir if artifact_dir.is_absolute() else base_dir / artifact_dir
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return root / stamp
+
+
+def _append_extra_cost(
+    composite: CompositeTrajectoryCost,
+    cost: GeneratedPythonCost,
+) -> CompositeTrajectoryCost:
+    """Return a composite with an additional generated cost term."""
+    return CompositeTrajectoryCost([*composite.terms(), cost])
+
+
+def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-locals
+    mpc: SmplLeftArmMPC,
+    instruction: str,
+    mdm_traj: np.ndarray,
+    current_q: np.ndarray,
+    q_history: list[np.ndarray],
+    context: MpcCostContext,
+    llm_cfg: Any,
+    artifact_base_dir: Path,
+    history_window: int,
+    llm_model_factory: Callable[[str], Any] = _make_llm_model,
+    run_dir: Path | None = None,
+    install: bool = True,
+) -> GeneratedPythonCost | None:
+    """Generate, validate, save, and install an LLM-generated MPC cost."""
+    if run_dir is None:
+        run_dir = _llm_artifact_run_dir(artifact_base_dir, llm_cfg.artifact_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    image_dir = run_dir / "images"
+    validation: dict[str, Any] = {"ok": False}
+
+    try:
+        generated_context = build_generated_cost_context(
+            context,
+            current_q,
+            mdm_traj,
+            q_history,
+            window=history_window,
+        )
+        summaries = build_motion_summaries(generated_context)
+        image_paths: list[Path] = []
+        if llm_cfg.use_images:
+            image_paths = render_prompt_images(generated_context, image_dir)
+        with open(run_dir / "summaries.json", "w", encoding="utf-8") as f:
+            json.dump(summaries, f, indent=2, sort_keys=True)
+
+        model_name = llm_cfg.model or os.getenv("OPENAI_MODEL", "gpt-5.4")
+        llm = llm_model_factory(model_name)
+        image_input = [str(path) for path in image_paths] or None
+        image_description = ""
+        if image_input:
+            image_description = llm.get_full_output(
+                _IMAGE_DESCRIPTION_PROMPT, image_input=image_input
+            )
+            (run_dir / "image_description.txt").write_text(
+                image_description, encoding="utf-8"
+            )
+            print(f"[llm-cost] image description: {image_description}")
+        prompt = build_llm_cost_prompt(instruction, summaries, image_paths, image_description)
+        (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        raw_response = llm.get_full_output(prompt, image_input=image_input)
+        (run_dir / "raw_response.txt").write_text(raw_response, encoding="utf-8")
+        response = parse_llm_cost_response(raw_response)
+        generated_cost = GeneratedPythonCost(
+            code=response.code,
+            params=response.params,
+            description=response.description,
+            context=generated_context,
+        )
+        validation_q = np.repeat(
+            current_q[np.newaxis, np.newaxis],
+            repeats=11,
+            axis=1,
+        )
+        generated_cost(validation_q)
+
+        (run_dir / "cost.py").write_text(response.code, encoding="utf-8")
+        with open(run_dir / "params.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "description": response.description,
+                    "params": response.params,
+                    "model": model_name,
+                },
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+        if install:
+            mpc.set_extra_costs(
+                _append_extra_cost(
+                    mpc._extra_costs,  # pylint: disable=protected-access
+                    generated_cost,
+                )
+            )
+        validation = {"ok": True, "artifact_dir": str(run_dir)}
+        action = "installed" if install else "generated"
+        print(f"[llm-cost] {action} generated cost: {response.description}")
+        print(f"[llm-cost] artifacts saved to: {run_dir}")
+        return generated_cost
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        validation = {
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "artifact_dir": str(run_dir),
+        }
+        action = "install" if install else "generate"
+        print(f"[llm-cost] failed to {action} generated cost: {exc}")
+        if llm_cfg.strict:
+            raise
+        return None
+    finally:
+        with open(run_dir / "validation.json", "w", encoding="utf-8") as f:
+            json.dump(validation, f, indent=2, sort_keys=True)
+
+
+def _run_llm_cluster_experiment(  # pylint: disable=too-many-arguments,too-many-locals
+    mpc: SmplLeftArmMPC,
+    cfg: MpcRunConfig,
+    instruction: str,
+    uq_result: UqClusterResult,
+    current_q: np.ndarray,
+    q_history: list[np.ndarray],
+    context: MpcCostContext,
+    artifact_base_dir: Path,
+    history_window: int,
+    remaining_steps: int,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+    llm_model_factory: Callable[[str], Any] = _make_llm_model,
+) -> GeneratedPythonCost | None:
+    """Generate one cost per UQ cluster and run headless comparison rollouts."""
+    cluster_cfg = cfg.llm_cost.cluster_experiment
+    root_dir = _llm_artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
+    root_dir.mkdir(parents=True, exist_ok=True)
+    (root_dir / "selected_cluster.txt").write_text(
+        f"{uq_result.chosen_label}\n", encoding="utf-8"
+    )
+
+    base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
+    rollout_steps = (
+        max(1, remaining_steps)
+        if cluster_cfg.rollout_steps is None
+        else cluster_cfg.rollout_steps
+    )
+    summary: dict[str, Any] = {
+        "selected_cluster": uq_result.chosen_label,
+        "cluster_ids": sorted(int(label) for label in uq_result.cluster_means),
+        "clusters": {},
+    }
+    selected_cost: GeneratedPythonCost | None = None
+
+    for label in summary["cluster_ids"]:
+        cluster_traj = uq_result.cluster_means[int(label)]
+        cluster_dir = root_dir / f"cluster_{label}"
+        install_selected = int(label) == uq_result.chosen_label
+        generated = _apply_llm_generated_cost(
+            mpc,
+            instruction,
+            cluster_traj,
+            current_q,
+            q_history,
+            context,
+            cfg.llm_cost,
+            artifact_base_dir,
+            history_window,
+            llm_model_factory=llm_model_factory,
+            run_dir=cluster_dir,
+            install=install_selected,
+        )
+        validation = _read_json_if_exists(cluster_dir / "validation.json")
+        params = _read_json_if_exists(cluster_dir / "params.json")
+        entry: dict[str, Any] = {
+            "artifact_path": str(cluster_dir),
+            "rollout_path": None,
+            "metrics_path": None,
+            "validation": validation,
+            "description": (
+                params.get("description") if isinstance(params, dict) else None
+            ),
+            "params": params.get("params") if isinstance(params, dict) else None,
+            "rollout_metrics": None,
+        }
+        if generated is None:
+            summary["clusters"][str(label)] = entry
+            _write_comparison_summary(root_dir, summary)
+            continue
+
+        if install_selected:
+            selected_cost = generated
+
+        rollout, metrics = _run_cluster_comparison_rollout(
+            cfg,
+            current_q,
+            cluster_traj,
+            context,
+            base_extra_costs,
+            generated,
+            rollout_steps,
+            body_pos,
+            spine3_pos,
+            spine3_aa,
+        )
+        rollout_path = cluster_dir / "rollout.npy"
+        metrics_path = cluster_dir / "metrics.json"
+        np.save(rollout_path, rollout)
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2, sort_keys=True)
+        entry["rollout_path"] = str(rollout_path)
+        entry["metrics_path"] = str(metrics_path)
+        entry["rollout_metrics"] = metrics
+        summary["clusters"][str(label)] = entry
+        _write_comparison_summary(root_dir, summary)
+
+    print(f"[llm-cost] cluster comparison artifacts saved to: {root_dir}")
+    return selected_cost
+
+
+def _run_cluster_comparison_rollout(  # pylint: disable=too-many-arguments
+    cfg: MpcRunConfig,
+    current_q: np.ndarray,
+    cluster_traj: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    generated_cost: GeneratedPythonCost,
+    rollout_steps: int,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Run a headless MPC rollout with one cluster's generated cost."""
+    comparison_mpc = _build_cluster_rollout_planner(
+        cfg,
+        current_q,
+        cluster_traj,
+        context,
+        base_extra_costs,
+        generated_cost,
+        body_pos,
+        spine3_pos,
+        spine3_aa,
+    )
+    q = np.asarray(current_q, dtype=np.float64).copy()
+    rollout_frames = [q.copy()]
+    error: str | None = None
+    for _ in range(rollout_steps):
+        try:
+            q = comparison_mpc.step(q)
+        except RuntimeError as exc:
+            error = str(exc)
+            break
+        rollout_frames.append(q.copy())
+
+    rollout = np.asarray(rollout_frames, dtype=np.float64)
+    metrics = _rollout_metrics(rollout, comparison_mpc, context)
+    metrics["steps_requested"] = rollout_steps
+    metrics["steps_completed"] = int(max(0, rollout.shape[0] - 1))
+    if error is not None:
+        metrics["error"] = error
+    return rollout, metrics
+
+
+def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
+    cfg: MpcRunConfig,
+    current_q: np.ndarray,
+    cluster_traj: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    generated_cost: GeneratedPythonCost,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+) -> SmplLeftArmMPC:
+    """Build an isolated planner for one cluster comparison rollout."""
+    extra_costs = _append_extra_cost(base_extra_costs, generated_cost)
+    common: dict[str, Any] = {
+        "horizon": cfg.horizon,
+        "n_mpc_samples": cfg.n_mpc_samples,
+        "max_angle_delta": cfg.max_angle_delta,
+        "goal_threshold": cfg.goal_threshold,
+        "visualize": False,
+        "fk": context.fk,
+        "spine3_pos": spine3_pos,
+        "spine3_aa": spine3_aa,
+        "body_pos": body_pos,
+        "extra_costs": extra_costs,
+    }
+    if cfg.planner == "arm_mpc_cartesian":
+        planner: SmplLeftArmMPC = LeftArmMPCCartesian(
+            cartesian_goals=[
+                np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals
+            ],
+            initial_arm_aa=current_q,
+            cartesian_threshold=cfg.cartesian.threshold,
+            **common,
+            advance_threshold=cfg.advance_threshold,
+            trajectory_fraction=cfg.trajectory_fraction,
+            n_diffusion_samples=cfg.uq.diffusion_samples,
+            n_clusters=cfg.uq.n_clusters,
+        )
+    else:
+        planner = LeftArmMPCMDM(
+            **common,
+            goals=[],
+            advance_threshold=cfg.advance_threshold,
+            trajectory_fraction=cfg.trajectory_fraction,
+        )
+
+    mdm_planner = cast(LeftArmMPCMDM, planner)
+    n_frames = cluster_traj.shape[0]
+    cutoff = max(1, round(n_frames * mdm_planner.trajectory_fraction))
+    mdm_planner.set_mdm_goal(cluster_traj[cutoff - 1])
+    mdm_planner.push_trajectory(cluster_traj[:cutoff])
+    return planner
+
+
+def _rollout_metrics(
+    rollout: np.ndarray,
+    mpc: SmplLeftArmMPC,
+    context: MpcCostContext,
+) -> dict[str, Any]:
+    deltas = np.diff(rollout, axis=0)
+    path_length = float(
+        np.linalg.norm(deltas.reshape(deltas.shape[0], -1), axis=1).sum()
+    )
+    final_q = rollout[-1]
+    positions = context.fk.fk(final_q, context.spine3_pos, context.spine3_aa)
+    metrics: dict[str, Any] = {
+        "path_length_joint_l2": path_length,
+        "final_q_norm": float(np.linalg.norm(final_q)),
+        "final_wrist_position": positions[-1].tolist(),
+    }
+    if mpc.current_goal is not None:
+        metrics["final_goal_distance"] = float(
+            np.linalg.norm(final_q - mpc.current_goal)
+        )
+    return metrics
+
+
+def _read_json_if_exists(path: Path) -> Any:
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_comparison_summary(root_dir: Path, summary: dict[str, Any]) -> None:
+    with open(root_dir / "comparison_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+
+
 def _save_learned_preference_yaml(
     input_path: Path,
     output_path: Path,
-    learned_elbow_cost: ElbowHeightCost,
+    learned_costs: LearnablePreferenceCost | list[LearnablePreferenceCost],
 ) -> None:
-    """Save a config copy with learned elbow-height preference parameters."""
+    """Save a config copy with learned preference parameters."""
     with open(input_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     data = raw if isinstance(raw, dict) else {}
@@ -297,15 +698,21 @@ def _save_learned_preference_yaml(
     if not isinstance(costs, dict):
         costs = {}
         data["costs"] = costs
-    elbow = costs.get("elbow_height")
-    if not isinstance(elbow, dict):
-        elbow = {}
-        costs["elbow_height"] = elbow
 
-    elbow["min"] = float(learned_elbow_cost.min_height)
-    elbow["max"] = float(learned_elbow_cost.max_height)
-    elbow["weight"] = float(learned_elbow_cost.weight)
-    elbow["progress_weight"] = float(learned_elbow_cost.progress_weight)
+    normalized_costs = (
+        [learned_costs]
+        if isinstance(learned_costs, LearnablePreferenceCost)
+        else learned_costs
+    )
+    for learned_cost in normalized_costs:
+        cost_data = costs.get(learned_cost.cost_name)
+        if not isinstance(cost_data, dict):
+            cost_data = {}
+            costs[learned_cost.cost_name] = cost_data
+        cost_data["min"] = float(learned_cost.min_value)
+        cost_data["max"] = float(learned_cost.max_value)
+        cost_data["weight"] = float(learned_cost.weight)
+        cost_data["progress_weight"] = float(learned_cost.progress_weight)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -315,6 +722,7 @@ def _save_learned_preference_yaml(
 
 def main() -> None:
     args = build_parser().parse_args()
+    artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
 
     uses_mdm = cfg.planner in _MDM_PLANNERS
@@ -383,10 +791,7 @@ def main() -> None:
                 "cartesian.goals is required when planner is arm_mpc_cartesian_no_mdm."
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        init_wrist_rel = (
-            fk.fk(arm_aa, spine3_pos, spine3_aa)[-1]
-            - _spine3_ref
-        )
+        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = ArmMPCCartesianNoMDM(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
@@ -400,10 +805,7 @@ def main() -> None:
                 "cartesian.goals is required when planner is arm_mpc_cartesian."
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        init_wrist_rel = (
-            fk.fk(arm_aa, spine3_pos, spine3_aa)[-1]
-            - _spine3_ref
-        )
+        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = LeftArmMPCCartesian(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
@@ -428,7 +830,7 @@ def main() -> None:
     mpc.set_visualization_mode(capture=args.save is not None, compact=compact)
 
     # --- MPC loop ---
-    from tqdm import tqdm  # pylint: disable=import-outside-toplevel
+    from tqdm import tqdm  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
 
     q = arm_aa.copy()
     q_history: list[np.ndarray] = []
@@ -459,7 +861,7 @@ def main() -> None:
                     spine3_aa=spine3_aa,
                 )
                 if cfg.preference_learning:
-                    learned_elbow_cost = _apply_preference_update(
+                    learned_costs = _apply_preference_update(
                         mpc,
                         traj,
                         q_history,
@@ -467,21 +869,35 @@ def main() -> None:
                         alpha=cfg.preference_alpha,
                         window=cfg.preference_window,
                     )
-                    if learned_elbow_cost is not None:
+                    if learned_costs:
                         _save_learned_preference_yaml(
-                            args.mpc_config, preference_output_path, learned_elbow_cost
+                            args.mpc_config, preference_output_path, learned_costs
                         )
                 else:
                     print(
                         "[preference] learning disabled; generated trajectory "
                         "will not update elbow bounds"
                     )
+                if cfg.llm_cost.enabled:
+                    _apply_llm_generated_cost(
+                        mpc,
+                        args.text,
+                        traj,
+                        q,
+                        q_history,
+                        cost_context,
+                        cfg.llm_cost,
+                        artifact_base_dir,
+                        cfg.preference_window,
+                    )
+                mdm_mpc = cast(LeftArmMPCMDM, mpc)
                 n_frames = traj.shape[0]
-                cutoff = max(1, round(n_frames * mpc.trajectory_fraction))
-                mpc.set_mdm_goal(traj[cutoff - 1])
-                mpc.push_trajectory(traj[:cutoff])
+                cutoff = max(1, round(n_frames * mdm_mpc.trajectory_fraction))
+                mdm_mpc.set_mdm_goal(traj[cutoff - 1])
+                mdm_mpc.push_trajectory(traj[:cutoff])
             else:
-                traj = mpc.query_mdm_with_uncertainty(
+                uq_mpc = cast(LeftArmMPCMDMUQ, mpc)
+                traj = uq_mpc.query_mdm_with_uncertainty(
                     gen,
                     args.text,
                     start_pose=current_pose,
@@ -491,7 +907,7 @@ def main() -> None:
                     frozen_body=args.frozen_body,
                 )
                 if cfg.preference_learning:
-                    learned_elbow_cost = _apply_preference_update(
+                    learned_costs = _apply_preference_update(
                         mpc,
                         traj,
                         q_history,
@@ -499,15 +915,48 @@ def main() -> None:
                         alpha=cfg.preference_alpha,
                         window=cfg.preference_window,
                     )
-                    if learned_elbow_cost is not None:
+                    if learned_costs:
                         _save_learned_preference_yaml(
-                            args.mpc_config, preference_output_path, learned_elbow_cost
+                            args.mpc_config, preference_output_path, learned_costs
                         )
                 else:
                     print(
                         "[preference] learning disabled; generated trajectory "
                         "will not update elbow bounds"
                     )
+                if cfg.llm_cost.enabled:
+                    uq_result = uq_mpc.last_uq_result
+                    if (
+                        cfg.llm_cost.cluster_experiment.enabled
+                        and uq_result is not None
+                    ):
+                        _run_llm_cluster_experiment(
+                            mpc,
+                            cfg,
+                            args.text,
+                            uq_result,
+                            q,
+                            q_history,
+                            cost_context,
+                            artifact_base_dir,
+                            cfg.preference_window,
+                            remaining_steps=max(1, cfg.steps - step),
+                            body_pos=body_pos,
+                            spine3_pos=spine3_pos,
+                            spine3_aa=spine3_aa,
+                        )
+                    else:
+                        _apply_llm_generated_cost(
+                            mpc,
+                            args.text,
+                            traj,
+                            q,
+                            q_history,
+                            cost_context,
+                            cfg.llm_cost,
+                            artifact_base_dir,
+                            cfg.preference_window,
+                        )
 
             # MDM generation can switch matplotlib to the Agg backend; restore it
             _restore_interactive_backend()

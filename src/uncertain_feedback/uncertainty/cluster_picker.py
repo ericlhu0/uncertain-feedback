@@ -22,12 +22,10 @@ from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_JOINT_INDICES_22,
     SmplLeftArmFK,
 )
-from uncertain_feedback.planners.mpc.visualizer import (
-    _BODY_BONES,
-    _BODY_COLOR,
-    _BODY_JOINTS,
-    _draw_bones_3d,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from uncertain_feedback.utils.plot import ArmVisualizer
 
 if TYPE_CHECKING:
     import matplotlib
@@ -96,11 +94,12 @@ def _draw_body(
 
     Returns (arm_bone_lines, arm_joint_scatter).
     """
+    from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
     # Grey non-arm skeleton
-    _draw_bones_3d(ax, body_pos, _BODY_BONES, _BODY_COLOR, alpha=0.45, lw=1.2)
+    ArmVisualizer.draw_bones_3d(ax, body_pos, ArmVisualizer.BODY_BONES, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
     ax.scatter(
-        *body_pos[_BODY_JOINTS].T,
-        color=_BODY_COLOR,
+        *body_pos[ArmVisualizer.BODY_JOINTS].T,
+        color=ArmVisualizer.BODY_COLOR,
         s=14,
         alpha=0.45,
         depthshade=False,
@@ -133,6 +132,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     ) = None,  # each list of (22, 3)
     current_body: np.ndarray | None = None,  # (22, 3) current MPC arm state
 ) -> tuple["Figure", list[list["Axes3D"]], list[list], list[list]]:
+    from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
     n_clusters = len(unique_labels)
     n_views = len(_PANEL_VIEWS)
     fig_w = max(4 * n_clusters, 8)
@@ -195,7 +195,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
             # Individual ghost arms (one per sample in cluster), very faint
             if cluster_individual_previews is not None:
                 for body_ind in cluster_individual_previews[idx]:
-                    _draw_bones_3d(
+                    ArmVisualizer.draw_bones_3d(
                         ax,
                         body_ind,
                         LEFT_ARM_BONE_PAIRS_22,
@@ -206,7 +206,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
 
             # Current MPC arm state (grey, drawn behind the cluster arm)
             if current_body is not None:
-                _draw_bones_3d(
+                ArmVisualizer.draw_bones_3d(
                     ax,
                     current_body,
                     LEFT_ARM_BONE_PAIRS_22,

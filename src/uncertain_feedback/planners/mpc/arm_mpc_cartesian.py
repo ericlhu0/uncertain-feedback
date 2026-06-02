@@ -15,11 +15,10 @@ from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, _compose_rotvec
-from uncertain_feedback.planners.mpc.visualizer import (
-    ArmVisualizer,
-    _MDM_COLOR,
-    _TARGET_COLOR,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.uncertainty.base import TrajectoryClusterer
 
 
@@ -160,6 +159,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                 dist = float(np.linalg.norm(next_q - target_q))
 
         if self._vis_config is not None:
+            from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
             if self._vis is None:
                 vis_goal = self._goals[-1] if self._goals else self._initial_arm_aa
                 self._vis = ArmVisualizer(self._vis_config.fk)
@@ -182,7 +182,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                     self._vis.update_cartesian_target(
                         self._spine3_pos + self.current_cartesian_goal
                     )
-            color = _MDM_COLOR if self._goals else _TARGET_COLOR
+            color = ArmVisualizer.MDM_COLOR if self._goals else ArmVisualizer.TARGET_COLOR
             self._vis.update_step(next_q, dist=dist, color=color)
 
         return next_q
@@ -208,6 +208,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             dist = float(np.linalg.norm(wrist_rel - self.current_cartesian_goal))
 
         if self._vis_config is not None:
+            from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
@@ -226,6 +227,6 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             self._vis.update_cartesian_target(
                 self._spine3_pos + self.current_cartesian_goal
             )
-            self._vis.update_step(next_q, dist=dist, color=_TARGET_COLOR)
+            self._vis.update_step(next_q, dist=dist, color=ArmVisualizer.TARGET_COLOR)
 
         return next_q

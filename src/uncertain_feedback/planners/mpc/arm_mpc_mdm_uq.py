@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,6 +27,20 @@ from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster_positions,
 )
 from uncertain_feedback.uncertainty.xyz_clusterer import XyzPositionClusterer
+
+
+@dataclass(frozen=True)
+class UqClusterResult:
+    """Clustered MDM trajectory result for downstream experiments."""
+
+    chosen_label: int
+    labels: np.ndarray
+    cluster_means: dict[int, np.ndarray]
+
+    @property
+    def chosen_mean(self) -> np.ndarray:
+        """Return the selected cluster mean trajectory."""
+        return self.cluster_means[self.chosen_label]
 
 
 class LeftArmMPCMDMUQ(LeftArmMPCMDM):
@@ -101,6 +116,12 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             self._clusterer = clusterer
         else:
             self._clusterer = XyzPositionClusterer(n_clusters, fk=self._fk)
+        self._last_uq_result: UqClusterResult | None = None
+
+    @property
+    def last_uq_result(self) -> UqClusterResult | None:
+        """Return the most recent UQ cluster result, if any."""
+        return self._last_uq_result
 
     # ------------------------------------------------------------------
     # UQ pipeline
@@ -222,15 +243,23 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             )
             print(f"User selected cluster {chosen_label}.")
 
-        if positions is not None:
-            selected_positions = positions[labels == chosen_label].mean(axis=0)
-            chosen_mean = gen.smpl_positions_to_left_arm_trajectory(
-                selected_positions,
-                spine3_aa=base_spine_aa,
-            )
-        else:
-            assert trajectories is not None
-            chosen_mean = trajectories[labels == chosen_label].mean(axis=0)
+        cluster_means: dict[int, np.ndarray] = {}
+        for label in sorted(int(v) for v in np.unique(labels)):
+            if positions is not None:
+                selected_positions = positions[labels == label].mean(axis=0)
+                cluster_means[label] = gen.smpl_positions_to_left_arm_trajectory(
+                    selected_positions,
+                    spine3_aa=base_spine_aa,
+                )
+            else:
+                assert trajectories is not None
+                cluster_means[label] = trajectories[labels == label].mean(axis=0)
+        chosen_mean = cluster_means[chosen_label]
+        self._last_uq_result = UqClusterResult(
+            chosen_label=chosen_label,
+            labels=np.asarray(labels, dtype=np.intp),
+            cluster_means=cluster_means,
+        )
         # chosen_mean: (n_frames, 3, 3)
 
         n_frames = chosen_mean.shape[0]

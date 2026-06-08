@@ -227,17 +227,30 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             print(f"[skip] {clip_name} — directory not found in {frames_dir}")
             continue
 
+        meta_path = clip_dir / "meta.json"
+        clip_fps = 20.0
+        if meta_path.exists():
+            with open(meta_path, encoding="utf-8") as f:
+                clip_fps = float(json.load(f).get("fps", 20.0))
+
+        # Group by (start_frame, end_frame) so pose estimation runs once per
+        # unique frame range regardless of how many captions share that range.
+        range_to_captions: dict[tuple[int, int], list[str]] = {}
         for seg in segments:
-            start_frame: int = int(seg.get("start_frame", 0))
-            end_frame: int = int(seg.get("end_frame", 0))
-            caption: str = str(seg.get("caption", "")).strip()
-            if not caption or end_frame <= start_frame:
+            sf = int(seg.get("start_frame", 0))
+            ef = int(seg.get("end_frame", 0))
+            cap = str(seg.get("caption", "")).strip()
+            if not cap or ef <= sf:
                 print(f"  [skip] invalid segment {seg!r}")
                 continue
+            range_to_captions.setdefault((sf, ef), []).append(cap)
 
+        for (start_frame, end_frame), captions in sorted(range_to_captions.items()):
+            n_captions = len(captions)
             motion_id += 1
             id_str = f"{motion_id:06d}"
-            print(f"[{id_str}] {clip_name}  f{start_frame}-f{end_frame} ...")
+            caption_note = f"  ({n_captions} caption{'s' if n_captions > 1 else ''})"
+            print(f"[{id_str}] {clip_name}  f{start_frame}-f{end_frame}{caption_note} ...")
 
             with tempfile.TemporaryDirectory() as tmp_dir:
                 try:
@@ -251,7 +264,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                         print("  ✗ no frames found in range — skipping")
                         motion_id -= 1
                         continue
-                    hml263 = pipeline.run(Path(tmp_dir))  # (N, 263) raw HML263
+                    hml263 = pipeline.run(Path(tmp_dir), source_fps=clip_fps)  # (N, 263) raw HML263
                     hml263, resampled = _resample_hml263(hml263)
                     if fix_body:
                         hml263 = _lock_body_to_frame0(hml263)
@@ -261,7 +274,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                     continue
 
             np.save(output_dir / "new_joint_vecs" / f"{id_str}.npy", hml263)
-            _write_text_file(output_dir / "texts" / f"{id_str}.txt", [caption], nlp)
+            _write_text_file(output_dir / "texts" / f"{id_str}.txt", captions, nlp)
             resample_note = " (resampled)" if resampled else ""
             print(f"  ✓ frames={n_frames}, hml263={hml263.shape}{resample_note}")
             successful_ids.append(id_str)
@@ -283,7 +296,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                     output_dir / "new_joint_vecs" / f"{aug_id_str}.npy", hml263_aug
                 )
                 _write_text_file(
-                    output_dir / "texts" / f"{aug_id_str}.txt", [caption], nlp
+                    output_dir / "texts" / f"{aug_id_str}.txt", captions, nlp
                 )
                 successful_ids.append(aug_id_str)
             if n_augment:
@@ -332,15 +345,16 @@ def main() -> None:  # pylint: disable=too-many-locals
     parser = argparse.ArgumentParser(
         description="Build an MDM-compatible dataset from labeled motion frame sequences."
     )
+    _here = Path(__file__).parent
     parser.add_argument(
         "--frames_dir",
-        required=True,
-        help="Directory containing per-clip frame subdirectories (from extract_all_frames.py).",
+        default=str(_here / "data" / "frames"),
+        help="Directory containing per-clip frame subdirectories (default: data_collection/frames/).",
     )
     parser.add_argument(
         "--labels_json",
-        required=True,
-        help="Path to labels.json produced by the labeler.",
+        default=str(_here / "data" / "frames" / "labels.json"),
+        help="Path to labels.json produced by the labeler (default: data_collection/frames/labels.json).",
     )
     parser.add_argument(
         "--output_dir", required=True, help="Directory to write the dataset into."

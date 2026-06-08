@@ -14,9 +14,54 @@ uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
 ```
 
 ## Get HML263 from sequence of images of human
-On first install, build detectron2 for your GPU architecture (replace `8.9` with your GPU's compute capability, e.g. `8.0` for A100):
+First initialize the SAM 3D Body and MHR submodules:
 ```
-TORCH_CUDA_ARCH_LIST="8.9" uv sync --reinstall-package detectron2
+git submodule update --init --recursive \
+  src/uncertain_feedback/data_collection/sam-3d-body \
+  src/uncertain_feedback/data_collection/MHR
+```
+
+Create the Conda environment used by the SAM 3D Body inference worker:
+```
+conda create -n sam_3d_body python=3.11 -y
+
+conda run -n sam_3d_body python -m pip install --upgrade pip setuptools wheel
+
+# CUDA build for the RTX 4080 / driver CUDA 12.2 setup on this machine.
+conda run -n sam_3d_body python -m pip install \
+  torch torchvision torchaudio \
+  --index-url https://download.pytorch.org/whl/cu121
+
+conda run -n sam_3d_body python -m pip install \
+  pytorch-lightning pyrender opencv-python yacs scikit-image einops timm dill \
+  pandas rich hydra-core hydra-submitit-launcher hydra-colorlog pyrootutils \
+  webdataset chump networkx==3.2.1 roma joblib seaborn wandb appdirs appnope \
+  ffmpeg cython jsonlines pytest xtcocotools loguru optree fvcore black \
+  pycocotools tensorboard huggingface_hub ninja
+
+# Build detectron2 for your GPU architecture. RTX 4080 uses compute capability 8.9.
+TORCH_CUDA_ARCH_LIST="8.9" FORCE_CUDA=1 MAX_JOBS=8 \
+  conda run -n sam_3d_body python -m pip install \
+  git+https://github.com/facebookresearch/detectron2.git@a1ce2f9 \
+  --no-build-isolation --no-deps
+
+# Optional, but needed for the upstream SAM 3D Body demo's default --fov_name moge2.
+conda run -n sam_3d_body python -m pip install git+https://github.com/microsoft/MoGe.git
+
+# Match detectron2's declared dependency range.
+conda run -n sam_3d_body python -m pip install iopath==0.1.9
+```
+
+Verify the environment:
+```
+conda run -n sam_3d_body python -m pip check
+conda run -n sam_3d_body python -c "import sys; sys.path.insert(0, 'src/uncertain_feedback/data_collection/sam-3d-body'); import torch, detectron2, sam_3d_body; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); print(detectron2.__version__)"
+```
+
+Download the gated SAM 3D Body checkpoint after Hugging Face access is approved:
+```
+conda run -n sam_3d_body hf download facebook/sam-3d-body-dinov3 \
+  --local-dir src/uncertain_feedback/data_collection/sam-3d-body/checkpoints/sam-3d-body-dinov3
 ```
 
 Step 1 — inference (produces data/demo/smpl_out.npz)
@@ -40,26 +85,17 @@ uv run python -m uncertain_feedback.data_collection.trajectory_editor.server \
 
 1. Turn videos into images
 ```
-uv run python src/uncertain_feedback/data_collection/extract_all_frames.py \
---videos_dir src/uncertain_feedback/data_collection/data/demo/videos/ \
---frames_dir src/uncertain_feedback/data_collection/data/demo/video_frames/
+uv run python src/uncertain_feedback/data_collection/extract_all_frames.py
 ```
 
 2. Label segments with text descriptions in browser
 ```
-uv run python src/uncertain_feedback/data_collection/labeler.py \
---frames_dir src/uncertain_feedback/data_collection/data/demo/video_frames/
+uv run python src/uncertain_feedback/data_collection/labeler.py
 ```
                                                                                        
 3. Build MDM dataset
 ```
-uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py \
---frames_dir src/uncertain_feedback/data_collection/data/demo/video_frames/ \
---labels_json src/uncertain_feedback/data_collection/data/demo/video_frames/labels.json \
---output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3Dnew \
---fix_body \
---n_augment 49 \
---noise_std 0.05
+uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py --output_dir ./my_mdm_dataset/
 ```
 
 4. Fine-tune motion-diffusion-model

@@ -36,6 +36,33 @@ from typing import Optional
 
 import numpy as np
 
+_HML_TARGET_FPS: float = 20.0
+
+
+def _resample_smpl_positions(
+    positions: np.ndarray,
+    source_fps: float,
+    target_fps: float = _HML_TARGET_FPS,
+) -> np.ndarray:
+    """Resample (N, 22, 3) SMPL positions from *source_fps* to *target_fps*.
+
+    Uses per-channel linear interpolation so the output frame count matches
+    ``round(N * target_fps / source_fps)``.  No-ops when source == target.
+    """
+    if abs(source_fps - target_fps) < 1e-6:
+        return positions
+    n_in = len(positions)
+    n_out = max(1, round(n_in * target_fps / source_fps))
+    old_t = np.linspace(0.0, 1.0, n_in)
+    new_t = np.linspace(0.0, 1.0, n_out)
+    flat = positions.reshape(n_in, -1)  # (N, 66)
+    resampled = np.stack(
+        [np.interp(new_t, old_t, flat[:, i]) for i in range(flat.shape[1])],
+        axis=1,
+    ).astype(np.float32)
+    return resampled.reshape(n_out, 22, 3)
+
+
 from uncertain_feedback.data_collection.mhr_pose_estimator import (
     MhrEstimatorConfig,
     MhrPoseEstimator,
@@ -82,12 +109,15 @@ class MhrToHml263Pipeline:
         self._estimator = MhrPoseEstimator(config.mhr_estimator_config)
         self._tpose_22 = SmplLeftArmFK().tpose_all_joints  # (22, 3)
 
-    def run(self, image_folder: Path) -> np.ndarray:
+    def run(self, image_folder: Path, source_fps: float = _HML_TARGET_FPS) -> np.ndarray:
         """Run the full pipeline: images → HML263.
 
         Args:
             image_folder: Directory of image frames (treated as a video
                 sequence; ordered by natural sort on filenames).
+            source_fps: Frame rate at which the images were extracted.
+                SMPL positions are resampled to 20 FPS before HML263
+                conversion.  Defaults to 20 (no resampling).
 
         Returns:
             ``(N, 263)`` HML263 feature array, ``float32``.
@@ -102,10 +132,11 @@ class MhrToHml263Pipeline:
             raise ValueError("MhrToHml263Config.hml_stats_dir must be set.")
 
         result = self._estimator.run(image_folder)
+        positions = _resample_smpl_positions(result["smpl_positions"], source_fps)
         mean, std = load_hml_stats(self._config.hml_stats_dir)
 
         return positions_to_hml263(
-            positions=result["smpl_positions"],
+            positions=positions,
             mean=mean,
             std=std,
             tpose_22=self._tpose_22,
@@ -114,14 +145,17 @@ class MhrToHml263Pipeline:
             normalize=self._config.output_normalized,
         )
 
-    def run_to_smpl_positions(self, image_folder: Path) -> np.ndarray:
-        """Return world-space 22-joint positions (debug/visualization helper).
+    def run_to_smpl_positions(
+        self, image_folder: Path, source_fps: float = _HML_TARGET_FPS
+    ) -> np.ndarray:
+        """Return world-space 22-joint positions resampled to 20 FPS.
 
         Args:
             image_folder: Directory of image frames.
+            source_fps: Frame rate at which the images were extracted.
 
         Returns:
-            ``(N, 22, 3)`` world-space joint positions in SMPL units.
+            ``(N, 22, 3)`` world-space joint positions in SMPL units at 20 FPS.
         """
         result = self._estimator.run(image_folder)
-        return result["smpl_positions"]
+        return _resample_smpl_positions(result["smpl_positions"], source_fps)

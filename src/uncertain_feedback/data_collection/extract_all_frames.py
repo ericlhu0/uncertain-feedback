@@ -4,13 +4,13 @@ Run this once before launching the labeler::
 
     uv run python src/uncertain_feedback/data_collection/extract_all_frames.py \\
         --videos_dir ./recordings/ \\
-        --frames_dir ./frames/ \\
-        [--fps 20]
+        --frames_dir ./frames/
 
-Each video produces a sub-directory ``<frames_dir>/<video_stem>/`` containing
-``frame_000001.jpg``, ``frame_000002.jpg``, … and a ``meta.json`` file with
-the extraction FPS and frame count.  These directories are consumed directly
-by the labeler and dataset builder.
+Every frame is extracted at the video's native FPS.  Each video produces a
+sub-directory ``<frames_dir>/<video_stem>/`` containing ``frame_000001.jpg``,
+``frame_000002.jpg``, … and a ``meta.json`` file with the source FPS and frame
+count.  These directories are consumed directly by the labeler and dataset
+builder.
 """
 
 from __future__ import annotations
@@ -24,13 +24,12 @@ from uncertain_feedback.data_collection.video_to_frames import extract_frames
 _VIDEO_EXTENSIONS = {".mov", ".mp4", ".avi", ".mkv", ".webm", ".m4v"}
 
 
-def extract_all(videos_dir: Path, frames_dir: Path, fps: float) -> None:
-    """Extract frames from every video in *videos_dir* into *frames_dir*.
+def extract_all(videos_dir: Path, frames_dir: Path) -> None:
+    """Extract every frame from every video in *videos_dir* into *frames_dir*.
 
     Args:
         videos_dir: Directory containing source video files.
         frames_dir: Root directory to write per-video frame folders into.
-        fps: Target frames per second for extraction.
     """
     videos = sorted(
         p for p in videos_dir.iterdir() if p.suffix.lower() in _VIDEO_EXTENSIONS
@@ -39,7 +38,7 @@ def extract_all(videos_dir: Path, frames_dir: Path, fps: float) -> None:
         print(f"No videos found in {videos_dir}")
         return
 
-    print(f"Found {len(videos)} video(s).  Extracting at {fps} fps …\n")
+    print(f"Found {len(videos)} video(s).\n")
     for video_path in videos:
         out_dir = frames_dir / video_path.stem
         meta_path = out_dir / "meta.json"
@@ -53,11 +52,11 @@ def extract_all(videos_dir: Path, frames_dir: Path, fps: float) -> None:
             continue
 
         print(f"  {video_path.name} → {out_dir.name}/  ", end="", flush=True)
-        count = extract_frames(video_path, out_dir, fps=fps)
-        meta = {"fps": fps, "count": count}
+        count, source_fps = extract_frames(video_path, out_dir)
+        meta = {"fps": source_fps, "count": count}
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f)
-        print(f"{count} frames")
+        print(f"{count} frames @ {source_fps} fps")
 
     print("\nDone.")
 
@@ -65,21 +64,18 @@ def extract_all(videos_dir: Path, frames_dir: Path, fps: float) -> None:
 def main() -> None:
     """Parse arguments and run batch frame extraction."""
     parser = argparse.ArgumentParser(
-        description="Extract frames from all videos in a directory."
+        description="Extract all frames from every video in a directory at native FPS."
     )
+    _here = Path(__file__).parent
     parser.add_argument(
-        "--videos_dir", required=True, help="Directory containing source video files."
+        "--videos_dir",
+        default=str(_here / "data" / "videos"),
+        help="Directory containing source video files (default: data_collection/data/videos/).",
     )
     parser.add_argument(
         "--frames_dir",
-        required=True,
-        help="Directory to write per-video frame folders into.",
-    )
-    parser.add_argument(
-        "--fps",
-        type=float,
-        default=20.0,
-        help="Frames per second to extract (default: 20).",
+        default=str(_here / "data" / "frames"),
+        help="Directory to write per-video frame folders into (default: data_collection/data/frames/).",
     )
     args = parser.parse_args()
 
@@ -90,7 +86,7 @@ def main() -> None:
     if not videos_dir.is_dir():
         raise FileNotFoundError(f"Videos directory not found: {videos_dir}")
 
-    extract_all(videos_dir, frames_dir, fps=args.fps)
+    extract_all(videos_dir, frames_dir)
 
 
 if __name__ == "__main__":

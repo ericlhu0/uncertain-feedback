@@ -200,6 +200,7 @@ def main():
 
     sitting_pose_path = MDM_ROOT / "demo_pose2.pt"
     sitting_pose = torch.load(sitting_pose_path, map_location="cuda")  # (263, 1)
+    input_motions = sitting_pose.unsqueeze(0).unsqueeze(-1).repeat(args.num_samples, 1, 1, n_frames)
     gt_frames_per_sample = {}
     apply_leftarm_inpainting(
         model_kwargs,

@@ -185,6 +185,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
     fix_body: bool = False,
     n_augment: int = 0,
     noise_std: float = 0.05,
+    cache_dir: Path | None = None,
 ) -> None:
     """Process labeled frame segments and write an MDM-compatible dataset directory.
 
@@ -209,9 +210,17 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             Each copy adds Gaussian noise (std=*noise_std*) to the arm features.
         noise_std: Standard deviation of the noise added to all HML263 features
             during augmentation, in normalized space.
+        cache_dir: Directory to cache raw HML263 pipeline outputs. When provided,
+            the raw ``pipeline.run()`` result for each ``(clip, start, end, fps)``
+            is saved as a ``.npy`` file so future runs skip re-running pose
+            estimation. Defaults to ``frames_dir.parent / "mdm_cache"``.
     """
     (output_dir / "new_joint_vecs").mkdir(parents=True, exist_ok=True)
     (output_dir / "texts").mkdir(parents=True, exist_ok=True)
+
+    if cache_dir is None:
+        cache_dir = frames_dir.parent / "mdm_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     arm_mask = _arm_feature_mask()
     hml_std = np.asarray(hml_std, dtype=np.float32)
@@ -252,26 +261,42 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             caption_note = f"  ({n_captions} caption{'s' if n_captions > 1 else ''})"
             print(f"[{id_str}] {clip_name}  f{start_frame}-f{end_frame}{caption_note} ...")
 
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                try:
-                    n_frames = _copy_frame_segment(
-                        clip_dir,
-                        Path(tmp_dir),
-                        start_frame=start_frame,
-                        end_frame=end_frame,
-                    )
-                    if n_frames == 0:
-                        print("  ✗ no frames found in range — skipping")
+            fps_tag = f"{clip_fps:.4g}".replace(".", "p")
+            cache_file = cache_dir / clip_name / f"{start_frame:06d}_{end_frame:06d}_fps{fps_tag}.npy"
+
+            if cache_file.exists():
+                hml263_raw = np.load(cache_file)
+                n_frames = end_frame - start_frame + 1
+                print(f"  (cache hit: {cache_file.relative_to(cache_dir)})")
+            else:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    try:
+                        n_frames = _copy_frame_segment(
+                            clip_dir,
+                            Path(tmp_dir),
+                            start_frame=start_frame,
+                            end_frame=end_frame,
+                        )
+                        if n_frames == 0:
+                            print("  ✗ no frames found in range — skipping")
+                            motion_id -= 1
+                            continue
+                        hml263_raw = pipeline.run(Path(tmp_dir), source_fps=clip_fps)  # (N, 263) raw HML263
+                    except Exception as exc:  # pylint: disable=broad-except
+                        print(f"  ✗ pipeline failed ({exc}) — skipping")
                         motion_id -= 1
                         continue
-                    hml263 = pipeline.run(Path(tmp_dir), source_fps=clip_fps)  # (N, 263) raw HML263
-                    hml263, resampled = _resample_hml263(hml263)
-                    if fix_body:
-                        hml263 = _lock_body_to_frame0(hml263)
-                except Exception as exc:  # pylint: disable=broad-except
-                    print(f"  ✗ pipeline failed ({exc}) — skipping")
-                    motion_id -= 1
-                    continue
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                np.save(cache_file, hml263_raw)
+
+            try:
+                hml263, resampled = _resample_hml263(hml263_raw)
+                if fix_body:
+                    hml263 = _lock_body_to_frame0(hml263)
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"  ✗ post-processing failed ({exc}) — skipping")
+                motion_id -= 1
+                continue
 
             np.save(output_dir / "new_joint_vecs" / f"{id_str}.npy", hml263)
             _write_text_file(output_dir / "texts" / f"{id_str}.txt", captions, nlp)
@@ -433,6 +458,14 @@ def main() -> None:  # pylint: disable=too-many-locals
         default=0.1,
         help="Fraction of motions for the test split (default: 0.1).",
     )
+    parser.add_argument(
+        "--cache_dir",
+        default=None,
+        help=(
+            "Directory to cache raw HML263 pipeline outputs and skip re-running "
+            "pose estimation on repeated calls (default: <frames_dir>/../mdm_cache)."
+        ),
+    )
     args = parser.parse_args()
 
     frames_dir = Path(args.frames_dir).expanduser().resolve()
@@ -440,6 +473,7 @@ def main() -> None:  # pylint: disable=too-many-locals
     output_dir = Path(args.output_dir).expanduser().resolve()
     hml_stats_dir = Path(args.hml_stats_dir).expanduser().resolve()
     sam_checkpoint_path = Path(args.sam_checkpoint_path).expanduser()
+    cache_dir = Path(args.cache_dir).expanduser().resolve() if args.cache_dir else None
 
     # Load labels
     with open(labels_json, encoding="utf-8") as f:
@@ -477,6 +511,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         fix_body=args.fix_body,
         n_augment=args.n_augment,
         noise_std=args.noise_std,
+        cache_dir=cache_dir,
     )
 
     # Copy normalization stats

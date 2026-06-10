@@ -127,9 +127,10 @@ uv run python -m train.train_mdm \
 ```
 
 To generate sanity-check samples from a fixed starting pose, use `train_leftarm.py` instead. It accepts the same flags plus three extras:
+(run from repo root. argument paths should be relative to `MDM_ROOT`)
 ```
-uv run python ../train_leftarm.py \
-    --save_dir ./save/my_finetuned \
+uv run python src/uncertain_feedback/motion_generators/mdm/train_leftarm.py \
+    --save_dir ./save/customv2 \
     --start_pose demo_pose.pt \
     --n_prefix 1 \
     --body_mode both \
@@ -139,8 +140,8 @@ uv run python ../train_leftarm.py \
     --mask_frames \
     --use_ema \
     --batch_size 8 \
-    --num_steps 700 \
-    --save_interval 100 \
+    --num_steps 5000 \
+    --save_interval 250 \
     --lr 3e-5 \
     --gen_during_training \
     --gen_num_samples 3 \

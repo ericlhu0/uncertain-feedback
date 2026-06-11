@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,7 +22,6 @@ from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_JOINT_INDICES_22,
     SmplLeftArmFK,
 )
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
@@ -30,22 +29,42 @@ if TYPE_CHECKING:
 if TYPE_CHECKING:
     import matplotlib
     from matplotlib.figure import Figure
-    from mpl_toolkits.mplot3d.axes3d import Axes3D  # type: ignore[import-untyped]
 
 _COLOR_ARM = "#4878CF"
 _COLOR_SELECTED = "#E87722"
 _COLOR_TRACE = "#888888"  # wrist trace
 _COLOR_CURRENT = "#AAAAAA"  # current MPC arm state
+
+
+class _OrthoView(NamedTuple):
+    title: str
+    hi: int  # horizontal axis index into (x, y, z)
+    vi: int  # vertical axis index
+    hl: str  # horizontal label
+    vl: str  # vertical label
+
+
 _PANEL_VIEWS = [
-    ("Front", 20, -90),
-    ("Side", 20, 0),
-    ("Overhead", 70, -90),
+    _OrthoView("Front (XY)", 0, 1, "X (m)", "Y (m)"),
+    _OrthoView("Side (ZY)", 2, 1, "Z (m)", "Y (m)"),
+    _OrthoView("Top (XZ)", 0, 2, "X (m)", "Z (m)"),
 ]
 
 
-def _xzy(pos: np.ndarray) -> np.ndarray:
-    """Reorder (N, 3) SMPL Y-up positions to (x, z, y) for matplotlib 3D display."""
-    return pos[:, [0, 2, 1]]
+def _draw_bones_2d(
+    ax: "plt.Axes",
+    positions: np.ndarray,
+    bone_pairs: list[tuple[int, int]],
+    hi: int,
+    vi: int,
+    color: str,
+    alpha: float = 1.0,
+    lw: float = 1.5,
+    linestyle: str = "-",
+) -> None:
+    for pi, ci in bone_pairs:
+        seg = positions[[pi, ci]]
+        ax.plot(seg[:, hi], seg[:, vi], color=color, alpha=alpha, linewidth=lw, linestyle=linestyle)
 
 
 def _merge_arm(arm_full: np.ndarray, body_pos: np.ndarray | None) -> np.ndarray:
@@ -93,35 +112,34 @@ def _fk_batch_for_arm(
 
 
 def _draw_body(
-    ax: "Axes3D", body_pos: np.ndarray, arm_color: str
+    ax: "plt.Axes", body_pos: np.ndarray, arm_color: str, hi: int, vi: int
 ) -> tuple[list, object]:
-    """Draw full body on ax.
+    """Draw full body on a 2D axes.
 
     Returns (arm_bone_lines, arm_joint_scatter).
     """
     from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
-    body_xzy = _xzy(body_pos)
     # Grey non-arm skeleton
-    ArmVisualizer.draw_bones_3d(ax, body_xzy, ArmVisualizer.BODY_BONES, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+    _draw_bones_2d(ax, body_pos, ArmVisualizer.BODY_BONES, hi, vi, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
     ax.scatter(
-        *body_xzy[ArmVisualizer.BODY_JOINTS].T,
+        body_pos[ArmVisualizer.BODY_JOINTS, hi],
+        body_pos[ArmVisualizer.BODY_JOINTS, vi],
         color=ArmVisualizer.BODY_COLOR,
         s=14,
         alpha=0.45,
-        depthshade=False,
     )
 
     # Coloured arm skeleton (mutable for highlight)
     arm_lines = []
     for pi, ci in LEFT_ARM_BONE_PAIRS_22:
-        seg = body_xzy[[pi, ci]]
-        (ln,) = ax.plot(seg[:, 0], seg[:, 1], seg[:, 2], color=arm_color, linewidth=2.2)
+        seg = body_pos[[pi, ci]]
+        (ln,) = ax.plot(seg[:, hi], seg[:, vi], color=arm_color, linewidth=2.2)
         arm_lines.append(ln)
     arm_scat = ax.scatter(
-        *body_xzy[LEFT_ARM_JOINT_INDICES_22].T,
+        body_pos[LEFT_ARM_JOINT_INDICES_22, hi],
+        body_pos[LEFT_ARM_JOINT_INDICES_22, vi],
         c=arm_color,
         s=35,
-        depthshade=False,
         zorder=5,
     )
     return arm_lines, arm_scat
@@ -137,12 +155,11 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
         list[list[np.ndarray]] | None
     ) = None,  # each list of (22, 3)
     current_body: np.ndarray | None = None,  # (22, 3) current MPC arm state
-) -> tuple["Figure", list[list["Axes3D"]], list[list], list[list]]:
-    from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+) -> tuple["Figure", list[list], list[list], list[list]]:
     n_clusters = len(unique_labels)
     n_views = len(_PANEL_VIEWS)
     fig_w = max(4 * n_clusters, 8)
-    fig = plt.figure(figsize=(fig_w, 3.5 * n_views + 1.0))
+    fig = plt.figure(figsize=(fig_w, 3.0 * n_views + 1.0))
     fig.patch.set_facecolor("#F5F5F5")
 
     gs = fig.add_gridspec(
@@ -150,13 +167,13 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
         n_clusters,
         bottom=0.12,
         top=0.92,
-        left=0.04,
-        right=0.96,
-        wspace=0.05,
-        hspace=0.16,
+        left=0.06,
+        right=0.98,
+        wspace=0.08,
+        hspace=0.30,
     )
     axes_by_cluster = [
-        [fig.add_subplot(gs[row, col], projection="3d") for row in range(n_views)]
+        [fig.add_subplot(gs[row, col]) for row in range(n_views)]
         for col in range(n_clusters)
     ]
 
@@ -168,31 +185,27 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     ):
         cluster_lines = []
         cluster_scats = []
-        for view_idx, (view_name, elev, azim) in enumerate(_PANEL_VIEWS):
+        for view_idx, view in enumerate(_PANEL_VIEWS):
             ax = axes_by_cluster[idx][view_idx]
-            ax.view_init(elev=elev, azim=azim)  # type: ignore[attr-defined]
-            ax.set_xlim(*lims[0])
-            ax.set_ylim(*lims[2])
-            ax.set_zlim(*lims[1])  # type: ignore[attr-defined]
-            ax.set_xlabel("X", fontsize=7)
-            ax.set_ylabel("Z", fontsize=7)
-            ax.set_zlabel("Y", fontsize=7)  # type: ignore[attr-defined]
+            ax.set_aspect("equal")
+            ax.set_xlim(*lims[view.hi])
+            ax.set_ylim(*lims[view.vi])
+            ax.set_xlabel(view.hl, fontsize=7)
+            ax.set_ylabel(view.vl, fontsize=7)
             ax.tick_params(labelsize=6)
             if view_idx == 0:
                 ax.set_title(
-                    f"Cluster {k} ({count} samples)\n{view_name}",
+                    f"Cluster {k} ({count} samples)\n{view.title}",
                     fontsize=9,
                     pad=4,
                 )
             else:
-                ax.set_title(view_name, fontsize=9, pad=4)
+                ax.set_title(view.title, fontsize=9, pad=4)
 
             # Wrist trace (static grey)
-            wt = _xzy(wrist_trace)
             ax.plot(
-                wt[:, 0],
-                wt[:, 1],
-                wt[:, 2],
+                wrist_trace[:, view.hi],
+                wrist_trace[:, view.vi],
                 linestyle=":",
                 color=_COLOR_TRACE,
                 linewidth=1.0,
@@ -202,10 +215,12 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
             # Individual ghost arms (one per sample in cluster), very faint
             if cluster_individual_previews is not None:
                 for body_ind in cluster_individual_previews[idx]:
-                    ArmVisualizer.draw_bones_3d(
+                    _draw_bones_2d(
                         ax,
-                        _xzy(body_ind),
+                        body_ind,
                         LEFT_ARM_BONE_PAIRS_22,
+                        view.hi,
+                        view.vi,
                         _COLOR_ARM,
                         alpha=0.12,
                         lw=1.2,
@@ -213,24 +228,26 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
 
             # Current MPC arm state (grey, drawn behind the cluster arm)
             if current_body is not None:
-                cb_xzy = _xzy(current_body)
-                ArmVisualizer.draw_bones_3d(
+                _draw_bones_2d(
                     ax,
-                    cb_xzy,
+                    current_body,
                     LEFT_ARM_BONE_PAIRS_22,
+                    view.hi,
+                    view.vi,
                     _COLOR_CURRENT,
                     alpha=0.9,
                     lw=2.2,
                 )
-                ax.scatter(  # type: ignore[misc]
-                    *cb_xzy[LEFT_ARM_JOINT_INDICES_22].T,
+                ax.scatter(
+                    current_body[LEFT_ARM_JOINT_INDICES_22, view.hi],
+                    current_body[LEFT_ARM_JOINT_INDICES_22, view.vi],
                     color=_COLOR_CURRENT,
                     s=28,
-                    depthshade=False,
+                    zorder=4,
                 )
 
             # Solid mean arm at trajectory-fraction cutoff (the pose that will be enqueued)
-            arm_lines, arm_scat = _draw_body(ax, body_cutoff, _COLOR_ARM)
+            arm_lines, arm_scat = _draw_body(ax, body_cutoff, _COLOR_ARM, view.hi, view.vi)
             cluster_lines.extend(arm_lines)
             cluster_scats.append(arm_scat)
         panel_arm_lines.append(cluster_lines)

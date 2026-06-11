@@ -115,6 +115,11 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             if spine3_aa is not None
             else np.zeros(3, dtype=np.float64)
         )
+        self._body_pos = (
+            np.asarray(body_pos, dtype=np.float64)
+            if body_pos is not None
+            else None
+        )
         if visualize:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")

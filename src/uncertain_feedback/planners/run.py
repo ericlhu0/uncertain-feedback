@@ -191,9 +191,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--text-time",
         type=int,
-        default=0,
+        default=None,
         dest="text_time",
-        help="MPC step at which MDM generation is triggered",
+        help="MPC step at which MDM generation is triggered (overrides YAML text_time)",
     )
     p.add_argument(
         "--save-motion",
@@ -842,7 +842,8 @@ def main() -> None:
 
     for step in tqdm(range(cfg.steps), desc="MPC", unit="step"):
         # Trigger MDM generation at the configured step
-        if uses_mdm and args.text and step == args.text_time and not mdm_triggered:
+        effective_text_time = args.text_time if args.text_time is not None else cfg.text_time
+        if uses_mdm and args.text and step == effective_text_time and not mdm_triggered:
             mdm_triggered = True
             assert gen is not None and initial_pose is not None
 
@@ -856,7 +857,7 @@ def main() -> None:
                     args.text,
                     start_pose=current_pose,
                     save_path=str(args.save_motion) if args.save_motion else None,
-                    num_frames=args.mdm_frames,
+                    num_frames=args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames,
                     frozen_body=args.frozen_body,
                     spine3_aa=spine3_aa,
                 )
@@ -903,7 +904,7 @@ def main() -> None:
                     start_pose=current_pose,
                     current_arm_aa=q,
                     auto_cluster=cfg.uq.auto_cluster,
-                    mdm_frames=args.mdm_frames,
+                    mdm_frames=args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames,
                     frozen_body=args.frozen_body,
                 )
                 if cfg.preference_learning:

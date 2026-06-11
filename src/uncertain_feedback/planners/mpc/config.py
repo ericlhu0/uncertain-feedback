@@ -65,6 +65,8 @@ class MpcRunConfig:
     cartesian: CartesianConfig
     costs: dict[str, dict[str, Any]]
     llm_cost: LlmCostConfig
+    mdm_frames: int | None = None
+    text_time: int = 0
     preference_learning: bool = True
     preference_alpha: float = 0.5
     preference_window: int = 50
@@ -235,6 +237,12 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 ),
             ),
         ),
+        mdm_frames=(
+            None
+            if data.get("mdm_frames") is None
+            else _positive_int(data["mdm_frames"], "mdm_frames")
+        ),
+        text_time=int(data.get("text_time", 0)),
         preference_learning=_bool(
             data.get("preference_learning", True), "preference_learning"
         ),

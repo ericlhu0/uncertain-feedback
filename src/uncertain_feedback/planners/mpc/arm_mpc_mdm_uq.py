@@ -212,7 +212,9 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             )
             spine_aa = base_spine_aa
             body_pos = (
-                self._vis_config.body_pos if self._vis_config is not None else None
+                self._vis_config.body_pos
+                if self._vis_config is not None
+                else self._body_pos
             )
             picker_t0 = time.perf_counter()
             if positions is not None:

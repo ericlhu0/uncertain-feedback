@@ -224,6 +224,7 @@ pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 goal_threshold: 0.1
 advance_threshold: 0.1
 trajectory_fraction: 1.0
+mdm_frames: 50
 
 uq:
   diffusion_samples: 128

@@ -43,6 +43,11 @@ _PANEL_VIEWS = [
 ]
 
 
+def _xzy(pos: np.ndarray) -> np.ndarray:
+    """Reorder (N, 3) SMPL Y-up positions to (x, z, y) for matplotlib 3D display."""
+    return pos[:, [0, 2, 1]]
+
+
 def _merge_arm(arm_full: np.ndarray, body_pos: np.ndarray | None) -> np.ndarray:
     """Combine FK arm joints with a reference body pose.
 
@@ -95,10 +100,11 @@ def _draw_body(
     Returns (arm_bone_lines, arm_joint_scatter).
     """
     from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+    body_xzy = _xzy(body_pos)
     # Grey non-arm skeleton
-    ArmVisualizer.draw_bones_3d(ax, body_pos, ArmVisualizer.BODY_BONES, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+    ArmVisualizer.draw_bones_3d(ax, body_xzy, ArmVisualizer.BODY_BONES, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
     ax.scatter(
-        *body_pos[ArmVisualizer.BODY_JOINTS].T,
+        *body_xzy[ArmVisualizer.BODY_JOINTS].T,
         color=ArmVisualizer.BODY_COLOR,
         s=14,
         alpha=0.45,
@@ -108,11 +114,11 @@ def _draw_body(
     # Coloured arm skeleton (mutable for highlight)
     arm_lines = []
     for pi, ci in LEFT_ARM_BONE_PAIRS_22:
-        seg = body_pos[[pi, ci]]
+        seg = body_xzy[[pi, ci]]
         (ln,) = ax.plot(seg[:, 0], seg[:, 1], seg[:, 2], color=arm_color, linewidth=2.2)
         arm_lines.append(ln)
     arm_scat = ax.scatter(
-        *body_pos[LEFT_ARM_JOINT_INDICES_22].T,
+        *body_xzy[LEFT_ARM_JOINT_INDICES_22].T,
         c=arm_color,
         s=35,
         depthshade=False,
@@ -166,11 +172,11 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
             ax = axes_by_cluster[idx][view_idx]
             ax.view_init(elev=elev, azim=azim)  # type: ignore[attr-defined]
             ax.set_xlim(*lims[0])
-            ax.set_ylim(*lims[1])
-            ax.set_zlim(*lims[2])  # type: ignore[attr-defined]
+            ax.set_ylim(*lims[2])
+            ax.set_zlim(*lims[1])  # type: ignore[attr-defined]
             ax.set_xlabel("X", fontsize=7)
-            ax.set_ylabel("Y", fontsize=7)
-            ax.set_zlabel("Z", fontsize=7)  # type: ignore[attr-defined]
+            ax.set_ylabel("Z", fontsize=7)
+            ax.set_zlabel("Y", fontsize=7)  # type: ignore[attr-defined]
             ax.tick_params(labelsize=6)
             if view_idx == 0:
                 ax.set_title(
@@ -182,10 +188,11 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
                 ax.set_title(view_name, fontsize=9, pad=4)
 
             # Wrist trace (static grey)
+            wt = _xzy(wrist_trace)
             ax.plot(
-                wrist_trace[:, 0],
-                wrist_trace[:, 1],
-                wrist_trace[:, 2],
+                wt[:, 0],
+                wt[:, 1],
+                wt[:, 2],
                 linestyle=":",
                 color=_COLOR_TRACE,
                 linewidth=1.0,
@@ -197,7 +204,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
                 for body_ind in cluster_individual_previews[idx]:
                     ArmVisualizer.draw_bones_3d(
                         ax,
-                        body_ind,
+                        _xzy(body_ind),
                         LEFT_ARM_BONE_PAIRS_22,
                         _COLOR_ARM,
                         alpha=0.12,
@@ -206,16 +213,17 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
 
             # Current MPC arm state (grey, drawn behind the cluster arm)
             if current_body is not None:
+                cb_xzy = _xzy(current_body)
                 ArmVisualizer.draw_bones_3d(
                     ax,
-                    current_body,
+                    cb_xzy,
                     LEFT_ARM_BONE_PAIRS_22,
                     _COLOR_CURRENT,
                     alpha=0.9,
                     lw=2.2,
                 )
                 ax.scatter(  # type: ignore[misc]
-                    *current_body[LEFT_ARM_JOINT_INDICES_22].T,
+                    *cb_xzy[LEFT_ARM_JOINT_INDICES_22].T,
                     color=_COLOR_CURRENT,
                     s=28,
                     depthshade=False,

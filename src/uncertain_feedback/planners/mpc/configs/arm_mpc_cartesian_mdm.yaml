@@ -6,7 +6,8 @@ max_angle_delta: 0.0025
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 goal_threshold: 0.1
 advance_threshold: 0.1
-trajectory_fraction: 1
+trajectory_fraction: 0.9
+text_time: 10
 
 uq:
   diffusion_samples: 500

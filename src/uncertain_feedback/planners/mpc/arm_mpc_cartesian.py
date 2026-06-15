@@ -102,6 +102,11 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             fk, spine3_pos, spine3_aa,
         )
 
+    @property
+    def mdm_tracking_complete(self) -> bool:
+        """True when the MDM queue is empty (fully transitioned to Cartesian)."""
+        return not self._goals
+
     # ------------------------------------------------------------------
     # solve override
     # ------------------------------------------------------------------
@@ -167,10 +172,10 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                     vis_goal,
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
-
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                     elbow_height_range=self._elbow_height_world_range(),
+                    show_target_arm=False,
                 )
                 if self._vis_config.capture:
                     self._vis.start_capture()
@@ -215,10 +220,10 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                     self._initial_arm_aa,
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
-
                     body_pos=self._vis_config.body_pos,
                     compact=self._vis_config.compact,
                     elbow_height_range=self._elbow_height_world_range(),
+                    show_target_arm=False,
                 )
                 if self._vis_config.capture:
                     self._vis.start_capture()

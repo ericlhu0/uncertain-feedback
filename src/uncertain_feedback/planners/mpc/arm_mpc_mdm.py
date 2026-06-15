@@ -136,6 +136,11 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
     # MDM-specific public API
     # ------------------------------------------------------------------
 
+    @property
+    def mdm_tracking_complete(self) -> bool:
+        """True once the arm has reached the final MDM waypoint (queue ≤1)."""
+        return len(self._goals) <= 1
+
     def push_trajectory(
         self,
         frames: np.ndarray,

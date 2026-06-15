@@ -181,10 +181,9 @@ Use the unified runner from the repo root:
 uv run python -m uncertain_feedback.planners.run --mpc-config path/to/mpc.yaml
 ```
 
-Controller settings now live in the required YAML file passed with `--mpc-config`.
+Controller settings live in the required YAML file passed with `--mpc-config`.
 The initial whole-body HML pose can be set with `pose:` in the YAML. Runtime
-inputs still stay on the command line: `--model-path`, `--arm`, `--text`,
-`--text-time`, `--save`, `--live`, `--mdm-frames`, and `--frozen-body`.
+inputs still stay on the command line: `--model-path`, `--arm`, `--text`, `--save`, `--live`, and `--frozen-body`.
 `--pose` is still accepted as an override for the YAML pose.
 
 Supported YAML `planner` values:
@@ -238,7 +237,6 @@ uv run python -m uncertain_feedback.planners.run \
   --mpc-config src/uncertain_feedback/planners/mpc/configs/mpc_mdm_uq.yaml \
   --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
   --text "raise my left arm" \
-  --mdm-frames 100 \
   --save out.mp4 \
   --live
 ```

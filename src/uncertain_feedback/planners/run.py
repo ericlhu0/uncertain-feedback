@@ -20,11 +20,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
@@ -37,6 +39,10 @@ from uncertain_feedback.planners.mpc import (
     LeftArmMPCMDMUQ,
     SmplLeftArmFK,
     SmplLeftArmMPC,
+)
+from uncertain_feedback.planners.mpc.kinematics import (
+    LEFT_ARM_BONE_PAIRS_22,
+    LEFT_ARM_JOINT_INDICES_22,
 )
 from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import UqClusterResult
@@ -351,9 +357,11 @@ def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-lo
     llm_cfg: Any,
     artifact_base_dir: Path,
     history_window: int,
+    body_pos: np.ndarray | None = None,
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
     run_dir: Path | None = None,
     install: bool = True,
+    pre_rendered_image_paths: list[Path] | None = None,
 ) -> GeneratedPythonCost | None:
     """Generate, validate, save, and install an LLM-generated MPC cost."""
     if run_dir is None:
@@ -369,10 +377,13 @@ def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-lo
             mdm_traj,
             q_history,
             window=history_window,
+            body_pos=body_pos,
         )
         summaries = build_motion_summaries(generated_context)
         image_paths: list[Path] = []
-        if llm_cfg.use_images:
+        if pre_rendered_image_paths is not None:
+            image_paths = pre_rendered_image_paths
+        elif llm_cfg.use_images:
             image_paths = render_prompt_images(generated_context, image_dir)
         with open(run_dir / "summaries.json", "w", encoding="utf-8") as f:
             json.dump(summaries, f, indent=2, sort_keys=True)
@@ -389,7 +400,7 @@ def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-lo
                 image_description, encoding="utf-8"
             )
             print(f"[llm-cost] image description: {image_description}")
-        prompt = build_llm_cost_prompt(instruction, summaries, image_paths, image_description)
+        prompt = build_llm_cost_prompt(instruction, summaries, image_paths)
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         raw_response = llm.get_full_output(prompt, image_input=image_input)
         (run_dir / "raw_response.txt").write_text(raw_response, encoding="utf-8")
@@ -408,10 +419,27 @@ def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-lo
         generated_cost(validation_q)
 
         (run_dir / "cost.py").write_text(response.code, encoding="utf-8")
+        if response.explanation:
+            (run_dir / "explanation.txt").write_text(
+                response.explanation,
+                encoding="utf-8",
+            )
+            print(f"[llm-cost] explanation: {response.explanation}")
+        if response.recipient_explanation:
+            (run_dir / "recipient_explanation.txt").write_text(
+                response.recipient_explanation,
+                encoding="utf-8",
+            )
+            print(
+                "[llm-cost] recipient explanation: "
+                f"{response.recipient_explanation}"
+            )
         with open(run_dir / "params.json", "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "description": response.description,
+                    "explanation": response.explanation,
+                    "recipient_explanation": response.recipient_explanation,
                     "params": response.params,
                     "model": model_name,
                 },
@@ -462,11 +490,17 @@ def _run_llm_cluster_experiment(  # pylint: disable=too-many-arguments,too-many-
     body_pos: np.ndarray | None,
     spine3_pos: np.ndarray | None,
     spine3_aa: np.ndarray | None,
+    initial_q: np.ndarray | None = None,
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
+    install: bool = True,
+    pre_rendered_images_per_cluster: dict[int, list[Path]] | None = None,
+    root_dir: Path | None = None,
+    run_rollouts_async: bool = True,
 ) -> GeneratedPythonCost | None:
     """Generate one cost per UQ cluster and run headless comparison rollouts."""
     cluster_cfg = cfg.llm_cost.cluster_experiment
-    root_dir = _llm_artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
+    if root_dir is None:
+        root_dir = _llm_artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
     root_dir.mkdir(parents=True, exist_ok=True)
     (root_dir / "selected_cluster.txt").write_text(
         f"{uq_result.chosen_label}\n", encoding="utf-8"
@@ -484,11 +518,19 @@ def _run_llm_cluster_experiment(  # pylint: disable=too-many-arguments,too-many-
         "clusters": {},
     }
     selected_cost: GeneratedPythonCost | None = None
+    generated_costs_by_label: dict[int, GeneratedPythonCost] = {}
 
+    # Phase 1: generate all LLM costs (sequential; main loop joins this thread).
+    _costs_ready: list[tuple] = []  # (label, cluster_traj, generated, cluster_dir, entry)
     for label in summary["cluster_ids"]:
         cluster_traj = uq_result.cluster_means[int(label)]
         cluster_dir = root_dir / f"cluster_{label}"
         install_selected = int(label) == uq_result.chosen_label
+        pre_rendered = (
+            pre_rendered_images_per_cluster.get(label)
+            if pre_rendered_images_per_cluster is not None
+            else None
+        )
         generated = _apply_llm_generated_cost(
             mpc,
             instruction,
@@ -499,9 +541,11 @@ def _run_llm_cluster_experiment(  # pylint: disable=too-many-arguments,too-many-
             cfg.llm_cost,
             artifact_base_dir,
             history_window,
+            body_pos=body_pos,
             llm_model_factory=llm_model_factory,
             run_dir=cluster_dir,
-            install=install_selected,
+            install=install_selected and install,
+            pre_rendered_image_paths=pre_rendered,
         )
         validation = _read_json_if_exists(cluster_dir / "validation.json")
         params = _read_json_if_exists(cluster_dir / "params.json")
@@ -513,6 +557,14 @@ def _run_llm_cluster_experiment(  # pylint: disable=too-many-arguments,too-many-
             "description": (
                 params.get("description") if isinstance(params, dict) else None
             ),
+            "explanation": (
+                params.get("explanation") if isinstance(params, dict) else None
+            ),
+            "recipient_explanation": (
+                params.get("recipient_explanation")
+                if isinstance(params, dict)
+                else None
+            ),
             "params": params.get("params") if isinstance(params, dict) else None,
             "rollout_metrics": None,
         }
@@ -523,32 +575,84 @@ def _run_llm_cluster_experiment(  # pylint: disable=too-many-arguments,too-many-
 
         if install_selected:
             selected_cost = generated
-
-        rollout, metrics = _run_cluster_comparison_rollout(
-            cfg,
-            current_q,
-            cluster_traj,
-            context,
-            base_extra_costs,
-            generated,
-            rollout_steps,
-            body_pos,
-            spine3_pos,
-            spine3_aa,
-        )
-        rollout_path = cluster_dir / "rollout.npy"
-        metrics_path = cluster_dir / "metrics.json"
-        np.save(rollout_path, rollout)
-        with open(metrics_path, "w", encoding="utf-8") as f:
-            json.dump(metrics, f, indent=2, sort_keys=True)
-        entry["rollout_path"] = str(rollout_path)
-        entry["metrics_path"] = str(metrics_path)
-        entry["rollout_metrics"] = metrics
+        generated_costs_by_label[int(label)] = generated
+        _costs_ready.append((label, cluster_traj, generated, cluster_dir, entry))
         summary["clusters"][str(label)] = entry
         _write_comparison_summary(root_dir, summary)
 
-    print(f"[llm-cost] cluster comparison artifacts saved to: {root_dir}")
+    # Phase 2: run rollouts and render videos in a separate daemon thread so the
+    # outer thread (which the main MPC loop joins) can return selected_cost immediately.
+    _cartesian_goal = np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian.goals else None
+
+    def _rollout_video_thread_fn(
+        _costs=_costs_ready,
+        _summary=summary,
+        _gen_by_label=generated_costs_by_label,
+    ) -> None:
+        for _label, _traj, _gen, _cdir, _entry in _costs:
+            _rollout, _metrics, _colors = _run_cluster_comparison_rollout(
+                cfg, current_q, _traj, context, base_extra_costs, _gen,
+                rollout_steps, body_pos, spine3_pos, spine3_aa,
+            )
+            np.save(_cdir / "rollout.npy", _rollout)
+            with open(_cdir / "metrics.json", "w", encoding="utf-8") as _f:
+                json.dump(_metrics, _f, indent=2, sort_keys=True)
+            _entry["rollout_path"] = str(_cdir / "rollout.npy")
+            _entry["metrics_path"] = str(_cdir / "metrics.json")
+            _entry["rollout_metrics"] = _metrics
+            _n = _traj.shape[0]
+            _cutoff = max(1, round(_n * cfg.trajectory_fraction))
+            _render_rollout_video(
+                _rollout, context.fk, spine3_pos, spine3_aa,
+                _cdir / "rollout.mp4",
+                body_pos=body_pos, cartesian_goal=_cartesian_goal,
+                frame_colors=_colors, mdm_goal_q=_traj[_cutoff - 1],
+            )
+            _summary["clusters"][str(_label)] = _entry
+            _write_comparison_summary(root_dir, _summary)
+
+        if initial_q is not None and cfg.planner in (
+            "arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"
+        ):
+            for _label in _summary["cluster_ids"]:
+                _gen = _gen_by_label.get(int(_label))
+                if _gen is None:
+                    continue
+                _cdir = root_dir / f"cluster_{_label}"
+                _cluster_entry = _summary["clusters"].get(str(_label), {})
+                _is_rollout, _is_metrics = _run_initial_state_rollout(
+                    cfg, initial_q, context, base_extra_costs, _gen,
+                    rollout_steps, body_pos, spine3_pos, spine3_aa,
+                )
+                np.save(_cdir / "initial_state_rollout.npy", _is_rollout)
+                with open(_cdir / "initial_state_metrics.json", "w", encoding="utf-8") as _f:
+                    json.dump(_is_metrics, _f, indent=2, sort_keys=True)
+                _render_rollout_video(
+                    _is_rollout, context.fk, spine3_pos, spine3_aa,
+                    _cdir / "initial_state_rollout.mp4",
+                    body_pos=body_pos, cartesian_goal=_cartesian_goal,
+                )
+                _cluster_entry["initial_state_rollout_path"] = str(
+                    _cdir / "initial_state_rollout.npy"
+                )
+                _cluster_entry["initial_state_metrics"] = _is_metrics
+                _summary["clusters"][str(_label)] = _cluster_entry
+                _write_comparison_summary(root_dir, _summary)
+
+        print(f"[llm-cost] cluster comparison artifacts saved to: {root_dir}")
+
+    if run_rollouts_async:
+        threading.Thread(target=_rollout_video_thread_fn, daemon=False).start()
+    else:
+        _rollout_video_thread_fn()
     return selected_cost
+
+
+def _planner_frame_color(planner: SmplLeftArmMPC) -> str:
+    """Return the arm color for the current planner state (MDM vs Cartesian)."""
+    if isinstance(planner, LeftArmMPCCartesian) and not planner.mdm_tracking_complete:
+        return ArmVisualizer.MDM_COLOR
+    return ArmVisualizer.TARGET_COLOR
 
 
 def _run_cluster_comparison_rollout(  # pylint: disable=too-many-arguments
@@ -562,7 +666,7 @@ def _run_cluster_comparison_rollout(  # pylint: disable=too-many-arguments
     body_pos: np.ndarray | None,
     spine3_pos: np.ndarray | None,
     spine3_aa: np.ndarray | None,
-) -> tuple[np.ndarray, dict[str, Any]]:
+) -> tuple[np.ndarray, dict[str, Any], list[str]]:
     """Run a headless MPC rollout with one cluster's generated cost."""
     comparison_mpc = _build_cluster_rollout_planner(
         cfg,
@@ -577,6 +681,7 @@ def _run_cluster_comparison_rollout(  # pylint: disable=too-many-arguments
     )
     q = np.asarray(current_q, dtype=np.float64).copy()
     rollout_frames = [q.copy()]
+    frame_colors = [_planner_frame_color(comparison_mpc)]
     error: str | None = None
     for _ in range(rollout_steps):
         try:
@@ -585,6 +690,7 @@ def _run_cluster_comparison_rollout(  # pylint: disable=too-many-arguments
             error = str(exc)
             break
         rollout_frames.append(q.copy())
+        frame_colors.append(_planner_frame_color(comparison_mpc))
 
     rollout = np.asarray(rollout_frames, dtype=np.float64)
     metrics = _rollout_metrics(rollout, comparison_mpc, context)
@@ -592,7 +698,7 @@ def _run_cluster_comparison_rollout(  # pylint: disable=too-many-arguments
     metrics["steps_completed"] = int(max(0, rollout.shape[0] - 1))
     if error is not None:
         metrics["error"] = error
-    return rollout, metrics
+    return rollout, metrics, frame_colors
 
 
 def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
@@ -670,6 +776,74 @@ def _rollout_metrics(
             np.linalg.norm(final_q - mpc.current_goal)
         )
     return metrics
+
+
+def _render_rollout_video(
+    rollout: np.ndarray,
+    fk: SmplLeftArmFK,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+    save_path: Path,
+    body_pos: np.ndarray | None = None,
+    cartesian_goal: np.ndarray | None = None,
+    frame_colors: list[str] | None = None,
+    mdm_goal_q: np.ndarray | None = None,
+    fps: int = 20,
+) -> None:
+    """Render a (steps+1, 3, 3) rollout to an MP4 using the 6-panel MPC layout."""
+    ArmVisualizer(fk).render_rollout_video(
+        rollout, save_path,
+        spine3_pos=spine3_pos, spine3_aa=spine3_aa,
+        body_pos=body_pos, cartesian_goal=cartesian_goal,
+        frame_colors=frame_colors, mdm_goal_q=mdm_goal_q, fps=fps,
+    )
+
+
+def _run_initial_state_rollout(
+    cfg: MpcRunConfig,
+    initial_q: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    generated_cost: GeneratedPythonCost,
+    rollout_steps: int,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Run MPC from the true initial state with one cluster's cost and the Cartesian goal."""
+    extra_costs = _append_extra_cost(base_extra_costs, generated_cost)
+    planner = ArmMPCCartesianNoMDM(
+        cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
+        initial_arm_aa=initial_q,
+        cartesian_threshold=cfg.cartesian.threshold,
+        horizon=cfg.horizon,
+        n_mpc_samples=cfg.n_mpc_samples,
+        max_angle_delta=cfg.max_angle_delta,
+        goal_threshold=cfg.goal_threshold,
+        visualize=False,
+        fk=context.fk,
+        spine3_pos=spine3_pos,
+        spine3_aa=spine3_aa,
+        body_pos=body_pos,
+        extra_costs=extra_costs,
+    )
+    q = np.asarray(initial_q, dtype=np.float64).copy()
+    rollout_frames = [q.copy()]
+    error: str | None = None
+    for _ in range(rollout_steps):
+        try:
+            q = planner.step(q)
+        except RuntimeError as exc:
+            error = str(exc)
+            break
+        rollout_frames.append(q.copy())
+    rollout = np.asarray(rollout_frames, dtype=np.float64)
+    metrics = _rollout_metrics(rollout, planner, context)
+    metrics["steps_requested"] = rollout_steps
+    metrics["steps_completed"] = int(max(0, rollout.shape[0] - 1))
+    if error is not None:
+        metrics["error"] = error
+    return rollout, metrics
 
 
 def _read_json_if_exists(path: Path) -> Any:
@@ -839,6 +1013,8 @@ def main() -> None:
     preference_output_path = args.preference_output or _default_preference_output_path(
         args.mpc_config
     )
+    pending_llm_thread: threading.Thread | None = None
+    pending_llm_result: list[GeneratedPythonCost | None] = []
 
     for step in tqdm(range(cfg.steps), desc="MPC", unit="step"):
         # Trigger MDM generation at the configured step
@@ -879,23 +1055,51 @@ def main() -> None:
                         "[preference] learning disabled; generated trajectory "
                         "will not update elbow bounds"
                     )
-                if cfg.llm_cost.enabled:
-                    _apply_llm_generated_cost(
-                        mpc,
-                        args.text,
-                        traj,
-                        q,
-                        q_history,
-                        cost_context,
-                        cfg.llm_cost,
-                        artifact_base_dir,
-                        cfg.preference_window,
-                    )
                 mdm_mpc = cast(LeftArmMPCMDM, mpc)
                 n_frames = traj.shape[0]
                 cutoff = max(1, round(n_frames * mdm_mpc.trajectory_fraction))
                 mdm_mpc.set_mdm_goal(traj[cutoff - 1])
                 mdm_mpc.push_trajectory(traj[:cutoff])
+                if cfg.llm_cost.enabled:
+                    _llm_run_dir = _llm_artifact_run_dir(
+                        artifact_base_dir, cfg.llm_cost.artifact_dir
+                    )
+                    # Pre-render images on the main thread (matplotlib is not thread-safe)
+                    _pre_imgs: list[Path] = []
+                    if cfg.llm_cost.use_images:
+                        _llm_run_dir.mkdir(parents=True, exist_ok=True)
+                        _img_ctx = build_generated_cost_context(
+                            cost_context, q, traj[:cutoff], list(q_history),
+                            window=cfg.preference_window, body_pos=body_pos,
+                        )
+                        _pre_imgs = render_prompt_images(
+                            _img_ctx, _llm_run_dir / "images"
+                        )
+                    # Snapshots so the thread doesn't race with the main loop
+                    _traj_snap = traj[:cutoff].copy()
+                    _q_snap = q.copy()
+                    _qh_snap = list(q_history)
+                    _preimg = _pre_imgs if _pre_imgs else None
+                    _rdir = _llm_run_dir
+
+                    def _llm_thread_fn(
+                        _traj=_traj_snap, _q=_q_snap, _qh=_qh_snap,
+                        _pi=_preimg, _rd=_rdir,
+                    ):
+                        result = _apply_llm_generated_cost(
+                            mpc, args.text, _traj, _q, _qh,
+                            cost_context, cfg.llm_cost, artifact_base_dir,
+                            cfg.preference_window, body_pos=body_pos,
+                            install=False,
+                            pre_rendered_image_paths=_pi,
+                            run_dir=_rd,
+                        )
+                        pending_llm_result.append(result)
+
+                    pending_llm_thread = threading.Thread(
+                        target=_llm_thread_fn, daemon=True
+                    )
+                    pending_llm_thread.start()
             else:
                 uq_mpc = cast(LeftArmMPCMDMUQ, mpc)
                 traj = uq_mpc.query_mdm_with_uncertainty(
@@ -931,39 +1135,120 @@ def main() -> None:
                         cfg.llm_cost.cluster_experiment.enabled
                         and uq_result is not None
                     ):
-                        _run_llm_cluster_experiment(
-                            mpc,
-                            cfg,
-                            args.text,
-                            uq_result,
-                            q,
-                            q_history,
-                            cost_context,
-                            artifact_base_dir,
-                            cfg.preference_window,
-                            remaining_steps=max(1, cfg.steps - step),
-                            body_pos=body_pos,
-                            spine3_pos=spine3_pos,
-                            spine3_aa=spine3_aa,
+                        _root_dir = _llm_artifact_run_dir(
+                            artifact_base_dir, cfg.llm_cost.artifact_dir
                         )
+                        # Pre-render per-cluster images on the main thread
+                        _pre_imgs_per_cluster: dict[int, list[Path]] = {}
+                        if cfg.llm_cost.use_images:
+                            _root_dir.mkdir(parents=True, exist_ok=True)
+                            for _label in sorted(
+                                int(lbl) for lbl in uq_result.cluster_means
+                            ):
+                                _cluster_traj = uq_result.cluster_means[_label]
+                                _cluster_dir = _root_dir / f"cluster_{_label}"
+                                _cluster_dir.mkdir(parents=True, exist_ok=True)
+                                _img_ctx = build_generated_cost_context(
+                                    cost_context, q, _cluster_traj, list(q_history),
+                                    window=cfg.preference_window, body_pos=body_pos,
+                                )
+                                _pre_imgs_per_cluster[_label] = render_prompt_images(
+                                    _img_ctx, _cluster_dir / "images"
+                                )
+                        _q_snap = q.copy()
+                        _qh_snap = list(q_history)
+                        _remaining = max(1, cfg.steps - step)
+                        _rdir = _root_dir
+                        _uqr = uq_result
+                        _pipc = _pre_imgs_per_cluster if _pre_imgs_per_cluster else None
+
+                        _arm_aa_snap = arm_aa.copy()
+
+                        def _llm_cluster_thread_fn(
+                            _q=_q_snap, _qh=_qh_snap,
+                            _rem=_remaining, _rd=_rdir,
+                            _uq=_uqr, _pipc=_pipc,
+                            _initial_q=_arm_aa_snap,
+                        ):
+                            result = _run_llm_cluster_experiment(
+                                mpc, cfg, args.text, _uq,
+                                _q, _qh, cost_context,
+                                artifact_base_dir, cfg.preference_window,
+                                remaining_steps=_rem,
+                                body_pos=body_pos,
+                                spine3_pos=spine3_pos,
+                                spine3_aa=spine3_aa,
+                                initial_q=_initial_q,
+                                install=False,
+                                pre_rendered_images_per_cluster=_pipc,
+                                root_dir=_rd,
+                            )
+                            pending_llm_result.append(result)
+
+                        pending_llm_thread = threading.Thread(
+                            target=_llm_cluster_thread_fn, daemon=True
+                        )
+                        pending_llm_thread.start()
                     else:
-                        _apply_llm_generated_cost(
-                            mpc,
-                            args.text,
-                            traj,
-                            q,
-                            q_history,
-                            cost_context,
-                            cfg.llm_cost,
-                            artifact_base_dir,
-                            cfg.preference_window,
+                        _llm_run_dir = _llm_artifact_run_dir(
+                            artifact_base_dir, cfg.llm_cost.artifact_dir
                         )
+                        _pre_imgs = []
+                        if cfg.llm_cost.use_images:
+                            _llm_run_dir.mkdir(parents=True, exist_ok=True)
+                            _img_ctx = build_generated_cost_context(
+                                cost_context, q, traj, list(q_history),
+                                window=cfg.preference_window, body_pos=body_pos,
+                            )
+                            _pre_imgs = render_prompt_images(
+                                _img_ctx, _llm_run_dir / "images"
+                            )
+                        _traj_snap = traj.copy()
+                        _q_snap = q.copy()
+                        _qh_snap = list(q_history)
+                        _preimg = _pre_imgs if _pre_imgs else None
+                        _rdir = _llm_run_dir
+
+                        def _llm_thread_fn(
+                            _traj=_traj_snap, _q=_q_snap, _qh=_qh_snap,
+                            _pi=_preimg, _rd=_rdir,
+                        ):
+                            result = _apply_llm_generated_cost(
+                                mpc, args.text, _traj, _q, _qh,
+                                cost_context, cfg.llm_cost, artifact_base_dir,
+                                cfg.preference_window, body_pos=body_pos,
+                                install=False,
+                                pre_rendered_image_paths=_pi,
+                                run_dir=_rd,
+                            )
+                            pending_llm_result.append(result)
+
+                        pending_llm_thread = threading.Thread(
+                            target=_llm_thread_fn, daemon=True
+                        )
+                        pending_llm_thread.start()
 
             # MDM generation can switch matplotlib to the Agg backend; restore it
             _restore_interactive_backend()
 
         q = mpc.step(q)
         q_history.append(q)
+
+        # Install the LLM cost once the correction trajectory has finished
+        if (
+            pending_llm_thread is not None
+            and isinstance(mpc, LeftArmMPCMDM)
+            and mpc.mdm_tracking_complete
+        ):
+            print("[llm-cost] correction trajectory done — waiting for LLM query...")
+            pending_llm_thread.join()
+            pending_llm_thread = None
+            if pending_llm_result and pending_llm_result[0] is not None:
+                generated_cost = pending_llm_result.pop(0)
+                mpc.set_extra_costs(
+                    _append_extra_cost(mpc._extra_costs, generated_cost)  # pylint: disable=protected-access
+                )
+                print("[llm-cost] installed after correction trajectory completed")
 
     # --- Save video ---
     if args.save and visualize:

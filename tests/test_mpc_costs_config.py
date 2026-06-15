@@ -36,6 +36,7 @@ from uncertain_feedback.planners.mpc.llm_costs import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
     build_generated_cost_context,
+    build_motion_summaries,
     parse_llm_cost_response,
     render_prompt_images,
 )
@@ -885,6 +886,134 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
     np.testing.assert_allclose(mpc._cartesian_cost(q_trajs), [expected_cost])
 
 
+def test_cartesian_mpc_consumes_final_mdm_goal_then_uses_cartesian_mode() -> None:
+    fk = SmplLeftArmFK()
+    q0 = np.zeros((3, 3), dtype=np.float64)
+    cartesian_goal = fk.fk(q0)[-1] - fk.tpose_spine3_pos
+    mpc = LeftArmMPCCartesian(
+        cartesian_goals=[cartesian_goal],
+        initial_arm_aa=q0,
+        fk=fk,
+        horizon=1,
+        n_mpc_samples=1,
+        max_angle_delta=0.0,
+        advance_threshold=0.1,
+    )
+    mpc.push_trajectory(np.stack([q0]))
+
+    assert not mpc.mdm_tracking_complete
+    q1 = mpc.step(q0)
+
+    assert mpc.mdm_tracking_complete
+    assert mpc.current_goal is None
+    assert len(mpc._goals) == 0
+
+    called = {"cartesian": False}
+
+    def fake_cartesian_solve(current_q):
+        called["cartesian"] = True
+        plan = np.zeros((mpc._horizon, 3, 3), dtype=np.float64)
+        np.testing.assert_allclose(current_q, q1)
+        return plan[0], plan
+
+    mpc._cartesian_solve = fake_cartesian_solve  # type: ignore[method-assign]
+    mpc.step(q1)
+
+    assert called["cartesian"]
+
+
+def test_cartesian_mpc_tracking_complete_only_after_mdm_queue_empties() -> None:
+    fk = SmplLeftArmFK()
+    q0 = np.zeros((3, 3), dtype=np.float64)
+    cartesian_goal = fk.fk(q0)[-1] - fk.tpose_spine3_pos
+    mpc = LeftArmMPCCartesian(
+        cartesian_goals=[cartesian_goal],
+        initial_arm_aa=q0,
+        fk=fk,
+        horizon=1,
+        n_mpc_samples=1,
+        max_angle_delta=0.0,
+        advance_threshold=10.0,
+    )
+    far_goal = np.full((3, 3), 0.5, dtype=np.float64)
+    mpc.push_trajectory(np.stack([q0, far_goal]))
+
+    assert not mpc.mdm_tracking_complete
+    mpc.step(q0)
+
+    assert not mpc.mdm_tracking_complete
+    assert len(mpc._goals) == 1
+
+    mpc.step(q0)
+
+    assert mpc.mdm_tracking_complete
+    assert len(mpc._goals) == 0
+
+
+def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
+    monkeypatch,
+) -> None:
+    from uncertain_feedback.utils import plot as plot_module
+
+    class SpyArmVisualizer:
+        TARGET_COLOR = "royalblue"
+        MDM_COLOR = "darkorange"
+        instances = []
+
+        def __init__(self, fk):
+            self.fk = fk
+            self.open_live_kwargs = None
+            self.cartesian_targets = []
+            self.step_colors = []
+            SpyArmVisualizer.instances.append(self)
+
+        def open_live(self, *args, **kwargs):
+            self.open_live_args = args
+            self.open_live_kwargs = kwargs
+
+        def start_capture(self):
+            pass
+
+        def update_mdm_goal(self, goal_q):
+            self.mdm_goal = goal_q
+
+        def update_trajectory_preview(self, preview_q):
+            self.preview_q = preview_q
+
+        def update_cartesian_target(self, world_pos):
+            self.cartesian_targets.append(np.asarray(world_pos, dtype=np.float64))
+
+        def update_step(self, q, dist, color=TARGET_COLOR):
+            self.step_colors.append(color)
+
+    monkeypatch.setattr(plot_module, "ArmVisualizer", SpyArmVisualizer)
+
+    fk = SmplLeftArmFK()
+    q0 = np.zeros((3, 3), dtype=np.float64)
+    cartesian_goal = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+    mpc = LeftArmMPCCartesian(
+        cartesian_goals=[cartesian_goal],
+        initial_arm_aa=q0,
+        fk=fk,
+        horizon=1,
+        n_mpc_samples=1,
+        max_angle_delta=0.0,
+        advance_threshold=0.1,
+        visualize=True,
+    )
+    mpc.push_trajectory(np.stack([np.full((3, 3), 0.5, dtype=np.float64)]))
+
+    mpc.step(q0)
+
+    spy = SpyArmVisualizer.instances[0]
+    assert spy.open_live_kwargs["show_target_arm"] is False
+    np.testing.assert_allclose(
+        spy.cartesian_targets[0],
+        fk.tpose_spine3_pos + cartesian_goal,
+    )
+    assert spy.step_colors == [SpyArmVisualizer.MDM_COLOR]
+
+
 def test_mdm_push_trajectory_enqueues_every_tenth_frame_and_endpoint() -> None:
     frames = np.arange(23 * 3 * 3, dtype=np.float64).reshape(23, 3, 3)
     mpc = LeftArmMPCMDM()
@@ -1045,6 +1174,100 @@ def cost(q_trajs, context, params):
     assert np.all(costs > 0.0)
 
 
+def test_generated_cost_context_named_joint_features_keep_leading_shape() -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+    q_trajs = np.zeros((2, 4, 3, 3), dtype=np.float64)
+
+    assert context.elbow_flexion_angles(q_trajs[:, 1:]).shape == (2, 3)
+    assert context.shoulder_flexion_extension_angles(q_trajs[:, 1:]).shape == (
+        2,
+        3,
+    )
+    assert context.shoulder_abduction_adduction_angles(q_trajs[:, 1:]).shape == (
+        2,
+        3,
+    )
+    assert context.shoulder_internal_external_rotation_angles(
+        q_trajs[:, 1:]
+    ).shape == (2, 3)
+
+
+def test_generated_cost_context_shoulder_twist_matches_tpose_axis_rotation() -> None:
+    fk = SmplLeftArmFK()
+    context = build_generated_cost_context(
+        _cost_context(fk),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+    axis = fk.tpose_joints[3] - fk.tpose_joints[2]
+    axis = axis / np.linalg.norm(axis)
+    trajectory = np.zeros((1, 3, 3), dtype=np.float64)
+    trajectory[0, 0] = axis * 0.4
+
+    twist = context.shoulder_internal_external_rotation_angles(trajectory)
+
+    np.testing.assert_allclose(twist, [0.4], atol=1e-10)
+
+
+def test_generated_cost_context_shoulder_component_angles_are_stable() -> None:
+    fk = SmplLeftArmFK()
+    context = build_generated_cost_context(
+        _cost_context(fk),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+    neutral = np.zeros((1, 3, 3), dtype=np.float64)
+    axis = fk.tpose_joints[3] - fk.tpose_joints[2]
+    axis = axis / np.linalg.norm(axis)
+    twisted = neutral.copy()
+    twisted[0, 0] = axis * 0.4
+    adducted = neutral.copy()
+    adducted[0, 0, 2] = 0.4
+
+    neutral_flex = context.shoulder_flexion_extension_angles(neutral)[0]
+    neutral_abduction = context.shoulder_abduction_adduction_angles(neutral)[0]
+    twisted_flex = context.shoulder_flexion_extension_angles(twisted)[0]
+    twisted_abduction = context.shoulder_abduction_adduction_angles(twisted)[0]
+    adducted_abduction = context.shoulder_abduction_adduction_angles(adducted)[0]
+
+    assert abs(neutral_flex) < 0.2
+    assert neutral_abduction > 1.0
+    np.testing.assert_allclose(twisted_flex, neutral_flex, atol=1e-10)
+    np.testing.assert_allclose(twisted_abduction, neutral_abduction, atol=1e-10)
+    assert adducted_abduction < neutral_abduction
+
+
+def test_motion_summaries_include_named_joint_features() -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+
+    summaries = build_motion_summaries(context)
+
+    assert "joint_features" in summaries["current"]
+    assert "joint_features" in summaries["mdm_traj"]
+    assert "shoulder_flexion_extension" in summaries["mdm_traj"]["joint_features"]
+    assert "shoulder_abduction_adduction" in summaries["mdm_traj"]["joint_features"]
+    assert (
+        "shoulder_internal_external_rotation"
+        in summaries["mdm_traj"]["joint_features"]
+    )
+
+
 def test_generated_python_cost_rejects_bad_shape() -> None:
     context = build_generated_cost_context(
         _cost_context(SmplLeftArmFK()),
@@ -1091,6 +1314,10 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
     )
     response = {
         "description": "penalize elbow below target height",
+        "explanation": "The cost keeps the elbow above the demonstrated target.",
+        "recipient_explanation": (
+            "I will help keep your elbow lifted while your arm moves upward."
+        ),
         "params": {"target_elbow_height": 0.1, "weight": 10.0},
         "code": "def cost(q_trajs, context, params):\n    positions = context.fk_rollouts(q_trajs)\n    elbow = positions[:, 1:, context.joint_index('elbow')]\n    violation = np.maximum(params['target_elbow_height'] - elbow[:, :, 1], 0.0)\n    return params['weight'] * np.mean(violation ** 2, axis=1)\n",
     }
@@ -1120,6 +1347,12 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
     assert len(artifact_dirs) == 1
     assert (artifact_dirs[0] / "prompt.txt").exists()
     assert (artifact_dirs[0] / "cost.py").exists()
+    assert (artifact_dirs[0] / "recipient_explanation.txt").read_text(
+        encoding="utf-8"
+    ) == response["recipient_explanation"]
+    with open(artifact_dirs[0] / "params.json", encoding="utf-8") as f:
+        params = json.load(f)
+    assert params["recipient_explanation"] == response["recipient_explanation"]
     assert fake_model.received_images is not None
 
 
@@ -1180,6 +1413,7 @@ llm_cost:
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3, dtype=np.float64),
         llm_model_factory=lambda _model_name: fake_model,
+        run_rollouts_async=False,
     )
 
     assert selected is not None
@@ -1208,8 +1442,9 @@ llm_cost:
 
 def test_parse_llm_cost_response_accepts_markdown_json() -> None:
     response = parse_llm_cost_response(
-        '```json\n{"description":"d","code":"def cost(q_trajs, context, params):\\n    return np.zeros(q_trajs.shape[0])","params":{}}\n```'
+        '```json\n{"description":"d","code":"def cost(q_trajs, context, params):\\n    return np.zeros(q_trajs.shape[0])","params":{},"recipient_explanation":"plain"}\n```'
     )
 
     assert response.description == "d"
+    assert response.recipient_explanation == "plain"
     assert "def cost" in response.code

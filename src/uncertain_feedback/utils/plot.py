@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import matplotlib
 import numpy as np
+from pathlib import Path
 
 # Select an interactive backend when running as a script; skip if one is
 # already active (e.g. when imported inside Jupyter).
@@ -348,6 +349,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         body_pos: np.ndarray | None = None,
         compact: bool = False,
         elbow_height_range: tuple[float, float] | None = None,
+        show_target_arm: bool = True,
     ) -> None:
         """Open an interactive window for live step-by-step visualization.
 
@@ -366,6 +368,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                         full 6-panel layout.  Faster to render and encode.
             elbow_height_range: Optional ``(min_y, max_y)`` world-space Y bounds
                         for acceptable elbow height, shown as red planes.
+            show_target_arm: If ``False``, omit the static dashed blue
+                        joint-space target arm.  Cartesian planners use this
+                        when the blue target should be the wrist star only.
         """
         target_full = self._full_body_positions(target_q, spine3_pos, spine3_aa)
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
@@ -390,6 +395,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             body_pos=body_pos,
             compact=compact,
             elbow_height_range=elbow_height_range,
+            show_target_arm=show_target_arm,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -580,6 +586,127 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
 
+    def render_rollout_video(
+        self,
+        rollout: np.ndarray,
+        save_path: str | Path,
+        spine3_pos: np.ndarray | None = None,
+        spine3_aa: np.ndarray | None = None,
+        body_pos: np.ndarray | None = None,
+        cartesian_goal: np.ndarray | None = None,
+        frame_colors: list[str] | None = None,
+        mdm_goal_q: np.ndarray | None = None,
+        fps: int = 20,
+    ) -> None:
+        """Render a pre-computed rollout to video using the 6-panel MPC layout.
+
+        Args:
+            rollout:         ``(T, 3, 3)`` arm axis-angle frames.
+            save_path:       Output path (.mp4 or .gif).
+            spine3_pos:      ``(3,)`` spine3 world position.
+            spine3_aa:       ``(3,)`` spine3 world axis-angle.
+            body_pos:        ``(22, 3)`` static body backdrop positions.
+            cartesian_goal:  ``(3,)`` Cartesian wrist goal offset relative to
+                             spine3 (same convention as the MPC planner).
+            frame_colors:    Per-frame arm color strings (len == len(rollout)).
+                             Defaults to ``TARGET_COLOR`` for all frames.
+            mdm_goal_q:      ``(3, 3)`` arm axis-angles for the MDM trajectory
+                             end-frame, shown as an orange dashed skeleton.
+            fps:             Frames per second.
+        """
+        import imageio  # pylint: disable=import-outside-toplevel
+        from matplotlib.backends.backend_agg import FigureCanvasAgg  # pylint: disable=import-outside-toplevel
+        from matplotlib.figure import Figure as _MplFigure  # pylint: disable=import-outside-toplevel
+
+        save_path = Path(save_path)
+        try:
+            all_pos = np.stack([
+                self.fk.full_body_positions(rollout[i], spine3_pos, spine3_aa)
+                for i in range(len(rollout))
+            ])  # (T, 22, 3)
+            ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
+            mg = 0.15
+            all_pts = np.vstack([all_pos.reshape(-1, 3), ref_body])
+            lims = [(float(all_pts[:, i].min()) - mg, float(all_pts[:, i].max()) + mg) for i in range(3)]
+
+            # Create figure with Agg canvas directly — avoids touching global pyplot
+            # state (no matplotlib.use() call), making this safe to call from threads.
+            agg_fig = _MplFigure(figsize=(20, 9))
+            FigureCanvasAgg(agg_fig)
+
+            # Use MDM goal as the static dashed reference (matches live visualizer),
+            # or the initial pose when no MDM goal is given (invisible at frame 0).
+            target_q = mdm_goal_q if mdm_goal_q is not None else rollout[0]
+            fig, artists_3d, artists_2d = self._build_figure(
+                target_q,
+                lims,
+                spine3_pos,
+                spine3_aa,
+                body_pos=body_pos,
+                fig=agg_fig,
+                show_target_arm=cartesian_goal is None,
+            )
+
+            if cartesian_goal is not None:
+                s3 = np.asarray(spine3_pos, dtype=np.float64) if spine3_pos is not None else self.fk.tpose_spine3_pos
+                world_goal = s3 + np.asarray(cartesian_goal, dtype=np.float64)
+                for a3 in artists_3d:
+                    a3["cartesian_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
+                        [world_goal[0]], [world_goal[1]], [world_goal[2]]
+                    )
+                for a2 in artists_2d:
+                    a2["cartesian_goal_scat"].set_offsets([[world_goal[a2["hi"]], world_goal[a2["vi"]]]])
+
+            if mdm_goal_q is not None:
+                goal_full = self._full_body_positions(mdm_goal_q, spine3_pos, spine3_aa)
+                arm_pts = goal_full[LEFT_ARM_JOINT_INDICES_22]
+                for a3 in artists_3d:
+                    a3["mdm_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
+                        arm_pts[:, 0], arm_pts[:, 1], arm_pts[:, 2]
+                    )
+                    for line, (pi, ci) in zip(a3["mdm_goal_lines"], LEFT_ARM_BONE_PAIRS_22):
+                        seg = goal_full[[pi, ci]]
+                        line.set_data(seg[:, 0], seg[:, 1])
+                        line.set_3d_properties(seg[:, 2])
+                for a2 in artists_2d:
+                    a2["mdm_goal_scat"].set_offsets(arm_pts[:, [a2["hi"], a2["vi"]]])
+                    for line, (pi, ci) in zip(a2["mdm_goal_lines"], LEFT_ARM_BONE_PAIRS_22):
+                        seg = goal_full[[pi, ci]]
+                        line.set_data(seg[:, a2["hi"]], seg[:, a2["vi"]])
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                fig.tight_layout()
+
+            wrist_trace: list[np.ndarray] = []
+            frames_out: list[np.ndarray] = []
+            n_steps = len(rollout) - 1
+            for i, q in enumerate(rollout):
+                pos = all_pos[i]
+                arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
+                wrist_trace.append(pos[_WRIST_IDX])
+                color = frame_colors[i] if frame_colors is not None else ArmVisualizer.TARGET_COLOR
+                trace_color = ArmVisualizer.MDM_COLOR if color == ArmVisualizer.MDM_COLOR else _TRACE_COLOR
+                _update_artists(
+                    artists_3d, artists_2d,
+                    pos, arm_pts,
+                    np.array(wrist_trace),
+                    step=i, n_steps=n_steps,
+                    dist=float(np.linalg.norm(q - rollout[-1])),
+                    color=color,
+                    trace_color=trace_color,
+                )
+                fig.canvas.draw()
+                w, h = fig.canvas.get_width_height()
+                buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+                frames_out.append(buf.reshape(h, w, 4)[..., :3].copy())
+
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            imageio.mimsave(str(save_path), frames_out, fps=fps)
+            print(f"[rollout-video] saved {save_path}")
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[rollout-video] failed to render {save_path}: {exc}")
+
     def finish_live(self, save_path: str, fps: int = 20) -> None:
         """Save the frames recorded during the live session to a video or GIF.
 
@@ -734,12 +861,20 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         body_pos: np.ndarray | None = None,
         compact: bool = False,
         elbow_height_range: tuple[float, float] | None = None,
+        fig: plt.Figure | None = None,
+        show_target_arm: bool = True,
     ) -> tuple[plt.Figure, list[dict], list[dict]]:
         """Build the figure with static elements drawn and mutable artists created.
 
         Args:
             body_pos: ``(22, 3)`` positions for the grey background body.
             compact:  If ``True``, build a single 3-D panel (faster to render).
+            fig:      Pre-created figure to use.  When ``None`` (default) a new
+                      figure is created via ``plt.figure()``.  Pass a figure
+                      with a non-interactive canvas (e.g. ``FigureCanvasAgg``)
+                      to avoid touching global pyplot state in background threads.
+            show_target_arm: If ``False``, omit the static dashed blue
+                      joint-space target arm.
 
         Returns:
             ``(fig, artists_3d, artists_2d)``
@@ -748,7 +883,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
         if compact:
-            fig = plt.figure(figsize=(8, 8))
+            if fig is None:
+                fig = plt.figure(figsize=(8, 8))
             gs = gridspec.GridSpec(1, 1, figure=fig)
             artists_3d = self._build_3d_panels(
                 fig,
@@ -758,10 +894,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 lims,
                 compact=True,
                 elbow_height_range=elbow_height_range,
+                show_target_arm=show_target_arm,
             )
             return fig, artists_3d, []
 
-        fig = plt.figure(figsize=(20, 9))
+        if fig is None:
+            fig = plt.figure(figsize=(20, 9))
         gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
         fig.suptitle("SMPL Left Arm MPC (CEM)", fontsize=13, y=1.01)
 
@@ -772,6 +910,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ref_body,
             lims,
             elbow_height_range=elbow_height_range,
+            show_target_arm=show_target_arm,
         )
         artists_2d = self._build_2d_panels(
             fig,
@@ -780,6 +919,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ref_body,
             lims,
             elbow_height_range=elbow_height_range,
+            show_target_arm=show_target_arm,
         )
         return fig, artists_3d, artists_2d
 
@@ -792,6 +932,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         lims: list[tuple[float, float]],
         compact: bool = False,
         elbow_height_range: tuple[float, float] | None = None,
+        show_target_arm: bool = True,
     ) -> list[dict]:
         views = [_COMPACT_VIEW] if compact else _3D_VIEWS
         artists: list[dict] = []
@@ -818,24 +959,25 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 alpha=0.45,
                 depthshade=False,
             )
-            ArmVisualizer.draw_bones_3d(
-                ax,
-                target_full,
-                LEFT_ARM_BONE_PAIRS_22,
-                ArmVisualizer.TARGET_COLOR,
-                alpha=0.4,
-                lw=1.8,
-                linestyle="--",
-                label="target" if col == 0 else None,
-            )
-            ax.scatter(
-                *target_full[LEFT_ARM_JOINT_INDICES_22].T,
-                color=ArmVisualizer.TARGET_COLOR,
-                s=30,
-                alpha=0.4,
-                depthshade=False,
-            )
-            if col == 0:
+            if show_target_arm:
+                ArmVisualizer.draw_bones_3d(
+                    ax,
+                    target_full,
+                    LEFT_ARM_BONE_PAIRS_22,
+                    ArmVisualizer.TARGET_COLOR,
+                    alpha=0.4,
+                    lw=1.8,
+                    linestyle="--",
+                    label="target" if col == 0 else None,
+                )
+                ax.scatter(
+                    *target_full[LEFT_ARM_JOINT_INDICES_22].T,
+                    color=ArmVisualizer.TARGET_COLOR,
+                    s=30,
+                    alpha=0.4,
+                    depthshade=False,
+                )
+            if col == 0 and show_target_arm:
                 ax.legend(loc="upper left", fontsize=7)
 
             scat = ax.scatter(
@@ -904,6 +1046,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         ref_body: np.ndarray,
         lims: list[tuple[float, float]],
         elbow_height_range: tuple[float, float] | None = None,
+        show_target_arm: bool = True,
     ) -> list[dict]:
         artists: list[dict] = []
         for col, view in enumerate(_ORTHO_VIEWS):
@@ -935,25 +1078,26 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 alpha=0.45,
                 zorder=3,
             )
-            _draw_bones_2d(
-                ax,
-                target_full,
-                LEFT_ARM_BONE_PAIRS_22,
-                view.hi,
-                view.vi,
-                ArmVisualizer.TARGET_COLOR,
-                alpha=0.4,
-                lw=1.8,
-                linestyle="--",
-            )
-            ax.scatter(
-                target_full[LEFT_ARM_JOINT_INDICES_22, view.hi],
-                target_full[LEFT_ARM_JOINT_INDICES_22, view.vi],
-                color=ArmVisualizer.TARGET_COLOR,
-                s=28,
-                alpha=0.4,
-                zorder=4,
-            )
+            if show_target_arm:
+                _draw_bones_2d(
+                    ax,
+                    target_full,
+                    LEFT_ARM_BONE_PAIRS_22,
+                    view.hi,
+                    view.vi,
+                    ArmVisualizer.TARGET_COLOR,
+                    alpha=0.4,
+                    lw=1.8,
+                    linestyle="--",
+                )
+                ax.scatter(
+                    target_full[LEFT_ARM_JOINT_INDICES_22, view.hi],
+                    target_full[LEFT_ARM_JOINT_INDICES_22, view.vi],
+                    color=ArmVisualizer.TARGET_COLOR,
+                    s=28,
+                    alpha=0.4,
+                    zorder=4,
+                )
 
             scat = ax.scatter([], [], color=ArmVisualizer.TARGET_COLOR, s=35, zorder=5)
             lines = [

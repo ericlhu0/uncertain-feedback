@@ -229,7 +229,7 @@ When `llm_cost.enabled: true` in the YAML:
 1. `build_motion_summaries()` — text summaries of recent MPC steps and MDM trajectory
 2. `render_prompt_images()` — renders 3D arm frames to matplotlib images (optional)
 3. `build_llm_cost_prompt()` — assembles system + user prompt with joint-position context
-4. LLM (OpenAI, configurable model) returns JSON: `{description, code, params}`
+4. LLM (OpenAI, configurable model) returns JSON: `{description, code, params, explanation, recipient_explanation}`
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet
 7. `GeneratedCostContext` provides the runtime sandbox: `fk`, `spine3_pos/aa`, `current_q`, `mdm_traj`, `recent_q`, and FK helper methods

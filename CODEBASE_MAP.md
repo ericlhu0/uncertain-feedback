@@ -27,7 +27,7 @@ uncertain-feedback/
 ├── src/uncertain_feedback/
 │   ├── consts.py                     # Project-wide paths (MDM_ROOT, weights)
 │   ├── planners/
-│   │   ├── run.py                    # Unified CLI entry point
+│   │   ├── run.py                    # Single-run CLI: plan → language correction → finish
 │   │   └── mpc/
 │   │       ├── __init__.py           # Public exports
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
@@ -45,6 +45,9 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_learn.yaml
 │   │           ├── arm_mpc_cartesian_mdm_llm.yaml
 │   │           └── arm_mpc_cartesian_no_mdm.yaml
+│   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
+│   │   ├── cluster_comparison.py     # Generate + roll out one LLM cost per UQ cluster
+│   │   └── run_experiment.py         # CLI entry point for cluster comparison experiments
 │   ├── motion_generators/
 │   │   └── mdm/
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
@@ -323,7 +326,8 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 
 | Command / Script                                      | Purpose                              |
 |-------------------------------------------------------|--------------------------------------|
-| `uv run python -m uncertain_feedback.planners.run --mpc-config <yaml>` | Main experiment runner  |
+| `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
+| `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |

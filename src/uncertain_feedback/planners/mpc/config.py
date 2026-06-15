@@ -33,21 +33,12 @@ class CartesianConfig:
 
 
 @dataclass(frozen=True)
-class LlmCostClusterExperimentConfig:
-    enabled: bool = False
-    rollout_steps: int | None = None
-
-
-@dataclass(frozen=True)
 class LlmCostConfig:
     enabled: bool = False
     model: str | None = None
     strict: bool = False
     artifact_dir: Path = Path("llm_cost_artifacts")
     use_images: bool = True
-    cluster_experiment: LlmCostClusterExperimentConfig = field(
-        default_factory=LlmCostClusterExperimentConfig
-    )
 
 
 @dataclass(frozen=True)
@@ -152,10 +143,6 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     cartesian_data = _mapping(data.get("cartesian"), "cartesian")
     cost_data = _mapping(data.get("costs"), "costs")
     llm_cost_data = _mapping(data.get("llm_cost"), "llm_cost")
-    llm_cluster_data = _mapping(
-        llm_cost_data.get("cluster_experiment"),
-        "llm_cost.cluster_experiment",
-    )
 
     goals = cartesian_data.get("goals", [])
     if goals is None:
@@ -221,20 +208,6 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             ),
             use_images=_bool(
                 llm_cost_data.get("use_images", True), "llm_cost.use_images"
-            ),
-            cluster_experiment=LlmCostClusterExperimentConfig(
-                enabled=_bool(
-                    llm_cluster_data.get("enabled", False),
-                    "llm_cost.cluster_experiment.enabled",
-                ),
-                rollout_steps=(
-                    None
-                    if llm_cluster_data.get("rollout_steps") is None
-                    else _positive_int(
-                        llm_cluster_data.get("rollout_steps"),
-                        "llm_cost.cluster_experiment.rollout_steps",
-                    )
-                ),
             ),
         ),
         mdm_frames=(

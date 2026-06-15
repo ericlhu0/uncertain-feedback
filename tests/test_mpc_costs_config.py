@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import yaml
 
+from uncertain_feedback.experiments import cluster_comparison
 from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesian
@@ -1119,9 +1120,6 @@ llm_cost:
   strict: true
   artifact_dir: artifacts
   use_images: false
-  cluster_experiment:
-    enabled: true
-    rollout_steps: 3
 """),
     )
 
@@ -1132,8 +1130,6 @@ llm_cost:
     assert cfg.llm_cost.strict is True
     assert cfg.llm_cost.artifact_dir == Path("artifacts")
     assert cfg.llm_cost.use_images is False
-    assert cfg.llm_cost.cluster_experiment.enabled is True
-    assert cfg.llm_cost.cluster_experiment.rollout_steps == 3
 
 
 def test_llm_artifact_run_dir_resolves_relative_to_base_dir(tmp_path) -> None:
@@ -1378,9 +1374,6 @@ llm_cost:
   enabled: true
   artifact_dir: artifacts
   use_images: false
-  cluster_experiment:
-    enabled: true
-    rollout_steps: 2
 """,
         )
     )
@@ -1398,7 +1391,7 @@ llm_cost:
     mpc = SmplLeftArmMPC(goals=[np.zeros((3, 3), dtype=np.float64)])
     fake_model = _FakeSequenceLlmModel()
 
-    selected = planner_run._run_llm_cluster_experiment(
+    selected = cluster_comparison.run_cluster_comparison(
         mpc,
         cfg,
         "prefer the demonstrated shape",
@@ -1408,12 +1401,11 @@ llm_cost:
         context,
         tmp_path,
         history_window=5,
-        remaining_steps=3,
+        rollout_steps=2,
         body_pos=None,
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3, dtype=np.float64),
         llm_model_factory=lambda _model_name: fake_model,
-        run_rollouts_async=False,
     )
 
     assert selected is not None

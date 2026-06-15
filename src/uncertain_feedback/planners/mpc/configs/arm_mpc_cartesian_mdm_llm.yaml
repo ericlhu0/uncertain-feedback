@@ -28,9 +28,6 @@ llm_cost:
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true
-  cluster_experiment:
-    enabled: true
-    rollout_steps: null
 
 # costs:
 #   elbow_height:

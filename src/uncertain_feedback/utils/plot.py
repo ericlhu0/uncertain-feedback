@@ -707,6 +707,114 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         except Exception as exc:  # pylint: disable=broad-except
             print(f"[rollout-video] failed to render {save_path}: {exc}")
 
+    def render_trajectory_overlay(
+        self,
+        save_path: str | Path,
+        *,
+        mdm_traj: np.ndarray,
+        current_q: np.ndarray,
+        spine3_pos: np.ndarray,
+        spine3_aa: np.ndarray,
+        body_pos: np.ndarray | None = None,
+    ) -> None:
+        """Render the 3-view MDM-trajectory overlay used to ground LLM cost prompts.
+
+        Args:
+            save_path:  Output image path (.png).
+            mdm_traj:   ``(T, 3, 3)`` MDM arm axis-angle frames.
+            current_q:  ``(3, 3)`` current arm axis-angle state.
+            spine3_pos: ``(3,)`` spine3 world position.
+            spine3_aa:  ``(3,)`` spine3 world axis-angle.
+            body_pos:   ``(22, 3)`` reference body positions; falls back to a
+                        translated T-pose when ``None``.
+        """
+        save_path = Path(save_path)
+        positions = self.fk.fk_batch(
+            mdm_traj, spine3_pos, spine3_aa
+        )  # (T, 5, 3) arm chain — wrist path / markers
+        current_positions = self.fk.fk(current_q, spine3_pos, spine3_aa)
+
+        # Reference body: actual body pose if available, else translated T-pose.
+        if body_pos is not None:
+            ref_body = body_pos
+        else:
+            ref_body = self.fk.tpose_all_joints + (spine3_pos - self.fk.tpose_spine3_pos)
+
+        cur_full = self.fk.full_body_positions(current_q, spine3_pos, spine3_aa)
+
+        # Equal-square axis limits across all three axes (matches format_3d_axis).
+        all_pts = np.concatenate(
+            [ref_body, positions.reshape(-1, 3), current_positions], axis=0
+        )
+        mins = np.min(all_pts, axis=0)
+        maxs = np.max(all_pts, axis=0)
+        center = (mins + maxs) / 2.0
+        radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
+        lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
+
+        n_samples = min(12, positions.shape[0])
+        sample_indices = (
+            np.linspace(0, positions.shape[0] - 1, n_samples).round().astype(int)
+        )
+        cmap = plt.get_cmap("Blues")
+        denom = max(1, positions.shape[0] - 1)
+        wrist_chain_idx = 4  # left_wrist in the 5-joint arm chain
+        wrist_path = positions[:, wrist_chain_idx]
+        start_w = positions[0, wrist_chain_idx]
+        end_w = positions[-1, wrist_chain_idx]
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        for ax, view in zip(axes, _ORTHO_VIEWS):
+            ax.set_aspect("equal")
+            ax.set_title(view.title, fontsize=9)
+            ax.set_xlabel(view.hl, fontsize=8)
+            ax.set_ylabel(view.vl, fontsize=8)
+            ax.set_xlim(*lims[view.hi])
+            ax.set_ylim(*lims[view.vi])
+            ax.tick_params(labelsize=7)
+
+            # Static reference body (grey)
+            _draw_bones_2d(ax, ref_body, ArmVisualizer.BODY_BONES, view.hi, view.vi,
+                           ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+
+            # MDM trajectory arm bones (blue gradient, sampled frames)
+            for frame_idx in sample_indices:
+                t = 0.3 + 0.7 * (frame_idx / denom)
+                full = self.fk.full_body_positions(
+                    mdm_traj[frame_idx], spine3_pos, spine3_aa
+                )
+                _draw_bones_2d(ax, full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
+                               cmap(t), alpha=0.5, lw=1.2)
+
+            # Wrist path and start/end markers
+            ax.plot(wrist_path[:, view.hi], wrist_path[:, view.vi],
+                    color="steelblue", alpha=0.5, linewidth=1.0)
+            ax.scatter(start_w[view.hi], start_w[view.vi], marker="o", color="lime", s=55, zorder=5)
+            ax.scatter(end_w[view.hi], end_w[view.vi], marker="X", color="red", s=65, zorder=5)
+
+            # Current pose arm (orange)
+            _draw_bones_2d(ax, cur_full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
+                           "tab:orange", alpha=1.0, lw=2.2)
+
+        scalar_mappable = plt.cm.ScalarMappable(
+            cmap=cmap, norm=plt.Normalize(vmin=0, vmax=positions.shape[0] - 1)
+        )
+        scalar_mappable.set_array([])
+        fig.colorbar(scalar_mappable, ax=axes[-1], shrink=0.8, pad=0.04,
+                     label="frame (light=early, dark=late)")
+        axes[0].legend(
+            handles=[
+                plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
+                plt.Line2D([0], [0], marker="o", color="lime", linestyle="", markersize=7, label="traj start"),
+                plt.Line2D([0], [0], marker="X", color="red", linestyle="", markersize=7, label="traj end"),
+            ],
+            fontsize=7, loc="upper left",
+        )
+        fig.tight_layout()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+
     def finish_live(self, save_path: str, fps: int = 20) -> None:
         """Save the frames recorded during the live session to a video or GIF.
 

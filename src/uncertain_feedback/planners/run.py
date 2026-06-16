@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,11 +48,10 @@ from uncertain_feedback.planners.mpc.costs import (
     replace_cost_in_composite,
     update_preference_cost,
 )
+from uncertain_feedback.planners.mpc.llm_cost_prompts import build_llm_cost_prompt
 from uncertain_feedback.planners.mpc.llm_costs import (
     GeneratedPythonCost,
-    _IMAGE_DESCRIPTION_PROMPT,
     build_generated_cost_context,
-    build_llm_cost_prompt,
     build_motion_summaries,
     parse_llm_cost_response,
     render_prompt_images,
@@ -385,16 +383,9 @@ def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-lo
         model_name = llm_cfg.model or os.getenv("OPENAI_MODEL", "gpt-5.4")
         llm = llm_model_factory(model_name)
         image_input = [str(path) for path in image_paths] or None
-        image_description = ""
-        if image_input:
-            image_description = llm.get_full_output(
-                _IMAGE_DESCRIPTION_PROMPT, image_input=image_input
-            )
-            (run_dir / "image_description.txt").write_text(
-                image_description, encoding="utf-8"
-            )
-            print(f"[llm-cost] image description: {image_description}")
-        prompt = build_llm_cost_prompt(instruction, summaries, image_paths)
+        prompt = build_llm_cost_prompt(
+            instruction, summaries, image_paths, prompt=llm_cfg.prompt
+        )
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         raw_response = llm.get_full_output(prompt, image_input=image_input)
         (run_dir / "raw_response.txt").write_text(raw_response, encoding="utf-8")
@@ -710,53 +701,6 @@ def run_planning_loop(
     return LoopResult(q_history=q_history, error=error)
 
 
-def _start_llm_cost_thread(  # pylint: disable=too-many-arguments
-    mpc: SmplLeftArmMPC,
-    args: argparse.Namespace,
-    cfg: MpcRunConfig,
-    cost_context: MpcCostContext,
-    artifact_base_dir: Path,
-    traj: np.ndarray,
-    current_q: np.ndarray,
-    q_history: list[np.ndarray],
-    body_pos: np.ndarray | None,
-    result_out: list[GeneratedPythonCost | None],
-) -> threading.Thread:
-    """Generate the single LLM correction cost in a daemon thread.
-
-    Images are pre-rendered on the main thread (matplotlib is not thread-safe).
-    The generated cost is appended to ``result_out`` (not installed); the caller
-    installs it once the correction trajectory completes.
-    """
-    run_dir = _llm_artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
-    pre_imgs: list[Path] = []
-    if cfg.llm_cost.use_images:
-        run_dir.mkdir(parents=True, exist_ok=True)
-        img_ctx = build_generated_cost_context(
-            cost_context, current_q, traj, list(q_history),
-            window=cfg.preference_window, body_pos=body_pos,
-        )
-        pre_imgs = render_prompt_images(img_ctx, run_dir / "images")
-
-    traj_snap = traj.copy()
-    q_snap = current_q.copy()
-    qh_snap = list(q_history)
-    pre = pre_imgs if pre_imgs else None
-
-    def _thread_fn() -> None:
-        result = _apply_llm_generated_cost(
-            mpc, args.text, traj_snap, q_snap, qh_snap,
-            cost_context, cfg.llm_cost, artifact_base_dir,
-            cfg.preference_window, body_pos=body_pos,
-            install=False, pre_rendered_image_paths=pre, run_dir=run_dir,
-        )
-        result_out.append(result)
-
-    thread = threading.Thread(target=_thread_fn, daemon=True)
-    thread.start()
-    return thread
-
-
 def main() -> None:
     args = build_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
@@ -777,12 +721,11 @@ def main() -> None:
 
     mdm_triggered = False
     pre_mdm_vis: ArmVisualizer | None = None
-    pending_llm_thread: threading.Thread | None = None
-    pending_llm_result: list[GeneratedPythonCost | None] = []
+    pending_cost: GeneratedPythonCost | None = None
 
     def _trigger_correction(q: np.ndarray, q_history: list[np.ndarray]) -> None:
         """Generate the MDM/UQ correction (and optional LLM cost) at text_time."""
-        nonlocal pre_mdm_vis, pending_llm_thread
+        nonlocal pre_mdm_vis, pending_cost
         assert gen is not None and initial_pose is not None
 
         # Close vis before the blocking MDM computation to avoid GUI freeze
@@ -839,9 +782,13 @@ def main() -> None:
             llm_traj = traj
 
         if cfg.llm_cost.enabled:
-            pending_llm_thread = _start_llm_cost_thread(
-                mpc, args, cfg, cost_context, artifact_base_dir,
-                llm_traj, q, list(q_history), body_pos, pending_llm_result,
+            # Generate synchronously here (the live viz is already closed for the
+            # MDM compute, so this adds no extra freeze). The cost is held and
+            # installed once the correction trajectory finishes (see _on_post_step).
+            pending_cost = _apply_llm_generated_cost(
+                mpc, args.text, llm_traj, q, list(q_history),
+                cost_context, cfg.llm_cost, artifact_base_dir,
+                cfg.preference_window, body_pos=body_pos, install=False,
             )
 
         # MDM generation can switch matplotlib to the Agg backend; restore it
@@ -859,22 +806,18 @@ def main() -> None:
             _trigger_correction(q, q_history)
 
     def _on_post_step(_step: int, _q: np.ndarray, _q_history: list[np.ndarray]) -> None:
-        nonlocal pending_llm_thread
+        nonlocal pending_cost
         # Install the LLM cost once the correction trajectory has finished.
         if (
-            pending_llm_thread is not None
+            pending_cost is not None
             and isinstance(mpc, LeftArmMPCMDM)
             and mpc.mdm_tracking_complete
         ):
-            print("[llm-cost] correction trajectory done — waiting for LLM query...")
-            pending_llm_thread.join()
-            pending_llm_thread = None
-            if pending_llm_result and pending_llm_result[0] is not None:
-                generated_cost = pending_llm_result.pop(0)
-                mpc.set_extra_costs(
-                    _append_extra_cost(mpc._extra_costs, generated_cost)  # pylint: disable=protected-access
-                )
-                print("[llm-cost] installed after correction trajectory completed")
+            mpc.set_extra_costs(
+                _append_extra_cost(mpc._extra_costs, pending_cost)  # pylint: disable=protected-access
+            )
+            pending_cost = None
+            print("[llm-cost] installed after correction trajectory completed")
 
     run_planning_loop(
         mpc,

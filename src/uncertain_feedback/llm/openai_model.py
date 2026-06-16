@@ -4,9 +4,7 @@ import base64
 import os
 from typing import Any, Dict, List, Literal, Optional, Union, cast
 
-import numpy as np
 from openai import OpenAI
-from openai.types.chat import ChatCompletion
 
 from .base_model import BaseModel
 
@@ -100,26 +98,6 @@ class OpenAIModel(BaseModel):
             return "image/jpeg"
         return "application/octet-stream"
 
-    def _get_chat_completion(
-        self,
-        text_input: str,
-        image_input: Optional[Union[str, List[str]]] = None,
-    ) -> ChatCompletion:
-        user_prompt = self._create_prompt(text_input, image_input)
-        request: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": cast(Any, user_prompt)},
-            ],
-            "temperature": self.temperature,
-            "logprobs": True,
-            "top_logprobs": 10,
-        }
-        if self.max_tokens is not None:
-            request[self._chat_token_limit_name()] = self.max_tokens
-        return self.client.chat.completions.create(**request)
-
     def _chat_token_limit_name(self) -> str:
         """Return the Chat Completions token-limit parameter for this model."""
         if self._is_gpt5_family():
@@ -135,34 +113,6 @@ class OpenAIModel(BaseModel):
 
     def _is_gpt5_family(self) -> bool:
         return self.model.startswith("gpt-5")
-
-    def get_single_token_logits(
-        self,
-        text_input: str,
-        image_input: Optional[Union[str, List[str]]] = None,
-    ) -> Dict[Any, Any]:
-        response = self._get_chat_completion(text_input, image_input)
-        assert response.choices[0].logprobs is not None
-        assert response.choices[0].logprobs.content is not None
-        assert response.choices[0].logprobs.content[0].top_logprobs is not None
-        return {
-            lp.token: float(np.exp(lp.logprob))
-            for lp in response.choices[0].logprobs.content[0].top_logprobs
-        }
-
-    def get_last_single_token_logits(
-        self,
-        text_input: str,
-        image_input: Optional[Union[str, List[str]]] = None,
-    ) -> Dict[Any, Any]:
-        response = self._get_chat_completion(text_input, image_input)
-        assert response.choices[0].logprobs is not None
-        assert response.choices[0].logprobs.content is not None
-        assert response.choices[0].logprobs.content[-1].top_logprobs is not None
-        return {
-            lp.token: float(np.exp(lp.logprob))
-            for lp in response.choices[0].logprobs.content[-1].top_logprobs
-        }
 
     def get_full_output(
         self,

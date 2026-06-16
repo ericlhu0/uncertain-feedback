@@ -60,9 +60,10 @@ uncertain-feedback/
 │   │       ├── visualize_sitting_pose.py
 │   │       └── motion-diffusion-model/   # Git submodule (GuyTevet/MDM)
 │   ├── uncertainty/
-│   │   ├── base.py                   # TrajectoryClusterer Protocol
-│   │   ├── xyz_clusterer.py          # XyzPositionClusterer (KMeans on FK positions)
-│   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI
+│   │   ├── clustering/               # Trajectory clustering methods (subclass to add)
+│   │   │   ├── base.py               # TrajectoryClusterer (template: _to_features + _fit_predict)
+│   │   │   └── xyz_clusterer.py      # XyzPositionClusterer (KMeans on FK positions)
+│   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI (stays here)
 │   ├── data_collection/
 │   │   ├── build_mdm_dataset.py      # Build HumanML3D dataset from video/labels
 │   │   ├── extract_all_frames.py     # Video → frames
@@ -79,8 +80,8 @@ uncertain-feedback/
 │   │       ├── server.py             # Flask web UI for hand-authoring trajectories
 │   │       └── hml_decode.py         # HML decode utilities for the editor
 │   ├── llm/
-│   │   ├── base_model.py             # BaseModel ABC (get_single_token_logits, get_full_output)
-│   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel
+│   │   ├── base_model.py             # BaseModel ABC (get_full_output)
+│   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
 │   └── utils/
 │       └── plot.py                   # ArmVisualizer (live MPC window + static drawing)
 ├── README.md                         # Full setup + run instructions
@@ -236,8 +237,8 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 When `llm_cost.enabled: true` in the YAML:
 
 1. `build_motion_summaries()` — text summaries of recent MPC steps and MDM trajectory
-2. `render_prompt_images()` — renders 3D arm frames to matplotlib images (optional)
-3. `build_llm_cost_prompt()` — assembles system + user prompt with joint-position context
+2. `render_prompt_images()` — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
+3. `build_llm_cost_prompt()` (in `llm_cost_prompts.py`) — assembles the prompt from a named template in the `PROMPTS` registry, selected by `llm_cost.prompt`
 4. LLM (OpenAI, configurable model) returns JSON: `{description, code, params, explanation, recipient_explanation}`
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet

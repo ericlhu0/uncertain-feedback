@@ -39,6 +39,7 @@ class LlmCostConfig:
     strict: bool = False
     artifact_dir: Path = Path("llm_cost_artifacts")
     use_images: bool = True
+    prompt: str = "default"
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,10 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             ),
             use_images=_bool(
                 llm_cost_data.get("use_images", True), "llm_cost.use_images"
+            ),
+            prompt=(
+                _optional_str(llm_cost_data.get("prompt", "default"), "llm_cost.prompt")
+                or "default"
             ),
         ),
         mdm_frames=(

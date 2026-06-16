@@ -21,12 +21,14 @@ import numpy as np
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
-from uncertain_feedback.uncertainty.base import TrajectoryClusterer
 from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster,
     pick_cluster_positions,
 )
-from uncertain_feedback.uncertainty.xyz_clusterer import XyzPositionClusterer
+from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
+from uncertain_feedback.uncertainty.clustering.xyz_clusterer import (
+    XyzPositionClusterer,
+)
 
 
 @dataclass(frozen=True)

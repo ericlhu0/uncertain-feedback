@@ -155,7 +155,7 @@ MdmMotionGenerator.generate_left_arm_trajectory()   [mdm_api.py]
     ├── Run N times → (N, n_frames, 3, 3)
     │       │
     │       ▼
-    │   XyzPositionClusterer.cluster()                [xyz_clusterer.py]
+    │   XyzPositionClusterer.cluster()                [clustering/xyz_clusterer.py]
     │       KMeans on FK positions at frame ~100
     │       │
     │       ▼
@@ -351,6 +351,6 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
   - Pretrained weights at `.../save/humanml_enc_512_50steps/model000750000.pt`
   - SMPL neutral model at `.../body_models/smpl/SMPL_NEUTRAL.pkl`
 - **OpenAI** — used for LLM cost generation (`llm/openai_model.py`)
-- **sklearn** — KMeans clustering in `xyz_clusterer.py`
+- **sklearn** — KMeans clustering in `clustering/base.py`
 - **smplx** — SMPL model loading
 - **detectron2** — human pose estimation in data collection worker

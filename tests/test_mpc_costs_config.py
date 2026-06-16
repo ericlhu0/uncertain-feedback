@@ -45,7 +45,7 @@ from uncertain_feedback.planners.mpc.llm_costs import (
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
     ArmMPCCartesianNoMDM,
 )
-from uncertain_feedback.uncertainty.base import TrajectoryClusterer
+from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
 
 def _write_config(tmp_path, body: str):
@@ -107,6 +107,10 @@ class _FixedCost:
 class _FakePositionClusterer(TrajectoryClusterer):
     """Cluster all fake position samples into one group."""
 
+    def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
+        """Unused — this double overrides ``cluster``/``cluster_positions``."""
+        raise AssertionError("fake clusterer does not use the feature template")
+
     def cluster(self, trajectories: np.ndarray) -> np.ndarray:
         """Unused trajectory clustering path."""
         _ = trajectories
@@ -120,6 +124,10 @@ class _FakePositionClusterer(TrajectoryClusterer):
 
 class _TwoTrajectoryClusterer(TrajectoryClusterer):
     """Split four fake trajectory samples into two deterministic clusters."""
+
+    def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
+        """Unused — this double overrides ``cluster`` with fixed labels."""
+        raise AssertionError("fake clusterer does not use the feature template")
 
     def cluster(self, trajectories: np.ndarray) -> np.ndarray:
         assert trajectories.shape[0] == 4
@@ -1200,7 +1208,7 @@ def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
         fk=fk,
         spine3_aa=spine3_aa,
         n_diffusion_samples=2,
-        clusterer=_FakePositionClusterer(),
+        clusterer=_FakePositionClusterer(n_clusters=1),
     )
 
     mpc.query_mdm_with_uncertainty(
@@ -1225,7 +1233,7 @@ def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
     gen = _FakeTrajectoryGenerator(trajectories)
     mpc = LeftArmMPCMDMUQ(
         n_diffusion_samples=4,
-        clusterer=_TwoTrajectoryClusterer(),
+        clusterer=_TwoTrajectoryClusterer(n_clusters=2),
     )
 
     chosen = mpc.query_mdm_with_uncertainty(

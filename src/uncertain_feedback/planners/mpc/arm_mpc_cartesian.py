@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
-from uncertain_feedback.uncertainty.base import TrajectoryClusterer
+from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
 
 class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):

@@ -65,6 +65,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         advance_threshold: float = 0.1,
+        max_playback_delta: float = 0.1,
         trajectory_fraction: float = LeftArmMPCMDM.TRAJECTORY_FRACTION,
         goal_threshold: float = 0.1,
         visualize: bool = False,
@@ -84,6 +85,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             n_mpc_samples=n_mpc_samples,
             max_angle_delta=max_angle_delta,
             advance_threshold=advance_threshold,
+            max_playback_delta=max_playback_delta,
             trajectory_fraction=trajectory_fraction,
             goals=[],
             goal_threshold=goal_threshold,
@@ -102,10 +104,9 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             fk, spine3_pos, spine3_aa,
         )
 
-    @property
-    def mdm_tracking_complete(self) -> bool:
-        """True when the MDM queue is empty (fully transitioned to Cartesian)."""
-        return not self._goals
+    # ``mdm_tracking_complete`` is inherited from ``LeftArmMPCMDM`` and now
+    # reflects MDM trajectory playback exhaustion (Cartesian mode engages once
+    # playback finishes).
 
     # ------------------------------------------------------------------
     # solve override
@@ -114,8 +115,10 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
     def solve(self, current_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return the best first action and full plan.
 
-        Delegates to the parent (joint-angle cost) while MDM waypoints are
-        queued.  Switches to Cartesian cost once the MDM queue is empty.
+        The MDM phase is direct playback (no sampling), so ``solve`` is only
+        reached once playback is exhausted and the Cartesian goal queue is
+        active.  The empty-``_goals`` check keeps the joint-angle fallback for
+        any unexpected goal-queue use.
         """
         if self._goals:
             return super().solve(current_q)
@@ -132,44 +135,29 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
     ) -> np.ndarray:
         """Perform one MPC step.
 
-        Tracks MDM waypoints while that queue is non-empty (the last frame can
-        be popped, unlike the parent, so the queue can reach empty).  Then
-        works through the Cartesian goal queue.
+        Follows the validated MDM trajectory directly (one frame per step) while
+        playback is active, then works through the Cartesian goal queue.
         """
-        if self._goals:
-            return self._mdm_tracking_step(current_q, advance_threshold)
+        _ = advance_threshold  # playback ignores the joint-space advance threshold
+        if self._in_playback():
+            return self._playback_step(current_q)
         return self._cartesian_step(current_q)
 
-    def _mdm_tracking_step(
-        self,
-        current_q: np.ndarray,
-        advance_threshold: float | None = None,
-    ) -> np.ndarray:
-        target_q = self._goals[0]
-        first_action, _ = self.solve(current_q)
-        next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
-
-        threshold = (
-            advance_threshold
-            if advance_threshold is not None
-            else self.advance_threshold
+    def _playback_step(self, current_q: np.ndarray) -> np.ndarray:
+        """Take one rate-limited MDM playback step and update the visualiser."""
+        next_q = self._advance_playback(np.asarray(current_q, dtype=np.float64))
+        dist = (
+            float(np.linalg.norm(next_q - self._preview_q))
+            if self._preview_q is not None
+            else 0.0
         )
-        dist = float(np.linalg.norm(next_q - target_q))
-        # No len > 1 guard — allow queue to empty so Cartesian mode engages.
-        if dist < threshold:
-            self._goals.popleft()
-            self.reset_warmstart()
-            if self._goals:
-                target_q = self._goals[0]
-                dist = float(np.linalg.norm(next_q - target_q))
 
         if self._vis_config is not None:
             from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
             if self._vis is None:
-                vis_goal = self._goals[-1] if self._goals else self._initial_arm_aa
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    vis_goal,
+                    self._initial_arm_aa,
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     body_pos=self._vis_config.body_pos,
@@ -187,8 +175,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                     self._vis.update_cartesian_target(
                         self._spine3_pos + self.current_cartesian_goal
                     )
-            color = ArmVisualizer.MDM_COLOR if self._goals else ArmVisualizer.TARGET_COLOR
-            self._vis.update_step(next_q, dist=dist, color=color)
+            self._vis.update_step(next_q, dist=dist, color=ArmVisualizer.MDM_COLOR)
 
         return next_q
 

@@ -51,6 +51,7 @@ class MpcRunConfig:
     pose: Path | None
     goal_threshold: float
     advance_threshold: float
+    max_playback_delta: float
     trajectory_fraction: float
     uq: UqConfig
     cartesian: CartesianConfig
@@ -173,6 +174,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         goal_threshold=_float(data.get("goal_threshold", 0.01), "goal_threshold"),
         advance_threshold=_float(
             data.get("advance_threshold", 0.1), "advance_threshold"
+        ),
+        max_playback_delta=_float(
+            data.get("max_playback_delta", 0.1), "max_playback_delta"
         ),
         trajectory_fraction=_float(
             data.get("trajectory_fraction", 1.0), "trajectory_fraction"

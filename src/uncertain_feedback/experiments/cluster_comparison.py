@@ -81,6 +81,7 @@ def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
             cartesian_threshold=cfg.cartesian.threshold,
             **common,
             advance_threshold=cfg.advance_threshold,
+            max_playback_delta=cfg.max_playback_delta,
             trajectory_fraction=cfg.trajectory_fraction,
             n_diffusion_samples=cfg.uq.diffusion_samples,
             n_clusters=cfg.uq.n_clusters,
@@ -90,6 +91,7 @@ def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
             **common,
             goals=[],
             advance_threshold=cfg.advance_threshold,
+            max_playback_delta=cfg.max_playback_delta,
             trajectory_fraction=cfg.trajectory_fraction,
         )
 

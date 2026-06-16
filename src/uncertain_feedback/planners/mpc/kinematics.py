@@ -104,6 +104,43 @@ def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
     return composed.reshape(rotvec.shape)
 
 
+def _rate_limited_step(
+    current_q: np.ndarray,
+    target_q: np.ndarray,
+    max_delta: float,
+) -> tuple[np.ndarray, bool]:
+    """Take a geodesic step from ``current_q`` toward ``target_q``, per-joint
+    angle-capped.
+
+    Each joint rotates along the shortest SO(3) path toward its target by at
+    most ``max_delta`` radians.  Joints already within ``max_delta`` land exactly
+    on the target.  Used to follow an MDM trajectory at a bounded angular speed
+    (rate limiting) so large frame-to-frame jumps are traversed smoothly.
+
+    Args:
+        current_q: ``(3, 3)`` current axis-angle joint angles.
+        target_q:  ``(3, 3)`` target axis-angle joint angles.
+        max_delta: Maximum per-joint rotation (radians) for this step.
+
+    Returns:
+        Tuple of:
+
+        - ``next_q`` ``(3, 3)``: stepped joint angles.
+        - ``reached`` ``bool``: ``True`` when every joint was within
+          ``max_delta`` of the target (i.e. the target is fully reached).
+    """
+    current_q = np.asarray(current_q, dtype=np.float64)
+    target_q = np.asarray(target_q, dtype=np.float64)
+    cur = Rotation.from_rotvec(current_q)
+    rel = (Rotation.from_rotvec(target_q) * cur.inv()).as_rotvec()  # (3, 3)
+    angles = np.linalg.norm(rel, axis=1)  # (3,)
+    scale = np.minimum(1.0, max_delta / np.maximum(angles, 1e-12))
+    delta = rel * scale[:, np.newaxis]
+    next_q = _compose_rotvec(current_q, delta)
+    reached = bool(np.all(angles <= max_delta))
+    return next_q, reached
+
+
 class SmplLeftArmFK:
     """Forward kinematics for the SMPL left arm.
 

@@ -3,11 +3,18 @@
 :class:`LeftArmMPCMDM` inherits all sampling logic from
 :class:`~uncertain_feedback.planners.mpc.arm_mpc.SmplLeftArmMPC` and adds:
 
-* :meth:`push_trajectory` — bulk-enqueue an MDM-generated trajectory.
+* :meth:`validate_trajectory` — check an MDM trajectory against the configured
+  range safety costs (advisory: warns but never blocks).
+* :meth:`push_trajectory` — validate then queue an MDM-generated trajectory for
+  direct frame-by-frame playback (rather than enqueuing it as goals).
 * :meth:`set_mdm_goal` — mark the MDM end-frame in the live visualizer.
-* Per-call ``advance_threshold`` override in :meth:`step`.
 * MDM-colored arm rendering (darkorange while following an MDM trajectory).
 * ``body_pos`` background skeleton in the live visualizer window.
+
+After generation the trajectory is followed directly — one frame per
+:meth:`step` — skipping the per-step sampling optimisation (the trajectory was
+already validated against the cost functions).  Once it is exhausted, the MPC
+resumes sampling toward the final queued goal.
 """
 
 from __future__ import annotations
@@ -21,10 +28,14 @@ from uncertain_feedback.planners.mpc.arm_mpc import (
     _VisConfig,
     SmplLeftArmMPC,
 )
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    LearnablePreferenceCost,
+)
 from uncertain_feedback.planners.mpc.kinematics import (
     SmplLeftArmFK,
     _compose_rotvec,
+    _rate_limited_step,
 )
 from typing import TYPE_CHECKING
 
@@ -48,9 +59,14 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         horizon:             Number of look-ahead steps.
         n_mpc_samples:       Number of candidate action sequences per step.
         max_angle_delta:     Sampling std dev (radians).
-        advance_threshold:   Default L2 distance below which the controller
-                             advances to the next queued frame.  Can be
-                             overridden per :meth:`step` call.
+        advance_threshold:   Default L2 distance below which the MPC advances
+                             to the next queued goal during the resume phase.
+        max_playback_delta:  Maximum per-joint rotation (radians) applied per
+                             step while following the MDM trajectory.  Caps the
+                             playback angular speed so large frame-to-frame
+                             jumps (and the initial jump from the live pose into
+                             the trajectory) are traversed smoothly rather than
+                             snapped in a single step.
         trajectory_fraction: Fraction of MDM-generated frames to enqueue
                              (e.g. ``0.75`` enqueues the first 75 % of
                              frames).  Defaults to
@@ -77,6 +93,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         advance_threshold: float = 0.1,
+        max_playback_delta: float = 0.1,
         trajectory_fraction: float = 1,
         goals: list[np.ndarray] | None = None,
         goal_threshold: float = 0.1,
@@ -103,6 +120,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             extra_costs=extra_costs,
         )
         self.advance_threshold = advance_threshold
+        self._max_playback_delta = max_playback_delta
         self.trajectory_fraction = trajectory_fraction
         self.visualize = visualize
         self._mdm_spine3_pos = (
@@ -132,48 +150,140 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         # Cutoff frame shown as a ghost arm in the live visualiser.
         self._preview_q: np.ndarray | None = None
 
+        # Direct-playback buffer: the validated MDM trajectory is followed frame
+        # by frame (one frame per step) rather than tracked with the sampling
+        # MPC.  Once exhausted, the MPC resumes toward the final queued goal.
+        self._playback_frames: np.ndarray | None = None
+        self._playback_idx: int = 0
+
     # ------------------------------------------------------------------
     # MDM-specific public API
     # ------------------------------------------------------------------
 
     @property
     def mdm_tracking_complete(self) -> bool:
-        """True once the arm has reached the final MDM waypoint (queue ≤1)."""
-        return len(self._goals) <= 1
+        """True once the MDM trajectory playback has finished (or never started)."""
+        return not self._in_playback()
+
+    def _in_playback(self) -> bool:
+        """Whether an MDM trajectory is still being followed frame by frame."""
+        return (
+            self._playback_frames is not None
+            and self._playback_idx < len(self._playback_frames)
+        )
+
+    def validate_trajectory(
+        self,
+        frames: np.ndarray,
+        tol: float = 1e-6,
+    ) -> list[str]:
+        """Check a trajectory against the configured range safety costs.
+
+        Evaluates every configured :class:`LearnablePreferenceCost` term (e.g.
+        elbow height / flexion / shoulder abduction) on each frame and reports
+        any frame whose feature value falls outside the term's ``[min, max]``
+        range.  This is advisory only — it never blocks playback — but surfaces
+        which safety constraints the generated trajectory would violate.
+
+        Scope: this checks the generated *waypoints* only.  It does not check the
+        rate-limited interpolation between frames, nor the ease-in segment
+        from the live pose into ``frames[0]``.  For a nonlinear feature such as
+        ``elbow_height`` (an FK output), a joint-space geodesic between two
+        in-range poses can briefly leave the range, so a clean report here does
+        not strictly guarantee the executed motion stays in-band.
+
+        Args:
+            frames: ``(n_frames, 3, 3)`` axis-angle trajectory.
+            tol:    Violation magnitude below which a frame is treated as
+                    in-range (guards against floating-point noise).
+
+        Returns:
+            One human-readable warning string per violated cost term (empty when
+            the trajectory respects every configured range cost).
+        """
+        frames = np.asarray(frames, dtype=np.float64)
+        warnings: list[str] = []
+        n_frames = len(frames)
+        for term in self._extra_costs.terms():
+            if not isinstance(term, LearnablePreferenceCost):
+                continue
+            values = term.feature_values(frames)
+            violation = np.maximum(term.min_value - values, 0.0) + np.maximum(
+                values - term.max_value, 0.0
+            )
+            bad = np.flatnonzero(violation > tol)
+            if bad.size == 0:
+                continue
+            worst = int(bad[np.argmax(violation[bad])])
+            warnings.append(
+                f"{term.cost_name}: {bad.size}/{n_frames} frames outside "
+                f"[{term.min_value:.3f}, {term.max_value:.3f}] "
+                f"(worst frame {worst}: value={values[worst]:.3f})"
+            )
+        return warnings
 
     def push_trajectory(
         self,
         frames: np.ndarray,
     ) -> None:
-        """Push an MDM-generated trajectory into the goal queue.
+        """Validate an MDM-generated trajectory and queue it for direct playback.
 
-                Frame 0, every 10th frame after that, and the final frame of
-                ``frames`` become ``(3, 3)`` targets in the goal queue.  By
-                default the new trajectory is prepended to the *front* of the
-                queue so it executes immediately ahead of any previously queued
-                goals.
+        The trajectory is first checked against the configured range safety
+        costs (see :meth:`validate_trajectory`); any violations are warned about
+        but do not block playback.  The full-resolution trajectory is then
+        stored so that :meth:`step` follows it one frame per step.  Once the
+        trajectory is exhausted, the MPC resumes sampling toward the final goal
+        already in the queue.
 
-                Args:
-                    frames:   ``(n_frames, 3, 3)`` axis-angle trajectory for
-                              ``[left_shoulder, left_elbow, left_wrist]``,
-                              as returned by
-                              :meth:`~uncertain_feedback.motion_generators.mdm.mdm_api\
-        .MdmMotionGenerator.generate_left_arm_trajectory`.
+        Args:
+            frames:   ``(n_frames, 3, 3)`` axis-angle trajectory for
+                      ``[left_shoulder, left_elbow, left_wrist]``,
+                      as returned by
+                      :meth:`~uncertain_feedback.motion_generators.mdm.mdm_api\
+.MdmMotionGenerator.generate_left_arm_trajectory`.
         """
         frames = np.asarray(frames, dtype=np.float64)
-        queued_frames = frames[::10]
-        if (frames.shape[0] - 1) % 10 != 0:
-            queued_frames = np.concatenate(
-                [queued_frames, frames[-1:]],
-                axis=0,
+
+        warnings = self.validate_trajectory(frames)
+        if warnings:
+            print(
+                "[validate] generated trajectory violates safety costs "
+                "(following anyway):"
             )
-        # extendleft reverses the iterable, so reverse first to preserve order.
-        self._goals.extendleft(queued_frames[::-1])
-        # Notify live visualiser of the new preview frame (last enqueued frame).
-        preview_q = queued_frames[-1].copy()
+            for warning in warnings:
+                print(f"[validate]   {warning}")
+        else:
+            print("[validate] generated trajectory respects all safety costs.")
+
+        self._playback_frames = frames
+        self._playback_idx = 0
+        self.reset_warmstart()
+
+        # Notify live visualiser of the new preview frame (last MDM frame).
+        preview_q = frames[-1].copy()
         self._preview_q = preview_q
         if self._vis is not None:
             self._vis.update_trajectory_preview(preview_q)
+
+    def _advance_playback(self, current_q: np.ndarray) -> np.ndarray:
+        """Take one rate-limited step toward the current MDM frame.
+
+        Moves from ``current_q`` toward the active playback frame by at most
+        :attr:`_max_playback_delta` radians per joint, advancing the cursor only
+        once the frame is reached.  This bounds the angular speed so the initial
+        jump from the live pose into the trajectory — and any large
+        frame-to-frame jump — is traversed smoothly rather than snapped in a
+        single step.  Resets the warm-start once the trajectory is exhausted so
+        the MPC resume phase plans from a clean slate.
+        """
+        assert self._playback_frames is not None
+        target_q = self._playback_frames[self._playback_idx]
+        next_q, reached = _rate_limited_step(current_q, target_q, self._max_playback_delta)
+        if reached:
+            self._playback_idx += 1
+            if not self._in_playback():
+                self.reset_warmstart()
+        return next_q
 
     def set_mdm_goal(self, goal_q: np.ndarray) -> None:
         """Set the MDM end-of-trajectory goal marker.
@@ -202,46 +312,65 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
     ) -> np.ndarray:
         """Perform one MPC step.
 
-        Uses the front of the goal queue as the current target.  When the arm
-        comes within ``advance_threshold`` of the current target *and* there is
-        a subsequent frame in the queue, the front entry is popped and the next
-        frame becomes the new target.
+        While an MDM trajectory is queued for playback, the arm follows it
+        directly — without sampling-based re-planning — at a bounded angular
+        speed: each step moves toward the current frame by at most
+        ``max_playback_delta`` radians per joint (rate limiting), so the
+        trajectory was already validated against the safety costs in
+        :meth:`push_trajectory`.  Smooth frames are reached in one step; large
+        jumps (including the initial jump from the live pose into the
+        trajectory) are traversed over several steps.  Once the trajectory is
+        exhausted, the MPC resumes sampling toward the final goal in the queue,
+        advancing through any remaining goals when within ``advance_threshold``.
 
         If ``visualize=True`` was set at construction, the live window is
         updated automatically.  The arm is drawn orange while following an MDM
-        trajectory (queue length > 1) and blue once only the final goal remains.
+        trajectory and blue once the MPC is reaching the final goal.
 
         Args:
             current_q:         ``(3, 3)`` current axis-angle joint angles.
             advance_threshold: Distance (L2 norm) below which the MPC advances
-                               to the next queued frame.  Defaults to
-                               :attr:`advance_threshold`.
+                               to the next queued goal during the resume phase.
+                               Defaults to :attr:`advance_threshold`.
 
         Returns:
             ``(3, 3)`` updated axis-angle joint angles.
         """
-        target_q = self._goals[0]
-        first_action, _ = self.solve(current_q)
-        next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
-
-        threshold = (
-            advance_threshold
-            if advance_threshold is not None
-            else self.advance_threshold
-        )
-        dist = float(np.linalg.norm(next_q - target_q))
-        if dist < threshold and len(self._goals) > 1:
-            self._goals.popleft()
-            self.reset_warmstart()
+        playing = self._in_playback()
+        if playing:
+            next_q = self._advance_playback(np.asarray(current_q, dtype=np.float64))
+            dist = float(np.linalg.norm(next_q - self._goals[0])) if self._goals else 0.0
+        elif not self._goals:
+            # Playback done and no final goal queued (e.g. a headless rollout
+            # that only follows the trajectory): hold the last pose.
+            next_q = np.asarray(current_q, dtype=np.float64).copy()
+            dist = 0.0
+        else:
             target_q = self._goals[0]
+            first_action, _ = self.solve(current_q)
+            next_q = _compose_rotvec(
+                np.asarray(current_q, dtype=np.float64), first_action
+            )
+
+            threshold = (
+                advance_threshold
+                if advance_threshold is not None
+                else self.advance_threshold
+            )
             dist = float(np.linalg.norm(next_q - target_q))
+            if dist < threshold and len(self._goals) > 1:
+                self._goals.popleft()
+                self.reset_warmstart()
+                target_q = self._goals[0]
+                dist = float(np.linalg.norm(next_q - target_q))
 
         if self._vis_config is not None:
             from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
             if self._vis is None:
+                vis_goal = self._goals[-1] if self._goals else next_q
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    self._goals[-1],
+                    vis_goal,
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     body_pos=self._vis_config.body_pos,
@@ -254,7 +383,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                     self._vis.update_mdm_goal(self._mdm_goal)
                 if self._preview_q is not None:
                     self._vis.update_trajectory_preview(self._preview_q)
-            color = ArmVisualizer.TARGET_COLOR if len(self._goals) <= 1 else ArmVisualizer.MDM_COLOR
+            color = ArmVisualizer.MDM_COLOR if playing else ArmVisualizer.TARGET_COLOR
             self._vis.update_step(next_q, dist=dist, color=color)
 
         return next_q

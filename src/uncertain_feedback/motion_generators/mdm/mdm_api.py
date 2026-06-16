@@ -24,7 +24,7 @@ Typical usage::
         start_pose=current_pose,
     )  # (n_frames, 3, 3)
 
-    # Enqueue trajectory into the MPC.
+    # Validate against the safety costs and queue for direct playback.
     mpc.push_trajectory(trajectory)
 """
 

@@ -8,6 +8,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 import yaml
+from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.experiments import cluster_comparison
 from uncertain_feedback.planners import run as planner_run
@@ -923,7 +924,7 @@ def test_cartesian_mpc_consumes_final_mdm_goal_then_uses_cartesian_mode() -> Non
     assert called["cartesian"]
 
 
-def test_cartesian_mpc_tracking_complete_only_after_mdm_queue_empties() -> None:
+def test_cartesian_mpc_tracking_complete_only_after_playback_exhausts() -> None:
     fk = SmplLeftArmFK()
     q0 = np.zeros((3, 3), dtype=np.float64)
     cartesian_goal = fk.fk(q0)[-1] - fk.tpose_spine3_pos
@@ -934,21 +935,25 @@ def test_cartesian_mpc_tracking_complete_only_after_mdm_queue_empties() -> None:
         horizon=1,
         n_mpc_samples=1,
         max_angle_delta=0.0,
-        advance_threshold=10.0,
+        max_playback_delta=10.0,  # large cap: each frame reached in one step
     )
     far_goal = np.full((3, 3), 0.5, dtype=np.float64)
     mpc.push_trajectory(np.stack([q0, far_goal]))
 
     assert not mpc.mdm_tracking_complete
-    mpc.step(q0)
+    q1 = mpc.step(q0)
+    np.testing.assert_allclose(q1, q0)
 
+    # One frame followed, one remaining: still in playback.
     assert not mpc.mdm_tracking_complete
-    assert len(mpc._goals) == 1
+    assert mpc._playback_idx == 1
 
-    mpc.step(q0)
+    q2 = mpc.step(q1)
+    np.testing.assert_allclose(q2, far_goal)
 
+    # Trajectory exhausted: Cartesian mode now engages.
     assert mpc.mdm_tracking_complete
-    assert len(mpc._goals) == 0
+    assert mpc._playback_idx == 2
 
 
 def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
@@ -1015,28 +1020,172 @@ def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
     assert spy.step_colors == [SpyArmVisualizer.MDM_COLOR]
 
 
-def test_mdm_push_trajectory_enqueues_every_tenth_frame_and_endpoint() -> None:
+def test_mdm_push_trajectory_stores_full_trajectory_for_playback() -> None:
     frames = np.arange(23 * 3 * 3, dtype=np.float64).reshape(23, 3, 3)
-    mpc = LeftArmMPCMDM()
+    final_goal = np.full((3, 3), 0.9, dtype=np.float64)
+    mpc = LeftArmMPCMDM(goals=[final_goal])
 
     mpc.push_trajectory(frames)
 
-    assert len(mpc._goals) == 4
-    for queued, expected in zip(mpc._goals, frames[[0, 10, 20, 22]]):
-        np.testing.assert_allclose(queued, expected)
+    # The full-resolution trajectory is stored for direct playback, not
+    # downsampled into the goal queue.
+    np.testing.assert_allclose(mpc._playback_frames, frames)
+    assert mpc._playback_idx == 0
+    assert not mpc.mdm_tracking_complete
     np.testing.assert_allclose(mpc._preview_q, frames[22])
+    # The pre-existing final goal is left untouched for the MPC resume phase.
+    assert len(mpc._goals) == 1
+    np.testing.assert_allclose(mpc._goals[0], final_goal)
 
 
-def test_mdm_push_trajectory_does_not_duplicate_stride_endpoint() -> None:
-    frames = np.arange(21 * 3 * 3, dtype=np.float64).reshape(21, 3, 3)
-    mpc = LeftArmMPCMDM()
-
+def test_mdm_playback_smooth_frames_advance_one_per_step() -> None:
+    # Consecutive frames differ by 0.1 rad on the shoulder; with a generous cap
+    # each is reached in a single step (smooth motion is not slowed).
+    frames = np.array(
+        [
+            [[0.1, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            [[0.2, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            [[0.3, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        ],
+        dtype=np.float64,
+    )
+    final_goal = np.zeros((3, 3), dtype=np.float64)
+    mpc = LeftArmMPCMDM(
+        goals=[final_goal],
+        horizon=1,
+        n_mpc_samples=1,
+        max_angle_delta=0.0,
+        max_playback_delta=1.0,
+    )
     mpc.push_trajectory(frames)
 
-    assert len(mpc._goals) == 3
-    for queued, expected in zip(mpc._goals, frames[[0, 10, 20]]):
-        np.testing.assert_allclose(queued, expected)
-    np.testing.assert_allclose(mpc._preview_q, frames[20])
+    q = np.zeros((3, 3), dtype=np.float64)
+    for expected in frames:
+        assert not mpc.mdm_tracking_complete
+        q = mpc.step(q)
+        np.testing.assert_allclose(q, expected, atol=1e-9)
+
+    # Playback exhausted: the MPC resumes sampling toward the final goal.
+    assert mpc.mdm_tracking_complete
+
+
+def _max_joint_rotation(q_a: np.ndarray, q_b: np.ndarray) -> float:
+    """Largest per-joint geodesic rotation (radians) between two (3, 3) configs."""
+    rel = (Rotation.from_rotvec(q_b) * Rotation.from_rotvec(q_a).inv()).as_rotvec()
+    return float(np.linalg.norm(rel, axis=1).max())
+
+
+def test_mdm_playback_caps_large_jump_velocity() -> None:
+    # A single far frame: a 1.2 rad shoulder jump must be traversed over many
+    # capped steps, never exceeding max_playback_delta per joint per step.
+    max_delta = 0.1
+    frames = np.array(
+        [[[1.2, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
+        dtype=np.float64,
+    )
+    mpc = LeftArmMPCMDM(
+        goals=[np.zeros((3, 3))],
+        horizon=1,
+        n_mpc_samples=1,
+        max_angle_delta=0.0,
+        max_playback_delta=max_delta,
+    )
+    mpc.push_trajectory(frames)
+
+    q = np.zeros((3, 3), dtype=np.float64)
+    n_steps = 0
+    while not mpc.mdm_tracking_complete and n_steps < 100:
+        prev = q
+        q = mpc.step(q)
+        assert _max_joint_rotation(prev, q) <= max_delta + 1e-9
+        n_steps += 1
+
+    assert n_steps > 1  # not snapped in a single step
+    assert mpc.mdm_tracking_complete
+    np.testing.assert_allclose(q, frames[0], atol=1e-9)
+
+
+def test_mdm_playback_eases_in_from_live_pose() -> None:
+    # The arm's live pose differs from frames[0]; the first step must ease in
+    # (move at most max_playback_delta), not snap straight to frames[0].
+    max_delta = 0.1
+    current_q = np.zeros((3, 3), dtype=np.float64)
+    frames = np.array(
+        [[[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
+        dtype=np.float64,
+    )
+    mpc = LeftArmMPCMDM(
+        goals=[np.zeros((3, 3))],
+        horizon=1,
+        n_mpc_samples=1,
+        max_angle_delta=0.0,
+        max_playback_delta=max_delta,
+    )
+    mpc.push_trajectory(frames)
+
+    q1 = mpc.step(current_q)
+    assert _max_joint_rotation(current_q, q1) <= max_delta + 1e-9
+    assert not np.allclose(q1, frames[0])  # did not snap to the first frame
+
+
+def test_mdm_mpc_resumes_toward_final_goal_after_playback() -> None:
+    np.random.seed(0)
+    frames = np.zeros((2, 3, 3), dtype=np.float64)  # trivial trajectory at origin
+    final_goal = np.array(
+        [[0.0, 0.6, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    mpc = LeftArmMPCMDM(
+        goals=[final_goal],
+        horizon=5,
+        n_mpc_samples=256,
+        max_angle_delta=0.05,
+    )
+    mpc.push_trajectory(frames)
+
+    q = np.zeros((3, 3), dtype=np.float64)
+    for _ in range(len(frames)):  # phase 1: direct playback
+        q = mpc.step(q)
+    assert mpc.mdm_tracking_complete
+    dist_after_playback = float(np.linalg.norm(q - final_goal))
+
+    for _ in range(200):  # phase 2: MPC resumes sampling toward the final goal
+        q = mpc.step(q)
+    dist_resumed = float(np.linalg.norm(q - final_goal))
+
+    assert dist_resumed < 0.5 * dist_after_playback
+
+
+def test_mdm_validate_trajectory_warns_on_range_violation() -> None:
+    fk = SmplLeftArmFK()
+    context = MpcCostContext(
+        fk=fk,
+        spine3_pos=fk.tpose_spine3_pos,
+        spine3_aa=np.zeros(3, dtype=np.float64),
+    )
+    # Constrain elbow flexion to a tight range; a large elbow rotation violates it.
+    extra_costs = CompositeTrajectoryCost(
+        [
+            ElbowFlexionAngleCost(
+                min_angle=0.0,
+                max_angle=0.1,
+                weight=1.0,
+                progress_weight=1.0,
+                context=context,
+            )
+        ]
+    )
+    mpc = LeftArmMPCMDM(goals=[np.zeros((3, 3))], extra_costs=extra_costs)
+
+    safe = np.zeros((4, 3, 3), dtype=np.float64)
+    assert mpc.validate_trajectory(safe) == []
+
+    violating = np.zeros((4, 3, 3), dtype=np.float64)
+    violating[2, 1, 0] = 1.5  # large elbow axis-angle on frame 2
+    warnings = mpc.validate_trajectory(violating)
+    assert len(warnings) == 1
+    assert "elbow_flexion_angle" in warnings[0]
+    assert "frame 2" in warnings[0]
 
 
 def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
@@ -1062,9 +1211,9 @@ def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
     )
 
     assert gen.received_spine3_aa is not None
-    assert mpc.current_goal is not None
+    assert mpc._playback_frames is not None
     np.testing.assert_allclose(gen.received_spine3_aa, spine3_aa)
-    np.testing.assert_allclose(mpc.current_goal, trajectory[0])
+    np.testing.assert_allclose(mpc._playback_frames[0], trajectory[0])
 
 
 def test_uq_result_contains_all_cluster_mean_trajectories() -> None:

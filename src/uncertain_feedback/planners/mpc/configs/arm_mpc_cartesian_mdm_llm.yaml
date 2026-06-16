@@ -6,6 +6,7 @@ max_angle_delta: 0.01
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 goal_threshold: 0.15
 advance_threshold: 0.15
+max_playback_delta: 0.1  # max per-joint rotation (rad) per step while following the MDM trajectory
 trajectory_fraction: 1
 mdm_frames: 50
 

@@ -585,6 +585,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
             **common,
             goals=[default_goal],
             advance_threshold=cfg.advance_threshold,
+            max_playback_delta=cfg.max_playback_delta,
             trajectory_fraction=cfg.trajectory_fraction,
         )
     elif cfg.planner == "arm_mpc_cartesian_no_mdm":
@@ -615,6 +616,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
             cartesian_threshold=cfg.cartesian.threshold,
             **common,
             advance_threshold=cfg.advance_threshold,
+            max_playback_delta=cfg.max_playback_delta,
             trajectory_fraction=cfg.trajectory_fraction,
             n_diffusion_samples=cfg.uq.diffusion_samples,
             n_clusters=cfg.uq.n_clusters,
@@ -624,6 +626,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
             **common,
             goals=[default_goal],
             advance_threshold=cfg.advance_threshold,
+            max_playback_delta=cfg.max_playback_delta,
             trajectory_fraction=cfg.trajectory_fraction,
             n_diffusion_samples=cfg.uq.diffusion_samples,
             n_clusters=cfg.uq.n_clusters,

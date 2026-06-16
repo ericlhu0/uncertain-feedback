@@ -102,8 +102,12 @@ SmplLeftArmMPC (arm_mpc.py)
 │  Warm-start: shifts previous best plan by one step each iteration.
 │
 ├── LeftArmMPCMDM (arm_mpc_mdm.py)
-│     Adds: push_trajectory(), set_mdm_goal(), advance_threshold per step,
-│     MDM-colored arm rendering, body_pos background skeleton.
+│     Adds: validate_trajectory() (advisory safety-cost check), push_trajectory()
+│     (validate + queue for rate-limited playback), set_mdm_goal(),
+│     MDM-colored arm rendering, body_pos background skeleton. The MDM trajectory
+│     is played back directly (no per-step sampling) at a bounded angular speed
+│     (max_playback_delta per joint per step), so jumps are eased not snapped;
+│     the MPC then resumes sampling toward the final goal.
 │
 │   └── LeftArmMPCMDMUQ (arm_mpc_mdm_uq.py)
 │         Adds: query_mdm_with_uncertainty() — draws N diffusion samples,
@@ -161,8 +165,10 @@ MdmMotionGenerator.generate_left_arm_trajectory()   [mdm_api.py]
     ▼  chosen (n_frames, 3, 3) trajectory
     │
 SmplLeftArmMPC / subclass
-    │   Goal queue filled via push_trajectory()
-    │   Each step: sample N×H action sequences, rollout, compute cost, take best
+    │   MDM trajectory validated against safety costs, then played back at a
+    │   bounded angular speed (rate-limited, push_trajectory); after
+    │   playback the MPC samples toward the final goal.
+    │   Each MPC step: sample N×H action sequences, rollout, compute cost, take best
     │
     ├── Joint-space cost: L2 to current goal in (3,3) axis-angle space
     └── Extra costs: CompositeTrajectoryCost terms [costs.py]
@@ -257,7 +263,8 @@ When `llm_cost.enabled: true` in the YAML:
 | `max_angle_delta`      | float    | Sampling std dev (radians)                           |
 | `pose`                 | path?    | HML pose `.pt` file for initial body state           |
 | `goal_threshold`       | float    | L2 dist threshold to pop goal (default 0.01)         |
-| `advance_threshold`    | float    | MDM frame advance threshold (default 0.1)            |
+| `advance_threshold`    | float    | Goal-advance threshold for the MPC resume phase (default 0.1). MDM frames are now played back directly, so this no longer governs MDM frame advancement. |
+| `max_playback_delta`   | float    | Max per-joint rotation (radians) per step while following the MDM trajectory (default 0.1). Rate limit: caps playback angular speed so the initial jump into the trajectory and any large frame-to-frame jump are eased rather than snapped. |
 | `trajectory_fraction`  | float    | Fraction of MDM frames to enqueue (default 1.0)      |
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |

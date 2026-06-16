@@ -8,10 +8,10 @@ from pathlib import Path
 from types import FunctionType
 from typing import Any
 
-import matplotlib.pyplot as plt
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.planners.mpc.costs import (
+from uncertain_feedback.planners.mpc.costs.base import (
     MpcCostContext,
     TrajectoryCost,
 )
@@ -43,6 +43,8 @@ class LlmCostResponse:
     description: str
     code: str
     params: dict[str, Any]
+    explanation: str = ""
+    recipient_explanation: str = ""
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class GeneratedCostContext:
     current_q: np.ndarray
     mdm_traj: np.ndarray
     recent_q: np.ndarray
+    body_pos: np.ndarray | None = None
 
     @property
     def current_positions(self) -> np.ndarray:
@@ -91,6 +94,109 @@ class GeneratedCostContext:
             return _JOINT_NAMES[name]
         except KeyError as exc:
             raise KeyError(f"Unknown generated-cost joint name: {name!r}") from exc
+
+    def elbow_flexion_angles(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return elbow bend as local elbow rotation-vector magnitude.
+
+        Accepts any leading shape ending in ``(3, 3)`` and returns that leading
+        shape. This is a coarse SMPL-space flexion proxy, not a clinical joint
+        angle decomposition.
+        """
+        trajectory = np.asarray(trajectory, dtype=np.float64)
+        return np.linalg.norm(trajectory[..., 1, :], axis=-1)
+
+    def shoulder_abduction_adduction_angles(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return signed shoulder abduction/adduction proxy in the spine3 frame.
+
+        This is the lateral component angle of the shoulder-to-elbow direction:
+        positive values move toward ``+x`` (left-arm abduction / away from the
+        torso), and negative values move toward ``-x`` (adduction / across the
+        torso).
+        """
+        upper_arm = self._upper_arm_direction_spine_frame(trajectory)
+        return np.arcsin(np.clip(upper_arm[..., 0], -1.0, 1.0))
+
+    def shoulder_flexion_extension_angles(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return signed shoulder flexion/extension proxy in the spine3 frame.
+
+        This is the depth component angle of the shoulder-to-elbow direction:
+        positive values move toward ``+z`` and negative values move toward
+        ``-z``.
+        """
+        upper_arm = self._upper_arm_direction_spine_frame(trajectory)
+        return np.arcsin(np.clip(upper_arm[..., 2], -1.0, 1.0))
+
+    def shoulder_internal_external_rotation_angles(
+        self, trajectory: np.ndarray
+    ) -> np.ndarray:
+        """Return signed shoulder twist around the T-pose upper-arm axis.
+
+        This is an approximate internal/external rotation proxy from the local
+        shoulder axis-angle. Positive sign follows the T-pose shoulder-to-elbow
+        axis convention.
+        """
+        trajectory = np.asarray(trajectory, dtype=np.float64)
+        leading = trajectory.shape[:-2]
+        shoulder_rotvec = trajectory[..., 0, :].reshape(-1, 3)
+        axis = self._tpose_upper_arm_axis()
+        angles = _twist_angles_about_axis(shoulder_rotvec, axis)
+        return angles.reshape(leading)
+
+    def _upper_arm_direction_spine_frame(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return unit shoulder-to-elbow directions in the spine3 frame."""
+        positions = self.fk_batch(trajectory)
+        upper_arm_world = (
+            positions[..., _JOINT_NAMES["left_elbow"], :]
+            - positions[..., _JOINT_NAMES["left_shoulder"], :]
+        )
+        leading = upper_arm_world.shape[:-1]
+        spine_inv = Rotation.from_rotvec(self.spine3_aa).inv()
+        upper_arm_local = spine_inv.apply(upper_arm_world.reshape(-1, 3)).reshape(
+            (*leading, 3)
+        )
+        norms = np.linalg.norm(upper_arm_local, axis=-1, keepdims=True)
+        return np.divide(
+            upper_arm_local,
+            norms,
+            out=np.zeros_like(upper_arm_local),
+            where=norms > 1e-12,
+        )
+
+    def _tpose_upper_arm_axis(self) -> np.ndarray:
+        """Return unit T-pose shoulder-to-elbow axis in the spine3 frame."""
+        tpose = self.fk.tpose_joints
+        axis = tpose[_JOINT_NAMES["left_elbow"]] - tpose[_JOINT_NAMES["left_shoulder"]]
+        norm = np.linalg.norm(axis)
+        if norm <= 1e-12:
+            return np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        return axis / norm
+
+
+def _twist_angles_about_axis(rotvecs: np.ndarray, axis: np.ndarray) -> np.ndarray:
+    """Return signed twist component of rotations about a unit axis."""
+    rotvecs = np.asarray(rotvecs, dtype=np.float64).reshape(-1, 3)
+    axis = np.asarray(axis, dtype=np.float64)
+    axis_norm = np.linalg.norm(axis)
+    if axis_norm <= 1e-12:
+        axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        axis = axis / axis_norm
+
+    quats = Rotation.from_rotvec(rotvecs).as_quat()  # (x, y, z, w)
+    vec = quats[:, :3]
+    w = quats[:, 3]
+    projected_vec = axis[np.newaxis, :] * (vec @ axis)[:, np.newaxis]
+    twist_norm = np.sqrt(np.sum(projected_vec**2, axis=1) + w**2)
+    safe_vec = np.divide(
+        projected_vec,
+        twist_norm[:, np.newaxis],
+        out=np.zeros_like(projected_vec),
+        where=twist_norm[:, np.newaxis] > 1e-12,
+    )
+    safe_w = np.divide(w, twist_norm, out=np.ones_like(w), where=twist_norm > 1e-12)
+    signed_vec = safe_vec @ axis
+    angles = 2.0 * np.arctan2(signed_vec, safe_w)
+    return (angles + np.pi) % (2.0 * np.pi) - np.pi
 
 
 @dataclass(frozen=True)
@@ -146,13 +252,25 @@ def parse_llm_cost_response(raw: str) -> LlmCostResponse:
     description = data.get("description", "")
     code = data.get("code")
     params = data.get("params", {})
+    explanation = data.get("explanation", "")
+    recipient_explanation = data.get("recipient_explanation", "")
     if not isinstance(description, str):
         raise GeneratedCostValidationError("description must be a string")
     if not isinstance(code, str):
         raise GeneratedCostValidationError("code must be a string")
     if not isinstance(params, dict):
         raise GeneratedCostValidationError("params must be an object")
-    return LlmCostResponse(description, code, params)
+    if not isinstance(explanation, str):
+        raise GeneratedCostValidationError("explanation must be a string")
+    if not isinstance(recipient_explanation, str):
+        raise GeneratedCostValidationError("recipient_explanation must be a string")
+    return LlmCostResponse(
+        description,
+        code,
+        params,
+        explanation,
+        recipient_explanation,
+    )
 
 
 def compile_generated_cost(code: str) -> FunctionType:
@@ -172,6 +290,7 @@ def build_generated_cost_context(
     mdm_traj: np.ndarray,
     q_history: list[np.ndarray],
     window: int,
+    body_pos: np.ndarray | None = None,
 ) -> GeneratedCostContext:
     """Build the runtime context passed to generated Python costs."""
     recent_q = np.asarray(q_history[-window:], dtype=np.float64)
@@ -184,6 +303,7 @@ def build_generated_cost_context(
         current_q=np.asarray(current_q, dtype=np.float64),
         mdm_traj=np.asarray(mdm_traj, dtype=np.float64),
         recent_q=recent_q,
+        body_pos=np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None,
     )
 
 
@@ -197,93 +317,27 @@ def build_motion_summaries(context: GeneratedCostContext) -> dict[str, Any]:
         "current": _state_summary(context.current_q, current_positions, spine3_pos),
         "mdm_traj": _trajectory_summary(context.mdm_traj, mdm_positions, spine3_pos),
     }
+    summaries["current"]["joint_features"] = _joint_feature_frame_summary(
+        context,
+        context.current_q,
+    )
+    summaries["mdm_traj"]["joint_features"] = _joint_feature_summary(
+        context,
+        context.mdm_traj,
+    )
     if context.recent_q.size > 0:
         summaries["recent"] = _trajectory_summary(
             context.recent_q,
             recent_positions,
             spine3_pos,
         )
+        summaries["recent"]["joint_features"] = _joint_feature_summary(
+            context,
+            context.recent_q,
+        )
     else:
         summaries["recent"] = {}
     return summaries
-
-
-_IMAGE_DESCRIPTION_PROMPT = (
-    "Describe the arm trajectory shown in this image. "
-    "Focus on: the overall direction of motion, the shape of the path, "
-    "roughly where the arm starts and ends, and any notable features "
-    "(e.g. arc, straight line, elbow going up/down, wrist reaching far). "
-    "Be concise (2-4 sentences)."
-)
-
-
-def build_llm_cost_prompt(
-    instruction: str,
-    summaries: dict[str, Any],
-    image_paths: list[Path],
-    image_description: str = "",
-) -> str:
-    """Build the text prompt for the cost-generator LLM."""
-    image_section = ""
-    if image_paths:
-        image_section = "An image of the trajectory is attached."
-        if image_description:
-            image_section += f"\n\nImage description: {image_description}"
-    return f"""
-You are a robot controller assisting a person with mobility limitations with arm movements. Your task is to generate a Python cost function that encodes caregiver preferences — what an experienced caregiver would prioritize when helping their care recipient perform this motion. Think in terms of: where should the arm reach (end goal), is the arm being kept comfortable and supported throughout, is the motion smooth, does the arm make meaningful progress toward the goal.
-
-Instruction:
-{instruction}
-
-{image_section}
-
-Guidelines:
-- DO: use the MDM trajectory summaries to extract the *intent* behind the motion — e.g. how high the person wants to reach (wrist z max), where they want the arm to end (end positions), how much lateral reach is involved. Use these numbers as concrete targets for preference-based costs.
-- DO: ground each cost term numerically in the generated trajectory data. The MDM trajectory tells you what this person's version of the instruction means quantitatively — treat those numbers as the caregiver's understanding of the goal, not as a trajectory to imitate. You may draw targets from any part of the trajectory — start, end, or mid-trajectory — if that best represents the preference (e.g. "elbow should reach at least height X mid-motion" if the preference is about a transient pose like arm elevation).
-- DO: write costs grounded in what a caregiver would consider: reaching a goal, keeping the arm supported, avoiding uncomfortable positions, smooth motion.
-- DO NOT: imitate the trajectory's shape or timing — no Gaussian time peaks tied to specific arc positions, no sweep patterns that encode the MDM trajectory geometry, no costs that enforce a specific mid-trajectory path.
-- DO NOT: write costs that only make sense as "follow this exact path." A caregiver cares about where the arm ends up and whether it's comfortable throughout, not about replicating the specific arc the MDM generated.
-
-Framing examples:
-- Caregiver-style (good): "Help the arm reach a comfortable height. Reward wrist ending above its starting height using the MDM end position as the target, penalize an uncomfortable elbow below the shoulder, keep motion smooth."
-- Trajectory-imitation (avoid): "Apply a Gaussian reward peaking at mid-horizon to encourage the upward arc, then enforce a leftward descending sweep to match the MDM path."
-
-Runtime API:
-- Define exactly: def cost(q_trajs, context, params):
-- q_trajs has shape (n_rollouts, horizon + 1, 3, 3) for left_shoulder,
-  left_elbow, left_wrist axis-angle states.
-- context.fk_rollouts(q_trajs) returns positions with shape
-  (n_rollouts, horizon + 1, 5, 3) for spine3, left_collar, left_shoulder,
-  left_elbow, left_wrist.
-- context.mdm_positions has shape (T, 5, 3) — a numpy array. Use numpy
-  indexing only: context.mdm_positions[:, 4, 2] gives wrist z over the MDM
-  trajectory; context.mdm_positions[-1, 4, :] gives the final wrist position.
-  Do NOT use dict-style access like context.mdm_positions['left_wrist'] — it
-  will raise a TypeError at runtime.
-- context.current_positions has shape (5, 3) — a numpy array. Use numpy
-  indexing: context.current_positions[4] gives the current wrist position.
-  Do NOT use dict-style access.
-- context.joint_index(name) accepts spine3, collar, shoulder, elbow, wrist and
-  left_* aliases and returns an integer index (0–4).
-- If you need statistics such as maximum wrist z during the MDM trajectory,
-  read those values from the Summaries section below and encode them as
-  hardcoded floats or params in your cost function — do not try to compute
-  them from context.mdm_positions using dict-style access.
-- context.mdm_traj and context.recent_q/recent_positions are also available
-  as numpy arrays.
-- np is available. Do not import anything.
-- Return a finite numpy array with shape (n_rollouts,).
-- Smoothness terms: if you compute velocity as q_trajs[:, 1:] - q_trajs[:, :-1],
-  use np.sum(...) / max(T, 1) instead of np.mean to avoid NaN on empty slices.
-
-Hard requirements:
-- Return only JSON with keys: description, code, params.
-- Prefer costs over future timesteps q_trajs[:, 1:], not only the initial state.
-- The description field must state the caregiver preference the cost encodes in plain human language — how a caregiver would explain what they are trying to achieve. Do not describe the code structure or mathematical approach.
-
-Summaries:
-{json.dumps(summaries, indent=2, sort_keys=True)}
-""".strip()
 
 
 def render_prompt_images(
@@ -293,7 +347,14 @@ def render_prompt_images(
     """Render trajectory-grounding overlay image for the LLM prompt."""
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "overlay.png"
-    _render_overlay(context, path)
+    ArmVisualizer(context.fk).render_trajectory_overlay(
+        path,
+        mdm_traj=context.mdm_traj,
+        current_q=context.current_q,
+        spine3_pos=context.spine3_pos,
+        spine3_aa=context.spine3_aa,
+        body_pos=context.body_pos,
+    )
     return [path]
 
 
@@ -316,6 +377,45 @@ def _state_summary(
     return {
         "joint_angles": np.asarray(q, dtype=np.float64).tolist(),
         "positions": _position_frame_summary(positions, spine3_pos),
+    }
+
+
+def _joint_feature_summary(
+    context: GeneratedCostContext,
+    trajectory: np.ndarray,
+) -> dict[str, Any]:
+    return {
+        "elbow_flexion": _series_stats(context.elbow_flexion_angles(trajectory)),
+        "shoulder_flexion_extension": _series_stats(
+            context.shoulder_flexion_extension_angles(trajectory)
+        ),
+        "shoulder_abduction_adduction": _series_stats(
+            context.shoulder_abduction_adduction_angles(trajectory)
+        ),
+        "shoulder_internal_external_rotation": _series_stats(
+            context.shoulder_internal_external_rotation_angles(trajectory)
+        ),
+    }
+
+
+def _joint_feature_frame_summary(
+    context: GeneratedCostContext,
+    q: np.ndarray,
+) -> dict[str, float]:
+    return {
+        name: float(np.asarray(values).reshape(-1)[0])
+        for name, values in {
+            "elbow_flexion": context.elbow_flexion_angles(q),
+            "shoulder_flexion_extension": (
+                context.shoulder_flexion_extension_angles(q)
+            ),
+            "shoulder_abduction_adduction": (
+                context.shoulder_abduction_adduction_angles(q)
+            ),
+            "shoulder_internal_external_rotation": (
+                context.shoulder_internal_external_rotation_angles(q)
+            ),
+        }.items()
     }
 
 
@@ -370,67 +470,4 @@ def _array_stats(values: np.ndarray) -> dict[str, Any]:
         "start": values[0].tolist(),
         "end": values[-1].tolist(),
     }
-
-
-
-def _render_overlay(context: GeneratedCostContext, path: Path) -> None:
-    positions = context.mdm_positions
-    current = context.current_positions
-    fig = plt.figure(figsize=(6, 5))
-    ax = fig.add_subplot(111, projection="3d")
-    n_samples = min(12, positions.shape[0])
-    sample_indices = np.linspace(0, positions.shape[0] - 1, n_samples).round().astype(int)
-    cmap = plt.get_cmap("Blues")
-    denom = max(1, positions.shape[0] - 1)
-    for frame_idx in sample_indices:
-        # map to [0.3, 1.0] so early frames are light blue, not white
-        t = 0.3 + 0.7 * (frame_idx / denom)
-        _plot_arm(ax, positions[frame_idx], color=cmap(t), alpha=0.5, linewidth=1.2)
-
-    wrist_path = positions[:, _JOINT_NAMES["left_wrist"]]
-    ax.plot(wrist_path[:, 0], wrist_path[:, 1], wrist_path[:, 2],
-            color="steelblue", alpha=0.5, linewidth=1.0)
-
-    start = positions[0, _JOINT_NAMES["left_wrist"]]
-    end = positions[-1, _JOINT_NAMES["left_wrist"]]
-    ax.scatter(start[0], start[1], start[2], marker="o", color="lime", s=55, zorder=5)
-    ax.scatter(end[0], end[1], end[2], marker="X", color="red", s=65, zorder=5)
-    _plot_arm(ax, current, color="tab:orange", alpha=1.0, linewidth=2.2)
-
-    scalar_mappable = plt.cm.ScalarMappable(
-        cmap=cmap, norm=plt.Normalize(vmin=0, vmax=positions.shape[0] - 1)
-    )
-    scalar_mappable.set_array([])
-    fig.colorbar(scalar_mappable, ax=ax, shrink=0.65, pad=0.08, label="frame (light=early, dark=late)")
-    ax.legend(
-        handles=[
-            plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
-            plt.Line2D([0], [0], marker="o", color="lime", linestyle="", markersize=7, label="traj start"),
-            plt.Line2D([0], [0], marker="X", color="red", linestyle="", markersize=7, label="traj end"),
-        ],
-        fontsize=7, loc="upper left",
-    )
-    ArmVisualizer.format_3d_axis(ax, np.concatenate([positions.reshape(-1, 3), current], axis=0))
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-
-
-def _plot_arm(
-    ax: Any, positions: np.ndarray, color: str, alpha: float, linewidth: float
-) -> None:
-    ax.plot(
-        positions[:, 0],
-        positions[:, 1],
-        positions[:, 2],
-        marker="o",
-        color=color,
-        alpha=alpha,
-        linewidth=linewidth,
-        markersize=3,
-    )
-
 

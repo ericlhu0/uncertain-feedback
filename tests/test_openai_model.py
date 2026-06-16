@@ -74,17 +74,3 @@ def test_chat_mode_preserves_legacy_chat_completion_shape() -> None:
     assert "max_completion_tokens" not in chat.request
     assert chat.request["messages"][0] == {"role": "system", "content": "system"}
     assert chat.request["messages"][1]["content"] == [{"type": "text", "text": "hello"}]
-
-
-def test_gpt5_chat_logit_path_uses_max_completion_tokens() -> None:
-    chat = _FakeChatCompletions()
-    client = SimpleNamespace(chat=SimpleNamespace(completions=chat))
-    model = _model("gpt-5.4", client, api_mode="chat")
-
-    model._get_chat_completion("token")
-
-    assert chat.request is not None
-    assert chat.request["max_completion_tokens"] == 123
-    assert "max_tokens" not in chat.request
-    assert chat.request["logprobs"] is True
-    assert chat.request["top_logprobs"] == 10

@@ -27,13 +27,23 @@ uncertain-feedback/
 ├── src/uncertain_feedback/
 │   ├── consts.py                     # Project-wide paths (MDM_ROOT, weights)
 │   ├── planners/
-│   │   ├── run.py                    # Unified CLI entry point
+│   │   ├── run.py                    # Single-run CLI: plan → language correction → finish
 │   │   └── mpc/
 │   │       ├── __init__.py           # Public exports
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
 │   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants
-│   │       ├── costs.py              # Cost terms + preference learning
-│   │       ├── llm_costs.py          # LLM-generated Python cost pipeline
+│   │       ├── costs/                # Cost package (public surface: mpc.costs)
+│   │       │   ├── __init__.py       # Re-exports the public cost API
+│   │       │   ├── base.py           # Cost terms + registry + preference learning
+│   │       │   ├── llm_costs.py      # LLM-generated Python cost pipeline
+│   │       │   └── prompts/          # Prompt templates loaded from .txt files
+│   │       │       ├── __init__.py   # PROMPTS registry + build_llm_cost_prompt
+│   │       │       ├── runtime_api.txt       # Shared technical contract
+│   │       │       ├── output_contract.txt   # Shared output rules
+│   │       │       └── templates/    # One .txt per prompt (stem = registry key)
+│   │       │           ├── default.txt
+│   │       │           ├── caregiver.txt
+│   │       │           └── goal_safe.txt
 │   │       ├── arm_mpc.py            # SmplLeftArmMPC (base sampling MPC)
 │   │       ├── arm_mpc_mdm.py        # LeftArmMPCMDM (+ MDM trajectory tracking)
 │   │       ├── arm_mpc_mdm_uq.py     # LeftArmMPCMDMUQ (+ UQ clustering)
@@ -45,6 +55,9 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_learn.yaml
 │   │           ├── arm_mpc_cartesian_mdm_llm.yaml
 │   │           └── arm_mpc_cartesian_no_mdm.yaml
+│   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
+│   │   ├── cluster_comparison.py     # Generate + roll out one LLM cost per UQ cluster
+│   │   └── run_experiment.py         # CLI entry point for cluster comparison experiments
 │   ├── motion_generators/
 │   │   └── mdm/
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
@@ -57,9 +70,10 @@ uncertain-feedback/
 │   │       ├── visualize_sitting_pose.py
 │   │       └── motion-diffusion-model/   # Git submodule (GuyTevet/MDM)
 │   ├── uncertainty/
-│   │   ├── base.py                   # TrajectoryClusterer Protocol
-│   │   ├── xyz_clusterer.py          # XyzPositionClusterer (KMeans on FK positions)
-│   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI
+│   │   ├── clustering/               # Trajectory clustering methods (subclass to add)
+│   │   │   ├── base.py               # TrajectoryClusterer (template: _to_features + _fit_predict)
+│   │   │   └── xyz_clusterer.py      # XyzPositionClusterer (KMeans on FK positions)
+│   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI (stays here)
 │   ├── data_collection/
 │   │   ├── build_mdm_dataset.py      # Build HumanML3D dataset from video/labels
 │   │   ├── extract_all_frames.py     # Video → frames
@@ -76,8 +90,8 @@ uncertain-feedback/
 │   │       ├── server.py             # Flask web UI for hand-authoring trajectories
 │   │       └── hml_decode.py         # HML decode utilities for the editor
 │   ├── llm/
-│   │   ├── base_model.py             # BaseModel ABC (get_single_token_logits, get_full_output)
-│   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel
+│   │   ├── base_model.py             # BaseModel ABC (get_full_output)
+│   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
 │   └── utils/
 │       └── plot.py                   # ArmVisualizer (live MPC window + static drawing)
 ├── README.md                         # Full setup + run instructions
@@ -99,8 +113,12 @@ SmplLeftArmMPC (arm_mpc.py)
 │  Warm-start: shifts previous best plan by one step each iteration.
 │
 ├── LeftArmMPCMDM (arm_mpc_mdm.py)
-│     Adds: push_trajectory(), set_mdm_goal(), advance_threshold per step,
-│     MDM-colored arm rendering, body_pos background skeleton.
+│     Adds: validate_trajectory() (advisory safety-cost check), push_trajectory()
+│     (validate + queue for rate-limited playback), set_mdm_goal(),
+│     MDM-colored arm rendering, body_pos background skeleton. The MDM trajectory
+│     is played back directly (no per-step sampling) at a bounded angular speed
+│     (max_playback_delta per joint per step), so jumps are eased not snapped;
+│     the MPC then resumes sampling toward the final goal.
 │
 │   └── LeftArmMPCMDMUQ (arm_mpc_mdm_uq.py)
 │         Adds: query_mdm_with_uncertainty() — draws N diffusion samples,
@@ -147,7 +165,7 @@ MdmMotionGenerator.generate_left_arm_trajectory()   [mdm_api.py]
     ├── Run N times → (N, n_frames, 3, 3)
     │       │
     │       ▼
-    │   XyzPositionClusterer.cluster()                [xyz_clusterer.py]
+    │   XyzPositionClusterer.cluster()                [clustering/xyz_clusterer.py]
     │       KMeans on FK positions at frame ~100
     │       │
     │       ▼
@@ -158,15 +176,17 @@ MdmMotionGenerator.generate_left_arm_trajectory()   [mdm_api.py]
     ▼  chosen (n_frames, 3, 3) trajectory
     │
 SmplLeftArmMPC / subclass
-    │   Goal queue filled via push_trajectory()
-    │   Each step: sample N×H action sequences, rollout, compute cost, take best
+    │   MDM trajectory validated against safety costs, then played back at a
+    │   bounded angular speed (rate-limited, push_trajectory); after
+    │   playback the MPC samples toward the final goal.
+    │   Each MPC step: sample N×H action sequences, rollout, compute cost, take best
     │
     ├── Joint-space cost: L2 to current goal in (3,3) axis-angle space
-    └── Extra costs: CompositeTrajectoryCost terms [costs.py]
+    └── Extra costs: CompositeTrajectoryCost terms [costs/base.py]
             ElbowHeightCost
             ElbowFlexionAngleCost
             ShoulderAbductionAngleCost
-            GeneratedPythonCost [llm_costs.py]
+            GeneratedPythonCost [costs/llm_costs.py]
     │
     ▼  next_q (3, 3) each step
     │
@@ -189,7 +209,7 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 
 ---
 
-## 6. Cost System (`costs.py`)
+## 6. Cost System (`costs/base.py`)
 
 ### Cost term protocol
 
@@ -222,14 +242,14 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 
 ---
 
-## 7. LLM Cost Pipeline (`llm_costs.py`)
+## 7. LLM Cost Pipeline (`costs/llm_costs.py`)
 
 When `llm_cost.enabled: true` in the YAML:
 
 1. `build_motion_summaries()` — text summaries of recent MPC steps and MDM trajectory
-2. `render_prompt_images()` — renders 3D arm frames to matplotlib images (optional)
-3. `build_llm_cost_prompt()` — assembles system + user prompt with joint-position context
-4. LLM (OpenAI, configurable model) returns JSON: `{description, code, params}`
+2. `render_prompt_images()` — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
+3. `build_llm_cost_prompt()` (in `costs/prompts/__init__.py`) — assembles the prompt from a named template (a `costs/prompts/templates/<name>.txt` head + shared `runtime_api.txt`/`output_contract.txt`), selected by `llm_cost.prompt`
+4. LLM (OpenAI, configurable model) returns JSON: `{description, code, params, explanation, recipient_explanation}`
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet
 7. `GeneratedCostContext` provides the runtime sandbox: `fk`, `spine3_pos/aa`, `current_q`, `mdm_traj`, `recent_q`, and FK helper methods
@@ -254,7 +274,8 @@ When `llm_cost.enabled: true` in the YAML:
 | `max_angle_delta`      | float    | Sampling std dev (radians)                           |
 | `pose`                 | path?    | HML pose `.pt` file for initial body state           |
 | `goal_threshold`       | float    | L2 dist threshold to pop goal (default 0.01)         |
-| `advance_threshold`    | float    | MDM frame advance threshold (default 0.1)            |
+| `advance_threshold`    | float    | Goal-advance threshold for the MPC resume phase (default 0.1). MDM frames are now played back directly, so this no longer governs MDM frame advancement. |
+| `max_playback_delta`   | float    | Max per-joint rotation (radians) per step while following the MDM trajectory (default 0.1). Rate limit: caps playback angular speed so the initial jump into the trajectory and any large frame-to-frame jump are eased rather than snapped. |
 | `trajectory_fraction`  | float    | Fraction of MDM frames to enqueue (default 1.0)      |
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
@@ -323,7 +344,8 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 
 | Command / Script                                      | Purpose                              |
 |-------------------------------------------------------|--------------------------------------|
-| `uv run python -m uncertain_feedback.planners.run --mpc-config <yaml>` | Main experiment runner  |
+| `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
+| `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |
@@ -339,6 +361,6 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
   - Pretrained weights at `.../save/humanml_enc_512_50steps/model000750000.pt`
   - SMPL neutral model at `.../body_models/smpl/SMPL_NEUTRAL.pkl`
 - **OpenAI** — used for LLM cost generation (`llm/openai_model.py`)
-- **sklearn** — KMeans clustering in `xyz_clusterer.py`
+- **sklearn** — KMeans clustering in `clustering/base.py`
 - **smplx** — SMPL model loading
 - **detectron2** — human pose estimation in data collection worker

@@ -174,17 +174,21 @@ uv run python ../sample_leftarm.py \
 `--model_path` is always relative to `motion-diffusion-model/` regardless of cwd (the script does an internal `os.chdir`). Output videos are saved under `save/my_finetuned_v1/edit_*/`. (1s = 20 frames)
 
 
-## Running MPC Experiments
+## Running a Single MPC Run
 
-Use the unified runner from the repo root:
+`run.py` performs one end-to-end run: plan with sampling MPC, optionally inject a
+language/LLM-generated cost correction at `text_time`, and finish the trajectory
+with MPC. To compare multiple LLM costs across UQ clusters, use the experiment
+runner instead (see [Running Cluster Experiments](#running-cluster-experiments)).
+
+Use the runner from the repo root:
 ```
-uv run python -m uncertain_feedback.planners.run --mpc-config path/to/mpc.yaml
+uv run python src/uncertain_feedback/planners/run.py --mpc-config path/to/mpc.yaml
 ```
 
-Controller settings now live in the required YAML file passed with `--mpc-config`.
+Controller settings live in the required YAML file passed with `--mpc-config`.
 The initial whole-body HML pose can be set with `pose:` in the YAML. Runtime
-inputs still stay on the command line: `--model-path`, `--arm`, `--text`,
-`--text-time`, `--save`, `--live`, `--mdm-frames`, and `--frozen-body`.
+inputs still stay on the command line: `--model-path`, `--arm`, `--text`, `--save`, `--live`, and `--frozen-body`.
 `--pose` is still accepted as an override for the YAML pose.
 
 Supported YAML `planner` values:
@@ -207,7 +211,7 @@ goal_threshold: 0.01
 
 Run:
 ```bash
-uv run python -m uncertain_feedback.planners.run \
+uv run python src/uncertain_feedback/planners/run.py \
   --mpc-config src/uncertain_feedback/planners/mpc/configs/mpc_plain.yaml \
   --live
 ```
@@ -224,6 +228,7 @@ pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 goal_threshold: 0.1
 advance_threshold: 0.1
 trajectory_fraction: 1.0
+mdm_frames: 50
 
 uq:
   diffusion_samples: 128
@@ -233,11 +238,10 @@ uq:
 
 Run with an interactive cluster picker:
 ```bash
-uv run python -m uncertain_feedback.planners.run \
+uv run python src/uncertain_feedback/planners/run.py \
   --mpc-config src/uncertain_feedback/planners/mpc/configs/mpc_mdm_uq.yaml \
   --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
   --text "raise my left arm" \
-  --mdm-frames 100 \
   --save out.mp4 \
   --live
 ```
@@ -279,7 +283,7 @@ cartesian:
 
 Run:
 ```bash
-uv run python -m uncertain_feedback.planners.run \
+uv run python src/uncertain_feedback/planners/run.py \
   --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm.yaml \
   --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
   --text "raise my left arm" \
@@ -312,7 +316,7 @@ cartesian:
 
 Run:
 ```bash
-uv run python -m uncertain_feedback.planners.run \
+uv run python src/uncertain_feedback/planners/run.py \
   --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm.yaml \
   --live
 ```
@@ -352,6 +356,27 @@ the spine3 frame.
 shape is `(3, 3)` for `[left_shoulder, left_elbow, left_wrist]`. Legacy `(4, 3)`
 files are accepted; the first row fixes the left collar and the remaining rows
 control shoulder, elbow, and wrist.
+
+
+## Running Cluster Experiments
+
+Experiments live separately from a single run, under
+`src/uncertain_feedback/experiments/`. The experiment runner drives a UQ planner
+(`arm_mpc_mdm_uq` or `arm_mpc_cartesian`, with `llm_cost.enabled: true`) up to
+`text_time` to obtain the cluster set, then generates one LLM cost per cluster,
+rolls each one out headlessly, and writes per-cluster metrics plus a
+`comparison_summary.json`:
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm.yaml \
+  --text "raise my left arm"
+```
+
+Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
+`steps - text_time`), and `--save-video` to render each rollout to an MP4. The
+saved video uses the same `ArmVisualizer` layout as a live run, so the only
+difference between watching and saving is the flag.
 
 
 ## Thanks

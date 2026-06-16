@@ -33,21 +33,13 @@ class CartesianConfig:
 
 
 @dataclass(frozen=True)
-class LlmCostClusterExperimentConfig:
-    enabled: bool = False
-    rollout_steps: int | None = None
-
-
-@dataclass(frozen=True)
 class LlmCostConfig:
     enabled: bool = False
     model: str | None = None
     strict: bool = False
     artifact_dir: Path = Path("llm_cost_artifacts")
     use_images: bool = True
-    cluster_experiment: LlmCostClusterExperimentConfig = field(
-        default_factory=LlmCostClusterExperimentConfig
-    )
+    prompt: str = "default"
 
 
 @dataclass(frozen=True)
@@ -60,11 +52,14 @@ class MpcRunConfig:
     pose: Path | None
     goal_threshold: float
     advance_threshold: float
+    max_playback_delta: float
     trajectory_fraction: float
     uq: UqConfig
     cartesian: CartesianConfig
     costs: dict[str, dict[str, Any]]
     llm_cost: LlmCostConfig
+    mdm_frames: int | None = None
+    text_time: int = 0
     preference_learning: bool = True
     preference_alpha: float = 0.5
     preference_window: int = 50
@@ -150,10 +145,6 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     cartesian_data = _mapping(data.get("cartesian"), "cartesian")
     cost_data = _mapping(data.get("costs"), "costs")
     llm_cost_data = _mapping(data.get("llm_cost"), "llm_cost")
-    llm_cluster_data = _mapping(
-        llm_cost_data.get("cluster_experiment"),
-        "llm_cost.cluster_experiment",
-    )
 
     goals = cartesian_data.get("goals", [])
     if goals is None:
@@ -184,6 +175,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         goal_threshold=_float(data.get("goal_threshold", 0.01), "goal_threshold"),
         advance_threshold=_float(
             data.get("advance_threshold", 0.1), "advance_threshold"
+        ),
+        max_playback_delta=_float(
+            data.get("max_playback_delta", 0.1), "max_playback_delta"
         ),
         trajectory_fraction=_float(
             data.get("trajectory_fraction", 1.0), "trajectory_fraction"
@@ -220,21 +214,17 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             use_images=_bool(
                 llm_cost_data.get("use_images", True), "llm_cost.use_images"
             ),
-            cluster_experiment=LlmCostClusterExperimentConfig(
-                enabled=_bool(
-                    llm_cluster_data.get("enabled", False),
-                    "llm_cost.cluster_experiment.enabled",
-                ),
-                rollout_steps=(
-                    None
-                    if llm_cluster_data.get("rollout_steps") is None
-                    else _positive_int(
-                        llm_cluster_data.get("rollout_steps"),
-                        "llm_cost.cluster_experiment.rollout_steps",
-                    )
-                ),
+            prompt=(
+                _optional_str(llm_cost_data.get("prompt", "default"), "llm_cost.prompt")
+                or "default"
             ),
         ),
+        mdm_frames=(
+            None
+            if data.get("mdm_frames") is None
+            else _positive_int(data["mdm_frames"], "mdm_frames")
+        ),
+        text_time=int(data.get("text_time", 0)),
         preference_learning=_bool(
             data.get("preference_learning", True), "preference_learning"
         ),

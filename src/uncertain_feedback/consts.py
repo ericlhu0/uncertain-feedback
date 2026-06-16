@@ -8,6 +8,6 @@ MDM_MODEL_WEIGHTS_PATH = (
     MDM_ROOT
     / "motion-diffusion-model"
     / "save"
-    / "humanml_enc_512_50steps"
-    / "model000750000.pt"
+    / "customv2"
+    / "model000753000.pt"
 )

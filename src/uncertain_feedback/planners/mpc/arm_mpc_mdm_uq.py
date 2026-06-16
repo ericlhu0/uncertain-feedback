@@ -21,12 +21,14 @@ import numpy as np
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
-from uncertain_feedback.uncertainty.base import TrajectoryClusterer
 from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster,
     pick_cluster_positions,
 )
-from uncertain_feedback.uncertainty.xyz_clusterer import XyzPositionClusterer
+from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
+from uncertain_feedback.uncertainty.clustering.xyz_clusterer import (
+    XyzPositionClusterer,
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         advance_threshold: float = 0.1,
+        max_playback_delta: float = 0.1,
         trajectory_fraction: float = LeftArmMPCMDM.TRAJECTORY_FRACTION,
         goals: list[np.ndarray] | None = None,
         goal_threshold: float = 0.1,
@@ -101,6 +104,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             n_mpc_samples=n_mpc_samples,
             max_angle_delta=max_angle_delta,
             advance_threshold=advance_threshold,
+            max_playback_delta=max_playback_delta,
             trajectory_fraction=trajectory_fraction,
             goals=goals,
             goal_threshold=goal_threshold,
@@ -212,7 +216,9 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             )
             spine_aa = base_spine_aa
             body_pos = (
-                self._vis_config.body_pos if self._vis_config is not None else None
+                self._vis_config.body_pos
+                if self._vis_config is not None
+                else self._body_pos
             )
             picker_t0 = time.perf_counter()
             if positions is not None:

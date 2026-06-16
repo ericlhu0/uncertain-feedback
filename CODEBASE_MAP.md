@@ -32,8 +32,18 @@ uncertain-feedback/
 │   │       ├── __init__.py           # Public exports
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
 │   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants
-│   │       ├── costs.py              # Cost terms + preference learning
-│   │       ├── llm_costs.py          # LLM-generated Python cost pipeline
+│   │       ├── costs/                # Cost package (public surface: mpc.costs)
+│   │       │   ├── __init__.py       # Re-exports the public cost API
+│   │       │   ├── base.py           # Cost terms + registry + preference learning
+│   │       │   ├── llm_costs.py      # LLM-generated Python cost pipeline
+│   │       │   └── prompts/          # Prompt templates loaded from .txt files
+│   │       │       ├── __init__.py   # PROMPTS registry + build_llm_cost_prompt
+│   │       │       ├── runtime_api.txt       # Shared technical contract
+│   │       │       ├── output_contract.txt   # Shared output rules
+│   │       │       └── templates/    # One .txt per prompt (stem = registry key)
+│   │       │           ├── default.txt
+│   │       │           ├── caregiver.txt
+│   │       │           └── goal_safe.txt
 │   │       ├── arm_mpc.py            # SmplLeftArmMPC (base sampling MPC)
 │   │       ├── arm_mpc_mdm.py        # LeftArmMPCMDM (+ MDM trajectory tracking)
 │   │       ├── arm_mpc_mdm_uq.py     # LeftArmMPCMDMUQ (+ UQ clustering)
@@ -172,11 +182,11 @@ SmplLeftArmMPC / subclass
     │   Each MPC step: sample N×H action sequences, rollout, compute cost, take best
     │
     ├── Joint-space cost: L2 to current goal in (3,3) axis-angle space
-    └── Extra costs: CompositeTrajectoryCost terms [costs.py]
+    └── Extra costs: CompositeTrajectoryCost terms [costs/base.py]
             ElbowHeightCost
             ElbowFlexionAngleCost
             ShoulderAbductionAngleCost
-            GeneratedPythonCost [llm_costs.py]
+            GeneratedPythonCost [costs/llm_costs.py]
     │
     ▼  next_q (3, 3) each step
     │
@@ -199,7 +209,7 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 
 ---
 
-## 6. Cost System (`costs.py`)
+## 6. Cost System (`costs/base.py`)
 
 ### Cost term protocol
 
@@ -232,13 +242,13 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 
 ---
 
-## 7. LLM Cost Pipeline (`llm_costs.py`)
+## 7. LLM Cost Pipeline (`costs/llm_costs.py`)
 
 When `llm_cost.enabled: true` in the YAML:
 
 1. `build_motion_summaries()` — text summaries of recent MPC steps and MDM trajectory
 2. `render_prompt_images()` — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
-3. `build_llm_cost_prompt()` (in `llm_cost_prompts.py`) — assembles the prompt from a named template in the `PROMPTS` registry, selected by `llm_cost.prompt`
+3. `build_llm_cost_prompt()` (in `costs/prompts/__init__.py`) — assembles the prompt from a named template (a `costs/prompts/templates/<name>.txt` head + shared `runtime_api.txt`/`output_contract.txt`), selected by `llm_cost.prompt`
 4. LLM (OpenAI, configurable model) returns JSON: `{description, code, params, explanation, recipient_explanation}`
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet

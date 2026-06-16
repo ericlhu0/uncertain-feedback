@@ -27,9 +27,9 @@ from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import UqClusterResult
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
+    GeneratedPythonCost,
     MpcCostContext,
 )
-from uncertain_feedback.planners.mpc.llm_costs import GeneratedPythonCost
 from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.run import (
     _append_extra_cost,

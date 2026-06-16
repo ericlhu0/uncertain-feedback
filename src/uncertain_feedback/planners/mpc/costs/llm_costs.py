@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.planners.mpc.costs import (
+from uncertain_feedback.planners.mpc.costs.base import (
     MpcCostContext,
     TrajectoryCost,
 )

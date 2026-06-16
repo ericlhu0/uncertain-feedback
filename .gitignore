@@ -1,6 +1,7 @@
 uv.lock
 .claude/
 .codex/
+AGENTS.md
 env_snapshots/
 amass/
 src/uncertain_feedback/data_collection/data/

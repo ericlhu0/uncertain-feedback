@@ -25,9 +25,11 @@ Runtime API:
 - context.fk_rollouts(q_trajs) returns positions with shape
   (n_rollouts, horizon + 1, 5, 3) for spine3, left_collar, left_shoulder,
   left_elbow, left_wrist.
-- context.mdm_positions has shape (T, 5, 3) — a numpy array. Use numpy
-  indexing only: context.mdm_positions[:, 4, 2] gives wrist z over the MDM
-  trajectory; context.mdm_positions[-1, 4, :] gives the final wrist position.
+- context.mdm_positions has shape (T, 5, 3) — a numpy array. Positions are
+  (x, y, z) with y as height/up; do not use z for height. Use numpy
+  indexing only: context.mdm_positions[:, 4, 1] gives wrist height (y) over
+  the MDM trajectory; context.mdm_positions[-1, 4, :] gives the final wrist
+  position.
   Do NOT use dict-style access like context.mdm_positions['left_wrist'] — it
   will raise a TypeError at runtime.
 - context.current_positions has shape (5, 3) — a numpy array. Use numpy
@@ -35,7 +37,7 @@ Runtime API:
   Do NOT use dict-style access.
 - context.joint_index(name) accepts spine3, collar, shoulder, elbow, wrist and
   left_* aliases and returns an integer index (0–4).
-- If you need statistics such as maximum wrist z during the MDM trajectory,
+- If you need statistics such as maximum wrist height (y) during the MDM trajectory,
   read those values from the Summaries section below and encode them as
   hardcoded floats or params in your cost function — do not try to compute
   them from context.mdm_positions using dict-style access.

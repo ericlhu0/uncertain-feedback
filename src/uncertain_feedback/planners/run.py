@@ -351,7 +351,10 @@ def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-lo
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
     run_dir: Path | None = None,
     install: bool = True,
-    pre_rendered_image_paths: list[Path] | None = None,
+    candidate_trajs: dict[int, np.ndarray] | None = None,
+    highlight_label: int | None = None,
+    reference_traj: np.ndarray | None = None,
+    goal_pos: np.ndarray | None = None,
 ) -> GeneratedPythonCost | None:
     """Generate, validate, save, and install an LLM-generated MPC cost."""
     if run_dir is None:
@@ -368,22 +371,24 @@ def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-lo
             q_history,
             window=history_window,
             body_pos=body_pos,
+            reference_traj=reference_traj,
         )
-        summaries = build_motion_summaries(generated_context)
-        image_paths: list[Path] = []
-        if pre_rendered_image_paths is not None:
-            image_paths = pre_rendered_image_paths
-        elif llm_cfg.use_images:
-            image_paths = render_prompt_images(generated_context, image_dir)
+        summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
+        images: dict[str, Path] = {}
+        if llm_cfg.use_images:
+            images = render_prompt_images(
+                generated_context, image_dir, candidate_trajs, highlight_label,
+                reference_traj=reference_traj, goal_pos=goal_pos,
+            )
         with open(run_dir / "summaries.json", "w", encoding="utf-8") as f:
             json.dump(summaries, f, indent=2, sort_keys=True)
 
         model_name = llm_cfg.model or os.getenv("OPENAI_MODEL", "gpt-5.4")
         llm = llm_model_factory(model_name)
-        image_input = [str(path) for path in image_paths] or None
-        prompt = build_llm_cost_prompt(
-            instruction, summaries, image_paths, prompt=llm_cfg.prompt
+        prompt, attached_images = build_llm_cost_prompt(
+            instruction, summaries, images, prompt=llm_cfg.prompt
         )
+        image_input = [str(path) for path in attached_images] or None
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         raw_response = llm.get_full_output(prompt, image_input=image_input)
         (run_dir / "raw_response.txt").write_text(raw_response, encoding="utf-8")
@@ -645,6 +650,7 @@ class LoopResult:
 
     q_history: list[np.ndarray]
     error: str | None = None
+    reached_goal: bool = False
 
 
 StepHook = Callable[[int, np.ndarray, list[np.ndarray]], None]
@@ -658,10 +664,11 @@ def run_planning_loop(
     on_pre_step: StepHook | None = None,
     on_post_step: StepHook | None = None,
     stop_on_runtime_error: bool = False,
+    stop_at_goal: bool = True,
     progress: bool = False,
     progress_desc: str = "MPC",
 ) -> LoopResult:
-    """Step ``mpc`` forward ``n_steps``, returning the visited joint configs.
+    """Step ``mpc`` forward up to ``n_steps``, returning the visited joint configs.
 
     This is the single stepping primitive shared by the live single run and the
     headless per-cluster experiment rollouts. The planner drives its own
@@ -674,6 +681,13 @@ def run_planning_loop(
     ``q_history`` holds the configs visited so far. With ``stop_on_runtime_error``
     a ``RuntimeError`` from ``mpc.step`` ends the loop and is recorded on the
     result instead of propagating.
+
+    With ``stop_at_goal`` (the default), the loop ends as soon as the planner
+    reports it has reached its final goal (``mpc.goal_reached``) and any MDM
+    correction has finished playing (``mpc.mdm_ready_to_terminate``), rather than
+    always running the full ``n_steps`` and idling at the goal. ``n_steps`` is
+    therefore an upper bound. ``LoopResult.reached_goal`` records whether the loop
+    stopped this way.
     """
     q = np.asarray(q0, dtype=np.float64).copy()
     q_history: list[np.ndarray] = []
@@ -683,6 +697,7 @@ def run_planning_loop(
 
         iterator = tqdm(iterator, desc=progress_desc, unit="step")
     error: str | None = None
+    reached_goal = False
     for step in iterator:
         if on_pre_step is not None:
             on_pre_step(step, q, q_history)
@@ -696,7 +711,59 @@ def run_planning_loop(
         q_history.append(q.copy())
         if on_post_step is not None:
             on_post_step(step, q, q_history)
-    return LoopResult(q_history=q_history, error=error)
+        # Stop once the goal is reached (and any correction has finished), so the
+        # rollout doesn't idle at the goal for the remaining step budget.
+        if stop_at_goal and mpc.mdm_ready_to_terminate and mpc.goal_reached(q):
+            reached_goal = True
+            break
+    return LoopResult(q_history=q_history, error=error, reached_goal=reached_goal)
+
+
+def _rollout_reference_trajectory(
+    cfg: MpcRunConfig,
+    current_q: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+) -> np.ndarray | None:
+    """Roll the MPC toward its original Cartesian goal, ignoring the correction.
+
+    Builds a headless :class:`ArmMPCCartesianNoMDM` from ``current_q`` carrying only
+    the configured comfort costs (no MDM correction, no LLM-generated cost) and steps
+    it toward ``cfg.cartesian.goals`` so the cost generator can see what the arm was
+    driving toward before the correction — and avoid blocking it. With no MDM phase
+    (``mdm_ready_to_terminate`` is always ``True``) the loop stops as soon as the wrist
+    reaches the goal, so the trajectory ends at the goal rather than idling there for the
+    full ``cfg.steps``. Returns ``(T, 3, 3)``, or ``None`` for planners without a
+    persistent Cartesian goal.
+    """
+    if cfg.planner not in ("arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"):
+        return None
+    if not cfg.cartesian.goals:
+        return None
+
+    planner = ArmMPCCartesianNoMDM(
+        cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
+        initial_arm_aa=current_q,
+        cartesian_threshold=cfg.cartesian.threshold,
+        horizon=cfg.horizon,
+        n_mpc_samples=cfg.n_mpc_samples,
+        max_angle_delta=cfg.max_angle_delta,
+        goal_threshold=cfg.goal_threshold,
+        visualize=False,
+        fk=context.fk,
+        spine3_pos=spine3_pos,
+        spine3_aa=spine3_aa,
+        body_pos=body_pos,
+        extra_costs=base_extra_costs,
+    )
+    q0 = np.asarray(current_q, dtype=np.float64).copy()
+    result = run_planning_loop(
+        planner, q0, max(1, cfg.steps), stop_on_runtime_error=True
+    )
+    return np.asarray([q0, *result.q_history], dtype=np.float64)
 
 
 def main() -> None:
@@ -780,6 +847,30 @@ def main() -> None:
             llm_traj = traj
 
         if cfg.llm_cost.enabled:
+            # Ground the cost in all candidate paths when the planner clustered the
+            # correction, so the overlay shows every cluster mean with the chosen one
+            # highlighted. Non-UQ planners pass a single path.
+            candidate_trajs: dict[int, np.ndarray] | None = None
+            highlight_label: int | None = None
+            uqr = getattr(mpc, "last_uq_result", None)
+            if uqr is not None:
+                candidate_trajs = uqr.cluster_means
+                highlight_label = uqr.chosen_label
+
+            # Roll the original-goal MPC out (no correction, no generated cost) so
+            # the cost generator sees what the arm was driving toward and avoids
+            # blocking it. mpc._extra_costs is still the pre-correction comfort set —
+            # the generated cost is held in pending_cost, not yet installed.
+            reference_traj = _rollout_reference_trajectory(
+                cfg, q, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
+                body_pos, setup.spine3_pos, spine3_aa,
+            )
+            goal_pos = (
+                np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
+                if reference_traj is not None and cfg.cartesian.goals
+                else None
+            )
+
             # Generate synchronously here (the live viz is already closed for the
             # MDM compute, so this adds no extra freeze). The cost is held and
             # installed once the correction trajectory finishes (see _on_post_step).
@@ -787,6 +878,8 @@ def main() -> None:
                 mpc, args.text, llm_traj, q, list(q_history),
                 cost_context, cfg.llm_cost, artifact_base_dir,
                 cfg.preference_window, body_pos=body_pos, install=False,
+                candidate_trajs=candidate_trajs, highlight_label=highlight_label,
+                reference_traj=reference_traj, goal_pos=goal_pos,
             )
 
         # MDM generation can switch matplotlib to the Agg backend; restore it

@@ -3,7 +3,8 @@ You are the caregiver of a person with limited arm mobility. You just watched th
 Instruction:
 {instruction}
 
-{image_section}
+{current_cluster_traj_img}
+{reference_traj_img}
 
 How to think (in this order):
 - FIRST, write one plain sentence a caregiver would actually say out loud about what the person wants, e.g. "they want their hand up near their face, but their elbow shouldn't stick out to the side." Do not write any code until you have that sentence.

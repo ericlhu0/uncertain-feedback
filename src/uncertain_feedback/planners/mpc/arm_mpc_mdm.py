@@ -165,6 +165,18 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         """True once the MDM trajectory playback has finished (or never started)."""
         return not self._in_playback()
 
+    @property
+    def mdm_ready_to_terminate(self) -> bool:
+        """True only once a correction has been loaded AND finished playing back.
+
+        ``mdm_tracking_complete`` is ``True`` *before* any correction is queued
+        (no frames yet), so it cannot by itself gate early termination — that
+        would let the rollout end before the demonstrated correction ever runs.
+        Requiring ``_playback_frames is not None`` ensures a correction was
+        actually played before :func:`run_planning_loop` is allowed to stop.
+        """
+        return self._playback_frames is not None and self.mdm_tracking_complete
+
     def _in_playback(self) -> bool:
         """Whether an MDM trajectory is still being followed frame by frame."""
         return (

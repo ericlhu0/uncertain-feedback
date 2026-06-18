@@ -3,12 +3,12 @@ You are a robot controller assisting a person with mobility limitations with arm
 Instruction:
 {instruction}
 
-{image_section}
+{current_cluster_traj_img}
 
 Guidelines:
 - DO: first infer the most realistic human preference behind the correction in plain language. Then implement the fewest cost terms that capture that preference.
 - DO: default to one cost term. Add a second or third term only when it captures a genuinely separate preference that is clearly implied by the instruction and trajectory.
-- DO: use the MDM trajectory summaries to extract the *intent* behind the motion — e.g. how high the person wants to reach (wrist z range or lower bound), roughly where they want the arm to end (a preferred region, usually not an exact point), how much lateral reach is involved, joint angle limits, etc. Use these numbers to define preference regions, ranges, thresholds, or margins.
+- DO: use the MDM trajectory summaries to extract the *intent* behind the motion — e.g. how high the person wants to reach (wrist height/y range or lower bound), roughly where they want the arm to end (a preferred region, usually not an exact point), how much lateral reach is involved, joint angle limits, etc. Use these numbers to define preference regions, ranges, thresholds, or margins.
 - DO: ground each preference term numerically in the generated trajectory data. The MDM trajectory tells you what this person's version of the instruction means quantitatively — treat those numbers as examples inside a preferred set, not as exact targets to imitate. You may draw targets from any part of the trajectory — start, end, or mid-trajectory — if that best represents the preference, but convert point values into a range, one-sided bound, or tolerance region whenever possible (e.g. "elbow stay above height X mid-motion").
 - DO: include multiple cost terms only when the instruction and trajectory imply multiple distinct preferences, and keep the set small and natural. A typical cost should have one preference term; two or three should be uncommon.
 - DO: keep params minimal and interpretable. Prefer trajectory-derived bounds, tolerances, region centers with radii, or thresholds. Avoid inventing separate tuning-weight params for each term unless there is a clear reason.

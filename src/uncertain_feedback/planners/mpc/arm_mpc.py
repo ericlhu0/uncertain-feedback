@@ -129,6 +129,31 @@ class SmplLeftArmMPC:
         empty."""
         return self._goals[0] if self._goals else None
 
+    def goal_reached(self, q: np.ndarray) -> bool:
+        """Whether ``q`` has reached the final goal so the rollout can end.
+
+        Only the last remaining goal counts: while earlier goals are still
+        queued the rollout has not finished. Returns ``True`` when ``q`` is
+        within ``goal_threshold`` (L2 in rot-vec space) of that final goal.
+        :func:`~uncertain_feedback.planners.run.run_planning_loop` polls this
+        (together with :attr:`mdm_ready_to_terminate`) to stop early.
+        """
+        goal = self.current_goal
+        if goal is None or len(self._goals) > 1:
+            return False
+        dist = float(np.linalg.norm(np.asarray(q, dtype=np.float64) - goal))
+        return dist < self._goal_threshold
+
+    @property
+    def mdm_ready_to_terminate(self) -> bool:
+        """Whether MDM playback state permits ending the rollout.
+
+        Always ``True`` for planners without an MDM correction phase; the MDM
+        subclass overrides this to keep the rollout alive until a queued
+        correction has finished playing back.
+        """
+        return True
+
     def get_visualizer(self) -> ArmVisualizer | None:
         """Return the active live visualizer, or ``None`` if not yet created."""
         return self._vis

@@ -36,6 +36,7 @@ from uncertain_feedback.planners.run import (
     _apply_llm_generated_cost,
     _llm_artifact_run_dir,
     _make_llm_model,
+    _rollout_reference_trajectory,
     run_planning_loop,
 )
 
@@ -258,7 +259,6 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
     initial_q: np.ndarray | None = None,
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
     install: bool = True,
-    pre_rendered_images_per_cluster: dict[int, list[Path]] | None = None,
     root_dir: Path | None = None,
     save_video: bool = False,
 ) -> GeneratedPythonCost | None:
@@ -277,6 +277,19 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
 
     base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
     rollout_steps = max(1, rollout_steps)
+
+    # The original-goal reference is cluster-independent — compute it once (no MDM
+    # correction, no generated cost) and attach it to every cluster's generation so
+    # each cost can be kept from blocking the goal the arm was driving toward.
+    reference_traj = _rollout_reference_trajectory(
+        cfg, current_q, context, base_extra_costs, body_pos, spine3_pos, spine3_aa,
+    )
+    goal_pos = (
+        np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
+        if reference_traj is not None and cfg.cartesian.goals
+        else None
+    )
+
     summary: dict[str, Any] = {
         "selected_cluster": uq_result.chosen_label,
         "cluster_ids": sorted(int(label) for label in uq_result.cluster_means),
@@ -285,23 +298,21 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
     selected_cost: GeneratedPythonCost | None = None
     generated_costs_by_label: dict[int, GeneratedPythonCost] = {}
 
-    # Phase 1: generate every cluster's LLM cost (sequential).
+    # Phase 1: generate every cluster's LLM cost (sequential). Each generation grounds
+    # on all cluster means (overlay highlights the active cluster); the prompt template
+    # decides whether to use the other paths.
     costs_ready: list[tuple[int, np.ndarray, GeneratedPythonCost, Path, dict[str, Any]]] = []
     for label in summary["cluster_ids"]:
         cluster_traj = uq_result.cluster_means[int(label)]
         cluster_dir = root_dir / f"cluster_{label}"
         install_selected = int(label) == uq_result.chosen_label
-        pre_rendered = (
-            pre_rendered_images_per_cluster.get(label)
-            if pre_rendered_images_per_cluster is not None
-            else None
-        )
         generated = _apply_llm_generated_cost(
             mpc, instruction, cluster_traj, current_q, q_history, context,
             cfg.llm_cost, artifact_base_dir, history_window,
             body_pos=body_pos, llm_model_factory=llm_model_factory,
             run_dir=cluster_dir, install=install_selected and install,
-            pre_rendered_image_paths=pre_rendered,
+            candidate_trajs=uq_result.cluster_means, highlight_label=int(label),
+            reference_traj=reference_traj, goal_pos=goal_pos,
         )
         validation = _read_json_if_exists(cluster_dir / "validation.json")
         params = _read_json_if_exists(cluster_dir / "params.json")

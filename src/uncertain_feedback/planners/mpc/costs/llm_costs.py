@@ -58,6 +58,7 @@ class GeneratedCostContext:
     mdm_traj: np.ndarray
     recent_q: np.ndarray
     body_pos: np.ndarray | None = None
+    reference_traj: np.ndarray | None = None
 
     @property
     def current_positions(self) -> np.ndarray:
@@ -68,6 +69,16 @@ class GeneratedCostContext:
     def mdm_positions(self) -> np.ndarray:
         """Generated arm-chain positions with shape ``(T, 5, 3)``."""
         return self.fk_batch(self.mdm_traj)
+
+    @property
+    def reference_positions(self) -> np.ndarray:
+        """Original-goal reference arm-chain positions with shape ``(T, 5, 3)``.
+
+        Empty ``(0, 5, 3)`` when no reference trajectory is available.
+        """
+        if self.reference_traj is None:
+            return np.empty((0, 5, 3), dtype=np.float64)
+        return self.fk_batch(self.reference_traj)
 
     @property
     def recent_positions(self) -> np.ndarray:
@@ -291,6 +302,7 @@ def build_generated_cost_context(
     q_history: list[np.ndarray],
     window: int,
     body_pos: np.ndarray | None = None,
+    reference_traj: np.ndarray | None = None,
 ) -> GeneratedCostContext:
     """Build the runtime context passed to generated Python costs."""
     recent_q = np.asarray(q_history[-window:], dtype=np.float64)
@@ -304,11 +316,26 @@ def build_generated_cost_context(
         mdm_traj=np.asarray(mdm_traj, dtype=np.float64),
         recent_q=recent_q,
         body_pos=np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None,
+        reference_traj=(
+            np.asarray(reference_traj, dtype=np.float64)
+            if reference_traj is not None
+            else None
+        ),
     )
 
 
-def build_motion_summaries(context: GeneratedCostContext) -> dict[str, Any]:
-    """Return JSON-serializable current/recent/MDM trajectory summaries."""
+def build_motion_summaries(
+    context: GeneratedCostContext,
+    cartesian_goal: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Return JSON-serializable current/recent/MDM trajectory summaries.
+
+    When ``context.reference_traj`` is set, a ``"reference"`` summary of the
+    original-goal rollout (the path the arm was taking before the correction,
+    including its endpoint joint posture) is included. When ``cartesian_goal``
+    (the spine3-relative wrist target) is given it is added under
+    ``"cartesian_goal"``. Both are omitted otherwise, leaving summaries unchanged.
+    """
     mdm_positions = context.mdm_positions
     current_positions = context.current_positions
     recent_positions = context.recent_positions
@@ -337,25 +364,83 @@ def build_motion_summaries(context: GeneratedCostContext) -> dict[str, Any]:
         )
     else:
         summaries["recent"] = {}
+    if context.reference_traj is not None and context.reference_traj.size > 0:
+        summaries["reference"] = _trajectory_summary(
+            context.reference_traj,
+            context.reference_positions,
+            spine3_pos,
+        )
+        summaries["reference"]["joint_features"] = _joint_feature_summary(
+            context,
+            context.reference_traj,
+        )
+    if cartesian_goal is not None:
+        summaries["cartesian_goal"] = np.asarray(
+            cartesian_goal, dtype=np.float64
+        ).tolist()
     return summaries
 
 
 def render_prompt_images(
     context: GeneratedCostContext,
     output_dir: Path,
-) -> list[Path]:
-    """Render trajectory-grounding overlay image for the LLM prompt."""
+    candidate_trajs: dict[int, np.ndarray] | None = None,
+    highlight_label: int | None = None,
+    reference_traj: np.ndarray | None = None,
+    goal_pos: np.ndarray | None = None,
+) -> dict[str, Path]:
+    """Render the per-purpose overlay images grounding the LLM cost prompt.
+
+    Produces up to three separately-readable images, each showing full-arm motion
+    and keyed by the prompt placeholder that requests it:
+
+    - ``current_cluster_traj_img``: only the chosen cluster's arm (always rendered).
+    - ``other_clusters_traj_img``: the chosen cluster alongside every other candidate
+      cluster's arm (rendered only when ``candidate_trajs`` has more than one cluster).
+    - ``reference_traj_img``: the chosen cluster alongside the original-goal reference
+      arm (rendered only when ``reference_traj`` is given).
+
+    The gold goal star and orange current pose appear in every image. When
+    ``candidate_trajs`` is ``None`` the highlighted path is ``context.mdm_traj``.
+    Returns ``{placeholder: path}`` for only the images that were renderable, so the
+    prompt layer can attach exactly the subset its template asks for.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "overlay.png"
-    ArmVisualizer(context.fk).render_trajectory_overlay(
-        path,
-        mdm_traj=context.mdm_traj,
-        current_q=context.current_q,
-        spine3_pos=context.spine3_pos,
-        spine3_aa=context.spine3_aa,
-        body_pos=context.body_pos,
-    )
-    return [path]
+    trajs = candidate_trajs if candidate_trajs else {0: context.mdm_traj}
+    label = highlight_label if highlight_label is not None else next(iter(trajs))
+    visualizer = ArmVisualizer(context.fk)
+
+    def _render(filename: str, *, include_others: bool, include_reference: bool) -> Path:
+        path = output_dir / filename
+        visualizer.render_cluster_contrast_overlay(
+            path,
+            mdm_trajs=trajs,
+            highlight_label=label,
+            current_q=context.current_q,
+            spine3_pos=context.spine3_pos,
+            spine3_aa=context.spine3_aa,
+            body_pos=context.body_pos,
+            reference_traj=reference_traj,
+            goal_pos=goal_pos,
+            include_others=include_others,
+            include_reference=include_reference,
+        )
+        return path
+
+    images: dict[str, Path] = {
+        "current_cluster_traj_img": _render(
+            "current.png", include_others=False, include_reference=False
+        )
+    }
+    if len(trajs) > 1:
+        images["other_clusters_traj_img"] = _render(
+            "others.png", include_others=True, include_reference=False
+        )
+    if reference_traj is not None:
+        images["reference_traj_img"] = _render(
+            "reference.png", include_others=False, include_reference=True
+        )
+    return images
 
 
 def _trajectory_summary(

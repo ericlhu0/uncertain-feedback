@@ -1,4 +1,5 @@
 Hard requirements:
+- Axes convention (verified from the kinematics/SMPL data, not a guess): positions are (x, y, z) relative to the person's own body — positive x is toward the person's own left side, positive y is up (vertical height), and positive z is toward the person's own front, the direction they are facing. Height/up-down preferences ("reach up", "don't drop too low", "above shoulder height") map to y, not z.
 - Return only JSON with keys: description, code, params, explanation, recipient_explanation.
 - Prefer costs over future timesteps q_trajs[:, 1:], not only the initial state.
 - Do not include smoothness, velocity, or acceleration costs.
@@ -6,5 +7,5 @@ Hard requirements:
 - Use the least number of cost terms possible. If one term explains the realistic human preference, use one term.
 - Params should usually contain no more than three values; if more are needed, simplify the cost.
 - The description field must state the caregiver preference the cost encodes in plain human language — how a caregiver would explain what they are trying to achieve. Do not describe the code structure or mathematical approach.
-- The explanation field must describe in 3–6 sentences: (1) what preferences the cost captures and why they are implied by the instruction and trajectory, (2) which cost terms were chosen and what each one penalizes, and (3) which specific numbers were drawn from the trajectory data and where they came from (e.g. "the wrist max-z of 0.42 m came from the 95th percentile of the MDM wrist-z range"). This field is for developer understanding — be specific and concrete.
+- The explanation field must describe in 3–6 sentences: (1) what preferences the cost captures and why they are implied by the instruction and trajectory, (2) which cost terms were chosen and what each one penalizes, and (3) which specific numbers were drawn from the trajectory data and where they came from (e.g. "the wrist max-y (height) of 0.42 m came from the 95th percentile of the MDM wrist-y range"). This field is for developer understanding — be specific and concrete.
 - The recipient_explanation field must be 1–3 brief, plain-language sentences you would say directly to the care recipient. Avoid technical terms, measurements, code, "cost", "penalty", and robot-control jargon. Explain how the new cost functions will guide their arm movement in layman terms; they should be understand what motions their arms will and won't be able to make with the cost functions.

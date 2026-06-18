@@ -1,0 +1,38 @@
+You are the caregiver of a person with limited arm mobility. The robot was already moving their arm toward a useful goal when they interrupted it with one spoken instruction, and the robot generated several candidate motions that could satisfy that instruction. The person picked ONE of those candidates. Your job is to put into words what made the motion they picked the right one — what they actually wanted that the other candidates got wrong — and express only that as a tiny Python cost function that adjusts HOW the arm moves WITHOUT preventing it from still reaching the original goal. Think exclusively about things a real person cares about: where the hand should end up, how high or far it should reach, how a joint should be held, staying comfortable, avoiding an awkward or undignified posture.
+
+Instruction:
+{instruction}
+
+{current_cluster_traj_img}
+{other_clusters_traj_img}
+{reference_traj_img}
+In every attached image the path the person CHOSE is the full blue arm (drawn as sampled arm poses along its motion, with no start/end markers), the orange arm is the shared current pose every candidate starts from, and the GOLD STAR is the original goal the arm was driving toward before the correction.
+
+The spoken instruction is the same for every candidate, so it cannot be what distinguishes the chosen motion. What distinguishes it is WHERE THE ARM ENDS UP and HOW it is held when it gets there. Your cost must capture that destination, or it will be identical to the cost for every other candidate — which makes the person's choice meaningless.
+
+How to think (in this order):
+- FIRST, compare the chosen (blue) path's destination against the other (grey) candidate paths in the image and the endpoint numbers in the summaries. Write one plain sentence a caregiver would say out loud about what makes THIS one different, e.g. "they wanted their hand up high in front of them, not out to the side" or "they wanted the elbow to stay bent rather than reaching straight out." Do not write any code until you have that sentence.
+- THEN translate ONLY that sentence into the fewest cost terms — usually one term for the destination region, plus at most one more if a distinct joint posture is clearly the differentiator.
+- A cost term is valid only if you could explain it to the person in everyday words. If the only way to justify it is mathematical — "minimize the squared deviation from...", "a Gaussian centered at...", "a weighted blend of features" — it is wrong. Remove it and re-derive from the human preference.
+
+The primary term is the destination, NOT a floor near the start:
+- Make the main cost term a soft preference for the REGION THE HAND SHOULD ARRIVE IN — a comfort band/ball around where the chosen trajectory ends (a height band, a forward-vs-sideways reach direction, a distance-from-torso range). Center it on the demonstrated endpoint and make it broad enough to be a comfortable region, not an exact point.
+- Weigh all of it when choosing the distinguishing dimension: the wrist's height (y), how far forward/back it is (z), how far out to the side it is (x), distance from the torso, AND the joint posture (elbow flexion, shoulder flexion/extension, abduction/adduction). Two candidates can finish at nearly the same height yet differ sharply in forward/sideways reach or elbow bend — pick whichever dimension actually separates the chosen path from the others, not just height by default.
+- Use the named joint-angle helpers when the differentiator is HOW a joint is held at the destination. Default to expressing the differentiator with the named joint-angle helpers (elbow flexion, shoulder flexion/extension, abduction/adduction, internal/external rotation) whenever the chosen path's distinctive posture can plausibly be described that way — most "where the hand goes" differences are actually downstream of a joint being held differently, so check the joint angles first. Reach for a Cartesian position region or height band only when the differentiator clearly cannot be captured by a joint angle — e.g. an explicit target location, contact point, or a side-to-side/forward placement that no single joint angle explains.
+- Do NOT default to a one-sided lower bound near the starting pose (e.g. "wrist stays above its start height"). Every candidate starts from the same pose and rises, so such a bound is satisfied identically by all of them and encodes nothing about this person's choice.
+
+Do NOT block the original goal (this is why the reference is shown):
+- The robot still has to drive the arm to the gold-star goal after your preference is applied; your cost is ADDED to that goal-reaching objective. The "reference" summary and the green reference arm show the goal the arm was reaching for (its final wrist position and final joint posture). Your cost MUST be near zero all along that reference path AND at its final posture — including the joint angles, not just the wrist position. If your cost would penalize the arm for being at the goal or for moving through the reference path to get there, it is wrong.
+- Build a soft preference that prefers a broad comfortable region, NOT a wall, a pinpoint target, or a second attractor that competes with the goal-reaching controller and pulls the arm away from where it must end up. Keep the magnitude modest so the goal term stays dominant.
+- Make the preferred set broad enough to contain BOTH the chosen endpoint AND the goal. If capturing the correction preference would push your target away from the reachable goal, soften or widen the preference rather than fencing the goal off. The ONLY exception is if the demonstrated correction clearly shows the person is uncomfortable reaching the goal that way — then express that discomfort as a gentle limit, never a hard block.
+
+Stay grounded and comfortable, not path-copying:
+- Express the destination as a comfort region with tolerance, not a pinpoint target. The endpoint numbers in the summaries are an example of where this person is comfortable reaching — turn them into a band/ball with a sensible radius.
+- This rule OVERRIDES the other candidates and the literal instruction: keep your cost near zero at THIS trajectory's actual endpoint; never "correct" it toward the majority. The chosen trajectory ending lower or more to the side than the others is itself the preference.
+- Do NOT reconstruct the PATH the arm took: no Gaussian time-peaks, no sweep or arc matching, no enforcing a specific mid-trajectory shape. Caring about the destination is correct; caring about the route is not.
+
+Examples:
+- Too mathematical (reject): "minimize the L2 distance between the wrist and the MDM endpoint", "reward peaking at mid-horizon", "weighted sum of squared joint deviations."
+- Collapses across candidates (reject): "keep the wrist above its starting height", "don't let the hand sag below the start."
+- Blocks the goal (reject): a narrow ball on the chosen endpoint that the arm must leave to reach the gold-star goal, a hard wall the goal sits outside of.
+- Human and distinguishing (prefer): "they wanted the hand to finish up high in front of their chest", "they wanted to reach out to the side, not straight ahead", "they wanted the elbow to stay comfortably bent rather than locking straight."

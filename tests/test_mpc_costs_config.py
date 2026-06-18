@@ -1421,6 +1421,62 @@ def test_motion_summaries_include_named_joint_features() -> None:
     )
 
 
+def test_motion_summaries_include_reference_and_goal_when_present() -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+        reference_traj=np.zeros((4, 3, 3), dtype=np.float64),
+    )
+
+    summaries = build_motion_summaries(
+        context, cartesian_goal=np.array([0.1, 0.2, 0.3])
+    )
+
+    assert "reference" in summaries
+    assert "joint_features" in summaries["reference"]
+    assert summaries["cartesian_goal"] == [0.1, 0.2, 0.3]
+
+
+def test_motion_summaries_omit_reference_without_reference_traj() -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+
+    summaries = build_motion_summaries(context)
+
+    assert "reference" not in summaries
+    assert "cartesian_goal" not in summaries
+
+
+def test_prompt_images_render_overlay_with_reference(tmp_path) -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((4, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+        reference_traj=np.zeros((5, 3, 3), dtype=np.float64),
+    )
+
+    images = render_prompt_images(
+        context, tmp_path,
+        reference_traj=np.zeros((5, 3, 3), dtype=np.float64),
+        goal_pos=np.array([0.1, 0.2, 0.3]),
+    )
+
+    # No candidate clusters → no "others" image; reference present → reference image.
+    assert set(images) == {"current_cluster_traj_img", "reference_traj_img"}
+    for path in images.values():
+        assert path.exists() and path.stat().st_size > 0
+
+
 def test_generated_python_cost_rejects_bad_shape() -> None:
     context = build_generated_cost_context(
         _cost_context(SmplLeftArmFK()),
@@ -1448,10 +1504,37 @@ def test_prompt_images_render_overlay(tmp_path) -> None:
         window=5,
     )
 
-    paths = render_prompt_images(context, tmp_path)
+    images = render_prompt_images(context, tmp_path)
 
-    assert [path.name for path in paths] == ["overlay.png"]
-    assert paths[0].exists() and paths[0].stat().st_size > 0
+    # No candidates and no reference → only the current-cluster image.
+    assert set(images) == {"current_cluster_traj_img"}
+    assert images["current_cluster_traj_img"].name == "current.png"
+    path = images["current_cluster_traj_img"]
+    assert path.exists() and path.stat().st_size > 0
+
+
+def test_prompt_images_render_others_with_multiple_clusters(tmp_path) -> None:
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((4, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+    )
+
+    candidate_trajs = {
+        0: np.zeros((4, 3, 3), dtype=np.float64),
+        1: np.full((4, 3, 3), 0.1, dtype=np.float64),
+    }
+    images = render_prompt_images(
+        context, tmp_path, candidate_trajs=candidate_trajs, highlight_label=0,
+    )
+
+    # More than one cluster → the "others" image is rendered; no reference.
+    assert set(images) == {"current_cluster_traj_img", "other_clusters_traj_img"}
+    assert images["other_clusters_traj_img"].name == "others.png"
+    for path in images.values():
+        assert path.exists() and path.stat().st_size > 0
 
 
 def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
@@ -1587,6 +1670,81 @@ llm_cost:
     assert set(summary["clusters"]) == {"0", "1"}
     assert summary["clusters"]["0"]["validation"]["ok"] is True
     assert summary["clusters"]["1"]["rollout_metrics"]["steps_completed"] == 2
+
+
+def test_planning_loop_stops_when_cartesian_goal_reached() -> None:
+    fk = SmplLeftArmFK()
+    arm0 = np.zeros((3, 3), dtype=np.float64)
+    wrist0 = fk.fk(arm0, fk.tpose_spine3_pos, np.zeros(3))[-1] - fk.tpose_spine3_pos
+    goal = wrist0 + np.array([0.03, 0.06, 0.0])
+    planner = ArmMPCCartesianNoMDM(
+        cartesian_goals=[goal], initial_arm_aa=arm0, cartesian_threshold=0.12,
+        horizon=10, n_mpc_samples=256, max_angle_delta=0.1, goal_threshold=0.15,
+        visualize=False, fk=fk, spine3_pos=None, spine3_aa=None, body_pos=None,
+    )
+
+    result = planner_run.run_planning_loop(planner, arm0, 300, stop_on_runtime_error=True)
+
+    # Stops well before the 300-step budget once the wrist is within threshold.
+    assert result.reached_goal is True
+    assert len(result.q_history) < 300
+    assert planner.goal_reached(result.q_history[-1]) is True
+
+
+def test_planning_loop_waits_for_mdm_correction_before_stopping() -> None:
+    fk = SmplLeftArmFK()
+    arm0 = np.zeros((3, 3), dtype=np.float64)
+    # Joint goal == start pose, so goal_reached(q0) is True from the very first step;
+    # the loop must still play the pushed correction out before it may stop.
+    planner = LeftArmMPCMDM(
+        goals=[arm0.copy()], horizon=10, n_mpc_samples=64, max_angle_delta=0.1,
+        goal_threshold=0.15, visualize=False, fk=fk, spine3_pos=None, spine3_aa=None,
+        body_pos=None, advance_threshold=0.1, max_playback_delta=0.2,
+        trajectory_fraction=1.0,
+    )
+    planner.push_trajectory(np.stack([arm0] * 8))
+
+    assert planner.goal_reached(arm0) is True  # goal trivially satisfied at the start
+    assert planner.mdm_ready_to_terminate is False  # but a correction is still queued
+
+    result = planner_run.run_planning_loop(planner, arm0, 100, stop_on_runtime_error=True)
+
+    # The loop ran the 8 playback frames before stopping, not stopping at step 1.
+    assert result.reached_goal is True
+    assert len(result.q_history) == 8
+    assert planner.mdm_ready_to_terminate is True
+
+
+def test_planning_loop_runs_cartesian_phase_after_correction_then_stops() -> None:
+    # The real active-planner scenario: play a correction that ends AWAY from the
+    # goal, drive the cartesian phase to the goal, then stop — all in one loop.
+    fk = SmplLeftArmFK()
+    sp = fk.tpose_spine3_pos
+    arm0 = np.zeros((3, 3), dtype=np.float64)
+    wrist0 = fk.fk(arm0, sp, np.zeros(3))[-1] - sp
+    goal = wrist0 + np.array([0.03, 0.06, 0.0])
+    planner = LeftArmMPCCartesian(
+        cartesian_goals=[goal], initial_arm_aa=arm0, cartesian_threshold=0.12,
+        horizon=10, n_mpc_samples=256, max_angle_delta=0.1, goal_threshold=0.15,
+        visualize=False, fk=fk, spine3_pos=None, spine3_aa=None, body_pos=None,
+        advance_threshold=0.1, max_playback_delta=0.3, trajectory_fraction=1.0,
+    )
+    # 4 playback frames whose endpoint wrist is well outside cartesian_threshold.
+    playback = np.stack(
+        [k * np.array([[0.0, 0.0, 0.4], [0, 0, 0], [0, 0, 0]]) for k in (0.25, 0.5, 0.75, 1.0)]
+    )
+    end_wrist = fk.fk(playback[-1], sp, np.zeros(3))[-1] - sp
+    assert float(np.linalg.norm(end_wrist - goal)) > 0.12  # playback ends away from goal
+    planner.set_mdm_goal(playback[-1])
+    planner.push_trajectory(playback)
+
+    result = planner_run.run_planning_loop(planner, arm0, 300, stop_on_runtime_error=True)
+
+    assert result.reached_goal is True
+    # Cartesian phase ran AFTER the 4 playback frames, then stopped before the budget.
+    assert len(result.q_history) > playback.shape[0]
+    assert len(result.q_history) < 300
+    assert planner.goal_reached(result.q_history[-1]) is True
 
 
 def test_parse_llm_cost_response_accepts_markdown_json() -> None:

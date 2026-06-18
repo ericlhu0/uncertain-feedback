@@ -55,6 +55,24 @@ class _CartesianGoalsMixin:
         """Add a Cartesian goal to the back of the queue."""
         self._cartesian_goals.append(np.asarray(goal, dtype=np.float64))
 
+    def goal_reached(self, q: np.ndarray) -> bool:
+        """Whether the wrist has reached the final Cartesian goal.
+
+        Overrides the joint-space check on
+        :class:`~uncertain_feedback.planners.mpc.arm_mpc.SmplLeftArmMPC`: the
+        wrist (spine3-relative) must be within ``cartesian_threshold`` of the
+        last remaining goal. While earlier goals are still queued the rollout
+        has not finished, so this returns ``False``.
+        """
+        goal = self.current_cartesian_goal
+        if goal is None or len(self._cartesian_goals) > 1:
+            return False
+        arm_pos = self._fk_inst.fk(
+            np.asarray(q, dtype=np.float64), self._spine3_pos, self._spine3_aa
+        )
+        wrist_rel = arm_pos[-1] - self._spine3_pos
+        return float(np.linalg.norm(wrist_rel - goal)) < self._cartesian_threshold
+
     def _cartesian_cost(self, q_trajs: np.ndarray) -> np.ndarray:
         """L2 Cartesian cost: spine3-relative wrist distance to current target.
 

@@ -1290,7 +1290,7 @@ llm_cost:
 
 
 def test_llm_artifact_run_dir_resolves_relative_to_base_dir(tmp_path) -> None:
-    run_dir = planner_run._llm_artifact_run_dir(
+    run_dir = planner_run.artifact_run_dir(
         tmp_path,
         Path("llm_cost_artifacts"),
     )
@@ -1564,18 +1564,20 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
         artifact_dir=tmp_path / "artifacts",
     )
 
-    generated = planner_run._apply_llm_generated_cost(
-        mpc,
-        "raise the elbow",
-        mdm_traj,
-        np.zeros((3, 3), dtype=np.float64),
-        [],
-        context,
+    run_dir = planner_run.artifact_run_dir(tmp_path, llm_cfg.artifact_dir)
+    summaries = build_motion_summaries(generated_context)
+    images = render_prompt_images(generated_context, run_dir / "images")
+    generator = planner_run.create_cost_generator(
         llm_cfg,
-        tmp_path,
-        history_window=5,
+        generated_context,
+        "raise the elbow",
+        summaries=summaries,
+        run_dir=run_dir,
+        images=images,
+        mpc=mpc,
         llm_model_factory=lambda _model_name: fake_model,
     )
+    generated = generator.generate(install=True)
 
     assert generated is not None
     assert len(mpc._extra_costs.terms()) == 1

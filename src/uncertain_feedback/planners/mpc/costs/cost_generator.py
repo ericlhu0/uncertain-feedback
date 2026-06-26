@@ -1,0 +1,296 @@
+"""Shared base for MPC cost-function generators.
+
+Three sibling strategies generate an executable :class:`GeneratedPythonCost` from a
+user correction, all constructed and called the same way:
+
+- ``llm``   — single-turn LLM call (:class:`~...costs.llm_costs.LlmCostGenerator`).
+- ``turns`` — multi-turn LLM conversation that refines the cost
+  (:class:`~...costs.turns_costs.TurnsCostGenerator`).
+- ``agent`` — delegates iteration to the ``codex`` CLI
+  (:class:`~...costs.agent_costs.AgentCostGenerator`).
+
+:class:`CostGenerator` holds the shared inputs and helpers (prompt building, model
+construction, response parsing/validation, artifact saving, installation) so each
+subclass body stays small. :func:`create_cost_generator` selects the strategy from
+config; this is the only place that branches on the backend.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+import numpy as np
+
+from uncertain_feedback.planners.mpc.costs.generated import (
+    GeneratedCostContext,
+    GeneratedCostValidationError,
+    GeneratedPythonCost,
+    LlmCostResponse,
+    parse_llm_cost_response,
+)
+from uncertain_feedback.planners.mpc.costs.prompts import build_llm_cost_prompt
+
+_SYSTEM_PROMPT = (
+    "You generate safe, vectorized Python MPC trajectory cost functions. "
+    "Return only the requested JSON object."
+)
+
+
+def _make_llm_model(model_name: str) -> Any:
+    """Build the cost-generator LLM wrapper."""
+    from uncertain_feedback.llm import (  # pylint: disable=import-outside-toplevel
+        OpenAIModel,
+    )
+
+    return OpenAIModel(
+        model=model_name,
+        system_prompt=_SYSTEM_PROMPT,
+        temperature=0.2,
+        max_tokens=1800,
+    )
+
+
+def artifact_run_dir(base_dir: Path, artifact_dir: Path) -> Path:
+    """Return a unique, timestamped artifact directory for one generation."""
+    root = artifact_dir if artifact_dir.is_absolute() else base_dir / artifact_dir
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return root / stamp
+
+
+def evaluate_candidate_cost(
+    context: GeneratedCostContext,
+    cost: GeneratedPythonCost,
+) -> float:
+    """Score a candidate cost; lower is better.
+
+    TODO: replace with the real metric — roll the goal-seeking MPC with this cost
+    installed and measure how close the resulting trajectory is to the corrected
+    (MDM) trajectory. For now this is a trivial proxy: evaluate the cost on the
+    corrected trajectory itself (treated as a single rollout), so a cost that
+    "likes" the demonstrated path scores low.
+    """
+    target = np.asarray(context.mdm_traj, dtype=np.float64)
+    if target.ndim != 3 or target.shape[0] == 0:
+        return 0.0
+    scores = cost(target[np.newaxis])  # (1, T, 3, 3) -> (1,)
+    return float(np.asarray(scores, dtype=np.float64).reshape(-1)[0])
+
+
+class CostGenerator(ABC):
+    """Base class for cost-function generators.
+
+    Subclasses implement :meth:`generate`; the base supplies prompt building, LLM
+    construction, response parsing/validation, artifact saving, and installation.
+    """
+
+    def __init__(
+        self,
+        context: GeneratedCostContext,
+        instruction: str,
+        summaries: dict[str, Any],
+        *,
+        run_dir: Path,
+        prompt: str = "2",
+        images: dict[str, Path] | None = None,
+        model: str | None = None,
+        strict: bool = False,
+        mpc: Any | None = None,
+        llm_model_factory: Callable[[str], Any] = _make_llm_model,
+    ) -> None:
+        self.context = context
+        self.instruction = instruction
+        self.summaries = summaries
+        self.run_dir = run_dir
+        self.prompt = prompt
+        self.images = images or {}
+        self.model = model
+        self.strict = strict
+        self.mpc = mpc
+        self.llm_model_factory = llm_model_factory
+
+    # -- shared helpers -----------------------------------------------------
+
+    @property
+    def model_name(self) -> str:
+        """Resolved model name (config, then env, then default)."""
+        return self.model or os.getenv("OPENAI_MODEL", "gpt-5.4")
+
+    def make_llm(self) -> Any:
+        """Construct the cost-generator LLM wrapper for this run's model."""
+        return self.llm_model_factory(self.model_name)
+
+    def build_prompt(self) -> tuple[str, list[str] | None]:
+        """Build the prompt text and the list of image paths to attach."""
+        text, attached = build_llm_cost_prompt(
+            self.instruction, self.summaries, self.images, prompt=self.prompt
+        )
+        image_input = [str(path) for path in attached] or None
+        return text, image_input
+
+    def compile_cost(
+        self,
+        code: str,
+        params: dict[str, Any] | None = None,
+        description: str = "",
+    ) -> GeneratedPythonCost:
+        """Compile and validate generated code into an executable cost."""
+        cost = GeneratedPythonCost(
+            code=code,
+            params=params or {},
+            description=description,
+            context=self.context,
+        )
+        # Smoke-test on a dummy rollout batch so a broken cost fails here.
+        validation_q = np.repeat(
+            self.context.current_q[np.newaxis, np.newaxis], repeats=11, axis=1
+        )
+        cost(validation_q)
+        return cost
+
+    def parse_cost(self, raw: str) -> tuple[LlmCostResponse, GeneratedPythonCost]:
+        """Parse a JSON LLM response and compile it into a cost."""
+        response = parse_llm_cost_response(raw)
+        cost = self.compile_cost(
+            response.code, response.params, response.description
+        )
+        return response, cost
+
+    def begin(self) -> None:
+        """Create the run dir and persist the prompt inputs."""
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.run_dir / "summaries.json", "w", encoding="utf-8") as f:
+            json.dump(self.summaries, f, indent=2, sort_keys=True)
+
+    def save_response(
+        self, response: LlmCostResponse, *, dir_: Path | None = None
+    ) -> None:
+        """Write the winning cost code, params, and explanations to ``dir_``."""
+        out = dir_ or self.run_dir
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "cost.py").write_text(response.code, encoding="utf-8")
+        if response.explanation:
+            (out / "explanation.txt").write_text(
+                response.explanation, encoding="utf-8"
+            )
+            print(f"[cost-gen] explanation: {response.explanation}")
+        if response.recipient_explanation:
+            (out / "recipient_explanation.txt").write_text(
+                response.recipient_explanation, encoding="utf-8"
+            )
+            print(
+                "[cost-gen] recipient explanation: "
+                f"{response.recipient_explanation}"
+            )
+        with open(out / "params.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "description": response.description,
+                    "explanation": response.explanation,
+                    "recipient_explanation": response.recipient_explanation,
+                    "params": response.params,
+                    "model": self.model_name,
+                    "backend": type(self).__name__,
+                },
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+
+    def install(self, cost: GeneratedPythonCost) -> None:
+        """Append the generated cost to the planner's extra-cost set."""
+        if self.mpc is None:
+            return
+        from uncertain_feedback.planners.mpc.costs.base import (  # pylint: disable=import-outside-toplevel
+            CompositeTrajectoryCost,
+        )
+
+        existing = self.mpc._extra_costs  # pylint: disable=protected-access
+        self.mpc.set_extra_costs(
+            CompositeTrajectoryCost([*existing.terms(), cost])
+        )
+
+    def _write_validation(self, payload: dict[str, Any]) -> None:
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.run_dir / "validation.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+
+    def _on_success(self, cost: GeneratedPythonCost, *, installed: bool) -> None:
+        self._write_validation({"ok": True, "artifact_dir": str(self.run_dir)})
+        action = "installed" if installed else "generated"
+        print(f"[cost-gen] {action} cost: {cost.description}")
+        print(f"[cost-gen] artifacts saved to: {self.run_dir}")
+
+    def _on_failure(self, exc: Exception) -> None:
+        self._write_validation(
+            {
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "artifact_dir": str(self.run_dir),
+            }
+        )
+        print(f"[cost-gen] failed to generate cost: {exc}")
+        if self.strict:
+            raise exc
+
+    @abstractmethod
+    def generate(self, install: bool = False) -> GeneratedPythonCost | None:
+        """Generate (and optionally install) an MPC cost, or ``None`` on failure."""
+
+
+def create_cost_generator(
+    cfg: Any,
+    context: GeneratedCostContext,
+    instruction: str,
+    *,
+    summaries: dict[str, Any],
+    run_dir: Path,
+    images: dict[str, Path] | None = None,
+    mpc: Any | None = None,
+    llm_model_factory: Callable[[str], Any] = _make_llm_model,
+) -> CostGenerator:
+    """Build the cost generator selected by ``cfg.backend``.
+
+    ``cfg`` is an ``LlmCostConfig`` (see config.py); the per-backend params
+    (``max_turns``, ``codex_cmd``) are read here. This is the only branch on the
+    backend — callers always construct and call the result identically.
+    """
+    # Local imports keep the subclass modules from importing this one at import time.
+    from uncertain_feedback.planners.mpc.costs.agent_costs import (  # pylint: disable=import-outside-toplevel
+        AgentCostGenerator,
+    )
+    from uncertain_feedback.planners.mpc.costs.llm_costs import (  # pylint: disable=import-outside-toplevel
+        LlmCostGenerator,
+    )
+    from uncertain_feedback.planners.mpc.costs.turns_costs import (  # pylint: disable=import-outside-toplevel
+        TurnsCostGenerator,
+    )
+
+    common: dict[str, Any] = dict(
+        context=context,
+        instruction=instruction,
+        summaries=summaries,
+        run_dir=run_dir,
+        prompt=cfg.prompt,
+        images=images,
+        model=cfg.model,
+        strict=cfg.strict,
+        mpc=mpc,
+        llm_model_factory=llm_model_factory,
+    )
+    backend = cfg.backend
+    if backend == "llm":
+        return LlmCostGenerator(**common)
+    if backend == "turns":
+        return TurnsCostGenerator(max_turns=cfg.max_turns, **common)
+    if backend == "agent":
+        return AgentCostGenerator(codex_cmd=cfg.codex_cmd, **common)
+    raise GeneratedCostValidationError(
+        f"unknown cost-generator backend {backend!r}; "
+        "expected one of 'llm', 'turns', 'agent'"
+    )

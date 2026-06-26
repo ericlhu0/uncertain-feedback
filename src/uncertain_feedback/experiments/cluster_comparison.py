@@ -31,11 +31,16 @@ from uncertain_feedback.planners.mpc.costs import (
     MpcCostContext,
 )
 from uncertain_feedback.utils.plot import ArmVisualizer
+from uncertain_feedback.planners.mpc.costs import (
+    artifact_run_dir,
+    build_generated_cost_context,
+    build_motion_summaries,
+    create_cost_generator,
+    render_prompt_images,
+)
+from uncertain_feedback.planners.mpc.costs.cost_generator import _make_llm_model
 from uncertain_feedback.planners.run import (
     _append_extra_cost,
-    _apply_llm_generated_cost,
-    _llm_artifact_run_dir,
-    _make_llm_model,
     _rollout_reference_trajectory,
     run_planning_loop,
 )
@@ -269,7 +274,7 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
     Returns the chosen cluster's cost, installed on ``mpc`` when ``install``.
     """
     if root_dir is None:
-        root_dir = _llm_artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
+        root_dir = artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
     root_dir.mkdir(parents=True, exist_ok=True)
     (root_dir / "selected_cluster.txt").write_text(
         f"{uq_result.chosen_label}\n", encoding="utf-8"
@@ -306,14 +311,24 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
         cluster_traj = uq_result.cluster_means[int(label)]
         cluster_dir = root_dir / f"cluster_{label}"
         install_selected = int(label) == uq_result.chosen_label
-        generated = _apply_llm_generated_cost(
-            mpc, instruction, cluster_traj, current_q, q_history, context,
-            cfg.llm_cost, artifact_base_dir, history_window,
-            body_pos=body_pos, llm_model_factory=llm_model_factory,
-            run_dir=cluster_dir, install=install_selected and install,
-            candidate_trajs=uq_result.cluster_means, highlight_label=int(label),
-            reference_traj=reference_traj, goal_pos=goal_pos,
+        generated_context = build_generated_cost_context(
+            context, current_q, cluster_traj, q_history, window=history_window,
+            body_pos=body_pos, reference_traj=reference_traj,
         )
+        summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
+        images: dict[str, Path] = {}
+        if cfg.llm_cost.use_images:
+            images = render_prompt_images(
+                generated_context, cluster_dir / "images",
+                uq_result.cluster_means, int(label),
+                reference_traj=reference_traj, goal_pos=goal_pos,
+            )
+        generator = create_cost_generator(
+            cfg.llm_cost, generated_context, instruction,
+            summaries=summaries, run_dir=cluster_dir, images=images, mpc=mpc,
+            llm_model_factory=llm_model_factory,
+        )
+        generated = generator.generate(install=install_selected and install)
         validation = _read_json_if_exists(cluster_dir / "validation.json")
         params = _read_json_if_exists(cluster_dir / "params.json")
         entry: dict[str, Any] = {

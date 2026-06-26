@@ -18,10 +18,7 @@ Usage examples::
 from __future__ import annotations
 
 import argparse
-import json
-import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, cast
 
@@ -45,11 +42,11 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
     LearnablePreferenceCost,
     MpcCostContext,
+    artifact_run_dir,
     build_extra_costs,
     build_generated_cost_context,
-    build_llm_cost_prompt,
     build_motion_summaries,
-    parse_llm_cost_response,
+    create_cost_generator,
     render_prompt_images,
     replace_cost_in_composite,
     update_preference_cost,
@@ -305,163 +302,12 @@ def _default_preference_output_path(config_path: Path) -> Path:
     return config_path.with_name(f"{config_path.stem}_learned{config_path.suffix}")
 
 
-def _make_llm_model(model_name: str) -> Any:
-    """Build the cost-generator LLM wrapper."""
-    from uncertain_feedback.llm import (
-        OpenAIModel,
-    )  # pylint: disable=import-outside-toplevel
-
-    return OpenAIModel(
-        model=model_name,
-        system_prompt=(
-            "You generate safe, vectorized Python MPC trajectory cost functions. "
-            "Return only the requested JSON object."
-        ),
-        temperature=0.2,
-        max_tokens=1800,
-    )
-
-
-def _llm_artifact_run_dir(base_dir: Path, artifact_dir: Path) -> Path:
-    """Return a unique artifact directory for one LLM-cost generation."""
-    root = artifact_dir if artifact_dir.is_absolute() else base_dir / artifact_dir
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return root / stamp
-
-
 def _append_extra_cost(
     composite: CompositeTrajectoryCost,
     cost: GeneratedPythonCost,
 ) -> CompositeTrajectoryCost:
     """Return a composite with an additional generated cost term."""
     return CompositeTrajectoryCost([*composite.terms(), cost])
-
-
-def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-locals
-    mpc: SmplLeftArmMPC,
-    instruction: str,
-    mdm_traj: np.ndarray,
-    current_q: np.ndarray,
-    q_history: list[np.ndarray],
-    context: MpcCostContext,
-    llm_cfg: Any,
-    artifact_base_dir: Path,
-    history_window: int,
-    body_pos: np.ndarray | None = None,
-    llm_model_factory: Callable[[str], Any] = _make_llm_model,
-    run_dir: Path | None = None,
-    install: bool = True,
-    candidate_trajs: dict[int, np.ndarray] | None = None,
-    highlight_label: int | None = None,
-    reference_traj: np.ndarray | None = None,
-    goal_pos: np.ndarray | None = None,
-) -> GeneratedPythonCost | None:
-    """Generate, validate, save, and install an LLM-generated MPC cost."""
-    if run_dir is None:
-        run_dir = _llm_artifact_run_dir(artifact_base_dir, llm_cfg.artifact_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    image_dir = run_dir / "images"
-    validation: dict[str, Any] = {"ok": False}
-
-    try:
-        generated_context = build_generated_cost_context(
-            context,
-            current_q,
-            mdm_traj,
-            q_history,
-            window=history_window,
-            body_pos=body_pos,
-            reference_traj=reference_traj,
-        )
-        summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
-        images: dict[str, Path] = {}
-        if llm_cfg.use_images:
-            images = render_prompt_images(
-                generated_context, image_dir, candidate_trajs, highlight_label,
-                reference_traj=reference_traj, goal_pos=goal_pos,
-            )
-        with open(run_dir / "summaries.json", "w", encoding="utf-8") as f:
-            json.dump(summaries, f, indent=2, sort_keys=True)
-
-        model_name = llm_cfg.model or os.getenv("OPENAI_MODEL", "gpt-5.4")
-        llm = llm_model_factory(model_name)
-        prompt, attached_images = build_llm_cost_prompt(
-            instruction, summaries, images, prompt=llm_cfg.prompt
-        )
-        image_input = [str(path) for path in attached_images] or None
-        (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-        raw_response = llm.get_full_output(prompt, image_input=image_input)
-        (run_dir / "raw_response.txt").write_text(raw_response, encoding="utf-8")
-        response = parse_llm_cost_response(raw_response)
-        generated_cost = GeneratedPythonCost(
-            code=response.code,
-            params=response.params,
-            description=response.description,
-            context=generated_context,
-        )
-        validation_q = np.repeat(
-            current_q[np.newaxis, np.newaxis],
-            repeats=11,
-            axis=1,
-        )
-        generated_cost(validation_q)
-
-        (run_dir / "cost.py").write_text(response.code, encoding="utf-8")
-        if response.explanation:
-            (run_dir / "explanation.txt").write_text(
-                response.explanation,
-                encoding="utf-8",
-            )
-            print(f"[llm-cost] explanation: {response.explanation}")
-        if response.recipient_explanation:
-            (run_dir / "recipient_explanation.txt").write_text(
-                response.recipient_explanation,
-                encoding="utf-8",
-            )
-            print(
-                "[llm-cost] recipient explanation: "
-                f"{response.recipient_explanation}"
-            )
-        with open(run_dir / "params.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "description": response.description,
-                    "explanation": response.explanation,
-                    "recipient_explanation": response.recipient_explanation,
-                    "params": response.params,
-                    "model": model_name,
-                },
-                f,
-                indent=2,
-                sort_keys=True,
-            )
-        if install:
-            mpc.set_extra_costs(
-                _append_extra_cost(
-                    mpc._extra_costs,  # pylint: disable=protected-access
-                    generated_cost,
-                )
-            )
-        validation = {"ok": True, "artifact_dir": str(run_dir)}
-        action = "installed" if install else "generated"
-        print(f"[llm-cost] {action} generated cost: {response.description}")
-        print(f"[llm-cost] artifacts saved to: {run_dir}")
-        return generated_cost
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        validation = {
-            "ok": False,
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-            "artifact_dir": str(run_dir),
-        }
-        action = "install" if install else "generate"
-        print(f"[llm-cost] failed to {action} generated cost: {exc}")
-        if llm_cfg.strict:
-            raise
-        return None
-    finally:
-        with open(run_dir / "validation.json", "w", encoding="utf-8") as f:
-            json.dump(validation, f, indent=2, sort_keys=True)
 
 
 def _save_learned_preference_yaml(
@@ -871,16 +717,34 @@ def main() -> None:
                 else None
             )
 
+            # Build the shared context/summaries/images once, then let the
+            # configured backend (llm / turns / agent) generate the cost. All three
+            # are constructed and called identically; only the factory branches.
+            generated_context = build_generated_cost_context(
+                cost_context, q, llm_traj, list(q_history),
+                window=cfg.preference_window, body_pos=body_pos,
+                reference_traj=reference_traj,
+            )
+            summaries = build_motion_summaries(
+                generated_context, cartesian_goal=goal_pos
+            )
+            run_dir = artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
+            images: dict[str, Path] = {}
+            if cfg.llm_cost.use_images:
+                images = render_prompt_images(
+                    generated_context, run_dir / "images",
+                    candidate_trajs, highlight_label,
+                    reference_traj=reference_traj, goal_pos=goal_pos,
+                )
+
             # Generate synchronously here (the live viz is already closed for the
             # MDM compute, so this adds no extra freeze). The cost is held and
             # installed once the correction trajectory finishes (see _on_post_step).
-            pending_cost = _apply_llm_generated_cost(
-                mpc, args.text, llm_traj, q, list(q_history),
-                cost_context, cfg.llm_cost, artifact_base_dir,
-                cfg.preference_window, body_pos=body_pos, install=False,
-                candidate_trajs=candidate_trajs, highlight_label=highlight_label,
-                reference_traj=reference_traj, goal_pos=goal_pos,
+            generator = create_cost_generator(
+                cfg.llm_cost, generated_context, args.text,
+                summaries=summaries, run_dir=run_dir, images=images, mpc=mpc,
             )
+            pending_cost = generator.generate(install=False)
 
         # MDM generation can switch matplotlib to the Agg backend; restore it
         _restore_interactive_backend()

@@ -2,12 +2,14 @@ uv.lock
 .claude/
 .codex/
 AGENTS.md
+CLAUDE.md
 env_snapshots/
 amass/
 src/uncertain_feedback/data_collection/data/
 my_mdm_dataset/
 memory/
 llm_cost_artifacts/
+experiment_artifacts/
 
 .DS_Store
 .python-version

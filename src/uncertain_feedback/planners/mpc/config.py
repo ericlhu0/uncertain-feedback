@@ -40,6 +40,17 @@ class LlmCostConfig:
     artifact_dir: Path = Path("llm_cost_artifacts")
     use_images: bool = True
     prompt: str = "2"
+    # Which cost generator to use: "llm" (single-turn, default), "turns"
+    # (multi-turn conversation), or "agent" (delegate to the codex CLI).
+    backend: str = "llm"
+    max_turns: int = 6  # used by the "turns" backend
+    # Used by the "agent" backend. --skip-git-repo-check is required because the
+    # per-generation artifact run dir is not a git repo. Depending on your codex
+    # auth/host you may also need e.g. `-m <model>` and a sandbox flag.
+    codex_cmd: str = "codex exec --skip-git-repo-check"
+
+
+COST_BACKENDS = {"llm", "turns", "agent"}
 
 
 @dataclass(frozen=True)
@@ -116,6 +127,15 @@ def _optional_str(value: Any, name: str) -> str | None:
     if not isinstance(value, str):
         raise ValueError(f"{name} must be a string or null.")
     return value
+
+
+def _cost_backend(value: Any) -> str:
+    backend = value if value is not None else "llm"
+    if backend not in COST_BACKENDS:
+        raise ValueError(
+            f"llm_cost.backend must be one of {sorted(COST_BACKENDS)}, got {value!r}."
+        )
+    return backend
 
 
 def _str_list(value: Any, name: str) -> list[str]:
@@ -217,6 +237,16 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             prompt=(
                 _optional_str(llm_cost_data.get("prompt", "2"), "llm_cost.prompt")
                 or "2"
+            ),
+            backend=_cost_backend(llm_cost_data.get("backend", "llm")),
+            max_turns=_positive_int(
+                llm_cost_data.get("max_turns", 6), "llm_cost.max_turns"
+            ),
+            codex_cmd=(
+                _optional_str(
+                    llm_cost_data.get("codex_cmd", "codex exec"), "llm_cost.codex_cmd"
+                )
+                or "codex exec"
             ),
         ),
         mdm_frames=(

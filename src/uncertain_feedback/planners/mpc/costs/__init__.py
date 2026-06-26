@@ -26,7 +26,7 @@ from uncertain_feedback.planners.mpc.costs.base import (
     update_elbow_cost,
     update_preference_cost,
 )
-from uncertain_feedback.planners.mpc.costs.llm_costs import (
+from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostContext,
     GeneratedCostValidationError,
     GeneratedPythonCost,
@@ -37,6 +37,15 @@ from uncertain_feedback.planners.mpc.costs.llm_costs import (
     parse_llm_cost_response,
     render_prompt_images,
 )
+from uncertain_feedback.planners.mpc.costs.cost_generator import (
+    CostGenerator,
+    artifact_run_dir,
+    create_cost_generator,
+    evaluate_candidate_cost,
+)
+from uncertain_feedback.planners.mpc.costs.llm_costs import LlmCostGenerator
+from uncertain_feedback.planners.mpc.costs.turns_costs import TurnsCostGenerator
+from uncertain_feedback.planners.mpc.costs.agent_costs import AgentCostGenerator
 from uncertain_feedback.planners.mpc.costs.prompts import (
     PROMPTS,
     build_llm_cost_prompt,
@@ -59,7 +68,7 @@ __all__ = [
     "replace_cost_in_composite",
     "update_elbow_cost",
     "update_preference_cost",
-    # llm_costs
+    # generated primitives
     "GeneratedCostContext",
     "GeneratedCostValidationError",
     "GeneratedPythonCost",
@@ -69,6 +78,14 @@ __all__ = [
     "compile_generated_cost",
     "parse_llm_cost_response",
     "render_prompt_images",
+    # cost generators
+    "CostGenerator",
+    "LlmCostGenerator",
+    "TurnsCostGenerator",
+    "AgentCostGenerator",
+    "create_cost_generator",
+    "evaluate_candidate_cost",
+    "artifact_run_dir",
     # prompts
     "PROMPTS",
     "build_llm_cost_prompt",

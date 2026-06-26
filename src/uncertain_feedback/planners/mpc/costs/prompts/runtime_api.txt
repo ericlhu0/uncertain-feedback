@@ -22,6 +22,10 @@ Runtime API:
   in the SMPL/HML state, but this simplified arm model has no hand joint beyond
   the wrist, so use wrist joint-angle terms only when a wrist-rotation
   preference is clearly implied.
+- The Cartesian/position helpers below (fk_rollouts, mdm_positions,
+  current_positions, joint_index, ...) are provided to help you UNDERSTAND the
+  correction. The returned cost itself must stay joint-space (see Hard
+  requirements): do not use these position outputs to compute it.
 - context.fk_rollouts(q_trajs) returns positions with shape
   (n_rollouts, horizon + 1, 5, 3) for spine3, left_collar, left_shoulder,
   left_elbow, left_wrist.

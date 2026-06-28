@@ -378,6 +378,27 @@ Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
 saved video uses the same `ArmVisualizer` layout as a live run, so the only
 difference between watching and saving is the flag.
 
+### Comparing cost-generation backends
+
+The backend experiment is the orthogonal axis: it holds the correction fixed (the
+**chosen** UQ cluster) and generates a cost with each backend (`llm` / `turns` /
+`agent`), then scores them all on the same rollout-vs-MDM L2 metric and writes a
+`backend_comparison.json` ranking. It requires `planner: arm_mpc_cartesian` (the
+scorer needs a persistent Cartesian goal) and `llm_cost.enabled: true`:
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_backend_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_agent.yaml \
+  --text "raise my left arm"
+```
+
+Only `llm_cost.backend` is varied per run; all other `llm_cost` settings (`model`,
+`max_turns`, `prompt`, `use_images`, and **`codex_cmd` for the `agent` backend**)
+are read from the base config, so pass a config whose `codex_cmd` works on this
+host. Use `--backends llm turns` to compare a subset, `--rollout-steps N` and
+`--save-video` to render an MP4 per backend. A backend that fails to produce a
+cost (e.g. `codex` unavailable) is recorded as failed and the rest still rank.
+
 
 ## Thanks
 This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code).

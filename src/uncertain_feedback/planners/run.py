@@ -612,6 +612,34 @@ def _rollout_reference_trajectory(
     return np.asarray([q0, *result.q_history], dtype=np.float64)
 
 
+def _make_cost_eval_rollout(
+    cfg: MpcRunConfig,
+    current_q: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+) -> Callable[[GeneratedPythonCost], np.ndarray | None]:
+    """Return a closure rolling the goal-seeking MPC with a candidate cost installed.
+
+    The returned function appends the candidate generated cost to the comfort costs
+    and rolls toward the original Cartesian goal (reusing
+    :func:`_rollout_reference_trajectory`), yielding the ``(T, 3, 3)`` trajectory the
+    cost evaluator compares against the MDM correction. Returns ``None`` for planners
+    without a persistent Cartesian goal. Each call builds a fresh headless planner, so
+    the live MPC's goals/warm-start are untouched.
+    """
+
+    def rollout(cost: GeneratedPythonCost) -> np.ndarray | None:
+        extra = _append_extra_cost(base_extra_costs, cost)
+        return _rollout_reference_trajectory(
+            cfg, current_q, context, extra, body_pos, spine3_pos, spine3_aa
+        )
+
+    return rollout
+
+
 def main() -> None:
     args = build_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
@@ -740,9 +768,14 @@ def main() -> None:
             # Generate synchronously here (the live viz is already closed for the
             # MDM compute, so this adds no extra freeze). The cost is held and
             # installed once the correction trajectory finishes (see _on_post_step).
+            cost_eval_rollout = _make_cost_eval_rollout(
+                cfg, q, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
+                body_pos, setup.spine3_pos, spine3_aa,
+            )
             generator = create_cost_generator(
                 cfg.llm_cost, generated_context, args.text,
                 summaries=summaries, run_dir=run_dir, images=images, mpc=mpc,
+                rollout_fn=cost_eval_rollout,
             )
             pending_cost = generator.generate(install=False)
 

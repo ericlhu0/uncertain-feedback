@@ -86,7 +86,7 @@ class TurnsCostGenerator(CostGenerator):
                 )
                 continue
 
-            score = evaluate_candidate_cost(self.context, cost)
+            score = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
             (turn_dir / "cost.py").write_text(response.code, encoding="utf-8")
             with open(turn_dir / "score.json", "w", encoding="utf-8") as f:
                 json.dump({"turn": turn, "score": score}, f, indent=2)

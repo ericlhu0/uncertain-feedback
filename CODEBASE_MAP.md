@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-06-01  
+**Last updated:** 2026-06-27  
 **Branch:** mpc
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -54,10 +54,14 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm.yaml
 │   │           ├── arm_mpc_cartesian_mdm_learn.yaml
 │   │           ├── arm_mpc_cartesian_mdm_llm.yaml
+│   │           ├── arm_mpc_cartesian_mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
+│   │           ├── arm_mpc_cartesian_mdm_llm_agent.yaml  # backend: agent (codex CLI)
 │   │           └── arm_mpc_cartesian_no_mdm.yaml
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── cluster_comparison.py     # Generate + roll out one LLM cost per UQ cluster
-│   │   └── run_experiment.py         # CLI entry point for cluster comparison experiments
+│   │   ├── run_experiment.py         # CLI entry point for cluster comparison experiments
+│   │   ├── backend_comparison.py     # Generate one cost per backend (llm/turns/agent), score uniformly
+│   │   └── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
 │   ├── motion_generators/
 │   │   └── mdm/
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
@@ -346,6 +350,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 |-------------------------------------------------------|--------------------------------------|
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
+| `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml>` | Per-backend (llm/turns/agent) cost comparison experiment |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |

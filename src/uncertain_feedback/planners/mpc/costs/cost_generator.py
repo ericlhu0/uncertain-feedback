@@ -18,6 +18,7 @@ config; this is the only place that branches on the backend.
 from __future__ import annotations
 
 import json
+import math
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -62,23 +63,56 @@ def artifact_run_dir(base_dir: Path, artifact_dir: Path) -> Path:
     return root / stamp
 
 
+def _resample_trajectory(traj: np.ndarray, n: int) -> np.ndarray:
+    """Linearly resample a ``(T, ...)`` trajectory to ``n`` frames along axis 0."""
+    t = traj.shape[0]
+    if t == n:
+        return traj
+    src = np.linspace(0.0, 1.0, t)
+    dst = np.linspace(0.0, 1.0, n)
+    flat = traj.reshape(t, -1)
+    out = np.stack(
+        [np.interp(dst, src, flat[:, i]) for i in range(flat.shape[1])], axis=1
+    )
+    return out.reshape((n, *traj.shape[1:]))
+
+
 def evaluate_candidate_cost(
     context: GeneratedCostContext,
     cost: GeneratedPythonCost,
+    rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
+    images: dict[str, Path] | None = None,
 ) -> float:
     """Score a candidate cost; lower is better.
 
-    TODO: replace with the real metric — roll the goal-seeking MPC with this cost
-    installed and measure how close the resulting trajectory is to the corrected
-    (MDM) trajectory. For now this is a trivial proxy: evaluate the cost on the
-    corrected trajectory itself (treated as a single rollout), so a cost that
-    "likes" the demonstrated path scores low.
+    Rolls the goal-seeking MPC toward its original goal with this cost installed
+    (via ``rollout_fn``), resamples the result to the corrected (MDM) trajectory's
+    length, and returns the mean per-frame Cartesian (FK) L2 distance to it. A cost
+    that steers the goal-seeking motion to match the user's correction scores low.
+
+    Returns ``math.inf`` when no rollout is available (``rollout_fn`` is ``None`` or
+    yields no trajectory, e.g. planners without a persistent Cartesian goal).
+    ``images`` is unused for now; it lets a future image-based evaluator score
+    rendered rollouts.
     """
+    if rollout_fn is None:
+        return math.inf
+    rollout = rollout_fn(cost)
+    if rollout is None:
+        return math.inf
+    rollout = np.asarray(rollout, dtype=np.float64)
     target = np.asarray(context.mdm_traj, dtype=np.float64)
-    if target.ndim != 3 or target.shape[0] == 0:
-        return 0.0
-    scores = cost(target[np.newaxis])  # (1, T, 3, 3) -> (1,)
-    return float(np.asarray(scores, dtype=np.float64).reshape(-1)[0])
+    if (
+        rollout.ndim != 3
+        or rollout.shape[0] == 0
+        or target.ndim != 3
+        or target.shape[0] == 0
+    ):
+        return math.inf
+    rollout = _resample_trajectory(rollout, target.shape[0])
+    rollout_positions = context.fk_batch(rollout)  # (T, 5, 3)
+    mdm_positions = context.mdm_positions  # (T, 5, 3)
+    return float(np.linalg.norm(rollout_positions - mdm_positions, axis=-1).mean())
 
 
 class CostGenerator(ABC):
@@ -101,6 +135,9 @@ class CostGenerator(ABC):
         strict: bool = False,
         mpc: Any | None = None,
         llm_model_factory: Callable[[str], Any] = _make_llm_model,
+        rollout_fn: (
+            Callable[[GeneratedPythonCost], np.ndarray | None] | None
+        ) = None,
     ) -> None:
         self.context = context
         self.instruction = instruction
@@ -112,6 +149,7 @@ class CostGenerator(ABC):
         self.strict = strict
         self.mpc = mpc
         self.llm_model_factory = llm_model_factory
+        self.rollout_fn = rollout_fn
 
     # -- shared helpers -----------------------------------------------------
 
@@ -253,6 +291,7 @@ def create_cost_generator(
     images: dict[str, Path] | None = None,
     mpc: Any | None = None,
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
+    rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
 ) -> CostGenerator:
     """Build the cost generator selected by ``cfg.backend``.
 
@@ -282,6 +321,7 @@ def create_cost_generator(
         strict=cfg.strict,
         mpc=mpc,
         llm_model_factory=llm_model_factory,
+        rollout_fn=rollout_fn,
     )
     backend = cfg.backend
     if backend == "llm":

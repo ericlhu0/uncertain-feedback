@@ -1,0 +1,43 @@
+planner: arm_mpc_cartesian
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.01
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
+goal_threshold: 0.15
+advance_threshold: 0.15
+max_playback_delta: 0.1  # max per-joint rotation (rad) per step while following the MDM trajectory
+trajectory_fraction: 1
+mdm_frames: 50
+text_time: 10
+
+
+uq:
+  diffusion_samples: 500
+  n_clusters: 3
+  auto_cluster: 0
+
+cartesian:
+  goals:
+    - [-0.15, 0.05, -0.1]
+  threshold: 0.05
+
+preference_learning: false
+preference_alpha: 0
+
+llm_cost:
+  enabled: true
+  model: gpt-5.4
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true
+  prompt: "5"   # "5" anchors on each path's destination AND keeps the original goal reachable (uses the reference); "3" destination-only; "2" generalizes one correction
+  backend: agent  # delegates authoring to the codex CLI; scores its single produced cost (rollout-vs-MDM L2)
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"  # no-sandbox required on this host (bwrap loopback blocked)
+
+# costs:
+#   elbow_height:
+#     min: -0.25
+#     max: 0.45
+#     weight: 100.0
+#     progress_weight: 100.0

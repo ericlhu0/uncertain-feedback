@@ -10,11 +10,15 @@ exactly like the ``llm`` and ``turns`` outputs.
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 from typing import Any
 
-from uncertain_feedback.planners.mpc.costs.cost_generator import CostGenerator
+from uncertain_feedback.planners.mpc.costs.cost_generator import (
+    CostGenerator,
+    evaluate_candidate_cost,
+)
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
@@ -56,6 +60,10 @@ class AgentCostGenerator(CostGenerator):
             raw = response_path.read_text(encoding="utf-8")
             (self.run_dir / "raw_response.txt").write_text(raw, encoding="utf-8")
             response, cost = self.parse_cost(raw)
+            score = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
+            with open(self.run_dir / "score.json", "w", encoding="utf-8") as f:
+                json.dump({"score": score}, f, indent=2)
+            print(f"[cost-gen][agent] score={score:.4f}")
             self.save_response(response)
             if install:
                 self.install(cost)

@@ -41,8 +41,10 @@ from uncertain_feedback.planners.mpc.costs.cost_generator import (
     CostGenerator,
     artifact_run_dir,
     create_cost_generator,
+    evaluate_and_render,
     evaluate_candidate_cost,
 )
+from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
 from uncertain_feedback.planners.mpc.costs.llm_costs import LlmCostGenerator
 from uncertain_feedback.planners.mpc.costs.turns_costs import TurnsCostGenerator
 from uncertain_feedback.planners.mpc.costs.agent_costs import AgentCostGenerator
@@ -85,6 +87,8 @@ __all__ = [
     "AgentCostGenerator",
     "create_cost_generator",
     "evaluate_candidate_cost",
+    "evaluate_and_render",
+    "EvalState",
     "artifact_run_dir",
     # prompts
     "PROMPTS",

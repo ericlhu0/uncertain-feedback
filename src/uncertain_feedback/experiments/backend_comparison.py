@@ -27,6 +27,7 @@ import numpy as np
 from uncertain_feedback.planners.mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
+    EvalState,
     MpcCostContext,
     artifact_run_dir,
     build_generated_cost_context,
@@ -116,6 +117,19 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
     rollout_fn = _make_cost_eval_rollout(
         cfg, current_q, context, base_extra_costs, body_pos, spine3_pos, spine3_aa,
     )
+    eval_state = EvalState(
+        cfg=cfg,
+        current_q=current_q,
+        correction_traj=correction_traj,
+        q_history=q_history,
+        window=history_window,
+        cost_context=context,
+        base_extra_costs=base_extra_costs,
+        body_pos=body_pos,
+        spine3_pos=spine3_pos,
+        spine3_aa=spine3_aa,
+        reference_traj=reference_traj,
+    )
 
     cartesian_goal = (
         np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian.goals else None
@@ -143,7 +157,8 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
         generator = create_cost_generator(
             cfg_backend.llm_cost, generated_context, instruction,
             summaries=summaries, run_dir=backend_dir, images=images, mpc=mpc,
-            rollout_fn=rollout_fn,
+            rollout_fn=rollout_fn, eval_state=eval_state,
+            save_candidate_videos=save_video,
         )
         generated = generator.generate(install=False)
         validation = _read_json_if_exists(backend_dir / "validation.json")

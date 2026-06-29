@@ -39,6 +39,7 @@ from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
+    EvalState,
     GeneratedPythonCost,
     LearnablePreferenceCost,
     MpcCostContext,
@@ -772,10 +773,23 @@ def main() -> None:
                 cfg, q, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
                 body_pos, setup.spine3_pos, spine3_aa,
             )
+            eval_state = EvalState(
+                cfg=cfg,
+                current_q=q,
+                correction_traj=llm_traj,
+                q_history=list(q_history),
+                window=cfg.preference_window,
+                cost_context=cost_context,
+                base_extra_costs=mpc._extra_costs,  # pylint: disable=protected-access
+                body_pos=body_pos,
+                spine3_pos=setup.spine3_pos,
+                spine3_aa=spine3_aa,
+                reference_traj=reference_traj,
+            )
             generator = create_cost_generator(
                 cfg.llm_cost, generated_context, args.text,
                 summaries=summaries, run_dir=run_dir, images=images, mpc=mpc,
-                rollout_fn=cost_eval_rollout,
+                rollout_fn=cost_eval_rollout, eval_state=eval_state,
             )
             pending_cost = generator.generate(install=False)
 

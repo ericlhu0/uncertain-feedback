@@ -77,29 +77,14 @@ def _resample_trajectory(traj: np.ndarray, n: int) -> np.ndarray:
     return out.reshape((n, *traj.shape[1:]))
 
 
-def evaluate_candidate_cost(
-    context: GeneratedCostContext,
-    cost: GeneratedPythonCost,
-    rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
-    images: dict[str, Path] | None = None,
+def _score_rollout(
+    context: GeneratedCostContext, rollout: np.ndarray
 ) -> float:
-    """Score a candidate cost; lower is better.
+    """Mean per-frame FK L2 distance between a rollout and the MDM correction.
 
-    Rolls the goal-seeking MPC toward its original goal with this cost installed
-    (via ``rollout_fn``), resamples the result to the corrected (MDM) trajectory's
-    length, and returns the mean per-frame Cartesian (FK) L2 distance to it. A cost
-    that steers the goal-seeking motion to match the user's correction scores low.
-
-    Returns ``math.inf`` when no rollout is available (``rollout_fn`` is ``None`` or
-    yields no trajectory, e.g. planners without a persistent Cartesian goal).
-    ``images`` is unused for now; it lets a future image-based evaluator score
-    rendered rollouts.
+    Resamples ``rollout`` to the corrected (MDM) trajectory's length and compares
+    FK joint positions. ``math.inf`` when either trajectory is empty / malformed.
     """
-    if rollout_fn is None:
-        return math.inf
-    rollout = rollout_fn(cost)
-    if rollout is None:
-        return math.inf
     rollout = np.asarray(rollout, dtype=np.float64)
     target = np.asarray(context.mdm_traj, dtype=np.float64)
     if (
@@ -113,6 +98,87 @@ def evaluate_candidate_cost(
     rollout_positions = context.fk_batch(rollout)  # (T, 5, 3)
     mdm_positions = context.mdm_positions  # (T, 5, 3)
     return float(np.linalg.norm(rollout_positions - mdm_positions, axis=-1).mean())
+
+
+def evaluate_candidate_cost(
+    context: GeneratedCostContext,
+    cost: GeneratedPythonCost,
+    rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
+) -> float:
+    """Score a candidate cost; lower is better.
+
+    Rolls the goal-seeking MPC toward its original goal with this cost installed
+    (via ``rollout_fn``), resamples the result to the corrected (MDM) trajectory's
+    length, and returns the mean per-frame Cartesian (FK) L2 distance to it. A cost
+    that steers the goal-seeking motion to match the user's correction scores low.
+
+    Returns ``math.inf`` when no rollout is available (``rollout_fn`` is ``None`` or
+    yields no trajectory, e.g. planners without a persistent Cartesian goal).
+    """
+    if rollout_fn is None:
+        return math.inf
+    rollout = rollout_fn(cost)
+    if rollout is None:
+        return math.inf
+    return _score_rollout(context, rollout)
+
+
+def evaluate_and_render(
+    context: GeneratedCostContext,
+    cost: GeneratedPythonCost,
+    rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None,
+    image_path: Path,
+    *,
+    rollout_path: Path | None = None,
+    video_path: Path | None = None,
+) -> tuple[float, Path | None]:
+    """Score a candidate cost and render the rollout-vs-correction comparison.
+
+    Rolls the goal-seeking MPC **once** with ``cost`` installed, computes the L2
+    score (:func:`_score_rollout`), and renders ``image_path`` overlaying that
+    rollout against the MDM correction
+    (:meth:`ArmVisualizer.render_cost_feedback_overlay`). Returns
+    ``(score, image_path)``, or ``(math.inf, None)`` when no rollout is available
+    (planners without a persistent Cartesian goal) so callers degrade to text-only
+    feedback.
+    """
+    from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+        ArmVisualizer,
+    )
+
+    if rollout_fn is None:
+        return math.inf, None
+    rollout = rollout_fn(cost)
+    if rollout is None:
+        return math.inf, None
+    rollout = np.asarray(rollout, dtype=np.float64)
+    if rollout.ndim != 3 or rollout.shape[0] == 0:
+        return math.inf, None
+    score = _score_rollout(context, rollout)
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    visualizer = ArmVisualizer(context.fk)
+    visualizer.render_cost_feedback_overlay(
+        image_path,
+        rollout_traj=rollout,
+        correction_traj=context.mdm_traj,
+        current_q=context.current_q,
+        spine3_pos=context.spine3_pos,
+        spine3_aa=context.spine3_aa,
+        body_pos=context.body_pos,
+    )
+    if rollout_path is not None:
+        rollout_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(rollout_path, rollout)
+    if video_path is not None:
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        visualizer.render_rollout_video(
+            rollout,
+            video_path,
+            spine3_pos=context.spine3_pos,
+            spine3_aa=context.spine3_aa,
+            body_pos=context.body_pos,
+        )
+    return score, image_path
 
 
 class CostGenerator(ABC):
@@ -131,6 +197,7 @@ class CostGenerator(ABC):
         run_dir: Path,
         prompt: str = "2",
         images: dict[str, Path] | None = None,
+        use_images: bool = True,
         model: str | None = None,
         strict: bool = False,
         mpc: Any | None = None,
@@ -138,6 +205,8 @@ class CostGenerator(ABC):
         rollout_fn: (
             Callable[[GeneratedPythonCost], np.ndarray | None] | None
         ) = None,
+        eval_state: Any | None = None,
+        save_candidate_videos: bool = False,
     ) -> None:
         self.context = context
         self.instruction = instruction
@@ -145,11 +214,14 @@ class CostGenerator(ABC):
         self.run_dir = run_dir
         self.prompt = prompt
         self.images = images or {}
+        self.use_images = use_images
         self.model = model
         self.strict = strict
         self.mpc = mpc
         self.llm_model_factory = llm_model_factory
         self.rollout_fn = rollout_fn
+        self.eval_state = eval_state
+        self.save_candidate_videos = save_candidate_videos
 
     # -- shared helpers -----------------------------------------------------
 
@@ -292,6 +364,8 @@ def create_cost_generator(
     mpc: Any | None = None,
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
     rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
+    eval_state: Any | None = None,
+    save_candidate_videos: bool = False,
 ) -> CostGenerator:
     """Build the cost generator selected by ``cfg.backend``.
 
@@ -317,11 +391,14 @@ def create_cost_generator(
         run_dir=run_dir,
         prompt=cfg.prompt,
         images=images,
+        use_images=cfg.use_images,
         model=cfg.model,
         strict=cfg.strict,
         mpc=mpc,
         llm_model_factory=llm_model_factory,
         rollout_fn=rollout_fn,
+        eval_state=eval_state,
+        save_candidate_videos=save_candidate_videos,
     )
     backend = cfg.backend
     if backend == "llm":

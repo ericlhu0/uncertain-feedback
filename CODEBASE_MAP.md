@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-06-27  
+**Last updated:** 2026-06-29  
 **Branch:** mpc
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -61,7 +61,8 @@ uncertain-feedback/
 │   │   ├── cluster_comparison.py     # Generate + roll out one LLM cost per UQ cluster
 │   │   ├── run_experiment.py         # CLI entry point for cluster comparison experiments
 │   │   ├── backend_comparison.py     # Generate one cost per backend (llm/turns/agent), score uniformly
-│   │   └── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
+│   │   ├── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
+│   │   └── render_cost_comparison.py # CLI the agent backend runs to render rollout-vs-correction overlay
 │   ├── motion_generators/
 │   │   └── mdm/
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
@@ -261,6 +262,21 @@ When `llm_cost.enabled: true` in the YAML:
 
 **LLM cost cluster experiment** (`llm_cost.cluster_experiment.enabled`): runs the LLM cost on each cluster's mean trajectory for `rollout_steps` steps and uses costs to rank / auto-select clusters.
 
+### Cost-generation backends (`costs/cost_generator.py`)
+
+`create_cost_generator()` selects one of three strategies via `llm_cost.backend`; all share `CostGenerator` (prompt building, compile/validate, save, install):
+
+- `llm` (`llm_costs.py`) — single-turn call.
+- `turns` (`turns_costs.py`) — stateful multi-turn conversation; keeps the best cost by score.
+- `agent` (`agent_costs.py`) — delegates authoring to the `codex` CLI, which emits the same `response.json`.
+
+### Cost evaluation & visual feedback
+
+- `evaluate_candidate_cost()` rolls the goal-seeking MPC with a candidate cost installed (`_make_cost_eval_rollout` in `run.py`) and returns the mean FK-position L2 distance to the MDM correction (`_score_rollout`). Lower is better; `inf` when the planner has no Cartesian goal. Drives `turns` selection/stopping and the `backend_comparison.json` ranking.
+- `evaluate_and_render()` does the **same single rollout** and additionally renders `ArmVisualizer.render_cost_feedback_overlay()` — a rollout (red) vs correction (green) overlay — returning `(score, image_path)`. It can also persist the exact rollout array and MP4 used for that feedback image. When `use_images` is on:
+  - `turns` feeds `turn_<i>/comparison.png` + score back through the conversation each turn; backend experiments with `--save-video` also write `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
+  - `agent` self-iterates: `EvalState` (`costs/cost_feedback.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Codex runs `experiments/render_cost_comparison.py` to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
+
 ---
 
 ## 8. Configuration System (`config.py`)
@@ -351,6 +367,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml>` | Per-backend (llm/turns/agent) cost comparison experiment |
+| `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction (agent backend self-service tool) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |

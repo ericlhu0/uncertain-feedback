@@ -13,6 +13,7 @@ from typing import Any
 
 from uncertain_feedback.planners.mpc.costs.cost_generator import (
     CostGenerator,
+    evaluate_and_render,
     evaluate_candidate_cost,
 )
 from uncertain_feedback.planners.mpc.costs.generated import (
@@ -86,7 +87,26 @@ class TurnsCostGenerator(CostGenerator):
                 )
                 continue
 
-            score = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
+            if self.use_images:
+                score, image_path = evaluate_and_render(
+                    self.context,
+                    cost,
+                    self.rollout_fn,
+                    turn_dir / "comparison.png",
+                    rollout_path=(
+                        turn_dir / "rollout.npy"
+                        if self.save_candidate_videos
+                        else None
+                    ),
+                    video_path=(
+                        turn_dir / "rollout.mp4"
+                        if self.save_candidate_videos
+                        else None
+                    ),
+                )
+            else:
+                score = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
+                image_path = None
             (turn_dir / "cost.py").write_text(response.code, encoding="utf-8")
             with open(turn_dir / "score.json", "w", encoding="utf-8") as f:
                 json.dump({"turn": turn, "score": score}, f, indent=2)
@@ -101,16 +121,33 @@ class TurnsCostGenerator(CostGenerator):
                 if no_improve >= _NO_IMPROVE_PATIENCE:
                     break
 
-            messages.append(
-                {
-                    "role": "user",
-                    "text": (
-                        f"That cost scored {score:.4f} (lower is better, where the "
-                        "score measures how well the resulting motion matches the "
-                        "user's correction). Revise the cost to lower the score and "
-                        "return the JSON object again."
-                    ),
-                }
-            )
+            if image_path is not None:
+                messages.append(
+                    {
+                        "role": "user",
+                        "text": (
+                            f"That cost scored {score:.4f} (lower is better). The "
+                            "attached image overlays the motion your cost produced "
+                            "(red, 'cost rollout') against the user's correction "
+                            "(green, 'target correction') it should match. Look at "
+                            "where the red arm diverges from the green one and revise "
+                            "the cost to close that gap, then return the JSON object "
+                            "again."
+                        ),
+                        "images": [str(image_path)],
+                    }
+                )
+            else:
+                messages.append(
+                    {
+                        "role": "user",
+                        "text": (
+                            f"That cost scored {score:.4f} (lower is better, where the "
+                            "score measures how well the resulting motion matches the "
+                            "user's correction). Revise the cost to lower the score and "
+                            "return the JSON object again."
+                        ),
+                    }
+                )
 
         return best

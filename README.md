@@ -388,16 +388,58 @@ scorer needs a persistent Cartesian goal) and `llm_cost.enabled: true`:
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_backend_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_agent.yaml \
-  --text "raise my left arm"
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm.yaml \
+  --text "raise my left arm" \
+  --backends turns agent \
+  --save-video
 ```
 
-Only `llm_cost.backend` is varied per run; all other `llm_cost` settings (`model`,
-`max_turns`, `prompt`, `use_images`, and **`codex_cmd` for the `agent` backend**)
-are read from the base config, so pass a config whose `codex_cmd` works on this
-host. Use `--backends llm turns` to compare a subset, `--rollout-steps N` and
-`--save-video` to render an MP4 per backend. A backend that fails to produce a
-cost (e.g. `codex` unavailable) is recorded as failed and the rest still rank.
+Pass the neutral base config (`arm_mpc_cartesian_mdm_llm.yaml`), not a
+backend-specific one — the experiment sets `llm_cost.backend` itself for each
+backend. All other `llm_cost` settings (`model`, `max_turns`, `prompt`,
+`use_images`, and `codex_cmd` for the `agent` backend) come from that config, so
+make sure its `codex_cmd` works on this host. Use `--backends llm turns` to
+compare a subset, `--rollout-steps N` and
+`--save-video` to render an MP4 per backend. With image feedback enabled,
+`--save-video` also saves the rollout videos for every intermediate `turns` and
+`agent` candidate cost. A backend that fails to produce a cost (e.g. `codex`
+unavailable) is recorded as failed and the rest still rank.
+
+#### Visual cost feedback (turns / agent)
+
+When `llm_cost.use_images: true`, the iterating backends refine the cost against a
+**rendered comparison** — a rollout-vs-correction overlay (red "cost rollout" vs
+green "target correction") — not just the scalar L2 score, which is still kept for
+selection and ranking:
+
+- `turns`: each turn renders `turn_<i>/comparison.png` and feeds it (plus the
+  score) back to the model via the multi-turn conversation. With `--save-video`,
+  each turn also saves `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
+- `agent`: codex receives the initial context overlay image paths as text in
+  `TASK.md`, is instructed to load those local files itself, and writes
+  `ITERATION_LOG.md` describing what it saw in each image, why each cost
+  revision was made, and whether it stopped because the movement matched well
+  enough or because it determined the available cost API could not make it match. It also gets a pickled `state.pkl` and a render script it
+  runs itself to inspect its rollout and iterate. The wrapper appends
+  `ITERATION_LOG.md` into `codex.log` when the run finishes. The script can
+  also be run standalone to re-render any candidate:
+
+  ```bash
+  uv run python src/uncertain_feedback/experiments/render_cost_comparison.py \
+    --state <run_dir>/agent/state.pkl \
+    --response <run_dir>/agent/response.json \
+    --out comparison.png \
+    --archive-dir candidates \
+    --save-video
+  ```
+
+  It loads the pickled `EvalState`, rolls the goal-seeking MPC with the candidate
+  cost, prints the L2 score, and writes the overlay PNG. With `--archive-dir`,
+  each invocation creates `candidate_<i>/` containing `response.json`, `cost.py`,
+  `score.json`, `comparison.png`, and, with `--save-video`, `rollout.npy` plus
+  `rollout.mp4`.
+
+With `use_images: false` both backends fall back to score-only text feedback.
 
 
 ## Thanks

@@ -152,7 +152,7 @@ class SmplLeftArmFK:
     loading the initial body pose:
 
         fk = SmplLeftArmFK()
-        fk.collar_aa = fixed_collar_aa  # from decode_pose_with_collar()
+        fk.collar_aa = fixed_collar_aa  # from decode_pose()
 
     Args:
         smpl_pkl_path: Path to ``SMPL_NEUTRAL.pkl``.  Defaults to the copy

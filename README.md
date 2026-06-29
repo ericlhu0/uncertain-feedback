@@ -174,6 +174,47 @@ uv run python ../sample_leftarm.py \
 `--model_path` is always relative to `motion-diffusion-model/` regardless of cwd (the script does an internal `os.chdir`). Output videos are saved under `save/my_finetuned_v1/edit_*/`. (1s = 20 frames)
 
 
+## Kimodo backend setup
+
+[Kimodo](https://github.com/nv-tlabs/kimodo) (NVIDIA) is an optional second
+text-to-motion backend. It pins `pydantic>=2` and `transformers==5.1.0`, which conflict
+with the main environment, so it lives in its own conda env and is called via a subprocess
+worker (`motion_generators/kimodo/_kimodo_inference_worker.py`).
+
+**1. Hugging Face / Llama-3 access** (kimodo's text encoder uses gated
+`meta-llama/Meta-Llama-3-8B-Instruct`):
+- Accept the license at https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct
+- Create a read token at https://huggingface.co/settings/tokens
+- `hf auth login` (or write the token to `~/.cache/huggingface/token`)
+
+**2. Create the isolated env and install kimodo** (env name must match
+`KIMODO_CONDA_ENV`, default `kimodo`):
+```bash
+conda create -n kimodo python=3.10 -y
+conda install -n kimodo -y -c conda-forge cmake cxx-compiler   # kimodo C++ extension
+# Install a torch build matching your GPU (cu128 for Blackwell sm_120):
+conda run -n kimodo pip install torch --index-url https://download.pytorch.org/whl/cu128
+conda run -n kimodo pip install "git+https://github.com/nv-tlabs/kimodo.git"
+```
+Model weights download automatically on first use. Set `TEXT_ENCODER_DEVICE=cpu` to cut
+VRAM from ~17 GB to <3 GB.
+
+**3. Run** any MDM-backed planner with `motion_generator: kimodo` in its YAML, e.g.:
+```bash
+uv run python src/uncertain_feedback/planners/run.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_kimodo.yaml
+```
+The kimodo start pose is a SMPL `body_pose (21,3)` `.npy` (`motion_generators/kimodo/start_pose.npy`). The wrapper converts it through the same FK used by the visualizer; the worker retargets that pose onto Kimodo's skeleton and applies the resulting positions and global rotations as the frame-0 Kimodo constraint. `--frozen-body` is not supported with `motion_generator: kimodo`.
+
+To generate only a kimodo motion and render it to video, without MPC:
+```bash
+TEXT_ENCODER_DEVICE=cpu uv run python src/uncertain_feedback/motion_generators/kimodo/generate_motion.py \
+  --text "raise my left arm" \
+  --num-frames 100 \
+  --output-npz kimodo_motion.npz \
+  --output-video kimodo_motion.mp4
+```
+
 ## Running a Single MPC Run
 
 `run.py` performs one end-to-end run: plan with sampling MPC, optionally inject a
@@ -197,6 +238,17 @@ Supported YAML `planner` values:
 - `arm_mpc_mdm_uq`: multiple MDM samples, clustering/picker, then MPC tracks the selected mean.
 - `arm_mpc_cartesian`: MDM/UQ first, then Cartesian wrist-goal MPC.
 - `arm_mpc_cartesian_no_mdm`: Cartesian wrist-goal MPC only, no MDM and no UQ.
+
+### Motion-generation backend (`motion_generator`)
+
+The text-to-motion backend is selected by the optional YAML key `motion_generator`:
+- `mdm` (default): the in-process Motion Diffusion Model (see Getting Started).
+- `kimodo`: NVIDIA's [kimodo](https://github.com/nv-tlabs/kimodo) SMPL-X model, run in an
+  isolated conda env via a subprocess worker (see [Kimodo backend setup](#kimodo-backend-setup)).
+
+Both backends expose the same interface, so any MDM-backed planner
+(`arm_mpc_mdm`, `arm_mpc_mdm_uq`, `arm_mpc_cartesian`) works with either by setting
+`motion_generator:` in its config.
 
 ### Minimal Joint-Space MPC Config
 Save as `src/uncertain_feedback/planners/mpc/configs/mpc_plain.yaml`:

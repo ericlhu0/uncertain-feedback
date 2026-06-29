@@ -707,6 +707,61 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         except Exception as exc:  # pylint: disable=broad-except
             print(f"[rollout-video] failed to render {save_path}: {exc}")
 
+    def render_body_trajectory_video(
+        self,
+        positions: np.ndarray,
+        save_path: str | Path,
+        fps: int = 30,
+        highlight_joints: set | None = None,
+    ) -> None:
+        """Render a full-body SMPL skeleton trajectory to video.
+
+        Unlike :meth:`render_rollout_video` (left arm only, over a static body
+        backdrop), every joint is animated so the whole body moves.
+
+        Args:
+            positions:        ``(T, 22, 3)`` SMPL joint world positions (Y-up).
+            save_path:        Output path (.mp4 or .gif).
+            fps:              Frames per second.
+            highlight_joints: Joints drawn in arm color (defaults to left arm).
+        """
+        import imageio  # pylint: disable=import-outside-toplevel
+        from matplotlib.backends.backend_agg import FigureCanvasAgg  # pylint: disable=import-outside-toplevel
+        from matplotlib.figure import Figure as _MplFigure  # pylint: disable=import-outside-toplevel
+
+        positions = np.asarray(positions, dtype=np.float64)
+        if highlight_joints is None:
+            highlight_joints = set(LEFT_ARM_JOINT_INDICES_22)
+        save_path = Path(save_path)
+
+        # Fixed limits across all frames (XZY order matches draw_smpl_skeleton)
+        # so the camera/scale stays steady while the body moves.
+        pts = positions.reshape(-1, 3)[:, [0, 2, 1]]
+        center = (pts.min(0) + pts.max(0)) / 2.0
+        radius = max(float((pts.max(0) - pts.min(0)).max()) / 2.0, 0.05)
+
+        agg_fig = _MplFigure(figsize=(7, 7))
+        FigureCanvasAgg(agg_fig)
+        ax = agg_fig.add_subplot(111, projection="3d")
+
+        frames_out: list[np.ndarray] = []
+        for t in range(len(positions)):
+            ax.clear()
+            ArmVisualizer.draw_smpl_skeleton(
+                ax, positions[t], title=f"frame {t}", highlight_joints=highlight_joints
+            )
+            ax.set_xlim(center[0] - radius, center[0] + radius)
+            ax.set_ylim(center[1] - radius, center[1] + radius)
+            ax.set_zlim(center[2] - radius, center[2] + radius)
+            agg_fig.canvas.draw()
+            w, h = agg_fig.canvas.get_width_height()
+            buf = np.frombuffer(agg_fig.canvas.buffer_rgba(), dtype=np.uint8)
+            frames_out.append(buf.reshape(h, w, 4)[..., :3].copy())
+
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimsave(str(save_path), frames_out, fps=fps)
+        print(f"[body-video] saved {save_path}")
+
     def render_trajectory_overlay(
         self,
         save_path: str | Path,

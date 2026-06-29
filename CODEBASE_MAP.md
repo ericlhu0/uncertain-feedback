@@ -1,7 +1,7 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-06-01  
-**Branch:** mpc
+**Last updated:** 2026-06-29  
+**Branch:** motion-backends
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
 
@@ -59,6 +59,13 @@ uncertain-feedback/
 │   │   ├── cluster_comparison.py     # Generate + roll out one LLM cost per UQ cluster
 │   │   └── run_experiment.py         # CLI entry point for cluster comparison experiments
 │   ├── motion_generators/
+│   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator
+│   │   ├── base.py                   # MotionGenerator ABC (shared backend interface)
+│   │   ├── kimodo/                   # kimodo (NVIDIA) backend, isolated conda env
+│   │   │   ├── kimodo_api.py         # KimodoMotionGenerator (subprocess bridge)
+│   │   │   ├── _kimodo_inference_worker.py  # standalone worker (runs in kimodo env)
+│   │   │   ├── generate_motion.py    # Standalone kimodo text-to-motion + video CLI
+│   │   │   └── start_pose.npy        # SMPL body_pose (21,3) default start pose
 │   │   └── mdm/
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
 │   │       ├── hml_smpl_conversion.py  # HML263 ↔ SMPL pose conversions
@@ -268,6 +275,7 @@ When `llm_cost.enabled: true` in the YAML:
 | Key                    | Type     | Purpose                                               |
 |------------------------|----------|-------------------------------------------------------|
 | `planner`              | str      | One of the 5 planner choices                         |
+| `motion_generator`     | str      | Text-to-motion backend: `mdm` (default) or `kimodo`  |
 | `steps`                | int      | Total MPC steps to run                               |
 | `horizon`              | int      | MPC look-ahead steps                                 |
 | `n_mpc_samples`        | int      | Candidate action sequences per step                  |
@@ -321,6 +329,13 @@ Videos → _mhr_inference_worker.py (detectron2 + SAM → SMPL .npz)
        → build_mdm_dataset.py → dataset
 ```
 
+> **Camera→world handedness:** `_mhr_inference_worker.py` converts SAM-3D-Body's
+> right-handed OpenCV camera keypoints (Y-down) to world (Y-up) by negating
+> **Y and Z** (180° about X). Negating Y alone mirrors body chirality (fixed
+> 2026-06-29). Any `data/mdm_cache/*` or `new_joint_vecs/*` collected before that
+> fix is mirrored and must be regenerated. See
+> `.claude/POSE_REPRESENTATION_AUDIT.md` §6.
+
 ---
 
 ## 10. Pose Representations
@@ -333,6 +348,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | HML263 feature vector   | `(263,)`   | MDM input/output                              |
 | SMPL body_pose          | `(21, 3)`  | SMPL model; intermediate conversion format   |
 | XYZ joint positions     | `(22, 3)`  | FK output, visualization, clustering features|
+| Global joint rotations  | `(22, 3, 3)` | Derived in Kimodo worker for frame-0 constraint |
 | Arm chain positions     | `(5, 3)`   | FK arm output (spine3 through wrist)          |
 | Spine3 anchor           | `(3,)`×2   | Position + axis-angle; fixed reference frame  |
 | Cartesian wrist goal    | `(3,)`     | Spine3-relative target for Cartesian MPC      |
@@ -360,7 +376,42 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
   - HumanML3D dataset expected at `.../dataset/HumanML3D/`
   - Pretrained weights at `.../save/humanml_enc_512_50steps/model000750000.pt`
   - SMPL neutral model at `.../body_models/smpl/SMPL_NEUTRAL.pkl`
+- **kimodo** (NVIDIA, `github.com/nv-tlabs/kimodo`) — second text-to-motion backend.
+  Installed in an **isolated conda env** (`KIMODO_CONDA_ENV`, default `kimodo`) because it
+  pins `pydantic>=2` / `transformers==5.1.0`, conflicting with the main env. Invoked via
+  `conda run` subprocess (`kimodo/_kimodo_inference_worker.py`), mirroring the SAM/MHR
+  worker pattern. Needs gated HF access to `meta-llama/Meta-Llama-3-8B-Instruct`.
 - **OpenAI** — used for LLM cost generation (`llm/openai_model.py`)
 - **sklearn** — KMeans clustering in `clustering/base.py`
 - **smplx** — SMPL model loading
 - **detectron2** — human pose estimation in data collection worker
+
+---
+
+## 13. Motion Generator Backends (`motion_generators/`)
+
+All backends implement the `MotionGenerator` ABC (`motion_generators/base.py`) and are
+selected by the `motion_generator` YAML key via the `MOTION_GENERATOR_BUILDERS` registry
+in `motion_generators/__init__.py` (mirrors the `COST_BUILDERS` pattern). Planners/experiments
+hold a `MotionGenerator` and call its methods; the per-backend "pose" array is treated as
+opaque.
+
+**Interface** (abstract unless noted): `load_pose`, `decode_pose`, `build_pose_from_arm_aa`, `generate_left_arm_trajectory`, `generate_left_arm_position_samples`,
+and the shared concrete `smpl_positions_to_left_arm_trajectory` (SMPL XYZ → arm axis-angles
+via `SmplLeftArmFK`, implemented once on the base).
+
+| Backend  | Class                   | Pose repr            | Generation                                  |
+|----------|-------------------------|----------------------|---------------------------------------------|
+| `mdm`    | `MdmMotionGenerator`    | HML263 `(263,)`      | in-process diffusion (MDM submodule)        |
+| `kimodo` | `KimodoMotionGenerator` | SMPL body_pose `(21,3)` | subprocess to isolated conda env (worker) |
+
+The kimodo backend reuses `hml_smpl_conversion`'s SMPL-side helpers
+(`smpl_body_pose_to_arm_aa/_collar_aa/_positions/_spine3_aa`) since kimodo's SMPL-X
+`get_amass_parameters()` `pose_body (T,63)` maps directly to SMPL `body_pose (T,21,3)`.
+For start poses, `KimodoMotionGenerator` converts SMPL `body_pose (21,3)` through the
+same FK used by the visualizer and sends Kimodo visualizer-FK joint positions; the worker retargets them onto Kimodo's
+skeleton and builds a frame-0 `FullBodyConstraintSet` from the resulting positions and
+global rotations.
+
+**Adding a new backend:** subclass `MotionGenerator`, implement the 5 abstract methods, and
+register a builder in `MOTION_GENERATOR_BUILDERS`.

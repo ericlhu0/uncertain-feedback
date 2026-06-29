@@ -79,11 +79,11 @@ class _FakeMotionGenerator:
         self.loaded_pose = np.arange(263, dtype=np.float64)
         self.body_pos = np.arange(66, dtype=np.float64).reshape(22, 3)
 
-    def load_hml_pose(self, path: Path) -> np.ndarray:
+    def load_pose(self, path: Path) -> np.ndarray:
         assert path == self.expected_pose_path
         return self.loaded_pose
 
-    def decode_pose_with_collar(
+    def decode_pose(
         self, pose: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         np.testing.assert_allclose(pose, self.loaded_pose)

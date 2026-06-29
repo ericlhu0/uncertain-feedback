@@ -386,6 +386,29 @@ def smpl_body_pose_to_collar_aa(body_pose: np.ndarray) -> np.ndarray:
     return np.asarray(body_pose)[..., COLLAR_BODY_POSE_INDEX, :]
 
 
+def smpl_body_pose_to_spine3_aa(body_pose: np.ndarray) -> np.ndarray:
+    """World axis-angle of spine3 (joint 9), accumulated along the spine chain.
+
+    ``body_pose[j-1]`` holds the local rotation of SMPL joint ``j``; the spine
+    chain is root → spine1 (j=3) → spine2 (j=6) → spine3 (j=9).  Use this with
+    ``spine3_pos = body_positions[9]`` so arm positions computed from the
+    extracted ``arm_aa`` match the full-body positions.
+
+    Args:
+        body_pose: ``(21, 3)`` SMPL body_pose axis-angles.
+
+    Returns:
+        ``(3,)`` world axis-angle of spine3.
+    """
+    body_pose = np.asarray(body_pose, dtype=np.float64)
+    spine3_world_rot = (
+        Rotation.from_rotvec(body_pose[2])  # spine1 (j=3)
+        * Rotation.from_rotvec(body_pose[5])  # spine2 (j=6)
+        * Rotation.from_rotvec(body_pose[8])  # spine3 (j=9)
+    )
+    return spine3_world_rot.as_rotvec()
+
+
 # ---------------------------------------------------------------------------
 # Full pipeline: HumanML3D 263-dim → SMPL body_pose
 # ---------------------------------------------------------------------------

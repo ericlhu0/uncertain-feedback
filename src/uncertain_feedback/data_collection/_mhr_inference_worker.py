@@ -228,9 +228,13 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-statements
     for out in sam_outputs:
         kps70 = np.asarray(out["pred_keypoints_3d"], dtype=np.float64)  # (70, 3)
         cam_t = np.asarray(out["pred_cam_t"], dtype=np.float64)  # (3,)
-        # Translate to camera-space world position, then flip Y from image-down to world-up
+        # Translate to camera-space world position, then rotate the camera frame
+        # (X-right, Y-down, Z-into-scene) to world (Y-up) WITHOUT mirroring.
+        # Negating Y alone is a reflection (det -1) and flips body chirality;
+        # negating Y and Z (180 deg about X) keeps the frame right-handed.
         kps70_world = kps70 + cam_t
         kps70_world[:, 1] *= -1
+        kps70_world[:, 2] *= -1
         smpl22 = _mhr70_to_smpl22(kps70_world)  # (22, 3)
         all_positions.append(smpl22)
 

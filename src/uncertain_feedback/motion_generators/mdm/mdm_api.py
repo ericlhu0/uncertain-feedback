@@ -3,7 +3,7 @@
 Provides :class:`MdmMotionGenerator`, which lazily loads the MDM model and
 HumanML3D dataset and exposes a simple one-call interface for generating left
 arm trajectories.  The caller supplies a starting pose (loaded via
-:meth:`MdmMotionGenerator.load_hml_pose`) and the generator constrains all
+:meth:`MdmMotionGenerator.load_pose`) and the generator constrains all
 body joints except the left arm to that pose via inpainting — the same
 approach used in ``sample_leftarm.py``.
 
@@ -12,8 +12,8 @@ Typical usage::
     gen = MdmMotionGenerator()
 
     # Load the starting pose and decode it.
-    start_pose = gen.load_hml_pose("path/to/pose.pt")
-    initial_q, body_positions, spine3_aa = gen.decode_pose(start_pose)
+    start_pose = gen.load_pose("path/to/pose.pt")
+    initial_q, body_positions, spine3_aa, collar_aa = gen.decode_pose(start_pose)
 
     # Build a start pose that reflects the current arm configuration.
     current_pose = gen.build_pose_from_arm_aa(start_pose, current_arm_aa)
@@ -51,6 +51,7 @@ if str(_SRC_ROOT) not in sys.path:
 
 # pylint: disable=wrong-import-position
 from uncertain_feedback.consts import MDM_MODEL_WEIGHTS_PATH, MDM_ROOT
+from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     HmlArmFeatureInfo,
     hml263_batch_to_smpl_body_pose,
@@ -60,9 +61,8 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_body_pose_to_arm_aa,
     smpl_body_pose_to_collar_aa,
     smpl_body_pose_to_positions,
-    smpl_positions_batch_to_body_pose,
+    smpl_body_pose_to_spine3_aa,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 _MDM_SUBDIR = MDM_ROOT / "motion-diffusion-model"
 
@@ -91,7 +91,7 @@ def _resolve_num_frames(
     return resolved
 
 
-class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
+class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-attributes
     """Lazy-loading wrapper for the MDM model.
 
     The MDM model and HumanML3D dataset are loaded on the first call to
@@ -109,6 +109,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         model_path: str | Path | None = None,
         seed: int = 10,
     ) -> None:
+        super().__init__()
         self._model_path = (
             Path(model_path) if model_path is not None else MDM_MODEL_WEIGHTS_PATH
         ).resolve()
@@ -120,7 +121,6 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         self._data: Any = None
         self._args: Any = None
         self._dist_util: Any = None
-        self._fk: SmplLeftArmFK = SmplLeftArmFK()
         self._not_l_arm_mask: np.ndarray | None = None  # (263,) bool
 
         # Populated in _ensure_loaded() for start_arm_aa support.
@@ -260,7 +260,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
     # Public interface
     # ------------------------------------------------------------------
 
-    def load_hml_pose(self, path: str | Path) -> np.ndarray:
+    def load_pose(self, path: str | Path) -> np.ndarray:
         """Load a saved HML263 pose file and return as a ``(263,)`` numpy
         array.
 
@@ -281,12 +281,12 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
 
     def decode_pose(
         self, pose: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Decode a ``(263,)`` HML263 pose into arm angles and body positions.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Decode a ``(263,)`` HML263 pose into arm angles, body positions, spine, and collar.
 
         Args:
             pose: ``(263,)`` HML263 feature vector (e.g. as returned by
-                  :meth:`load_hml_pose`).
+                  :meth:`load_pose`).
 
         Returns:
             arm_aa:         ``(3, 3)`` left arm axis-angles for
@@ -299,11 +299,9 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
                             ``spine3_pos=body_positions[9]``, so that arm
                             joint positions computed from ``arm_aa`` match
                             those in ``body_positions``.
+            collar_aa:      ``(3,)`` local left-collar axis-angle from the
+                            decoded start pose.
         """
-        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
-            Rotation,
-        )
-
         self._ensure_loaded()
         import torch  # pylint: disable=import-outside-toplevel
 
@@ -314,54 +312,12 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         )  # (1, 263)
         body_pose = hml263_to_smpl_body_pose(pose_t, self._data)  # (1, 21, 3)
         arm_aa = smpl_body_pose_to_arm_aa(body_pose[0])  # (3, 3)
+        collar_aa = smpl_body_pose_to_collar_aa(body_pose[0])  # (3,)
         body_positions = smpl_body_pose_to_positions(
             body_pose[0], self._fk.tpose_all_joints
         )  # (22, 3)
+        spine3_aa = smpl_body_pose_to_spine3_aa(body_pose[0])  # (3,)
 
-        # Spine3 world rotation: accumulate local rotations along the spine
-        # chain (root→spine1(j=3)→spine2(j=6)→spine3(j=9)).
-        # body_pose[j-1] is the local rotation for SMPL joint j.
-        spine3_world_rot = (
-            Rotation.from_rotvec(body_pose[0][2])  # spine1 (j=3)
-            * Rotation.from_rotvec(body_pose[0][5])  # spine2 (j=6)
-            * Rotation.from_rotvec(body_pose[0][8])  # spine3 (j=9)
-        )
-        spine3_aa = spine3_world_rot.as_rotvec()  # (3,)
-
-        return arm_aa, body_positions, spine3_aa
-
-    def decode_pose_with_collar(
-        self, pose: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Decode pose and also return the fixed left-collar rotation.
-
-        Returns:
-            ``(arm_aa, body_positions, spine3_aa, collar_aa)`` where
-            ``arm_aa`` is ``(3, 3)`` for
-            ``[left_shoulder, left_elbow, left_wrist]`` and ``collar_aa`` is
-            the start-pose left-collar axis-angle.
-        """
-        self._ensure_loaded()
-        import torch  # pylint: disable=import-outside-toplevel
-        from scipy.spatial.transform import (  # pylint: disable=import-outside-toplevel
-            Rotation,
-        )
-
-        pose_t = torch.tensor(
-            pose, dtype=torch.float32, device=self._dist_util.dev()
-        ).unsqueeze(0)
-        body_pose = hml263_to_smpl_body_pose(pose_t, self._data)
-        arm_aa = smpl_body_pose_to_arm_aa(body_pose[0])
-        collar_aa = smpl_body_pose_to_collar_aa(body_pose[0])
-        body_positions = smpl_body_pose_to_positions(
-            body_pose[0], self._fk.tpose_all_joints
-        )
-        spine3_world_rot = (
-            Rotation.from_rotvec(body_pose[0][2])
-            * Rotation.from_rotvec(body_pose[0][5])
-            * Rotation.from_rotvec(body_pose[0][8])
-        )
-        spine3_aa = spine3_world_rot.as_rotvec()
         return arm_aa, body_positions, spine3_aa, collar_aa
 
     def build_pose_from_arm_aa(
@@ -378,7 +334,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
 
         Args:
             base_pose: ``(263,)`` HML263 feature vector (e.g. sitting pose
-                       from :meth:`load_hml_pose`).
+                       from :meth:`load_pose`).
             arm_aa:    ``(3, 3)`` axis-angle for
                        ``[left_shoulder, left_elbow, left_wrist]``.
 
@@ -427,7 +383,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             start_pose:            ``(263,)`` HML263 feature vector used as
                                    the inpainting base for all joints
                                    throughout the motion.  Pass the output of
-                                   :meth:`load_hml_pose` or
+                                   :meth:`load_pose` or
                                    :meth:`build_pose_from_arm_aa`.
             save_path:             If provided, save a full-body visualization
                                    of the generated motion to this path as an
@@ -462,6 +418,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         assert self._arm_info is not None
         assert self._hml_mean is not None
         assert self._hml_std is not None
+        self._align_fk_collar_to_pose(start_pose)
 
         # pylint: disable=import-outside-toplevel,import-error
         import torch
@@ -652,6 +609,7 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         assert self._not_l_arm_mask is not None
+        self._align_fk_collar_to_pose(start_pose)
 
         # pylint: disable=import-outside-toplevel,import-error
         import torch
@@ -731,47 +689,3 @@ class MdmMotionGenerator:  # pylint: disable=too-many-instance-attributes
             f"{time.perf_counter() - convert_t0:.3f}s"
         )
         return positions
-
-    def smpl_positions_to_left_arm_trajectory(
-        self,
-        positions: np.ndarray,
-        spine3_aa: np.ndarray | None = None,
-    ) -> np.ndarray:
-        """Convert SMPL XYZ positions to a left-arm axis-angle trajectory.
-
-        Args:
-            positions: ``(n_frames, 22, 3)`` or ``(n_samples, n_frames, 22, 3)``
-                global SMPL joint positions.
-            spine3_aa: Optional fixed MPC spine3 world axis-angle.
-
-        Returns:
-            ``(n_frames, 3, 3)`` for a single trajectory, otherwise
-            ``(n_samples, n_frames, 3, 3)``.
-        """
-        self._ensure_loaded()
-        positions = np.asarray(positions, dtype=np.float64)
-        single = positions.ndim == 3
-        if single:
-            positions = positions[None, ...]
-
-        convert_t0 = time.perf_counter()
-        if spine3_aa is not None:
-            arm_aa = self._fk.arm_aa_from_positions_batch(
-                positions,
-                spine3_aa=spine3_aa,
-            )
-            print(
-                "[timing] selected position-to-fixed-base arm IK total: "
-                f"{time.perf_counter() - convert_t0:.3f}s"
-            )
-            return arm_aa[0] if single else arm_aa
-
-        body_pose = smpl_positions_batch_to_body_pose(
-            positions, self._fk.tpose_all_joints
-        )
-        print(
-            "[timing] selected position-to-arm IK total: "
-            f"{time.perf_counter() - convert_t0:.3f}s"
-        )
-        arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-        return arm_aa[0] if single else arm_aa

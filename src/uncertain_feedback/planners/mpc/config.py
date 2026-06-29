@@ -63,6 +63,7 @@ class MpcRunConfig:
     preference_learning: bool = True
     preference_alpha: float = 0.5
     preference_window: int = 50
+    motion_generator: str = "mdm"
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -139,6 +140,17 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     if planner not in PLANNER_CHOICES:
         raise ValueError(
             f"planner must be one of {sorted(PLANNER_CHOICES)}; got {planner!r}."
+        )
+
+    from uncertain_feedback.motion_generators import (  # pylint: disable=import-outside-toplevel
+        MOTION_GENERATOR_BUILDERS,
+    )
+
+    motion_generator = str(data.get("motion_generator", "mdm"))
+    if motion_generator not in MOTION_GENERATOR_BUILDERS:
+        raise ValueError(
+            "motion_generator must be one of "
+            f"{sorted(MOTION_GENERATOR_BUILDERS)}; got {motion_generator!r}."
         )
 
     uq_data = _mapping(data.get("uq"), "uq")
@@ -232,4 +244,5 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         preference_window=_positive_int(
             data.get("preference_window", 50), "preference_window"
         ),
+        motion_generator=motion_generator,
     )

@@ -30,6 +30,8 @@ import numpy as np
 import yaml
 
 from uncertain_feedback.consts import MDM_ROOT
+from uncertain_feedback.motion_generators import make_motion_generator
+from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDM,
     LeftArmMPCCartesian,
@@ -74,20 +76,13 @@ class _InitialPoseState:
         return cls(arm_aa=np.zeros((3, 3)), fixed_collar_aa=np.zeros(3))
 
 
-def _make_motion_generator(model_path: Path | None) -> Any:
-    from uncertain_feedback.motion_generators.mdm.mdm_api import (  # pylint: disable=import-outside-toplevel
-        MdmMotionGenerator,
-    )
-
-    return MdmMotionGenerator(model_path=model_path)
-
-
 def _load_initial_pose_state(
     args: argparse.Namespace,
     uses_mdm: bool,
     config_pose: Path | None = None,
-    motion_generator_factory: Callable[[Path | None], Any] | None = None,
-) -> tuple[Any | None, _InitialPoseState]:
+    motion_generator: str = "mdm",
+    motion_generator_factory: Callable[[Path | None], MotionGenerator] | None = None,
+) -> tuple[MotionGenerator | None, _InitialPoseState]:
     """Load the optional HML pose used to initialize all planner variants.
 
     MDM-backed planners keep the historical default sitting pose. Non-MDM
@@ -100,10 +95,12 @@ def _load_initial_pose_state(
     if pose_path is None:
         return None, _InitialPoseState.tpose()
 
-    factory = motion_generator_factory or _make_motion_generator
+    factory = motion_generator_factory or (
+        lambda mp: make_motion_generator(motion_generator, mp)
+    )
     gen = factory(args.model_path)
-    hml_pose = gen.load_hml_pose(pose_path)
-    arm_aa, body_pos, spine3_aa, fixed_collar_aa = gen.decode_pose_with_collar(hml_pose)
+    hml_pose = gen.load_pose(pose_path)
+    arm_aa, body_pos, spine3_aa, fixed_collar_aa = gen.decode_pose(hml_pose)
     return gen, _InitialPoseState(
         arm_aa=np.asarray(arm_aa, dtype=np.float64),
         fixed_collar_aa=np.asarray(fixed_collar_aa, dtype=np.float64),
@@ -532,7 +529,9 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
     # Compact (1-panel) rendering when saving without live view.
     compact = (args.save is not None) and not args.live
 
-    gen, initial_state = _load_initial_pose_state(args, uses_mdm, cfg.pose)
+    gen, initial_state = _load_initial_pose_state(
+        args, uses_mdm, cfg.pose, motion_generator=cfg.motion_generator
+    )
     _apply_arm_override(initial_state, args.arm)
     arm_aa = initial_state.arm_aa
     body_pos = initial_state.body_pos

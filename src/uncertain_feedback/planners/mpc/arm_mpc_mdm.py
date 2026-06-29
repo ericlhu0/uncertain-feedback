@@ -476,13 +476,13 @@ if __name__ == "__main__":
     )
 
     gen = MdmMotionGenerator()
-    initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
+    initial_pose = gen.load_pose(MDM_ROOT / args.start_pose)  # (263,)
     (
         initial_arm_aa,
         initial_body_positions,
         initial_spine3_aa,
         initial_collar_aa,
-    ) = gen.decode_pose_with_collar(initial_pose)
+    ) = gen.decode_pose(initial_pose)
     demo_fk.collar_aa = np.asarray(initial_collar_aa, dtype=np.float64)
 
     demo_target_q = initial_arm_aa.copy() + np.array(

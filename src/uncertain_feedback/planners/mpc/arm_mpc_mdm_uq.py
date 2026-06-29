@@ -18,9 +18,14 @@ from dataclasses import dataclass
 import matplotlib.pyplot as plt
 import numpy as np
 
+from typing import TYPE_CHECKING
+
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+
+if TYPE_CHECKING:
+    from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster,
     pick_cluster_positions,
@@ -133,7 +138,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
 
     def query_mdm_with_uncertainty(  # pylint: disable=redefined-outer-name
         self,
-        gen: "MdmMotionGenerator",  # type: ignore[name-defined]  # noqa: F821
+        gen: MotionGenerator,
         text: str,
         start_pose: np.ndarray | None = None,
         current_arm_aa: np.ndarray | None = None,
@@ -368,13 +373,13 @@ if __name__ == "__main__":
     )
 
     gen = MdmMotionGenerator()
-    initial_pose = gen.load_hml_pose(MDM_ROOT / args.start_pose)  # (263,)
+    initial_pose = gen.load_pose(MDM_ROOT / args.start_pose)  # (263,)
     (
         initial_arm_aa,
         initial_body_positions,
         initial_spine3_aa,
         initial_collar_aa,
-    ) = gen.decode_pose_with_collar(initial_pose)
+    ) = gen.decode_pose(initial_pose)
     demo_fk.collar_aa = np.asarray(initial_collar_aa, dtype=np.float64)
 
     demo_target_q = initial_arm_aa.copy() + np.array(

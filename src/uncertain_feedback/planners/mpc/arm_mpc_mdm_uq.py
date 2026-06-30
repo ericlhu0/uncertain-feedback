@@ -172,7 +172,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     frozen_body: If ``True``, freeze non-left-arm body features
                                  during MDM generation.
         """
-        print(f"Generating {self._n_diffusion_samples} MDM samples for: '{text}' …")
+        print(f"Generating {self._n_diffusion_samples} motion samples for: '{text}' …")
         generation_t0 = time.perf_counter()
         use_position_uq = hasattr(self._clusterer, "cluster_positions")
         base_spine_aa = self._mdm_spine3_aa

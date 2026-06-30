@@ -70,6 +70,7 @@ class MpcRunConfig:
     costs: dict[str, dict[str, Any]]
     llm_cost: LlmCostConfig
     mdm_frames: int | None = None
+    num_denoising_steps: int | None = None  # kimodo DDIM steps; None = backend default
     text_time: int = 0
     preference_learning: bool = True
     preference_alpha: float = 0.5
@@ -265,6 +266,11 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             None
             if data.get("mdm_frames") is None
             else _positive_int(data["mdm_frames"], "mdm_frames")
+        ),
+        num_denoising_steps=(
+            None
+            if data.get("num_denoising_steps") is None
+            else _positive_int(data["num_denoising_steps"], "num_denoising_steps")
         ),
         text_time=int(data.get("text_time", 0)),
         preference_learning=_bool(

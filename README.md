@@ -206,6 +206,14 @@ uv run python src/uncertain_feedback/planners/run.py \
 ```
 The kimodo start pose is a SMPL `body_pose (21,3)` `.npy` (`motion_generators/kimodo/start_pose.npy`). The wrapper converts it through the same FK used by the visualizer; the worker retargets that pose onto Kimodo's skeleton and applies the resulting positions and global rotations as the frame-0 Kimodo constraint. `--frozen-body` is not supported with `motion_generator: kimodo`.
 
+**Generation speed.** Kimodo's text encoder is an 8B LLM2Vec model. With no encoder
+server reachable on `127.0.0.1:9550` it loads locally, and `TEXT_ENCODER_DEVICE=cpu`
+(auto-set when VRAM < 18 GB) runs it on CPU — slow per prompt. The worker encodes the
+(shared) prompt once per call regardless of `uq.diffusion_samples`, so generation time is
+dominated by the one-time ~85 s model load plus diffusion, not the sample count. To speed
+diffusion, lower `num_denoising_steps` (top-level YAML key, kimodo only; default 100,
+try 30-50 for a quality/speed trade).
+
 To generate only a kimodo motion and render it to video, without MPC:
 ```bash
 TEXT_ENCODER_DEVICE=cpu uv run python src/uncertain_feedback/motion_generators/kimodo/generate_motion.py \

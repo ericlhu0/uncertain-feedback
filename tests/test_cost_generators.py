@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import numpy as np
 import pytest
@@ -31,6 +32,15 @@ _COST_CODE = (
     "    future = q_trajs[:, 1:, 0, 0]\n"
     "    return params['weight'] * np.mean(future ** 2, axis=1)\n"
 )
+
+
+def _fake_rollout(_cost: GeneratedPythonCost) -> np.ndarray:
+    """A valid ``(T, 3, 3)`` arm-aa rollout so the L2 evaluator has a trajectory.
+
+    Mirrors the live ``rollout_fn`` supplied by ``run.py``; without one the
+    evaluator returns ``inf`` (no Cartesian rollout available).
+    """
+    return np.full((6, 3, 3), 0.05, dtype=np.float64)
 
 
 def _response(description: str = "fake cost") -> str:
@@ -122,9 +132,11 @@ def test_llm_generator_produces_and_installs_cost(tmp_path) -> None:
 def test_turns_generator_keeps_state_and_returns_best(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
     kwargs = _factory_kwargs(
-        tmp_path, fake, LlmCostConfig(backend="turns", max_turns=3)
+        tmp_path,
+        fake,
+        LlmCostConfig(backend="turns", max_turns=3, use_images=False),
     )
-    gen = create_cost_generator(**kwargs)
+    gen = create_cost_generator(rollout_fn=_fake_rollout, **kwargs)
 
     cost = gen.generate(install=False)
 
@@ -140,7 +152,9 @@ def test_evaluate_candidate_cost_is_finite() -> None:
     cost = GeneratedPythonCost(
         code=_COST_CODE, params={"weight": 1.0}, context=context
     )
-    assert np.isfinite(evaluate_candidate_cost(context, cost))
+    assert np.isfinite(evaluate_candidate_cost(context, cost, _fake_rollout))
+    # No rollout available (e.g. planners without a Cartesian goal) -> inf.
+    assert evaluate_candidate_cost(context, cost) == math.inf
 
 
 def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:

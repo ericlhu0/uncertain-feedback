@@ -67,6 +67,41 @@ def _read(path: Path) -> str:
 _RUNTIME_API = _read(_DIR / "runtime_api.txt")
 _OUTPUT_CONTRACT = _read(_DIR / "output_contract.txt")
 
+# Heads for the three-stage ``staged`` backend (interpret -> ground -> author), each
+# a focused subtask so the model reasons about one thing at a time.
+_STAGES_DIR = _DIR / "stages"
+_INTERPRET_HEAD = _read(_STAGES_DIR / "interpret.txt")
+_GROUND_HEAD = _read(_STAGES_DIR / "ground.txt")
+_AUTHOR_HEAD = _read(_STAGES_DIR / "author.txt")
+
+
+def _substitute_images(
+    template: str, images: dict[str, Path]
+) -> tuple[str, list[Path]]:
+    """Replace image placeholders in ``template`` and return the attached paths.
+
+    Each placeholder in :data:`IMAGE_PLACEHOLDERS` that appears is replaced by its
+    self-describing line when its image was rendered, or dropped otherwise. Paths are
+    returned in the order their placeholders appear in ``template``.
+    """
+    present = [
+        (template.index("{" + key + "}"), key)
+        for key in IMAGE_PLACEHOLDERS
+        if "{" + key + "}" in template
+    ]
+    ordered_paths: list[Path] = []
+    for _, key in sorted(present):
+        path = images.get(key)
+        replacement = IMAGE_PLACEHOLDERS[key] if path is not None else ""
+        template = template.replace("{" + key + "}", replacement)
+        if path is not None:
+            ordered_paths.append(path)
+    return template, ordered_paths
+
+
+def _dump(summaries: dict[str, Any]) -> str:
+    return json.dumps(summaries, indent=2, sort_keys=True)
+
 
 def _assemble(head: str) -> str:
     """Join a variant head with the shared API + output contract + summaries."""
@@ -76,7 +111,7 @@ def _assemble(head: str) -> str:
 
 
 # Registry of available prompt templates, keyed by the head filename stem. Select
-# one via ``llm_cost.prompt`` in the MPC config (defaults to ``"default"``).
+# one via ``llm_cost.prompt`` in the MPC config (defaults to ``"1"``).
 PROMPTS: dict[str, str] = {
     path.stem: _assemble(_read(path))
     for path in sorted(_TEMPLATES_DIR.glob("*.txt"))
@@ -87,7 +122,7 @@ def build_llm_cost_prompt(
     instruction: str,
     summaries: dict[str, Any],
     images: dict[str, Path],
-    prompt: str = "2",
+    prompt: str = "1",
 ) -> tuple[str, list[Path]]:
     """Build the text prompt for the cost-generator LLM and its attached images.
 
@@ -115,21 +150,73 @@ def build_llm_cost_prompt(
         ) from exc
 
     # Attach images in the order their placeholders appear in the template head.
-    present = [
-        (template.index("{" + key + "}"), key)
-        for key in IMAGE_PLACEHOLDERS
-        if "{" + key + "}" in template
-    ]
-    ordered_paths: list[Path] = []
-    for _, key in sorted(present):
-        path = images.get(key)
-        replacement = IMAGE_PLACEHOLDERS[key] if path is not None else ""
-        template = template.replace("{" + key + "}", replacement)
-        if path is not None:
-            ordered_paths.append(path)
-
+    template, ordered_paths = _substitute_images(template, images)
     text = (
         template.replace("{instruction}", instruction)
-        .replace("{summaries}", json.dumps(summaries, indent=2, sort_keys=True))
+        .replace("{summaries}", _dump(summaries))
     )
     return text, ordered_paths
+
+
+def compact_summaries(summaries: dict[str, Any]) -> dict[str, Any]:
+    """Return a slimmed summary for the interpret stage.
+
+    Keeps only the qualitative anatomy the interpretation needs — per-trajectory
+    joint-feature ranges and each joint's endpoint position — and drops the raw
+    joint-angle arrays and axis-angle values. The full summaries go to the grounding
+    stage; this keeps stage one from doing stage two's numeric work.
+    """
+    slim: dict[str, Any] = {}
+    for name, entry in summaries.items():
+        if not isinstance(entry, dict):
+            slim[name] = entry
+            continue
+        kept: dict[str, Any] = {}
+        if "joint_features" in entry:
+            kept["joint_features"] = entry["joint_features"]
+        positions = entry.get("positions")
+        if isinstance(positions, dict):
+            kept["end_positions"] = {
+                joint: stats.get("end")
+                for joint, stats in positions.items()
+                if isinstance(stats, dict)
+            }
+        slim[name] = kept or entry
+    return slim
+
+
+def build_interpret_prompt(
+    instruction: str,
+    summaries: dict[str, Any],
+    images: dict[str, Path],
+) -> tuple[str, list[Path]]:
+    """Build the stage-one (interpret) prompt and its attached images.
+
+    Sees the instruction, the contrast images, and a compact summary only — no
+    runtime API, output contract, or numeric grounding. Returns a plain-language
+    preference JSON.
+    """
+    template, ordered_paths = _substitute_images(_INTERPRET_HEAD, images)
+    text = template.replace("{instruction}", instruction).replace(
+        "{summaries}", _dump(compact_summaries(summaries))
+    )
+    return text, ordered_paths
+
+
+def build_ground_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
+    """Build the stage-two (ground) prompt: preference + full numbers -> numeric spec.
+
+    Text only — no images, no runtime API, no code contract.
+    """
+    return _GROUND_HEAD.replace("{interpretation}", interpretation).replace(
+        "{summaries}", _dump(summaries)
+    )
+
+
+def build_author_prompt(specification: str) -> str:
+    """Build the stage-three (author) prompt: numeric spec + code contract -> cost JSON.
+
+    Appends the shared runtime API and output contract; sees no images or summaries.
+    """
+    head = _AUTHOR_HEAD.replace("{specification}", specification)
+    return "\n\n".join([head, _RUNTIME_API, _OUTPUT_CONTRACT]).strip()

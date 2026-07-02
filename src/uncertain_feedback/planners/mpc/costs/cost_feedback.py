@@ -46,6 +46,7 @@ class EvalState:
     spine3_pos: np.ndarray | None
     spine3_aa: np.ndarray | None
     reference_traj: np.ndarray | None = None
+    full_correction_traj: np.ndarray | None = None
 
     def save(self, path: Path) -> None:
         """Pickle this state to ``path``."""
@@ -69,6 +70,7 @@ class EvalState:
             window=self.window,
             body_pos=self.body_pos,
             reference_traj=self.reference_traj,
+            full_correction_traj=self.full_correction_traj,
         )
 
     def make_rollout_fn(

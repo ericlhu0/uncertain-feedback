@@ -1,9 +1,10 @@
-"""Tests for the llm / turns / agent cost generators."""
+"""Tests for the llm / staged / turns / agent cost generators."""
 
 from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from uncertain_feedback.planners.mpc.costs import (
     AgentCostGenerator,
     LlmCostGenerator,
     MpcCostContext,
+    StagedCostGenerator,
     TurnsCostGenerator,
     artifact_run_dir,
     build_generated_cost_context,
@@ -26,6 +28,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedPythonCost,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.utils.plot import ArmVisualizer
 
 _COST_CODE = (
     "def cost(q_trajs, context, params):\n"
@@ -61,11 +64,13 @@ class _FakeLlmModel:
     def __init__(self, response: str) -> None:
         self.response = response
         self.received_images = None
+        self.full_output_calls: list[tuple[str, object]] = []
         self.converse_calls = 0
         self.last_messages = None
 
     def get_full_output(self, text_input: str, image_input=None) -> str:
         self.received_images = image_input
+        self.full_output_calls.append((text_input, image_input))
         return self.response
 
     def converse(self, messages) -> str:
@@ -105,6 +110,7 @@ def test_create_cost_generator_selects_backend(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
     cases = {
         "llm": LlmCostGenerator,
+        "staged": StagedCostGenerator,
         "turns": TurnsCostGenerator,
         "agent": AgentCostGenerator,
     }
@@ -127,6 +133,79 @@ def test_llm_generator_produces_and_installs_cost(tmp_path) -> None:
     assert len(mpc._extra_costs.terms()) == 1
     assert (kwargs["run_dir"] / "cost.py").exists()
     assert (kwargs["run_dir"] / "validation.json").exists()
+
+
+def test_staged_generator_runs_three_focused_stages(tmp_path) -> None:
+    fake = _FakeLlmModel(_response())
+    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="staged"))
+    kwargs["images"] = {"current_cluster_traj_img": Path("current.png")}
+    gen = create_cost_generator(**kwargs)
+
+    cost = gen.generate(install=False)
+
+    assert isinstance(cost, GeneratedPythonCost)
+    # Three separate calls: interpret, ground, author.
+    assert len(fake.full_output_calls) == 3
+    interpret, ground, author = fake.full_output_calls
+    # Only the interpret stage sees images; ground and author are text-only.
+    assert interpret[1] == ["current.png"]
+    assert ground[1] is None and author[1] is None
+    # Only the author stage carries the code contract.
+    assert "def cost(q_trajs, context, params):" in author[0]
+    assert "def cost(q_trajs, context, params):" not in interpret[0]
+    # Each stage's prompt and raw response are persisted for inspection.
+    for stage in ("interpret", "ground", "author"):
+        assert (kwargs["run_dir"] / f"{stage}_prompt.txt").exists()
+        assert (kwargs["run_dir"] / f"{stage}_response.txt").exists()
+    assert (kwargs["run_dir"] / "cost.py").exists()
+
+
+def test_generator_saves_reference_with_correction_video(tmp_path, monkeypatch) -> None:
+    saved_rollouts: list[np.ndarray] = []
+
+    def fake_render_rollout_video(
+        _self,
+        rollout,
+        save_path,
+        **_kwargs,
+    ) -> None:
+        saved_rollouts.append(np.asarray(rollout, dtype=np.float64).copy())
+        save_path.write_bytes(b"video")
+
+    monkeypatch.setattr(
+        ArmVisualizer, "render_rollout_video", fake_render_rollout_video
+    )
+    fk = SmplLeftArmFK()
+    mpc_context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    full_correction = np.full((6, 3, 3), 0.2, dtype=np.float64)
+    context = build_generated_cost_context(
+        mpc_context,
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((4, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+        full_correction_traj=full_correction,
+    )
+    fake = _FakeLlmModel(_response())
+    cfg = LlmCostConfig(backend="llm")
+    run_dir = artifact_run_dir(tmp_path, cfg.artifact_dir)
+    gen = create_cost_generator(
+        cfg=cfg,
+        context=context,
+        instruction="raise the elbow",
+        summaries=build_motion_summaries(context),
+        run_dir=run_dir,
+        images={},
+        llm_model_factory=lambda _name: fake,
+    )
+
+    assert gen.generate(install=False) is not None
+
+    assert (run_dir / "reference_with_correction.mp4").read_bytes() == b"video"
+    assert len(saved_rollouts) == 1
+    np.testing.assert_allclose(saved_rollouts[0], full_correction)
 
 
 def test_turns_generator_keeps_state_and_returns_best(tmp_path) -> None:
@@ -152,9 +231,13 @@ def test_evaluate_candidate_cost_is_finite() -> None:
     cost = GeneratedPythonCost(
         code=_COST_CODE, params={"weight": 1.0}, context=context
     )
-    assert np.isfinite(evaluate_candidate_cost(context, cost, _fake_rollout))
+    score, rollout = evaluate_candidate_cost(context, cost, _fake_rollout)
+    assert np.isfinite(score)
+    assert rollout is not None
     # No rollout available (e.g. planners without a Cartesian goal) -> inf.
-    assert evaluate_candidate_cost(context, cost) == math.inf
+    score, rollout = evaluate_candidate_cost(context, cost)
+    assert score == math.inf
+    assert rollout is None
 
 
 def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:

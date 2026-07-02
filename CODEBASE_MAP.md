@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-06-30  
+**Last updated:** 2026-07-02  
 **Branch:** agent-costs
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -35,15 +35,19 @@ uncertain-feedback/
 │   │       ├── costs/                # Cost package (public surface: mpc.costs)
 │   │       │   ├── __init__.py       # Re-exports the public cost API
 │   │       │   ├── base.py           # Cost terms + registry + preference learning
-│   │       │   ├── llm_costs.py      # LLM-generated Python cost pipeline
+│   │       │   ├── generated.py      # Runtime context, cost compile/exec, summaries, image render
+│   │       │   ├── cost_generator.py # CostGenerator base + create_cost_generator factory + scoring
+│   │       │   ├── llm_costs.py      # backend: llm (single-turn) + re-exports
+│   │       │   ├── staged_costs.py   # backend: staged (interpret→ground→author, 3 calls)
+│   │       │   ├── turns_costs.py    # backend: turns (multi-turn scored refinement)
+│   │       │   ├── agent_costs.py    # backend: agent (codex CLI)
+│   │       │   ├── cost_feedback.py  # EvalState (picklable rollout state for agent backend)
 │   │       │   └── prompts/          # Prompt templates loaded from .txt files
-│   │       │       ├── __init__.py   # PROMPTS registry + build_llm_cost_prompt
+│   │       │       ├── __init__.py   # PROMPTS registry + build_llm_cost_prompt + staged builders
 │   │       │       ├── runtime_api.txt       # Shared technical contract
 │   │       │       ├── output_contract.txt   # Shared output rules
-│   │       │       └── templates/    # One .txt per prompt (stem = registry key)
-│   │       │           ├── default.txt
-│   │       │           ├── caregiver.txt
-│   │       │           └── goal_safe.txt
+│   │       │       ├── templates/    # One .txt per prompt (stem = registry key); currently 1.txt
+│   │       │       └── stages/       # staged-backend heads: interpret.txt, ground.txt, author.txt
 │   │       ├── arm_mpc.py            # SmplLeftArmMPC (base sampling MPC)
 │   │       ├── arm_mpc_mdm.py        # LeftArmMPCMDM (+ MDM trajectory tracking)
 │   │       ├── arm_mpc_mdm_uq.py     # LeftArmMPCMDMUQ (+ UQ clustering)
@@ -260,29 +264,31 @@ When `llm_cost.enabled: true` in the YAML:
 
 1. `build_motion_summaries()` — text summaries of recent MPC steps and MDM trajectory
 2. `render_prompt_images()` — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
-3. `build_llm_cost_prompt()` (in `costs/prompts/__init__.py`) — assembles the prompt from a named template (a `costs/prompts/templates/<name>.txt` head + shared `runtime_api.txt`/`output_contract.txt`), selected by `llm_cost.prompt`
+3. `build_llm_cost_prompt()` (in `costs/prompts/__init__.py`) — assembles the prompt from a named template (a `costs/prompts/templates/<name>.txt` head + shared `runtime_api.txt`/`output_contract.txt`), selected by `llm_cost.prompt`. The `staged` backend bypasses this, instead calling `build_interpret_prompt` / `build_ground_prompt` / `build_author_prompt` (`costs/prompts/stages/*.txt`) across its three calls
 4. LLM (OpenAI, configurable model) returns JSON: `{description, code, params, explanation, recipient_explanation}`
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet
 7. `GeneratedCostContext` provides the runtime sandbox: `fk`, `spine3_pos/aa`, `current_q`, `mdm_traj`, `recent_q`, and FK helper methods
-8. Artifacts (prompt JSON, images, cost.py) saved to `llm_cost_artifacts/<timestamp>/`
+8. Artifacts (prompt JSON, images, cost.py, `reference_with_correction.mp4`) saved to `llm_cost_artifacts/<timestamp>/`
 
 **LLM cost cluster experiment** (`llm_cost.cluster_experiment.enabled`): runs the LLM cost on each cluster's mean trajectory for `rollout_steps` steps and uses costs to rank / auto-select clusters.
 
 ### Cost-generation backends (`costs/cost_generator.py`)
 
-`create_cost_generator()` selects one of three strategies via `llm_cost.backend`; all share `CostGenerator` (prompt building, compile/validate, save, install):
+`create_cost_generator()` selects one of four strategies via `llm_cost.backend`; all share `CostGenerator` (prompt building, compile/validate, save, install):
 
-- `llm` (`llm_costs.py`) — single-turn call.
+- `llm` (`llm_costs.py`) — single-turn call with the full monolithic prompt.
+- `staged` (`staged_costs.py`) — three focused single-turn calls, chained: **interpret** (instruction + contrast images + compact summary → plain-language preference), **ground** (preference + full numeric summaries → concrete features + numeric bounds), **author** (spec + `runtime_api.txt`/`output_contract.txt` → cost JSON). Prompts built by `build_interpret_prompt` / `build_ground_prompt` / `build_author_prompt` from `costs/prompts/stages/*.txt`; only the author output is parsed/compiled. Each stage's `<stage>_prompt.txt` / `<stage>_response.txt` is saved. Single pass, no rollout feedback (like `llm`).
 - `turns` (`turns_costs.py`) — stateful multi-turn conversation; keeps the best cost by score.
 - `agent` (`agent_costs.py`) — delegates authoring to the `codex` CLI, which emits the same `response.json`.
 
 ### Cost evaluation & visual feedback
 
 - `evaluate_candidate_cost()` rolls the goal-seeking MPC with a candidate cost installed (`_make_cost_eval_rollout` in `run.py`) and returns the mean FK-position L2 distance to the MDM correction (`_score_rollout`). Lower is better; `inf` when the planner has no Cartesian goal. Drives `turns` selection/stopping and the `backend_comparison.json` ranking.
-- `evaluate_and_render()` does the **same single rollout** and additionally renders `ArmVisualizer.render_cost_feedback_overlay()` — a rollout (red) vs correction (green) overlay — returning `(score, image_path)`. It can also persist the exact rollout array and MP4 used for that feedback image. When `use_images` is on:
-  - `turns` feeds `turn_<i>/comparison.png` + score back through the conversation each turn; backend experiments with `--save-video` also write `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
-  - `agent` self-iterates: `EvalState` (`costs/cost_feedback.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Codex runs `experiments/render_cost_comparison.py` to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
+- `CostGenerator.begin()` writes `reference_with_correction.mp4` into every generated-cost artifact directory using `context.full_correction_traj` when present, falling back to `context.mdm_traj`.
+- `evaluate_and_render()` does the **same single rollout** and additionally renders `ArmVisualizer.render_cost_feedback_overlay()` — a rollout (red) vs target-corrected-path (green) overlay — returning `(score, image_path)`. When an `angle_path` is passed it also renders `ArmVisualizer.render_joint_angle_comparison()` — a joint-angle-over-time graph (one subplot per anatomical joint feature; green target vs red rollout, per-frame series from `build_joint_angle_series()`) — so the model sees the temporal shape of the motion, not just endpoints. The green target is `context.full_correction_traj` when present (the **entire** intended path: pre-correction history → MDM correction → comfort-only continuation to the goal, assembled once in `run.py:_assemble_full_correction_traj` and threaded through `build_generated_cost_context` / `EvalState`), falling back to the MDM correction segment (`mdm_traj`) alone. The score (`_score_rollout`) still measures distance to the MDM correction segment only. It can also persist the exact rollout array and MP4 used for that feedback image. When `use_images` is on:
+  - `turns` feeds `turn_<i>/comparison.png` + `turn_<i>/angles.png` + score back through the conversation each turn; backend experiments with `--save-video` also write `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
+  - `agent` self-iterates: `EvalState` (`costs/cost_feedback.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Codex runs `experiments/render_cost_comparison.py` (writing both `comparison.png` and `angles.png`) to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
 
 ---
 
@@ -384,7 +390,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml>` | Per-backend (llm/turns/agent) cost comparison experiment |
-| `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction (agent backend self-service tool) |
+| `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |

@@ -20,6 +20,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
     LlmCostResponse,
+    build_rollout_joint_comparison,
 )
 
 # Stop early once the score fails to improve this many turns in a row.
@@ -88,11 +89,12 @@ class TurnsCostGenerator(CostGenerator):
                 continue
 
             if self.use_images:
-                score, image_path = evaluate_and_render(
+                score, image_path, rollout = evaluate_and_render(
                     self.context,
                     cost,
                     self.rollout_fn,
                     turn_dir / "comparison.png",
+                    angle_path=turn_dir / "angles.png",
                     rollout_path=(
                         turn_dir / "rollout.npy"
                         if self.save_candidate_videos
@@ -105,7 +107,7 @@ class TurnsCostGenerator(CostGenerator):
                     ),
                 )
             else:
-                score = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
+                score, rollout = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
                 image_path = None
             (turn_dir / "cost.py").write_text(response.code, encoding="utf-8")
             with open(turn_dir / "score.json", "w", encoding="utf-8") as f:
@@ -121,20 +123,33 @@ class TurnsCostGenerator(CostGenerator):
                 if no_improve >= _NO_IMPROVE_PATIENCE:
                     break
 
+            joint_block = ""
+            if rollout is not None:
+                comparison = build_rollout_joint_comparison(self.context, rollout)
+                joint_block = (
+                    "\n\nJoint feature comparison (rollout vs. target):\n"
+                    + json.dumps(comparison, indent=2)
+                )
+
             if image_path is not None:
                 messages.append(
                     {
                         "role": "user",
                         "text": (
                             f"That cost scored {score:.4f} (lower is better). The "
-                            "attached image overlays the motion your cost produced "
-                            "(red, 'cost rollout') against the user's correction "
-                            "(green, 'target correction') it should match. Look at "
-                            "where the red arm diverges from the green one and revise "
-                            "the cost to close that gap, then return the JSON object "
-                            "again."
+                            "first attached image overlays the motion your cost "
+                            "produced (red, 'cost rollout') against the entire "
+                            "intended corrected path (green, 'target corrected "
+                            "path': the pre-correction motion, the correction, and "
+                            "the continuation to the goal) it should match. The "
+                            "second image plots each arm joint angle over time for "
+                            "the same two trajectories (green target vs red rollout) "
+                            "so you can compare the shape of the movement, not just "
+                            "endpoints. Look at where the red arm/curves diverge from "
+                            "the green ones and revise the cost to close that gap, "
+                            f"then return the JSON object again.{joint_block}"
                         ),
-                        "images": [str(image_path)],
+                        "images": [str(image_path), str(turn_dir / "angles.png")],
                     }
                 )
             else:
@@ -145,7 +160,7 @@ class TurnsCostGenerator(CostGenerator):
                             f"That cost scored {score:.4f} (lower is better, where the "
                             "score measures how well the resulting motion matches the "
                             "user's correction). Revise the cost to lower the score and "
-                            "return the JSON object again."
+                            f"return the JSON object again.{joint_block}"
                         ),
                     }
                 )

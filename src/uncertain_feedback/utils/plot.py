@@ -1080,8 +1080,10 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         Renders two full arms on shared equal-square axes across the three
         orthographic views: the trajectory the candidate cost produced
-        (``rollout_traj``, red gradient) and the user's correction the cost should
-        match (``correction_traj``, green gradient). The orange current pose and
+        (``rollout_traj``, red gradient) and the target corrected path the cost
+        should match (``correction_traj``, green gradient) — typically the entire
+        intended motion (pre-correction history, the correction, and the
+        continuation to the goal). The orange current pose and
         gold goal star ground the scene. ``rollout_traj`` is linearly resampled to
         ``correction_traj``'s length so the two arms are frame-comparable. This is
         the per-iteration image fed back to the ``turns`` / ``agent`` cost
@@ -1090,7 +1092,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         Args:
             save_path:       Output image path (.png).
             rollout_traj:    ``(R, 3, 3)`` arm trajectory the candidate cost produced.
-            correction_traj: ``(T, 3, 3)`` target correction trajectory.
+            correction_traj: ``(T, 3, 3)`` target corrected-path trajectory.
             current_q:       ``(3, 3)`` current arm axis-angle state.
             spine3_pos:      ``(3,)`` spine3 world position.
             spine3_aa:       ``(3,)`` spine3 world axis-angle.
@@ -1182,7 +1184,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         legend_handles = [
             plt.Line2D([0], [0], color="firebrick", linewidth=2, label="cost rollout"),
-            plt.Line2D([0], [0], color="green", linewidth=2, label="target correction"),
+            plt.Line2D([0], [0], color="green", linewidth=2,
+                       label="target corrected path"),
             plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
         ]
         if goal_world is not None:
@@ -1191,6 +1194,51 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                            linestyle="", markersize=11, label="original goal")
             )
         axes[0].legend(handles=legend_handles, fontsize=7, loc="upper left")
+        fig.tight_layout()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+
+    def render_joint_angle_comparison(
+        self,
+        save_path: str | Path,
+        *,
+        target_series: dict[str, np.ndarray],
+        rollout_series: dict[str, np.ndarray],
+    ) -> None:
+        """Plot joint angles over time: target correction vs. cost rollout.
+
+        One subplot per anatomical joint feature (keyed identically in both
+        dicts, e.g. ``elbow_flexion``), each a ``(T,)`` radian series. The target
+        corrected path is drawn in green and the candidate cost's rollout in red;
+        each rollout series is linearly resampled to its target series' length so
+        both curves share a frame-index x-axis. Companion to
+        :meth:`render_cost_feedback_overlay`: the overlay shows Cartesian shape,
+        this shows the temporal shape of each joint angle.
+
+        Args:
+            save_path:      Output image path (.png).
+            target_series:  ``{feature_name: (T,) radians}`` for the target path.
+            rollout_series: ``{feature_name: (R,) radians}`` for the cost rollout.
+        """
+        save_path = Path(save_path)
+        names = list(target_series.keys())
+        fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+        for ax, name in zip(axes.flat, names):
+            target = np.asarray(target_series[name], dtype=np.float64)
+            rollout = _resample_traj(
+                np.asarray(rollout_series[name], dtype=np.float64), target.shape[0]
+            )
+            frames = np.arange(target.shape[0])
+            ax.plot(frames, target, color="green", linewidth=1.6,
+                    label="target corrected path")
+            ax.plot(frames, rollout, color="firebrick", linewidth=1.6,
+                    label="cost rollout")
+            ax.set_title(name.replace("_", " "), fontsize=9)
+            ax.set_xlabel("frame", fontsize=8)
+            ax.set_ylabel("angle (rad)", fontsize=8)
+            ax.tick_params(labelsize=7)
+        axes.flat[0].legend(fontsize=7, loc="best")
         fig.tight_layout()
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=150)

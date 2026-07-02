@@ -36,6 +36,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
 _RESPONSE_FILE = "response.json"
 _STATE_FILE = "state.pkl"
 _COMPARISON_FILE = "comparison.png"
+_ANGLES_FILE = "angles.png"
 _ITERATION_LOG_FILE = "ITERATION_LOG.md"
 _RENDER_SCRIPT = (
     Path(__file__).resolve().parents[3] / "experiments" / "render_cost_comparison.py"
@@ -87,7 +88,7 @@ class AgentCostGenerator(CostGenerator):
             raw = response_path.read_text(encoding="utf-8")
             (self.run_dir / "raw_response.txt").write_text(raw, encoding="utf-8")
             response, cost = self.parse_cost(raw)
-            score = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
+            score, _ = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
             with open(self.run_dir / "score.json", "w", encoding="utf-8") as f:
                 json.dump({"score": score}, f, indent=2)
             print(f"[cost-gen][agent] score={score:.4f}")
@@ -131,7 +132,8 @@ class AgentCostGenerator(CostGenerator):
                 f"Maintain `{_ITERATION_LOG_FILE}` while you work. Before writing "
                 f"the first `{_RESPONSE_FILE}`, load every local image path listed "
                 "above and write what you observed. After each rollout-comparison "
-                f"render, load `{_COMPARISON_FILE}` and append one entry with:\n"
+                f"render, load `{_COMPARISON_FILE}` and `{_ANGLES_FILE}` and append "
+                "one entry with:\n"
                 "- which image files you loaded;\n"
                 "- what visual mismatch or limitation you saw;\n"
                 "- the candidate score when available;\n"
@@ -150,16 +152,22 @@ class AgentCostGenerator(CostGenerator):
                 "```\n"
                 f"uv run --project {_REPO_ROOT} python {_RENDER_SCRIPT} "
                 f"--state {_STATE_FILE} --response {_RESPONSE_FILE} "
-                f"--out {_COMPARISON_FILE}{archive_args}\n"
+                f"--out {_COMPARISON_FILE} --angles-out {_ANGLES_FILE}"
+                f"{archive_args}\n"
                 "```\n\n"
                 f"This prints an L2 score (lower is better) and writes "
-                f"the comparison image. When the command includes an archive "
+                f"the comparison images. When the command includes an archive "
                 f"directory, it also saves candidate JSON, score, rollout, "
-                f"and MP4 files there. It also writes "
+                f"and MP4 files there. It writes "
                 f"`{_COMPARISON_FILE}`, which overlays the motion your cost produced "
-                "(red, 'cost rollout') against the user's correction (green, 'target "
-                "correction') it should match. Open and look at that image: where the "
-                "red arm diverges from the green one tells you what to fix. Revise "
+                "(red, 'cost rollout') against the entire intended corrected path "
+                "(green, 'target corrected path': the pre-correction motion, the "
+                "correction, and the continuation to the goal) it should match, and "
+                f"`{_ANGLES_FILE}`, which plots each arm joint angle over time for "
+                "the same two trajectories (green target vs red rollout) so you can "
+                "compare the shape of the movement, not just endpoints. Open and "
+                "look at both images: where the red arm/curves diverge from the "
+                "green ones tells you what to fix. Revise "
                 "`response.json`, re-run the command, and keep iterating until "
                 "you are satisfied that the generated arm movement matches the "
                 "green reference well enough, or until you determine there is no "

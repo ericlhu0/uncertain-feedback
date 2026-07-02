@@ -19,7 +19,7 @@ def _requested(name: str) -> list[str]:
 
 
 def test_prompts_are_registered() -> None:
-    assert {"1", "2", "3", "5"} <= set(PROMPTS)
+    assert {"1"} <= set(PROMPTS)
 
 
 @pytest.mark.parametrize("name", sorted(PROMPTS))
@@ -47,9 +47,9 @@ def test_every_prompt_fills_placeholders_and_shares_contract(name: str) -> None:
 
 
 def test_unavailable_image_dropped_without_attachment() -> None:
-    # Template "5" requests all three images; provide only the current one.
+    # Template "1" requests all three images; provide only the current one.
     text, attached = build_llm_cost_prompt(
-        "x", {}, {"current_cluster_traj_img": Path("current.png")}, prompt="5"
+        "x", {}, {"current_cluster_traj_img": Path("current.png")}, prompt="1"
     )
     assert [p.name for p in attached] == ["current.png"]
     assert IMAGE_PLACEHOLDERS["current_cluster_traj_img"] in text
@@ -63,7 +63,7 @@ def test_unavailable_image_dropped_without_attachment() -> None:
 
 
 def test_no_images_attached_when_none_available() -> None:
-    text, attached = build_llm_cost_prompt("x", {}, {}, prompt="5")
+    text, attached = build_llm_cost_prompt("x", {}, {}, prompt="1")
     assert attached == []
     for key in IMAGE_PLACEHOLDERS:
         assert "{" + key + "}" not in text

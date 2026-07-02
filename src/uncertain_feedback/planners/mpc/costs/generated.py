@@ -68,6 +68,7 @@ class GeneratedCostContext:
     recent_q: np.ndarray
     body_pos: np.ndarray | None = None
     reference_traj: np.ndarray | None = None
+    full_correction_traj: np.ndarray | None = None
 
     @property
     def current_positions(self) -> np.ndarray:
@@ -312,6 +313,7 @@ def build_generated_cost_context(
     window: int,
     body_pos: np.ndarray | None = None,
     reference_traj: np.ndarray | None = None,
+    full_correction_traj: np.ndarray | None = None,
 ) -> GeneratedCostContext:
     """Build the runtime context passed to generated Python costs."""
     recent_q = np.asarray(q_history[-window:], dtype=np.float64)
@@ -328,6 +330,11 @@ def build_generated_cost_context(
         reference_traj=(
             np.asarray(reference_traj, dtype=np.float64)
             if reference_traj is not None
+            else None
+        ),
+        full_correction_traj=(
+            np.asarray(full_correction_traj, dtype=np.float64)
+            if full_correction_traj is not None
             else None
         ),
     )
@@ -452,6 +459,79 @@ def render_prompt_images(
     return images
 
 
+def _shoulder_elbow_frame_summary(q: np.ndarray) -> dict[str, Any]:
+    q = np.asarray(q, dtype=np.float64)
+    return {
+        "shoulder": {"value": q[0].tolist(), "norm": float(np.linalg.norm(q[0]))},
+        "elbow": {"value": q[1].tolist(), "norm": float(np.linalg.norm(q[1]))},
+    }
+
+
+def _shoulder_elbow_joint_summary(trajectory: np.ndarray) -> dict[str, Any]:
+    t = np.asarray(trajectory, dtype=np.float64)
+    return {
+        "shoulder": {
+            "start": t[0, 0].tolist(),
+            "end": t[-1, 0].tolist(),
+            "norm_start": float(np.linalg.norm(t[0, 0])),
+            "norm_end": float(np.linalg.norm(t[-1, 0])),
+        },
+        "elbow": {
+            "start": t[0, 1].tolist(),
+            "end": t[-1, 1].tolist(),
+            "norm_start": float(np.linalg.norm(t[0, 1])),
+            "norm_end": float(np.linalg.norm(t[-1, 1])),
+        },
+    }
+
+
+def build_rollout_joint_comparison(
+    context: GeneratedCostContext,
+    rollout: np.ndarray,
+) -> dict[str, Any]:
+    """Return joint feature comparison between a scored rollout and the intended target.
+
+    Uses ``context.full_correction_traj`` as the target when available (the full
+    pre-correction + correction + goal-continuation path), falling back to
+    ``context.mdm_traj``.
+    """
+    target_traj = (
+        context.full_correction_traj
+        if context.full_correction_traj is not None
+        else context.mdm_traj
+    )
+    return {
+        "rollout": _joint_feature_summary(context, np.asarray(rollout, dtype=np.float64)),
+        "target": _joint_feature_summary(context, target_traj),
+    }
+
+
+def build_joint_angle_series(
+    context: GeneratedCostContext,
+    trajectory: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Return the per-frame anatomical joint-feature series for a trajectory.
+
+    Same four features as :func:`_joint_feature_summary` (elbow flexion, shoulder
+    flexion/extension, abduction/adduction, internal/external rotation), but the
+    full ``(T,)`` radian series per feature instead of summary statistics — used
+    to plot joint angles over time.
+    """
+    trajectory = np.asarray(trajectory, dtype=np.float64)
+    return {
+        "elbow_flexion": context.elbow_flexion_angles(trajectory),
+        "shoulder_flexion_extension": context.shoulder_flexion_extension_angles(
+            trajectory
+        ),
+        "shoulder_abduction_adduction": context.shoulder_abduction_adduction_angles(
+            trajectory
+        ),
+        "shoulder_internal_external_rotation": (
+            context.shoulder_internal_external_rotation_angles(trajectory)
+        ),
+    }
+
+
 def _trajectory_summary(
     trajectory: np.ndarray,
     positions: np.ndarray,
@@ -460,6 +540,7 @@ def _trajectory_summary(
     return {
         "joint_angles": _array_stats(trajectory),
         "positions": _position_summary(positions, spine3_pos),
+        "shoulder_elbow_values": _shoulder_elbow_joint_summary(trajectory),
     }
 
 
@@ -471,6 +552,7 @@ def _state_summary(
     return {
         "joint_angles": np.asarray(q, dtype=np.float64).tolist(),
         "positions": _position_frame_summary(positions, spine3_pos),
+        "shoulder_elbow_values": _shoulder_elbow_frame_summary(q),
     }
 
 

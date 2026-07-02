@@ -43,6 +43,7 @@ from uncertain_feedback.experiments.cluster_comparison import (
     _run_initial_state_rollout,
 )
 from uncertain_feedback.planners.run import (
+    _assemble_full_correction_traj,
     _make_cost_eval_rollout,
     _rollout_reference_trajectory,
 )
@@ -102,9 +103,14 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
         if reference_traj is not None and cfg.cartesian.goals
         else None
     )
+    full_correction_traj = _assemble_full_correction_traj(
+        cfg, q_history, correction_traj, context, base_extra_costs,
+        body_pos, spine3_pos, spine3_aa,
+    )
     generated_context = build_generated_cost_context(
         context, current_q, correction_traj, q_history, window=history_window,
         body_pos=body_pos, reference_traj=reference_traj,
+        full_correction_traj=full_correction_traj,
     )
     summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
     images: dict[str, Path] = {}
@@ -129,6 +135,7 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
         spine3_pos=spine3_pos,
         spine3_aa=spine3_aa,
         reference_traj=reference_traj,
+        full_correction_traj=full_correction_traj,
     )
 
     cartesian_goal = (
@@ -187,7 +194,7 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
             _write_backend_summary(root_dir, summary)
             continue
 
-        score = evaluate_candidate_cost(generated_context, generated, rollout_fn)
+        score, _ = evaluate_candidate_cost(generated_context, generated, rollout_fn)
         entry["score"] = _finite_or_none(score)
         print(f"[backend-compare] {backend}: score={score:.4f}")
 

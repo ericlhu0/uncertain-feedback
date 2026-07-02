@@ -46,6 +46,7 @@ from uncertain_feedback.planners.mpc.costs.cost_generator import (
 )
 from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
 from uncertain_feedback.planners.mpc.costs.llm_costs import LlmCostGenerator
+from uncertain_feedback.planners.mpc.costs.staged_costs import StagedCostGenerator
 from uncertain_feedback.planners.mpc.costs.turns_costs import TurnsCostGenerator
 from uncertain_feedback.planners.mpc.costs.agent_costs import AgentCostGenerator
 from uncertain_feedback.planners.mpc.costs.prompts import (
@@ -83,6 +84,7 @@ __all__ = [
     # cost generators
     "CostGenerator",
     "LlmCostGenerator",
+    "StagedCostGenerator",
     "TurnsCostGenerator",
     "AgentCostGenerator",
     "create_cost_generator",

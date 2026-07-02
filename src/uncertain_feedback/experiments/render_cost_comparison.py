@@ -61,6 +61,12 @@ def main() -> None:
         help="Output PNG path for the rollout-vs-correction overlay.",
     )
     parser.add_argument(
+        "--angles-out",
+        type=Path,
+        default=None,
+        help="Optional output PNG path for the joint-angle-over-time comparison.",
+    )
+    parser.add_argument(
         "--archive-dir",
         type=Path,
         default=None,
@@ -101,11 +107,12 @@ def main() -> None:
             rollout_path = args.out.with_suffix(".npy")
             video_path = args.out.with_suffix(".mp4")
 
-    score, image_path = evaluate_and_render(
+    score, image_path, _ = evaluate_and_render(
         context,
         cost,
         rollout_fn,
         args.out,
+        angle_path=args.angles_out,
         rollout_path=rollout_path,
         video_path=video_path,
     )
@@ -117,6 +124,9 @@ def main() -> None:
                 {
                     "score": score,
                     "comparison_path": str(candidate_dir / "comparison.png"),
+                    "angles_path": (
+                        str(candidate_dir / "angles.png") if args.angles_out else None
+                    ),
                     "rollout_path": str(rollout_path) if rollout_path else None,
                     "video_path": str(video_path) if video_path else None,
                 },
@@ -128,6 +138,10 @@ def main() -> None:
             archive_image = candidate_dir / "comparison.png"
             if image_path.resolve() != archive_image.resolve():
                 shutil.copyfile(image_path, archive_image)
+            if args.angles_out is not None:
+                archive_angles = candidate_dir / "angles.png"
+                if args.angles_out.resolve() != archive_angles.resolve():
+                    shutil.copyfile(args.angles_out, archive_angles)
     if image_path is None:
         print(
             "[cost-compare] no rollout available for this planner "
@@ -136,6 +150,8 @@ def main() -> None:
         return
     print(f"[cost-compare] L2 score (lower is better): {score:.4f}")
     print(f"[cost-compare] comparison image: {image_path}")
+    if args.angles_out is not None:
+        print(f"[cost-compare] joint-angle image: {args.angles_out}")
 
 
 if __name__ == "__main__":

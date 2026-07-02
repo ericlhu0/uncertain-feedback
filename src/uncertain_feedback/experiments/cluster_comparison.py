@@ -41,6 +41,7 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.costs.cost_generator import _make_llm_model
 from uncertain_feedback.planners.run import (
     _append_extra_cost,
+    _assemble_full_correction_traj,
     _rollout_reference_trajectory,
     run_planning_loop,
 )
@@ -311,9 +312,14 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
         cluster_traj = uq_result.cluster_means[int(label)]
         cluster_dir = root_dir / f"cluster_{label}"
         install_selected = int(label) == uq_result.chosen_label
+        full_correction_traj = _assemble_full_correction_traj(
+            cfg, q_history, cluster_traj, context, base_extra_costs,
+            body_pos, spine3_pos, spine3_aa,
+        )
         generated_context = build_generated_cost_context(
             context, current_q, cluster_traj, q_history, window=history_window,
             body_pos=body_pos, reference_traj=reference_traj,
+            full_correction_traj=full_correction_traj,
         )
         summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
         images: dict[str, Path] = {}

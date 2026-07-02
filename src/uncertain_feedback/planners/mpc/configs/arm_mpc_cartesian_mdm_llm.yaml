@@ -3,7 +3,7 @@ steps: 300
 horizon: 10
 n_mpc_samples: 200
 max_angle_delta: 0.01
-pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt.bak"
 goal_threshold: 0.15
 advance_threshold: 0.15
 max_playback_delta: 0.1  # max per-joint rotation (rad) per step while following the MDM trajectory
@@ -31,7 +31,7 @@ llm_cost:
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true
-  prompt: "5"   # "5" anchors on each path's destination AND keeps the original goal reachable (uses the reference); "3" destination-only; "2" generalizes one correction
+  prompt: "1"   # anchors on each path's destination AND keeps the original goal reachable (uses the reference image)
   # backend defaults to "llm". The two settings below are inert for the "llm"
   # backend; they let run_backend_experiment.py flip to "turns"/"agent" without a
   # backend-specific config.

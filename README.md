@@ -6,11 +6,13 @@ Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedb
 ## Running (Custom) Motion Generation
 ```
 uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
---model_path save/humanml_enc_512_50steps/model000750000.pt \
+--model_path src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/humanml_enc_512_50steps/model000750000.pt \
 --text_condition "a person barely raises their left hand." \
 --num_samples 1 \
 --num_repetitions 1 \
 --motion_length 5.0 \
+--initial_pose_path src/uncertain_feedback/motion_generators/mdm/demo_pose.pt
+--fix_body
 ```
 
 ## Get HML263 from sequence of images of human
@@ -161,17 +163,16 @@ Key hyperparameter guidance:
 
 5. Run motion generation with the new model
 
-From the same directory as training (`motion-diffusion-model/`):
+From the repo root:
 ```
-# still inside motion-diffusion-model/
-uv run python ../sample_leftarm.py \
-    --model_path save/my_finetuned_v1/model000001000.pt \
+uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
+    --model_path src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_v1/model000001000.pt \
     --text_condition "raise my left arm" \
     --num_samples 3 \
     --num_repetitions 5 \
     --motion_length 5.0
 ```
-`--model_path` is always relative to `motion-diffusion-model/` regardless of cwd (the script does an internal `os.chdir`). Output videos are saved under `save/my_finetuned_v1/edit_*/`. (1s = 20 frames)
+All paths are relative to wherever you invoke the script. Output videos are saved under `save/my_finetuned_v1/edit_*/` inside `motion-diffusion-model/`. (1s = 20 frames)
 
 
 ## Kimodo backend setup
@@ -220,7 +221,8 @@ TEXT_ENCODER_DEVICE=cpu uv run python src/uncertain_feedback/motion_generators/k
   --text "raise my left arm" \
   --num-frames 100 \
   --output-npz kimodo_motion.npz \
-  --output-video kimodo_motion.mp4
+  --output-video kimodo_motion.mp4 \
+  --start-pose src/uncertain_feedback/motion_generators/kimodo/start_pose_kimodo.npy
 ```
 
 ## Running a Single MPC Run
@@ -440,10 +442,25 @@ difference between watching and saving is the flag.
 
 ### Comparing cost-generation backends
 
+`llm_cost.backend` selects how the cost is generated:
+
+- `llm` — one LLM call with the full prompt (framing + contract + summaries + images).
+- `staged` — three focused LLM calls so the model reasons about one thing at a time:
+  **interpret** (instruction + contrast images + a compact summary → a plain-language
+  preference), **ground** (that preference + the full numeric summaries → concrete
+  features and numeric bounds), **author** (that spec + the runtime API and output
+  contract → the cost JSON). Each stage sees only what it needs — the images and framing
+  never reach the code-writing stage, and the code contract never reaches interpretation.
+  Single pass, no rollout feedback loop; each stage's prompt and raw response are saved
+  as `<stage>_prompt.txt` / `<stage>_response.txt`.
+- `turns` — a multi-turn conversation that rolls out each candidate, scores it, and feeds
+  the score plus rendered comparisons back to refine it.
+- `agent` — delegates iteration to the external `codex` CLI.
+
 The backend experiment is the orthogonal axis: it holds the correction fixed (the
-**chosen** UQ cluster) and generates a cost with each backend (`llm` / `turns` /
-`agent`), then scores them all on the same rollout-vs-MDM L2 metric and writes a
-`backend_comparison.json` ranking. It requires `planner: arm_mpc_cartesian` (the
+**chosen** UQ cluster) and generates a cost with each backend (`llm` / `staged` /
+`turns` / `agent`), then scores them all on the same rollout-vs-MDM L2 metric and writes
+a `backend_comparison.json` ranking. It requires `planner: arm_mpc_cartesian` (the
 scorer needs a persistent Cartesian goal) and `llm_cost.enabled: true`:
 
 ```bash
@@ -465,22 +482,31 @@ compare a subset, `--rollout-steps N` and
 `agent` candidate cost. A backend that fails to produce a cost (e.g. `codex`
 unavailable) is recorded as failed and the rest still rank.
 
+Every generated LLM-cost artifact directory also includes
+`reference_with_correction.mp4`, a video of the target reference trajectory that
+contains the correction (`full_correction_traj` when available, otherwise the
+MDM correction segment).
+
 #### Visual cost feedback (turns / agent)
 
-When `llm_cost.use_images: true`, the iterating backends refine the cost against a
-**rendered comparison** — a rollout-vs-correction overlay (red "cost rollout" vs
-green "target correction") — not just the scalar L2 score, which is still kept for
-selection and ranking:
+When `llm_cost.use_images: true`, the iterating backends refine the cost against
+**two rendered comparisons** — a spatial rollout-vs-correction overlay (red "cost
+rollout" vs green "target correction") and a joint-angle-over-time graph plotting
+the same two trajectories' arm joint angles (green target vs red rollout) so the
+model sees the shape of the movement, not just endpoints — not just the scalar L2
+score, which is still kept for selection and ranking:
 
-- `turns`: each turn renders `turn_<i>/comparison.png` and feeds it (plus the
-  score) back to the model via the multi-turn conversation. With `--save-video`,
-  each turn also saves `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
+- `turns`: each turn renders `turn_<i>/comparison.png` and `turn_<i>/angles.png`
+  and feeds both (plus the score) back to the model via the multi-turn
+  conversation. With `--save-video`, each turn also saves `turn_<i>/rollout.npy`
+  and `turn_<i>/rollout.mp4`.
 - `agent`: codex receives the initial context overlay image paths as text in
   `TASK.md`, is instructed to load those local files itself, and writes
   `ITERATION_LOG.md` describing what it saw in each image, why each cost
   revision was made, and whether it stopped because the movement matched well
   enough or because it determined the available cost API could not make it match. It also gets a pickled `state.pkl` and a render script it
-  runs itself to inspect its rollout and iterate. The wrapper appends
+  runs itself (writing both `comparison.png` and `angles.png`) to inspect its
+  rollout and iterate. The wrapper appends
   `ITERATION_LOG.md` into `codex.log` when the run finishes. The script can
   also be run standalone to re-render any candidate:
 
@@ -489,14 +515,16 @@ selection and ranking:
     --state <run_dir>/agent/state.pkl \
     --response <run_dir>/agent/response.json \
     --out comparison.png \
+    --angles-out angles.png \
     --archive-dir candidates \
     --save-video
   ```
 
   It loads the pickled `EvalState`, rolls the goal-seeking MPC with the candidate
-  cost, prints the L2 score, and writes the overlay PNG. With `--archive-dir`,
-  each invocation creates `candidate_<i>/` containing `response.json`, `cost.py`,
-  `score.json`, `comparison.png`, and, with `--save-video`, `rollout.npy` plus
+  cost, prints the L2 score, and writes the overlay PNG (plus the joint-angle
+  graph when `--angles-out` is given). With `--archive-dir`, each invocation
+  creates `candidate_<i>/` containing `response.json`, `cost.py`, `score.json`,
+  `comparison.png`, `angles.png`, and, with `--save-video`, `rollout.npy` plus
   `rollout.mp4`.
 
 With `use_images: false` both backends fall back to score-only text feedback.

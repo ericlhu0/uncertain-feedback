@@ -32,6 +32,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
     LlmCostResponse,
+    build_joint_angle_series,
     parse_llm_cost_response,
 )
 from uncertain_feedback.planners.mpc.costs.prompts import build_llm_cost_prompt
@@ -104,23 +105,25 @@ def evaluate_candidate_cost(
     context: GeneratedCostContext,
     cost: GeneratedPythonCost,
     rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
-) -> float:
+) -> tuple[float, np.ndarray | None]:
     """Score a candidate cost; lower is better.
 
     Rolls the goal-seeking MPC toward its original goal with this cost installed
     (via ``rollout_fn``), resamples the result to the corrected (MDM) trajectory's
-    length, and returns the mean per-frame Cartesian (FK) L2 distance to it. A cost
-    that steers the goal-seeking motion to match the user's correction scores low.
+    length, and returns the mean per-frame Cartesian (FK) L2 distance to it plus the
+    raw rollout trajectory. A cost that steers the goal-seeking motion to match the
+    user's correction scores low.
 
-    Returns ``math.inf`` when no rollout is available (``rollout_fn`` is ``None`` or
-    yields no trajectory, e.g. planners without a persistent Cartesian goal).
+    Returns ``(math.inf, None)`` when no rollout is available (``rollout_fn`` is
+    ``None`` or yields no trajectory, e.g. planners without a persistent Cartesian
+    goal).
     """
     if rollout_fn is None:
-        return math.inf
+        return math.inf, None
     rollout = rollout_fn(cost)
     if rollout is None:
-        return math.inf
-    return _score_rollout(context, rollout)
+        return math.inf, None
+    return _score_rollout(context, rollout), rollout
 
 
 def evaluate_and_render(
@@ -129,43 +132,54 @@ def evaluate_and_render(
     rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None,
     image_path: Path,
     *,
+    angle_path: Path | None = None,
     rollout_path: Path | None = None,
     video_path: Path | None = None,
-) -> tuple[float, Path | None]:
+) -> tuple[float, Path | None, np.ndarray | None]:
     """Score a candidate cost and render the rollout-vs-correction comparison.
 
     Rolls the goal-seeking MPC **once** with ``cost`` installed, computes the L2
     score (:func:`_score_rollout`), and renders ``image_path`` overlaying that
     rollout against the MDM correction
-    (:meth:`ArmVisualizer.render_cost_feedback_overlay`). Returns
-    ``(score, image_path)``, or ``(math.inf, None)`` when no rollout is available
-    (planners without a persistent Cartesian goal) so callers degrade to text-only
-    feedback.
+    (:meth:`ArmVisualizer.render_cost_feedback_overlay`). When ``angle_path`` is
+    given, also renders a joint-angle-over-time comparison there
+    (:meth:`ArmVisualizer.render_joint_angle_comparison`). Returns
+    ``(score, image_path, rollout)``, or ``(math.inf, None, None)`` when no rollout
+    is available (planners without a persistent Cartesian goal) so callers degrade
+    to text-only feedback.
     """
     from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
         ArmVisualizer,
     )
 
     if rollout_fn is None:
-        return math.inf, None
+        return math.inf, None, None
     rollout = rollout_fn(cost)
     if rollout is None:
-        return math.inf, None
+        return math.inf, None, None
     rollout = np.asarray(rollout, dtype=np.float64)
     if rollout.ndim != 3 or rollout.shape[0] == 0:
-        return math.inf, None
+        return math.inf, None, None
     score = _score_rollout(context, rollout)
     image_path.parent.mkdir(parents=True, exist_ok=True)
     visualizer = ArmVisualizer(context.fk)
+    correction_traj = _reference_with_correction_traj(context)
     visualizer.render_cost_feedback_overlay(
         image_path,
         rollout_traj=rollout,
-        correction_traj=context.mdm_traj,
+        correction_traj=correction_traj,
         current_q=context.current_q,
         spine3_pos=context.spine3_pos,
         spine3_aa=context.spine3_aa,
         body_pos=context.body_pos,
     )
+    if angle_path is not None:
+        angle_path.parent.mkdir(parents=True, exist_ok=True)
+        visualizer.render_joint_angle_comparison(
+            angle_path,
+            target_series=build_joint_angle_series(context, correction_traj),
+            rollout_series=build_joint_angle_series(context, rollout),
+        )
     if rollout_path is not None:
         rollout_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(rollout_path, rollout)
@@ -178,7 +192,14 @@ def evaluate_and_render(
             spine3_aa=context.spine3_aa,
             body_pos=context.body_pos,
         )
-    return score, image_path
+    return score, image_path, rollout
+
+
+def _reference_with_correction_traj(context: GeneratedCostContext) -> np.ndarray:
+    """Return the target path that includes the user's correction."""
+    if context.full_correction_traj is not None:
+        return context.full_correction_traj
+    return context.mdm_traj
 
 
 class CostGenerator(ABC):
@@ -275,6 +296,36 @@ class CostGenerator(ABC):
         self.run_dir.mkdir(parents=True, exist_ok=True)
         with open(self.run_dir / "summaries.json", "w", encoding="utf-8") as f:
             json.dump(self.summaries, f, indent=2, sort_keys=True)
+        self._save_reference_video()
+
+    def _save_reference_video(self) -> None:
+        from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+            ArmVisualizer,
+        )
+
+        reference = np.asarray(
+            _reference_with_correction_traj(self.context), dtype=np.float64
+        )
+        if reference.ndim != 3 or reference.shape[0] == 0:
+            return
+        video_path = self.run_dir / "reference_with_correction.mp4"
+        mdm_traj = np.asarray(self.context.mdm_traj, dtype=np.float64)
+        mdm_goal_q = (
+            mdm_traj[-1]
+            if mdm_traj.ndim == 3 and mdm_traj.shape[0] > 0
+            else reference[-1]
+        )
+        try:
+            ArmVisualizer(self.context.fk).render_rollout_video(
+                reference,
+                video_path,
+                spine3_pos=self.context.spine3_pos,
+                spine3_aa=self.context.spine3_aa,
+                body_pos=self.context.body_pos,
+                mdm_goal_q=mdm_goal_q,
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            print(f"[cost-gen] failed to render {video_path}: {exc}")
 
     def save_response(
         self, response: LlmCostResponse, *, dir_: Path | None = None
@@ -380,6 +431,9 @@ def create_cost_generator(
     from uncertain_feedback.planners.mpc.costs.llm_costs import (  # pylint: disable=import-outside-toplevel
         LlmCostGenerator,
     )
+    from uncertain_feedback.planners.mpc.costs.staged_costs import (  # pylint: disable=import-outside-toplevel
+        StagedCostGenerator,
+    )
     from uncertain_feedback.planners.mpc.costs.turns_costs import (  # pylint: disable=import-outside-toplevel
         TurnsCostGenerator,
     )
@@ -403,11 +457,13 @@ def create_cost_generator(
     backend = cfg.backend
     if backend == "llm":
         return LlmCostGenerator(**common)
+    if backend == "staged":
+        return StagedCostGenerator(**common)
     if backend == "turns":
         return TurnsCostGenerator(max_turns=cfg.max_turns, **common)
     if backend == "agent":
         return AgentCostGenerator(codex_cmd=cfg.codex_cmd, **common)
     raise GeneratedCostValidationError(
         f"unknown cost-generator backend {backend!r}; "
-        "expected one of 'llm', 'turns', 'agent'"
+        "expected one of 'llm', 'staged', 'turns', 'agent'"
     )

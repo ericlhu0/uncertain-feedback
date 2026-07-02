@@ -104,8 +104,12 @@ def apply_leftarm_inpainting(
 
 
 def main():
-    os.chdir(MDM_ROOT / "motion-diffusion-model")
     args = edit_args()
+    args.model_path = str(Path(args.model_path).resolve())
+    if args.output_dir:
+        args.output_dir = str(Path(args.output_dir).resolve())
+    args.initial_pose_path = str(Path(args.initial_pose_path).resolve())
+    os.chdir(MDM_ROOT / "motion-diffusion-model")
     fixseed(args.seed)
     out_path = args.output_dir
     name = os.path.basename(os.path.dirname(args.model_path))
@@ -198,7 +202,7 @@ def main():
     # gt_frames_per_sample = {}
     # model_kwargs['y']['inpainted_motion'] = input_motions
 
-    sitting_pose_path = MDM_ROOT / "demo_pose2.pt"
+    sitting_pose_path = args.initial_pose_path
     sitting_pose = torch.load(sitting_pose_path, map_location="cuda")  # (263, 1)
     input_motions = sitting_pose.unsqueeze(0).unsqueeze(-1).repeat(args.num_samples, 1, 1, n_frames)
     gt_frames_per_sample = {}
@@ -208,7 +212,7 @@ def main():
         n_prefix=1,
         batch_size=args.num_samples,
         n_frames=n_frames,
-        fix_body=False,
+        fix_body=args.fix_body,
     )
 
     all_motions = []

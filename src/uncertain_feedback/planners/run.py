@@ -617,6 +617,41 @@ def _rollout_reference_trajectory(
     return np.asarray([q0, *result.q_history], dtype=np.float64)
 
 
+def _assemble_full_correction_traj(
+    cfg: MpcRunConfig,
+    q_history: list[np.ndarray],
+    correction_traj: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+) -> np.ndarray:
+    """Assemble the entire corrected path: history → correction → goal continuation.
+
+    This is the target shown (green) in the cost-feedback comparison so the cost
+    generator sees the whole intended trajectory, not just the MDM correction
+    segment. The three segments are the executed pre-correction history, the MDM
+    correction itself, and a comfort-only goal-seeking continuation rolled from the
+    correction's endpoint (so the arm still reaches the goal afterwards). The
+    continuation is empty for planners without a Cartesian goal, leaving just
+    history + correction. The duplicated seam frame at the correction endpoint is
+    dropped.
+    """
+    correction_traj = np.asarray(correction_traj, dtype=np.float64)
+    segments: list[np.ndarray] = []
+    if q_history:
+        segments.append(np.asarray(q_history, dtype=np.float64))
+    segments.append(correction_traj)
+    post = _rollout_reference_trajectory(
+        cfg, correction_traj[-1], context, base_extra_costs,
+        body_pos, spine3_pos, spine3_aa,
+    )
+    if post is not None and len(post) > 1:
+        segments.append(post[1:])
+    return np.concatenate(segments, axis=0)
+
+
 def _make_cost_eval_rollout(
     cfg: MpcRunConfig,
     current_q: np.ndarray,
@@ -753,10 +788,15 @@ def main() -> None:
             # Build the shared context/summaries/images once, then let the
             # configured backend (llm / turns / agent) generate the cost. All three
             # are constructed and called identically; only the factory branches.
+            full_correction_traj = _assemble_full_correction_traj(
+                cfg, list(q_history), llm_traj, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
+                body_pos, setup.spine3_pos, spine3_aa,
+            )
             generated_context = build_generated_cost_context(
                 cost_context, q, llm_traj, list(q_history),
                 window=cfg.preference_window, body_pos=body_pos,
                 reference_traj=reference_traj,
+                full_correction_traj=full_correction_traj,
             )
             summaries = build_motion_summaries(
                 generated_context, cartesian_goal=goal_pos
@@ -789,6 +829,7 @@ def main() -> None:
                 spine3_pos=setup.spine3_pos,
                 spine3_aa=spine3_aa,
                 reference_traj=reference_traj,
+                full_correction_traj=full_correction_traj,
             )
             generator = create_cost_generator(
                 cfg.llm_cost, generated_context, args.text,

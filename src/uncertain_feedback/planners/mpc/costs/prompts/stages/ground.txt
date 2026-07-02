@@ -1,0 +1,32 @@
+You are grounding a care preference in trajectory data. This is the SECOND of three stages. You are given a plain-language preference (from stage one) and the full numeric trajectory summaries. Your only job is to turn that preference into a concrete NUMERIC specification a programmer could implement directly. You are NOT writing code in this stage.
+
+Preference (from stage one):
+{interpretation}
+
+Available joint-angle features (all in radians, all you may specify a preference over):
+- elbow_flexion: how bent the elbow is (larger = more bent).
+- shoulder_flexion_extension: signed depth of the upper arm; positive = forward, negative = back.
+- shoulder_abduction_adduction: signed lateral position of the upper arm; positive = out away from the torso (for the left arm), negative = across the body.
+- shoulder_internal_external_rotation: signed twist of the upper arm.
+Each of these appears in the summaries under "joint_features" for every trajectory, with min / median / max / start / end values.
+
+How to ground it:
+- Choose the FEWEST features that express the preference — default to exactly one. Add a second only if stage one's "secondary" clearly calls for a distinct one.
+- Translate the preference into ONE of these bound types per feature, never an exact target unless the preference clearly demands a precise posture:
+  - "lower_bound": penalize the feature going BELOW a value (e.g. keep the elbow at least this bent).
+  - "upper_bound": penalize the feature going ABOVE a value.
+  - "band": penalize leaving a [low, high] comfort range.
+- Pick the numeric value(s) from the summaries. A feature value on the CHOSEN trajectory (its "mdm_traj" end or median) is an EXAMPLE inside a broader comfortable set — turn it into a bound with margin, not the exact number. State which trajectory and which statistic each value came from.
+- Stay goal-safe. A "reference" summary (the original-goal path the robot must still reach) is usually present. Unless stage one set goal_conflict=true, every bound you choose MUST already be satisfied by BOTH the chosen trajectory's end AND the reference's end — check both in the summaries and widen the bound until it contains them. If goal_conflict=true, you may set the bound to gently exclude the goal posture, but never by more than the chosen trajectory demonstrates.
+- Keep magnitudes modest: this preference is ADDED to a goal-reaching objective that must stay dominant.
+
+Return ONLY a JSON object, no prose, with these keys:
+- "terms": a list (usually length 1) of objects, each:
+  - "feature": one of the four feature names above (string).
+  - "bound_type": "lower_bound" | "upper_bound" | "band" (string).
+  - "values": for lower_bound/upper_bound {"threshold": float}; for band {"low": float, "high": float}. Radians.
+  - "source": which trajectory + statistic each number came from, and the margin you added (string).
+- "goal_safety_check": one sentence confirming each bound is satisfied by both the chosen end and the reference end (or, if goal_conflict, why the gentle exclusion is justified) (string).
+
+Full numeric summaries:
+{summaries}

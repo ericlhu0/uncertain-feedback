@@ -39,7 +39,6 @@ class LlmCostConfig:
     strict: bool = False
     artifact_dir: Path = Path("llm_cost_artifacts")
     use_images: bool = True
-    prompt: str = "1"
     # Which cost generator to use: "llm" (single-turn, default), "turns"
     # (multi-turn conversation), or "agent" (delegate to the codex CLI).
     backend: str = "llm"
@@ -50,7 +49,7 @@ class LlmCostConfig:
     codex_cmd: str = "codex exec --skip-git-repo-check"
 
 
-COST_BACKENDS = {"llm", "staged", "turns", "agent"}
+COST_BACKENDS = {"llm", "turns", "agent"}
 
 
 @dataclass(frozen=True)
@@ -246,10 +245,6 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             ),
             use_images=_bool(
                 llm_cost_data.get("use_images", True), "llm_cost.use_images"
-            ),
-            prompt=(
-                _optional_str(llm_cost_data.get("prompt", "1"), "llm_cost.prompt")
-                or "2"
             ),
             backend=_cost_backend(llm_cost_data.get("backend", "llm")),
             max_turns=_positive_int(

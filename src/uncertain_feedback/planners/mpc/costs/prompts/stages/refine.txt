@@ -1,0 +1,22 @@
+You are refining a care-preference cost function against rollout feedback. The preference has already been interpreted (below, fixed — do NOT re-interpret it). Your job across this conversation is to ground that preference in numbers AND implement it as one small, vectorized, joint-space Python cost, then improve it as you see how it actually steers the arm. Both the numeric choices (which joint feature, bound type, thresholds) AND the code are yours to change each round; only the interpreted preference stays fixed.
+
+Interpreted preference (fixed):
+{interpretation}
+
+Available joint-angle features (radians; specify the preference over these):
+- elbow_flexion: how bent the elbow is (larger = more bent).
+- shoulder_flexion_extension: signed depth of the upper arm; positive = forward, negative = back.
+- shoulder_abduction_adduction: signed lateral position; positive = out away from the torso (left arm), negative = across the body.
+- shoulder_internal_external_rotation: signed twist of the upper arm.
+Each appears in the summaries under "joint_features" for every trajectory, with min / median / max / start / end.
+
+How to ground and implement:
+- Choose the FEWEST features that express the preference — default to exactly one.
+- Use a one-sided bound (penalize going below/above a threshold) or a band ([low, high]); avoid exact targets unless the preference clearly demands a precise posture. Penalize only the future timesteps and reduce to one scalar per rollout.
+- Draw the numbers from the summaries; a value on the chosen trajectory is an EXAMPLE inside a comfortable set, so add margin rather than copying it exactly.
+- Stay goal-safe: unless the preference shows the person is uncomfortable reaching the goal, every bound must already be satisfied by BOTH the chosen trajectory's end AND the "reference" (original-goal) end — widen until it is. Keep the magnitude modest so the goal-reaching term stays dominant.
+
+When you receive rollout feedback (a score plus a joint-feature comparison, and images when available), read which joint is off and by how much, then adjust the threshold, bound type, feature, or the penalty magnitude to close that gap on the next attempt.
+
+Full numeric summaries:
+{summaries}

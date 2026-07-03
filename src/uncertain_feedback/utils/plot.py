@@ -1205,21 +1205,27 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         *,
         target_series: dict[str, np.ndarray],
         rollout_series: dict[str, np.ndarray],
+        reference_series: dict[str, np.ndarray] | None = None,
     ) -> None:
         """Plot joint angles over time: target correction vs. cost rollout.
 
         One subplot per anatomical joint feature (keyed identically in both
         dicts, e.g. ``elbow_flexion``), each a ``(T,)`` radian series. The target
         corrected path is drawn in green and the candidate cost's rollout in red;
-        each rollout series is linearly resampled to its target series' length so
-        both curves share a frame-index x-axis. Companion to
+        when ``reference_series`` is given, the initial uncorrected goal-seeking
+        path is drawn as a dashed steel-blue curve so the difference between the
+        pre-correction and corrected motion is visible. Each rollout and reference
+        series is linearly resampled to its target series' length so all curves
+        share a frame-index x-axis. Companion to
         :meth:`render_cost_feedback_overlay`: the overlay shows Cartesian shape,
         this shows the temporal shape of each joint angle.
 
         Args:
-            save_path:      Output image path (.png).
-            target_series:  ``{feature_name: (T,) radians}`` for the target path.
-            rollout_series: ``{feature_name: (R,) radians}`` for the cost rollout.
+            save_path:        Output image path (.png).
+            target_series:    ``{feature_name: (T,) radians}`` for the target path.
+            rollout_series:   ``{feature_name: (R,) radians}`` for the cost rollout.
+            reference_series: ``{feature_name: (S,) radians}`` for the initial
+                              uncorrected path, or ``None`` to omit it.
         """
         save_path = Path(save_path)
         names = list(target_series.keys())
@@ -1230,6 +1236,13 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 np.asarray(rollout_series[name], dtype=np.float64), target.shape[0]
             )
             frames = np.arange(target.shape[0])
+            if reference_series is not None:
+                reference = _resample_traj(
+                    np.asarray(reference_series[name], dtype=np.float64),
+                    target.shape[0],
+                )
+                ax.plot(frames, reference, color="steelblue", linewidth=1.4,
+                        linestyle="--", label="initial uncorrected path")
             ax.plot(frames, target, color="green", linewidth=1.6,
                     label="target corrected path")
             ax.plot(frames, rollout, color="firebrick", linewidth=1.6,

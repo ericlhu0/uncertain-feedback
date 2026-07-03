@@ -1,9 +1,9 @@
-"""Single-turn (``llm``) cost generator, plus back-compat re-exports.
+"""Single-pass (``llm``) staged cost generator, plus back-compat re-exports.
 
 The shared primitives now live in :mod:`...costs.generated`; this module re-exports
 them so existing ``from ...costs.llm_costs import ...`` imports keep working, and
-adds :class:`LlmCostGenerator` — the one-shot cost generator (the original
-single-turn behavior, lifted out of ``planners/run.py``).
+adds :class:`LlmCostGenerator` — the one-pass generator that runs the three focused
+stages (interpret -> ground -> author) once, with no rollout feedback loop.
 """
 
 from __future__ import annotations
@@ -36,17 +36,15 @@ __all__ = [
 
 
 class LlmCostGenerator(CostGenerator):
-    """Single-turn cost generator: one LLM call, no feedback loop."""
+    """Single-pass staged cost generator: interpret -> ground -> author, no feedback."""
 
     def generate(self, install: bool = False) -> GeneratedPythonCost | None:
         try:
             self.begin()
-            prompt_text, image_input = self.build_prompt()
-            (self.run_dir / "prompt.txt").write_text(prompt_text, encoding="utf-8")
             llm = self.make_llm()
-            raw = llm.get_full_output(prompt_text, image_input=image_input)
-            (self.run_dir / "raw_response.txt").write_text(raw, encoding="utf-8")
-            response, cost = self.parse_cost(raw)
+            interpretation = self.interpret(llm)
+            specification = self.ground(llm, interpretation)
+            response, cost = self.author(llm, specification)
             self.save_response(response)
             if install:
                 self.install(cost)

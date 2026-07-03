@@ -1,8 +1,8 @@
 # LLM / Agent Cost-Generation Prompting — Full Review
 
 _A complete map of every prompt, contract, image, and summary fed to the cost
-generator, plus observed tensions. Covers `costs/prompts/**`, the four backends
-(`llm_costs.py`, `staged_costs.py`, `turns_costs.py`, `agent_costs.py`), the shared plumbing in
+generator, plus observed tensions. Covers `costs/prompts/**`, the three backends
+(`llm_costs.py`, `turns_costs.py`, `agent_costs.py`), the shared plumbing in
 `cost_generator.py` / `generated.py` / `cost_feedback.py`, and the rendering in
 `utils/plot.py`._
 
@@ -34,29 +34,30 @@ minimal, joint-space, preference-shaped (not path-copying), and goal-safe.
 
 Source: `prompts/__init__.py`.
 
-Every prompt sent to the model is built by `build_llm_cost_prompt(...)` and is the
-concatenation of **four blocks**, in order:
+Every backend uses the same staged prompting strategy:
 
 ```
-[ template head (templates/<name>.txt) ]   ← framing + guidelines + {instruction} + image placeholders
-[ runtime_api.txt ]                         ← shared API contract (identical everywhere)
-[ output_contract.txt ]                     ← shared "Hard requirements" + JSON schema (identical everywhere)
-Summaries:
-{summaries}                                 ← JSON trajectory statistics (see §7)
+interpret.txt + instruction + contrast images + compact summaries
+    -> plain-language preference JSON
+ground.txt + interpretation + full numeric summaries
+    -> numeric feature/bound specification JSON
+author.txt + specification + runtime_api.txt + output_contract.txt
+    -> final cost JSON
 ```
 
 Assembly details:
 
-- `_assemble(head)` joins `head + runtime_api + output_contract + "Summaries:\n{summaries}"`.
-- Templates are **auto-registered** by filename stem: dropping `templates/6.txt` adds
-  a `"6"` prompt with no code change. Registry key = filename stem.
+- `build_interpret_prompt`, `build_ground_prompt`, `build_author_prompt`, and
+  `build_refine_prompt` load `prompts/stages/*.txt`.
+- `compact_summaries()` strips raw joint-angle arrays from stage one so interpretation
+  does not do stage two's numeric work.
 - Substitution is via `str.replace` (not `str.format`), so literal braces in the
   guideline prose are left untouched. Only `{instruction}`, `{summaries}`, and the
   image placeholders are replaced.
-- **Selected via** `llm_cost.prompt` in the MPC config. There is currently **one
-  template, `"1"`** (the default). Earlier variants `2`–`5` were consolidated away; `1`
-  is the former `5` (the most goal-safe, multi-candidate framing). The auto-registry
-  means adding more later is just dropping in `templates/<name>.txt`.
+- `turns` uses `build_refine_prompt`: it fixes the interpretation once, then lets the
+  conversation revise both the numeric grounding and the code against rollout feedback.
+- `agent` uses `build_staged_task_body`: the same stage heads are inlined into `TASK.md`
+  so codex follows the same decomposition.
 
 ### Image placeholders
 
@@ -76,22 +77,28 @@ so a placeholder can be dropped whole when its image is unavailable.
 
 ---
 
-## 3. The template head (`templates/1.txt`)
+## 3. Stage heads (`prompts/stages/*.txt`)
 
-There is one framing head, `1.txt` (formerly `5.txt`, kept as the most goal-safe
-variant when the earlier heads were removed). It requests **all three** images
-(`current` + `others` + `reference`) and is written for the **UQ multi-candidate,
+There are four stage heads: `interpret.txt`, `ground.txt`, `author.txt`, and
+`refine.txt`. `interpret.txt` requests **all three** contrast images (`current` +
+`others` + `reference`) when available and is written for the **UQ multi-candidate,
 iterative** case.
 
 Persona: *the caregiver of a person with limited arm mobility.* The robot was already
 driving the arm to a goal when the user interrupted with one spoken instruction; the
 robot produced several candidate motions; the user picked **one**. The head's job is to
 put into words what made the chosen motion right — what the other candidates got wrong —
-and express only that as a tiny cost function that adjusts **how** the arm moves without
-preventing it from still reaching the original goal.
+and express only that as a joint-space preference that adjusts **how** the arm moves
+without preventing it from still reaching the original goal. `ground.txt` turns that
+preference into feature/bound numbers; `author.txt` implements those numbers without
+changing them.
 
 Core instructions in the head:
 
+- **Resolve the distinguishing dimension to a supported joint feature.** Height/reach
+  language must be attributed to elbow flexion, shoulder flexion/extension, shoulder
+  abduction/adduction, or shoulder internal/external rotation; there is no separate
+  hand-height feature in the authoring API.
 - **Infer the preferred *set*, not the demonstrated point.** A feature value on the
   chosen trajectory is one example inside a broader comfortable set — convert to a band /
   one-sided bound / tolerance, never an exact target.
@@ -104,8 +111,7 @@ Core instructions in the head:
   rises from the same pose, so it encodes nothing).
 - **Prefer named joint-angle helpers** for the differentiator ("most 'where the hand
   goes' differences are downstream of a joint being held differently — check joint
-  angles first"); reach for a Cartesian region/height band only when no joint angle can
-  explain it.
+  angles first").
 - **Do NOT block the original goal** (dedicated section — this is why the reference image
   is shown): the cost is *added* to the goal-reaching objective, so it must be near-zero
   all along the reference path *and* at its final joint posture, and the preferred set
@@ -254,36 +260,27 @@ elbow_flexion of the MDM range").
 
 ---
 
-## 8. The four backends
+## 8. The three backends
 
 All constructed identically via `create_cost_generator(cfg, ...)`; only the factory
-branches on `cfg.backend`. Shared base `CostGenerator` supplies prompt building, LLM
+branches on `cfg.backend`. Shared base `CostGenerator` supplies stage helpers, LLM
 construction, JSON parse/compile/smoke-test, artifact saving, and installation.
 
-- **`llm`** (`LlmCostGenerator`, default): one call, no feedback. Writes `prompt.txt`,
-  `raw_response.txt`, `cost.py`, `params.json`. Uses only the §6a prompt images.
-- **`staged`** (`StagedCostGenerator`): the monolithic single call split into **three
-  focused calls** so the model isn't reasoning about everything at once — a direct
-  response to finding #1's "the model juggles interpret + ground + author
-  simultaneously." **Interpret** (instruction + the §6a contrast images + a *compact*
-  summary — via `build_interpret_prompt` — → a plain-language preference JSON;
-  no runtime API, no contract, no numeric grounding). **Ground** (that preference + the
-  *full* numeric summaries → concrete features + numeric bounds; text only). **Author**
-  (that spec + `runtime_api` + `output_contract` → the cost JSON; no images, no
-  interpretation). Each stage's raw text chains into the next; only the author output is
-  parsed/compiled. Single pass, no rollout feedback (like `llm`). Saves
-  `interpret_prompt.txt`/`interpret_response.txt` (and same for `ground`/`author`).
-  Stage heads live in `prompts/stages/{interpret,ground,author}.txt`. Note: this splits
-  the *task*, not the joint-space/height contradiction of finding #1 — the ground stage
-  still recommends the same feature-vs-position choices, so that tension is unchanged.
+- **`llm`** (`LlmCostGenerator`, default): single-pass staged flow. Runs
+  interpret → ground → author once, parses/compiles only author output, and saves
+  `interpret_*`, `ground_*`, `author_*`, `stage_log.md`, `cost.py`, and `params.json`.
 - **`turns`** (`TurnsCostGenerator`, `max_turns` default 6): a real stateful
-  conversation. Each turn: parse → roll out → score (FK L2, lower=better) → render
-  `comparison.png` + `angles.png` → feed the score, both images, and a JSON
-  joint-feature comparison back as the next user message. Keeps the best-scoring cost;
-  stops early after `_NO_IMPROVE_PATIENCE = 2` non-improving turns.
+  conversation. It interprets once, then iterates grounding+authoring. Each turn:
+  parse → roll out → score (FK L2, lower=better) → render `comparison.png` +
+  `angles.png` → feed the score, both images, and a JSON joint-feature comparison back
+  as the next user message. Keeps the best-scoring cost; stops early after
+  `_NO_IMPROVE_PATIENCE = 2` non-improving turns. `stage_log.md` records the fixed
+  interpretation and every refine-turn prompt snapshot/response.
 - **`agent`** (`AgentCostGenerator`, `codex_cmd`): writes the same prompt into `TASK.md`
-  and delegates to the external `codex` CLI, which authors `response.json` itself. When
-  an `EvalState` is available it also drops `state.pkl` + points codex at
+  as an inlined staged task and delegates to the external `codex` CLI, which authors
+  `response.json` itself. It must also write `stage_log.md` with Stage 1, Stage 2, and
+  Stage 3 responses; that file is appended to `codex.log`. When an `EvalState` is
+  available it also drops `state.pkl` + points codex at
   `experiments/render_cost_comparison.py` so codex can roll out, render
   `comparison.png`/`angles.png`, and iterate — logging each visual comparison in a
   required `ITERATION_LOG.md`.
@@ -377,15 +374,13 @@ The stale `defaults to "default"` docstring comment is also now fixed (reads `"1
 
 | File | Role |
 |---|---|
-| `prompts/__init__.py` | assembly, placeholder→image mapping, `build_llm_cost_prompt` |
+| `prompts/__init__.py` | staged prompt assembly, placeholder→image mapping |
 | `prompts/runtime_api.txt` | shared API contract (§4) |
 | `prompts/output_contract.txt` | shared hard requirements + JSON schema (§5) |
-| `prompts/templates/1.txt` | the framing head (§3) |
+| `prompts/stages/*.txt` | interpret / ground / author / refine heads (§3) |
 | `cost_generator.py` | base class, factory, scoring, `evaluate_and_render` |
-| `llm_costs.py` | single-shot backend |
-| `staged_costs.py` | 3-stage backend (interpret → ground → author) |
-| `prompts/stages/*.txt` | staged-backend heads (§8) |
-| `turns_costs.py` | multi-turn conversational backend |
+| `llm_costs.py` | single-pass staged backend |
+| `turns_costs.py` | multi-turn conversational backend (fixed interpret, ground+author refine) |
 | `agent_costs.py` | codex-CLI agent backend, `TASK.md` authoring |
 | `generated.py` | runtime context, cost compile/exec, summaries, `render_prompt_images` |
 | `cost_feedback.py` | `EvalState` — picklable rollout state for the off-process agent |

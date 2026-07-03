@@ -32,12 +32,14 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
 )
+from uncertain_feedback.planners.mpc.costs.prompts import build_staged_task_body
 
 _RESPONSE_FILE = "response.json"
 _STATE_FILE = "state.pkl"
 _COMPARISON_FILE = "comparison.png"
 _ANGLES_FILE = "angles.png"
 _ITERATION_LOG_FILE = "ITERATION_LOG.md"
+_STAGE_LOG_FILE = "stage_log.md"
 _RENDER_SCRIPT = (
     Path(__file__).resolve().parents[3] / "experiments" / "render_cost_comparison.py"
 )
@@ -46,9 +48,10 @@ _REPO_ROOT = _RENDER_SCRIPT.parents[3]
 _CODEX_INSTRUCTION = (
     "Read TASK.md in this directory. Load every local image path listed there "
     f"before drafting the first answer, maintain {_ITERATION_LOG_FILE} exactly "
-    f"as TASK.md requests, and write the final cost as the single JSON object "
-    f"it specifies (keys: description, code, params, explanation, "
-    f"recipient_explanation) into {_RESPONSE_FILE}."
+    f"as TASK.md requests, maintain {_STAGE_LOG_FILE} exactly as TASK.md "
+    f"requests, and write the final cost as the single JSON object it specifies "
+    f"(keys: description, code, params, explanation, recipient_explanation) into "
+    f"{_RESPONSE_FILE}."
 )
 
 
@@ -64,7 +67,11 @@ class AgentCostGenerator(CostGenerator):
     def generate(self, install: bool = False) -> GeneratedPythonCost | None:
         try:
             self.begin()
-            prompt_text, image_input = self.build_prompt()
+            prompt_text, image_input = build_staged_task_body(
+                self.instruction,
+                self.summaries,
+                self.images if self.use_images else {},
+            )
             iterate = self.use_images and self.eval_state is not None
             if iterate:
                 self.eval_state.save(self.run_dir / _STATE_FILE)
@@ -78,6 +85,7 @@ class AgentCostGenerator(CostGenerator):
             )
 
             self._run_codex()
+            self._record_stage_log()
             self._record_iteration_log(required=self.use_images)
 
             response_path = self.run_dir / _RESPONSE_FILE
@@ -144,6 +152,17 @@ class AgentCostGenerator(CostGenerator):
                 "determined it cannot be made to match with the available cost "
                 "API.\n\n"
             )
+        header += (
+            "## Required stage log\n\n"
+            f"Maintain `{_STAGE_LOG_FILE}` while you work. It must show the response "
+            "you produced for each stage prompt with exactly these headings:\n"
+            "- `## Stage 1 response` — the interpretation JSON you wrote after "
+            "reading the Stage 1 prompt and visual context.\n"
+            "- `## Stage 2 response` — the numeric grounding/specification JSON you "
+            "wrote from the Stage 2 prompt.\n"
+            "- `## Stage 3 response` — the final cost JSON you wrote to "
+            f"`{_RESPONSE_FILE}`.\n\n"
+        )
         if iterate:
             header += (
                 "## Iterate using the rollout comparison\n\n"
@@ -164,8 +183,10 @@ class AgentCostGenerator(CostGenerator):
                 "(green, 'target corrected path': the pre-correction motion, the "
                 "correction, and the continuation to the goal) it should match, and "
                 f"`{_ANGLES_FILE}`, which plots each arm joint angle over time for "
-                "the same two trajectories (green target vs red rollout) so you can "
-                "compare the shape of the movement, not just endpoints. Open and "
+                "the same two trajectories (green target vs red rollout), plus the "
+                "initial uncorrected goal-seeking path (dashed steel-blue) so you "
+                "can see how the correction changed the motion, and compare the "
+                "shape of the movement, not just endpoints. Open and "
                 "look at both images: where the red arm/curves diverge from the "
                 "green ones tells you what to fix. Revise "
                 "`response.json`, re-run the command, and keep iterating until "
@@ -200,6 +221,22 @@ class AgentCostGenerator(CostGenerator):
             raise GeneratedCostValidationError(
                 f"codex exited with code {result.returncode}; see codex.log"
             )
+
+    def _record_stage_log(self) -> None:
+        stage_log_path = self.run_dir / _STAGE_LOG_FILE
+        codex_log_path = self.run_dir / "codex.log"
+        if not stage_log_path.exists():
+            with open(codex_log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n\n[missing] {_STAGE_LOG_FILE}\n")
+            raise GeneratedCostValidationError(
+                f"codex did not produce {_STAGE_LOG_FILE}; see codex.log"
+            )
+        stage_log = stage_log_path.read_text(encoding="utf-8")
+        with open(codex_log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n\n===== {_STAGE_LOG_FILE} =====\n")
+            f.write(stage_log)
+            if not stage_log.endswith("\n"):
+                f.write("\n")
 
     def _record_iteration_log(self, *, required: bool) -> None:
         iteration_log_path = self.run_dir / _ITERATION_LOG_FILE

@@ -444,22 +444,22 @@ difference between watching and saving is the flag.
 
 `llm_cost.backend` selects how the cost is generated:
 
-- `llm` — one LLM call with the full prompt (framing + contract + summaries + images).
-- `staged` — three focused LLM calls so the model reasons about one thing at a time:
-  **interpret** (instruction + contrast images + a compact summary → a plain-language
-  preference), **ground** (that preference + the full numeric summaries → concrete
-  features and numeric bounds), **author** (that spec + the runtime API and output
-  contract → the cost JSON). Each stage sees only what it needs — the images and framing
-  never reach the code-writing stage, and the code contract never reaches interpretation.
-  Single pass, no rollout feedback loop; each stage's prompt and raw response are saved
-  as `<stage>_prompt.txt` / `<stage>_response.txt`.
+- `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
+  images + compact summary → plain-language preference), **ground** (preference + full
+  numeric summaries → concrete features and bounds), **author** (spec + runtime API /
+  output contract → cost JSON). Each stage's prompt and raw response are saved as
+  `<stage>_prompt.txt` / `<stage>_response.txt`, with a readable aggregate in
+  `stage_log.md`.
 - `turns` — a multi-turn conversation that rolls out each candidate, scores it, and feeds
-  the score plus rendered comparisons back to refine it.
-- `agent` — delegates iteration to the external `codex` CLI.
+  the score plus rendered comparisons back to refine the grounding and authoring while
+  keeping the initial interpretation fixed.
+- `agent` — delegates the same staged method and optional rollout iteration to the
+  external `codex` CLI. The agent is required to write `stage_log.md` with its Stage 1,
+  Stage 2, and Stage 3 responses; that log is also appended to `codex.log`.
 
 The backend experiment is the orthogonal axis: it holds the correction fixed (the
-**chosen** UQ cluster) and generates a cost with each backend (`llm` / `staged` /
-`turns` / `agent`), then scores them all on the same rollout-vs-MDM L2 metric and writes
+**chosen** UQ cluster) and generates a cost with each backend (`llm` / `turns` /
+`agent`), then scores them all on the same rollout-vs-MDM L2 metric and writes
 a `backend_comparison.json` ranking. It requires `planner: arm_mpc_cartesian` (the
 scorer needs a persistent Cartesian goal) and `llm_cost.enabled: true`:
 
@@ -473,8 +473,8 @@ uv run python src/uncertain_feedback/experiments/run_backend_experiment.py \
 
 Pass the neutral base config (`arm_mpc_cartesian_mdm_llm.yaml`), not a
 backend-specific one — the experiment sets `llm_cost.backend` itself for each
-backend. All other `llm_cost` settings (`model`, `max_turns`, `prompt`,
-`use_images`, and `codex_cmd` for the `agent` backend) come from that config, so
+backend. All other `llm_cost` settings (`model`, `max_turns`, `use_images`, and
+`codex_cmd` for the `agent` backend) come from that config, so
 make sure its `codex_cmd` works on this host. Use `--backends llm turns` to
 compare a subset, `--rollout-steps N` and
 `--save-video` to render an MP4 per backend. With image feedback enabled,

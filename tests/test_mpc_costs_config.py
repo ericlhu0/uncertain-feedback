@@ -140,7 +140,8 @@ class _FakeLlmModel:
         self.received_images: list[str] | None = None
 
     def get_full_output(self, text_input: str, image_input=None) -> str:
-        self.received_images = image_input
+        if image_input is not None:
+            self.received_images = image_input
         # image description call — return a plain string
         if "Runtime API" not in text_input:
             return "The arm moves upward in an arc."
@@ -295,6 +296,27 @@ def test_initial_pose_cli_pose_overrides_config_pose(tmp_path) -> None:
 
     assert gen is fake_gen
     np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)
+
+
+def test_arm_override_legacy_shape_fixes_collar(tmp_path) -> None:
+    arm_path = tmp_path / "arm.npy"
+    legacy_arm = np.arange(12, dtype=np.float64).reshape(4, 3)
+    np.save(arm_path, legacy_arm)
+    state = planner_run._InitialPoseState.tpose()
+
+    planner_run._apply_arm_override(state, arm_path)
+
+    np.testing.assert_allclose(state.fixed_collar_aa, legacy_arm[0])
+    np.testing.assert_allclose(state.arm_aa, legacy_arm[1:])
+
+
+def test_arm_override_rejects_unexpected_shape(tmp_path) -> None:
+    arm_path = tmp_path / "arm.npy"
+    np.save(arm_path, np.zeros((5, 3), dtype=np.float64))
+    state = planner_run._InitialPoseState.tpose()
+
+    with pytest.raises(ValueError, match="--arm must contain shape"):
+        planner_run._apply_arm_override(state, arm_path)
 
 
 def test_load_mpc_config_with_elbow_height(tmp_path) -> None:
@@ -1046,6 +1068,14 @@ def test_mdm_push_trajectory_stores_full_trajectory_for_playback() -> None:
     np.testing.assert_allclose(mpc._goals[0], final_goal)
 
 
+def test_mdm_push_trajectory_rejects_collar_row() -> None:
+    mpc = LeftArmMPCMDM(goals=[np.zeros((3, 3), dtype=np.float64)])
+    frames = np.zeros((2, 4, 3), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="left_collar is fixed"):
+        mpc.push_trajectory(frames)
+
+
 def test_mdm_playback_smooth_frames_advance_one_per_step() -> None:
     # Consecutive frames differ by 0.1 rad on the shoulder; with a generous cap
     # each is reached in a single step (smooth motion is not slowed).
@@ -1583,7 +1613,9 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
     assert len(mpc._extra_costs.terms()) == 1
     artifact_dirs = list((tmp_path / "artifacts").iterdir())
     assert len(artifact_dirs) == 1
-    assert (artifact_dirs[0] / "prompt.txt").exists()
+    assert (artifact_dirs[0] / "interpret_prompt.txt").exists()
+    assert (artifact_dirs[0] / "ground_prompt.txt").exists()
+    assert (artifact_dirs[0] / "author_prompt.txt").exists()
     assert (artifact_dirs[0] / "cost.py").exists()
     assert (artifact_dirs[0] / "recipient_explanation.txt").read_text(
         encoding="utf-8"
@@ -1659,7 +1691,9 @@ llm_cost:
     assert (root / "selected_cluster.txt").read_text(encoding="utf-8").strip() == "1"
     for label in (0, 1):
         cluster_dir = root / f"cluster_{label}"
-        assert (cluster_dir / "prompt.txt").exists()
+        assert (cluster_dir / "interpret_prompt.txt").exists()
+        assert (cluster_dir / "ground_prompt.txt").exists()
+        assert (cluster_dir / "author_prompt.txt").exists()
         assert (cluster_dir / "cost.py").exists()
         assert (cluster_dir / "rollout.npy").exists()
         assert (cluster_dir / "metrics.json").exists()

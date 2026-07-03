@@ -1,8 +1,10 @@
-"""Multi-turn (``turns``) cost generator.
+"""Multi-turn (``turns``) staged cost generator.
 
-Holds a real conversation with the LLM (a growing message list, not stateless
-re-prompting): each turn it parses the returned cost, scores it with the
-evaluation harness, and feeds that score back, keeping the best-scoring cost.
+Runs the interpret stage once to fix the preference, then holds a real conversation
+that iterates the ground+author work: each turn it parses the returned cost, scores
+it with the evaluation harness, and feeds that score (and rollout comparison) back so
+the model can revise both the numeric choices and the code, keeping the best-scoring
+cost. The interpretation stays fixed — only grounding and authoring iterate.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     LlmCostResponse,
     build_rollout_joint_comparison,
 )
+from uncertain_feedback.planners.mpc.costs.prompts import build_refine_prompt
 
 # Stop early once the score fails to improve this many turns in a row.
 _NO_IMPROVE_PATIENCE = 2
@@ -55,11 +58,14 @@ class TurnsCostGenerator(CostGenerator):
     def _converse(
         self,
     ) -> tuple[GeneratedPythonCost, LlmCostResponse] | None:
-        prompt_text, image_input = self.build_prompt()
-        (self.run_dir / "prompt.txt").write_text(prompt_text, encoding="utf-8")
         llm = self.make_llm()
+        # Interpret once; the correction and its images don't change between turns, so
+        # only grounding + authoring iterate against rollout feedback below.
+        interpretation = self.interpret(llm)
+        prompt_text = build_refine_prompt(interpretation, self.summaries)
+        (self.run_dir / "refine_prompt.txt").write_text(prompt_text, encoding="utf-8")
         messages: list[dict[str, Any]] = [
-            {"role": "user", "text": prompt_text, "images": image_input}
+            {"role": "user", "text": prompt_text}
         ]
 
         best: tuple[GeneratedPythonCost, LlmCostResponse] | None = None
@@ -67,11 +73,13 @@ class TurnsCostGenerator(CostGenerator):
         no_improve = 0
 
         for turn in range(self.max_turns):
+            prompt_snapshot = json.dumps(messages, indent=2)
             raw = llm.converse(messages)
             messages.append({"role": "assistant", "text": raw})
             turn_dir = self.run_dir / f"turn_{turn}"
             turn_dir.mkdir(parents=True, exist_ok=True)
             (turn_dir / "raw_response.txt").write_text(raw, encoding="utf-8")
+            self._append_stage_log(f"refine turn {turn}", prompt_snapshot, raw)
 
             try:
                 response, cost = self.parse_cost(raw)
@@ -107,7 +115,9 @@ class TurnsCostGenerator(CostGenerator):
                     ),
                 )
             else:
-                score, rollout = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
+                score, rollout = evaluate_candidate_cost(
+                    self.context, cost, self.rollout_fn
+                )
                 image_path = None
             (turn_dir / "cost.py").write_text(response.code, encoding="utf-8")
             with open(turn_dir / "score.json", "w", encoding="utf-8") as f:

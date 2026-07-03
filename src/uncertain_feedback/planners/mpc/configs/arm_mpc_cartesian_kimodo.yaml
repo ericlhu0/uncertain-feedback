@@ -35,7 +35,6 @@ llm_cost:
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true
-  prompt: "1"   # anchors on each path's destination AND keeps the original goal reachable (uses the reference image)
   # backend defaults to "llm". The two settings below are inert for the "llm"
   # backend; they let run_backend_experiment.py flip to "turns"/"agent" without a
   # backend-specific config.

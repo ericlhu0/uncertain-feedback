@@ -1,4 +1,4 @@
-"""Tests for the llm / staged / turns / agent cost generators."""
+"""Tests for the llm / turns / agent cost generators."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from uncertain_feedback.planners.mpc.costs import (
     AgentCostGenerator,
     LlmCostGenerator,
     MpcCostContext,
-    StagedCostGenerator,
     TurnsCostGenerator,
     artifact_run_dir,
     build_generated_cost_context,
@@ -110,7 +109,6 @@ def test_create_cost_generator_selects_backend(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
     cases = {
         "llm": LlmCostGenerator,
-        "staged": StagedCostGenerator,
         "turns": TurnsCostGenerator,
         "agent": AgentCostGenerator,
     }
@@ -135,9 +133,9 @@ def test_llm_generator_produces_and_installs_cost(tmp_path) -> None:
     assert (kwargs["run_dir"] / "validation.json").exists()
 
 
-def test_staged_generator_runs_three_focused_stages(tmp_path) -> None:
+def test_llm_generator_runs_three_focused_stages(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
-    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="staged"))
+    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
     kwargs["images"] = {"current_cluster_traj_img": Path("current.png")}
     gen = create_cost_generator(**kwargs)
 
@@ -157,6 +155,11 @@ def test_staged_generator_runs_three_focused_stages(tmp_path) -> None:
     for stage in ("interpret", "ground", "author"):
         assert (kwargs["run_dir"] / f"{stage}_prompt.txt").exists()
         assert (kwargs["run_dir"] / f"{stage}_response.txt").exists()
+    stage_log = (kwargs["run_dir"] / "stage_log.md").read_text(encoding="utf-8")
+    assert "## interpret" in stage_log
+    assert "## ground" in stage_log
+    assert "## author" in stage_log
+    assert "### Response" in stage_log
     assert (kwargs["run_dir"] / "cost.py").exists()
 
 
@@ -224,6 +227,10 @@ def test_turns_generator_keeps_state_and_returns_best(tmp_path) -> None:
     assert fake.converse_calls >= 1
     assert fake.last_messages is not None and len(fake.last_messages) > 1
     assert (kwargs["run_dir"] / "turn_0" / "score.json").exists()
+    stage_log = (kwargs["run_dir"] / "stage_log.md").read_text(encoding="utf-8")
+    assert "## interpret" in stage_log
+    assert "## refine turn 0" in stage_log
+    assert "### Response" in stage_log
 
 
 def test_evaluate_candidate_cost_is_finite() -> None:
@@ -257,3 +264,17 @@ def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:
     )
     lenient.codex_cmd = "definitely-not-a-real-binary-xyz"
     assert lenient.generate() is None
+
+
+def test_agent_task_requires_stage_log(tmp_path) -> None:
+    fake = _FakeLlmModel(_response())
+    gen = create_cost_generator(
+        **_factory_kwargs(tmp_path, fake, LlmCostConfig(backend="agent"))
+    )
+
+    task = gen._task_md("prompt body", iterate=False, image_input=None)
+
+    assert "stage_log.md" in task
+    assert "## Stage 1 response" in task
+    assert "## Stage 2 response" in task
+    assert "## Stage 3 response" in task

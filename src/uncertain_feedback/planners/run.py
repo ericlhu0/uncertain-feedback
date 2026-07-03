@@ -115,7 +115,18 @@ def _apply_arm_override(state: _InitialPoseState, arm_path: Path | None) -> None
         return
 
     arm_override = np.load(arm_path)
-    state.arm_aa = np.asarray(arm_override, dtype=np.float64)
+    arm_override = np.asarray(arm_override, dtype=np.float64)
+    if arm_override.shape == (4, 3):
+        state.fixed_collar_aa = arm_override[0].copy()
+        state.arm_aa = arm_override[1:].copy()
+    elif arm_override.shape == (3, 3):
+        state.arm_aa = arm_override.copy()
+    else:
+        raise ValueError(
+            "--arm must contain shape (3, 3) for "
+            "[left_shoulder, left_elbow, left_wrist], or legacy shape "
+            f"(4, 3) with left_collar first; got {arm_override.shape}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -156,7 +167,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--arm",
         type=Path,
         default=None,
-        help="Optional .npy file with (3, 3) shoulder/elbow/wrist axis-angles.",
+        help=(
+            "Optional .npy file with (3, 3) shoulder/elbow/wrist axis-angles. "
+            "Legacy (4, 3) files are interpreted as collar, shoulder, elbow, wrist."
+        ),
     )
 
     # --- Visualization ---

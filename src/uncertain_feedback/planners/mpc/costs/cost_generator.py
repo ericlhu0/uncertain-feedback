@@ -35,7 +35,11 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     build_joint_angle_series,
     parse_llm_cost_response,
 )
-from uncertain_feedback.planners.mpc.costs.prompts import build_llm_cost_prompt
+from uncertain_feedback.planners.mpc.costs.prompts import (
+    build_author_prompt,
+    build_ground_prompt,
+    build_interpret_prompt,
+)
 
 _SYSTEM_PROMPT = (
     "You generate safe, vectorized Python MPC trajectory cost functions. "
@@ -175,10 +179,16 @@ def evaluate_and_render(
     )
     if angle_path is not None:
         angle_path.parent.mkdir(parents=True, exist_ok=True)
+        reference_series = (
+            build_joint_angle_series(context, context.reference_traj)
+            if context.reference_traj is not None and context.reference_traj.size > 0
+            else None
+        )
         visualizer.render_joint_angle_comparison(
             angle_path,
             target_series=build_joint_angle_series(context, correction_traj),
             rollout_series=build_joint_angle_series(context, rollout),
+            reference_series=reference_series,
         )
     if rollout_path is not None:
         rollout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,7 +226,6 @@ class CostGenerator(ABC):
         summaries: dict[str, Any],
         *,
         run_dir: Path,
-        prompt: str = "2",
         images: dict[str, Path] | None = None,
         use_images: bool = True,
         model: str | None = None,
@@ -233,7 +242,6 @@ class CostGenerator(ABC):
         self.instruction = instruction
         self.summaries = summaries
         self.run_dir = run_dir
-        self.prompt = prompt
         self.images = images or {}
         self.use_images = use_images
         self.model = model
@@ -255,13 +263,63 @@ class CostGenerator(ABC):
         """Construct the cost-generator LLM wrapper for this run's model."""
         return self.llm_model_factory(self.model_name)
 
-    def build_prompt(self) -> tuple[str, list[str] | None]:
-        """Build the prompt text and the list of image paths to attach."""
-        text, attached = build_llm_cost_prompt(
-            self.instruction, self.summaries, self.images, prompt=self.prompt
+    def _run_stage(
+        self,
+        llm: Any,
+        name: str,
+        prompt_text: str,
+        *,
+        image_input: list[str] | None = None,
+    ) -> str:
+        """Run one staged LLM call, persist its prompt and raw response, return the text."""
+        (self.run_dir / f"{name}_prompt.txt").write_text(prompt_text, encoding="utf-8")
+        raw = llm.get_full_output(prompt_text, image_input=image_input)
+        (self.run_dir / f"{name}_response.txt").write_text(raw, encoding="utf-8")
+        self._append_stage_log(name, prompt_text, raw)
+        return raw
+
+    def _append_stage_log(
+        self,
+        name: str,
+        prompt_text: str,
+        response_text: str,
+    ) -> None:
+        """Append one prompt/response pair to the readable stage log."""
+        with open(self.run_dir / "stage_log.md", "a", encoding="utf-8") as f:
+            f.write(f"\n\n## {name}\n\n")
+            f.write("### Prompt\n\n")
+            f.write("```text\n")
+            f.write(prompt_text)
+            if not prompt_text.endswith("\n"):
+                f.write("\n")
+            f.write("```\n\n")
+            f.write("### Response\n\n")
+            f.write("```text\n")
+            f.write(response_text)
+            if not response_text.endswith("\n"):
+                f.write("\n")
+            f.write("```\n")
+
+    def interpret(self, llm: Any) -> str:
+        """Stage one: read the correction (instruction + contrast images + compact summary)."""
+        text, image_paths = build_interpret_prompt(
+            self.instruction, self.summaries, self.images if self.use_images else {}
         )
-        image_input = [str(path) for path in attached] or None
-        return text, image_input
+        image_input = [str(path) for path in image_paths] or None
+        return self._run_stage(llm, "interpret", text, image_input=image_input)
+
+    def ground(self, llm: Any, interpretation: str) -> str:
+        """Stage two: turn the preference into a concrete numeric spec (full summaries)."""
+        text = build_ground_prompt(interpretation, self.summaries)
+        return self._run_stage(llm, "ground", text)
+
+    def author(
+        self, llm: Any, specification: str
+    ) -> tuple[LlmCostResponse, GeneratedPythonCost]:
+        """Stage three: implement the spec faithfully as the compiled cost JSON."""
+        text = build_author_prompt(specification)
+        raw = self._run_stage(llm, "author", text)
+        return self.parse_cost(raw)
 
     def compile_cost(
         self,
@@ -431,9 +489,6 @@ def create_cost_generator(
     from uncertain_feedback.planners.mpc.costs.llm_costs import (  # pylint: disable=import-outside-toplevel
         LlmCostGenerator,
     )
-    from uncertain_feedback.planners.mpc.costs.staged_costs import (  # pylint: disable=import-outside-toplevel
-        StagedCostGenerator,
-    )
     from uncertain_feedback.planners.mpc.costs.turns_costs import (  # pylint: disable=import-outside-toplevel
         TurnsCostGenerator,
     )
@@ -443,7 +498,6 @@ def create_cost_generator(
         instruction=instruction,
         summaries=summaries,
         run_dir=run_dir,
-        prompt=cfg.prompt,
         images=images,
         use_images=cfg.use_images,
         model=cfg.model,
@@ -457,13 +511,11 @@ def create_cost_generator(
     backend = cfg.backend
     if backend == "llm":
         return LlmCostGenerator(**common)
-    if backend == "staged":
-        return StagedCostGenerator(**common)
     if backend == "turns":
         return TurnsCostGenerator(max_turns=cfg.max_turns, **common)
     if backend == "agent":
         return AgentCostGenerator(codex_cmd=cfg.codex_cmd, **common)
     raise GeneratedCostValidationError(
         f"unknown cost-generator backend {backend!r}; "
-        "expected one of 'llm', 'staged', 'turns', 'agent'"
+        "expected one of 'llm', 'turns', 'agent'"
     )

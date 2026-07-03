@@ -37,17 +37,15 @@ uncertain-feedback/
 │   │       │   ├── base.py           # Cost terms + registry + preference learning
 │   │       │   ├── generated.py      # Runtime context, cost compile/exec, summaries, image render
 │   │       │   ├── cost_generator.py # CostGenerator base + create_cost_generator factory + scoring
-│   │       │   ├── llm_costs.py      # backend: llm (single-turn) + re-exports
-│   │       │   ├── staged_costs.py   # backend: staged (interpret→ground→author, 3 calls)
-│   │       │   ├── turns_costs.py    # backend: turns (multi-turn scored refinement)
+│   │       │   ├── llm_costs.py      # backend: llm (interpret→ground→author, single pass) + re-exports
+│   │       │   ├── turns_costs.py    # backend: turns (fixed interpret, ground+author refinement)
 │   │       │   ├── agent_costs.py    # backend: agent (codex CLI)
 │   │       │   ├── cost_feedback.py  # EvalState (picklable rollout state for agent backend)
-│   │       │   └── prompts/          # Prompt templates loaded from .txt files
-│   │       │       ├── __init__.py   # PROMPTS registry + build_llm_cost_prompt + staged builders
+│   │       │   └── prompts/          # Staged prompt text files
+│   │       │       ├── __init__.py   # staged prompt builders + image placeholder substitution
 │   │       │       ├── runtime_api.txt       # Shared technical contract
 │   │       │       ├── output_contract.txt   # Shared output rules
-│   │       │       ├── templates/    # One .txt per prompt (stem = registry key); currently 1.txt
-│   │       │       └── stages/       # staged-backend heads: interpret.txt, ground.txt, author.txt
+│   │       │       └── stages/       # interpret.txt, ground.txt, author.txt, refine.txt
 │   │       ├── arm_mpc.py            # SmplLeftArmMPC (base sampling MPC)
 │   │       ├── arm_mpc_mdm.py        # LeftArmMPCMDM (+ MDM trajectory tracking)
 │   │       ├── arm_mpc_mdm_uq.py     # LeftArmMPCMDMUQ (+ UQ clustering)
@@ -264,23 +262,22 @@ When `llm_cost.enabled: true` in the YAML:
 
 1. `build_motion_summaries()` — text summaries of recent MPC steps and MDM trajectory
 2. `render_prompt_images()` — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
-3. `build_llm_cost_prompt()` (in `costs/prompts/__init__.py`) — assembles the prompt from a named template (a `costs/prompts/templates/<name>.txt` head + shared `runtime_api.txt`/`output_contract.txt`), selected by `llm_cost.prompt`. The `staged` backend bypasses this, instead calling `build_interpret_prompt` / `build_ground_prompt` / `build_author_prompt` (`costs/prompts/stages/*.txt`) across its three calls
-4. LLM (OpenAI, configurable model) returns JSON: `{description, code, params, explanation, recipient_explanation}`
+3. Staged prompt builders (in `costs/prompts/__init__.py`) assemble `interpret` (instruction + images + compact summary), `ground` (interpretation + full summaries), and `author` (numeric spec + `runtime_api.txt`/`output_contract.txt`) prompts from `costs/prompts/stages/*.txt`
+4. LLM (OpenAI, configurable model) returns final author JSON: `{description, code, params, explanation, recipient_explanation}`
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet
 7. `GeneratedCostContext` provides the runtime sandbox: `fk`, `spine3_pos/aa`, `current_q`, `mdm_traj`, `recent_q`, and FK helper methods
-8. Artifacts (prompt JSON, images, cost.py, `reference_with_correction.mp4`) saved to `llm_cost_artifacts/<timestamp>/`
+8. Artifacts (stage prompts/responses, `stage_log.md`, images, cost.py, `reference_with_correction.mp4`) saved to `llm_cost_artifacts/<timestamp>/`
 
 **LLM cost cluster experiment** (`llm_cost.cluster_experiment.enabled`): runs the LLM cost on each cluster's mean trajectory for `rollout_steps` steps and uses costs to rank / auto-select clusters.
 
 ### Cost-generation backends (`costs/cost_generator.py`)
 
-`create_cost_generator()` selects one of four strategies via `llm_cost.backend`; all share `CostGenerator` (prompt building, compile/validate, save, install):
+`create_cost_generator()` selects one of three iteration mechanisms via `llm_cost.backend`; all share the staged prompting strategy and `CostGenerator` (stage helpers, compile/validate, save, install):
 
-- `llm` (`llm_costs.py`) — single-turn call with the full monolithic prompt.
-- `staged` (`staged_costs.py`) — three focused single-turn calls, chained: **interpret** (instruction + contrast images + compact summary → plain-language preference), **ground** (preference + full numeric summaries → concrete features + numeric bounds), **author** (spec + `runtime_api.txt`/`output_contract.txt` → cost JSON). Prompts built by `build_interpret_prompt` / `build_ground_prompt` / `build_author_prompt` from `costs/prompts/stages/*.txt`; only the author output is parsed/compiled. Each stage's `<stage>_prompt.txt` / `<stage>_response.txt` is saved. Single pass, no rollout feedback (like `llm`).
-- `turns` (`turns_costs.py`) — stateful multi-turn conversation; keeps the best cost by score.
-- `agent` (`agent_costs.py`) — delegates authoring to the `codex` CLI, which emits the same `response.json`.
+- `llm` (`llm_costs.py`) — single-pass staged calls: interpret → ground → author; only the author output is parsed/compiled. Stage prompt/response pairs are aggregated in `stage_log.md`.
+- `turns` (`turns_costs.py`) — interprets once, then runs a stateful ground+author conversation; keeps the best cost by score. `stage_log.md` includes the interpretation plus each refine turn's prompt snapshot and response.
+- `agent` (`agent_costs.py`) — delegates the staged method to the `codex` CLI, which emits the same `response.json` and must write `stage_log.md` with Stage 1 / Stage 2 / Stage 3 responses.
 
 ### Cost evaluation & visual feedback
 

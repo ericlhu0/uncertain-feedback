@@ -470,11 +470,27 @@ The hidden bounds are the evaluation ground truth in headless experiments
 > `GeneratedCostContext.elbow_flexion_angles` (generator-side) and
 > `compute_elbow_flexion_angles` in `costs/base.py` (the `elbow_flexion_angle`
 > YAML cost + preference learning) both now measure the angle between the upper
-> arm and forearm from FK positions (0 = straight). The old elbow-slot rotvec
-> norm could not see an anatomical elbow bend at all — under the repo FK
-> convention (audit §3) the bend is encoded in the wrist slot — and instead
-> tracked upper-arm re-orientation. Any old `elbow_flexion_angle` min/max
-> values from before this fix are on the wrong scale.
+> arm and forearm (0 = straight), computed from the **wrist-slot joint
+> rotation** applied to the T-pose bone axes (equivalent to the FK-position
+> angle, no FK needed). The old elbow-slot rotvec norm could not see an
+> anatomical elbow bend at all — under the repo FK convention (audit §3) the
+> bend is encoded in the wrist slot — and instead tracked upper-arm
+> re-orientation. Any old `elbow_flexion_angle` min/max values from before
+> this fix are on the wrong scale.
+
+> **Shoulder internal/external-rotation feature fix (2026-07-07):**
+> `GeneratedCostContext.shoulder_internal_external_rotation_angles` now
+> twist-decomposes the **composed collar∘shoulder∘elbow** rotation about the
+> T-pose upper-arm axis. Under the same FK convention that composition orients
+> the upper-arm bone, so the old shoulder-slot-only twist gave different
+> readings for physically identical poses (and read 0 for twist encoded in the
+> elbow slot, as position-derived MDM trajectories may do).
+> Abduction/adduction and flexion/extension were audited and are correct.
+> All four joint features (and the cost-side `compute_elbow_flexion_angles` /
+> `compute_shoulder_abduction_angles`) are now closed-form joint-angle
+> computations — composed slot rotations applied to T-pose bone axes — with
+> outputs identical to the previous FK-position geometry (~5× faster on MPC
+> rollout batches since no FK positions are computed).
 
 ## 14. Motion Generator Backends (`motion_generators/`)
 

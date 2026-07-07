@@ -122,25 +122,19 @@ class GeneratedCostContext:
         """Return elbow bend as the angle between upper arm and forearm.
 
         Accepts any leading shape ending in ``(3, 3)`` and returns that leading
-        shape. 0 = fully extended; larger = more bent. Computed from FK
-        positions because under this repo's FK convention (joint *j*'s rotation
-        transforms the bone arriving at *j*) the anatomical bend is encoded in
-        the wrist-slot rotvec, so the elbow-slot rotvec magnitude does not
-        measure it.
+        shape. 0 = fully extended; larger = more bent. Computed from the
+        wrist-slot joint rotation — under this repo's FK convention (joint
+        *j*'s rotation transforms the bone arriving at *j*) that slot rotates
+        the forearm relative to the upper arm, so the bend is the angle it
+        opens between the T-pose bone axes. Equivalent to the FK-position
+        angle, without running FK.
         """
-        positions = self.fk_batch(trajectory)
-        upper_arm = (
-            positions[..., _JOINT_NAMES["left_elbow"], :]
-            - positions[..., _JOINT_NAMES["left_shoulder"], :]
-        )
-        forearm = (
-            positions[..., _JOINT_NAMES["left_wrist"], :]
-            - positions[..., _JOINT_NAMES["left_elbow"], :]
-        )
-        dots = np.sum(upper_arm * forearm, axis=-1)
-        norms = np.linalg.norm(upper_arm, axis=-1) * np.linalg.norm(forearm, axis=-1)
-        cos = np.divide(dots, norms, out=np.ones_like(dots), where=norms > 1e-12)
-        return np.arccos(np.clip(cos, -1.0, 1.0))
+        trajectory = np.asarray(trajectory, dtype=np.float64)
+        leading = trajectory.shape[:-2]
+        flat = trajectory.reshape(-1, 3, 3)
+        forearm = Rotation.from_rotvec(flat[:, 2]).apply(self._tpose_forearm_axis())
+        cos = forearm @ self._tpose_upper_arm_axis()
+        return np.arccos(np.clip(cos, -1.0, 1.0)).reshape(leading)
 
     def shoulder_abduction_adduction_angles(self, trajectory: np.ndarray) -> np.ndarray:
         """Return signed shoulder abduction/adduction proxy in the spine3 frame.
@@ -168,41 +162,59 @@ class GeneratedCostContext:
     ) -> np.ndarray:
         """Return signed shoulder twist around the T-pose upper-arm axis.
 
-        This is an approximate internal/external rotation proxy from the local
-        shoulder axis-angle. Positive sign follows the T-pose shoulder-to-elbow
-        axis convention.
+        Twist is decomposed from the composed collar∘shoulder∘elbow rotation
+        because under this repo's FK convention that composition orients the
+        upper-arm bone — the same physical twist can live in either controlled
+        slot. Positive sign follows the T-pose shoulder-to-elbow axis
+        convention.
         """
         trajectory = np.asarray(trajectory, dtype=np.float64)
         leading = trajectory.shape[:-2]
-        shoulder_rotvec = trajectory[..., 0, :].reshape(-1, 3)
+        flat = trajectory.reshape(-1, 3, 3)
+        upper_arm_rotvec = self._upper_arm_rotations(flat).as_rotvec()
         axis = self._tpose_upper_arm_axis()
-        angles = _twist_angles_about_axis(shoulder_rotvec, axis)
+        angles = _twist_angles_about_axis(upper_arm_rotvec, axis)
         return angles.reshape(leading)
 
+    def _upper_arm_rotations(self, flat: np.ndarray) -> Rotation:
+        """Return the composed collar∘shoulder∘elbow rotations for ``(N, 3, 3)``
+        frames — the rotation orienting the upper-arm bone in the spine3 frame
+        under this repo's FK convention."""
+        collar = Rotation.from_rotvec(self.fk.collar_aa[None])
+        return (
+            collar
+            * Rotation.from_rotvec(flat[:, 0])
+            * Rotation.from_rotvec(flat[:, 1])
+        )
+
     def _upper_arm_direction_spine_frame(self, trajectory: np.ndarray) -> np.ndarray:
-        """Return unit shoulder-to-elbow directions in the spine3 frame."""
-        positions = self.fk_batch(trajectory)
-        upper_arm_world = (
-            positions[..., _JOINT_NAMES["left_elbow"], :]
-            - positions[..., _JOINT_NAMES["left_shoulder"], :]
+        """Return unit shoulder-to-elbow directions in the spine3 frame.
+
+        Computed by applying the composed joint rotations to the T-pose bone
+        axis; identical to normalizing the FK elbow−shoulder position
+        difference (the spine3 rotation cancels), without running FK.
+        """
+        trajectory = np.asarray(trajectory, dtype=np.float64)
+        leading = trajectory.shape[:-2]
+        flat = trajectory.reshape(-1, 3, 3)
+        directions = self._upper_arm_rotations(flat).apply(
+            self._tpose_upper_arm_axis()
         )
-        leading = upper_arm_world.shape[:-1]
-        spine_inv = Rotation.from_rotvec(self.spine3_aa).inv()
-        upper_arm_local = spine_inv.apply(upper_arm_world.reshape(-1, 3)).reshape(
-            (*leading, 3)
-        )
-        norms = np.linalg.norm(upper_arm_local, axis=-1, keepdims=True)
-        return np.divide(
-            upper_arm_local,
-            norms,
-            out=np.zeros_like(upper_arm_local),
-            where=norms > 1e-12,
-        )
+        return directions.reshape((*leading, 3))
 
     def _tpose_upper_arm_axis(self) -> np.ndarray:
         """Return unit T-pose shoulder-to-elbow axis in the spine3 frame."""
         tpose = self.fk.tpose_joints
         axis = tpose[_JOINT_NAMES["left_elbow"]] - tpose[_JOINT_NAMES["left_shoulder"]]
+        norm = np.linalg.norm(axis)
+        if norm <= 1e-12:
+            return np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        return axis / norm
+
+    def _tpose_forearm_axis(self) -> np.ndarray:
+        """Return unit T-pose elbow-to-wrist axis in the spine3 frame."""
+        tpose = self.fk.tpose_joints
+        axis = tpose[_JOINT_NAMES["left_wrist"]] - tpose[_JOINT_NAMES["left_elbow"]]
         norm = np.linalg.norm(axis)
         if norm <= 1e-12:
             return np.array([1.0, 0.0, 0.0], dtype=np.float64)

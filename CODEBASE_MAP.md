@@ -244,7 +244,7 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 | YAML key                  | Class                       | Feature                                      |
 |---------------------------|-----------------------------|----------------------------------------------|
 | `elbow_height`            | `ElbowHeightCost`           | Spine3-relative elbow Y position (meters)    |
-| `elbow_flexion_angle`     | `ElbowFlexionAngleCost`     | Elbow rotation magnitude (radians)           |
+| `elbow_flexion_angle`     | `ElbowFlexionAngleCost`     | Upper-arm/forearm bend angle (radians; 0 = straight) |
 | `shoulder_abduction_angle`| `ShoulderAbductionAngleCost`| Upper-arm angle from torso-down (radians)    |
 
 ### Cost structure
@@ -450,13 +450,14 @@ headless experiments (never shown to the cost generator).
   Registry: `PERSONAS` / `get_persona(name)`.
 
 > **Elbow-flexion feature fix (2026-07-06):**
-> `GeneratedCostContext.elbow_flexion_angles` now measures the angle between the
-> upper arm and forearm from FK positions. The old elbow-slot rotvec norm could
-> not see an anatomical elbow bend at all — under the repo FK convention
-> (audit §3) the bend is encoded in the wrist slot — and instead tracked
-> upper-arm re-orientation. `compute_elbow_flexion_angles` in `costs/base.py`
-> (the `elbow_flexion_angle` YAML cost + preference learning) still has the old
-> definition and needs the same fix.
+> `GeneratedCostContext.elbow_flexion_angles` (generator-side) and
+> `compute_elbow_flexion_angles` in `costs/base.py` (the `elbow_flexion_angle`
+> YAML cost + preference learning) both now measure the angle between the upper
+> arm and forearm from FK positions (0 = straight). The old elbow-slot rotvec
+> norm could not see an anatomical elbow bend at all — under the repo FK
+> convention (audit §3) the bend is encoded in the wrist slot — and instead
+> tracked upper-arm re-orientation. Any old `elbow_flexion_angle` min/max
+> values from before this fix are on the wrong scale.
 
 ## 14. Motion Generator Backends (`motion_generators/`)
 

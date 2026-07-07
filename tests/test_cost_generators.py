@@ -21,6 +21,8 @@ from uncertain_feedback.planners.mpc.costs import (
     build_motion_summaries,
     create_cost_generator,
     evaluate_candidate_cost,
+    rank_candidate_cost,
+    resample_equidistant,
 )
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
@@ -241,10 +243,110 @@ def test_evaluate_candidate_cost_is_finite() -> None:
     score, rollout = evaluate_candidate_cost(context, cost, _fake_rollout)
     assert np.isfinite(score)
     assert rollout is not None
+    # The L2 score compares paths, not timing: dwelling on each frame (same
+    # path, 3x slower) scores identically.
+    warped_score, _ = evaluate_candidate_cost(
+        context, cost, lambda _: np.repeat(rollout, 3, axis=0)
+    )
+    assert warped_score == pytest.approx(score, abs=1e-8)
     # No rollout available (e.g. planners without a Cartesian goal) -> inf.
     score, rollout = evaluate_candidate_cost(context, cost)
     assert score == math.inf
     assert rollout is None
+
+
+def _ranking_context() -> object:
+    """Context with revealed preferences: chosen (still) vs original + one rejected."""
+    fk = SmplLeftArmFK()
+    mpc_context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    original = np.linspace(0.0, 0.8, 6)[:, None, None] * np.ones((6, 3, 3))
+    rejected = np.linspace(0.0, 0.4, 5)[:, None, None] * np.ones((5, 3, 3))
+    return build_generated_cost_context(
+        mpc_context,
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=np.zeros((4, 3, 3), dtype=np.float64),
+        q_history=[],
+        window=5,
+        reference_traj=original,
+        rejected_trajs=(rejected,),
+    )
+
+
+def test_resample_equidistant_removes_timing() -> None:
+    def traj_at(ts: np.ndarray) -> np.ndarray:
+        out = np.zeros((len(ts), 3, 3))
+        out[:, 0, 0] = ts
+        return out
+
+    uniform = traj_at(np.linspace(0.0, 1.0, 40))
+    warped = traj_at(np.linspace(0.0, 1.0, 40) ** 2)  # same path, different timing
+    np.testing.assert_allclose(
+        resample_equidistant(uniform, 20),
+        resample_equidistant(warped, 20),
+        atol=1e-8,
+    )
+    still = np.full((7, 3, 3), 0.3)
+    out = resample_equidistant(still, 5)
+    assert out.shape == (5, 3, 3)
+    np.testing.assert_allclose(out, 0.3)
+
+
+def test_rank_candidate_cost_orders_revealed_preferences() -> None:
+    context = _ranking_context()
+    cost = GeneratedPythonCost(
+        code=_COST_CODE, params={"weight": 1.0}, context=context
+    )
+    ranking = rank_candidate_cost(context, cost)
+    assert ranking is not None and not ranking.inert
+    assert ranking.rank_accuracy == 1.0
+    assert ranking.normalized_margin > 0.0
+    assert set(ranking.costs) == {
+        "original_plan",
+        "rejected_cluster_0",
+        "chosen_correction",
+    }
+    assert ranking.sort_key < (1.0, 0.0)
+
+
+def test_rank_candidate_cost_flags_inert_and_missing_context() -> None:
+    context = _ranking_context()
+    inert_code = (
+        "def cost(q_trajs, context, params):\n"
+        "    return np.zeros(q_trajs.shape[0])\n"
+    )
+    inert = GeneratedPythonCost(code=inert_code, params={}, context=context)
+    ranking = rank_candidate_cost(context, inert)
+    assert ranking is not None and ranking.inert
+    assert ranking.sort_key == (math.inf, math.inf)
+    # No reference rollout and no rejected clusters -> no ranking signal.
+    bare = _context()
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=bare)
+    assert rank_candidate_cost(bare, cost) is None
+
+
+def test_turns_generator_selects_by_ranking_when_available(tmp_path) -> None:
+    fake = _FakeLlmModel(_response())
+    kwargs = _factory_kwargs(
+        tmp_path,
+        fake,
+        LlmCostConfig(backend="turns", max_turns=2, use_images=False),
+    )
+    kwargs["context"] = _ranking_context()
+    kwargs["summaries"] = build_motion_summaries(kwargs["context"])
+    gen = create_cost_generator(rollout_fn=_fake_rollout, **kwargs)
+
+    cost = gen.generate(install=False)
+
+    assert isinstance(cost, GeneratedPythonCost)
+    payload = json.loads(
+        (kwargs["run_dir"] / "turn_0" / "score.json").read_text(encoding="utf-8")
+    )
+    assert payload["ranking"]["rank_accuracy"] == 1.0
+    # The feedback describes the ranking, not an L2 match to the correction.
+    texts = [m["text"] for m in fake.last_messages if m["role"] == "user"]
+    assert any("chosen_correction" in t for t in texts)
 
 
 def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:

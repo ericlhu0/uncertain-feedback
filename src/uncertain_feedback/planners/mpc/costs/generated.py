@@ -71,6 +71,7 @@ class GeneratedCostContext:
     full_correction_traj: np.ndarray | None = None
     cartesian_goal: np.ndarray | None = None
     cartesian_threshold: float | None = None
+    rejected_trajs: tuple[np.ndarray, ...] = ()
 
     @property
     def current_positions(self) -> np.ndarray:
@@ -344,6 +345,7 @@ def build_generated_cost_context(
     full_correction_traj: np.ndarray | None = None,
     cartesian_goal: np.ndarray | None = None,
     cartesian_threshold: float | None = None,
+    rejected_trajs: tuple[np.ndarray, ...] | None = None,
 ) -> GeneratedCostContext:
     """Build the runtime context passed to generated Python costs."""
     recent_q = np.asarray(q_history[-window:], dtype=np.float64)
@@ -373,6 +375,9 @@ def build_generated_cost_context(
             else None
         ),
         cartesian_threshold=cartesian_threshold,
+        rejected_trajs=tuple(
+            np.asarray(traj, dtype=np.float64) for traj in (rejected_trajs or ())
+        ),
     )
 
 

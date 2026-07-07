@@ -103,10 +103,20 @@ class _OrthoView(NamedTuple):
     vl: str  # vertical label
 
 
+# Axis labels carry the body-relative meaning of each world axis (SMPL convention,
+# upright body: +X = person's left, +Y = up, +Z = person's front) so an LLM reading
+# the overlays can resolve "out to the side" vs "across the body" without guessing
+# the handedness of the projection.
 _ORTHO_VIEWS = [
-    _OrthoView("Front (XY)", 0, 1, "X (m)", "Y (m)"),
-    _OrthoView("Side (ZY)", 2, 1, "Z (m)", "Y (m)"),
-    _OrthoView("Top (XZ)", 0, 2, "X (m)", "Z (m)"),
+    _OrthoView(
+        "Front (XY)", 0, 1, "X (m), + = person's left", "Y (m), + = up"
+    ),
+    _OrthoView(
+        "Side (ZY)", 2, 1, "Z (m), + = person's front", "Y (m), + = up"
+    ),
+    _OrthoView(
+        "Top (XZ)", 0, 2, "X (m), + = person's left", "Z (m), + = person's front"
+    ),
 ]
 
 

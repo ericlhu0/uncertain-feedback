@@ -5,6 +5,13 @@ that iterates the ground+author work: each turn it parses the returned cost, sco
 it with the evaluation harness, and feeds that score (and rollout comparison) back so
 the model can revise both the numeric choices and the code, keeping the best-scoring
 cost. The interpretation stays fixed — only grounding and authoring iterate.
+
+Candidates are selected by ranking consistency (:func:`rank_candidate_cost`): the
+cost is applied directly to the trajectories whose preference order the user
+revealed, so a cost that captures the intent wins without having to recreate the
+correction trajectory. When the context has no comparison trajectories the loop
+falls back to the L2 rollout score. Either way, a goal-reaching candidate beats a
+non-reaching one unless stage one judged the correction to conflict with the goal.
 """
 
 from __future__ import annotations
@@ -14,10 +21,12 @@ from typing import Any
 
 from uncertain_feedback.planners.mpc.costs.cost_generator import (
     CostGenerator,
+    CostRanking,
     evaluate_and_render,
     evaluate_candidate_cost,
     goal_reach_report,
     parse_goal_conflict,
+    rank_candidate_cost,
 )
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
@@ -98,7 +107,7 @@ class TurnsCostGenerator(CostGenerator):
         ]
 
         best: tuple[GeneratedPythonCost, LlmCostResponse] | None = None
-        best_key: tuple[int, float] | None = None
+        best_key: tuple[float, float, float] | None = None
         no_improve = 0
 
         for turn in range(self.max_turns):
@@ -150,18 +159,36 @@ class TurnsCostGenerator(CostGenerator):
                 image_path = None
             report = goal_reach_report(self.context, rollout)
             # A goal-reaching candidate beats a non-reaching one (unless the correction
-            # conflicts with the goal); ties break on the correction-match score.
+            # conflicts with the goal); within that, candidates order by ranking
+            # consistency, falling back to the L2 rollout score.
             reach_rank = (
                 1 if report is not None and not goal_conflict and not report["reached"]
                 else 0
             )
-            key = (reach_rank, score)
+            ranking = rank_candidate_cost(self.context, cost)
+            rank_key = ranking.sort_key if ranking is not None else (score, 0.0)
+            key = (float(reach_rank), *rank_key)
             (turn_dir / "cost.py").write_text(response.code, encoding="utf-8")
+            payload: dict[str, Any] = {"turn": turn, "l2_score": score}
+            if ranking is not None:
+                payload["ranking"] = {
+                    "rank_accuracy": ranking.rank_accuracy,
+                    "normalized_margin": ranking.normalized_margin,
+                    "inert": ranking.inert,
+                    "costs": ranking.costs,
+                }
+            payload["goal_reach"] = report
             with open(turn_dir / "score.json", "w", encoding="utf-8") as f:
-                json.dump(
-                    {"turn": turn, "score": score, "goal_reach": report}, f, indent=2
+                json.dump(payload, f, indent=2)
+            if ranking is not None:
+                print(
+                    f"[cost-gen][turns] turn {turn}: rank_accuracy="
+                    f"{ranking.rank_accuracy:.2f} margin="
+                    f"{ranking.normalized_margin:.2f} inert={ranking.inert} "
+                    f"(l2={score:.4f})"
                 )
-            print(f"[cost-gen][turns] turn {turn}: score={score:.4f}")
+            else:
+                print(f"[cost-gen][turns] turn {turn}: score={score:.4f}")
 
             if best_key is None or key < best_key:
                 best_key = key
@@ -181,24 +208,24 @@ class TurnsCostGenerator(CostGenerator):
                 )
 
             goal_block = _goal_feedback(report, goal_conflict)
-
+            score_block = _feedback_score_block(ranking, score)
             if image_path is not None:
                 messages.append(
                     {
                         "role": "user",
                         "text": (
-                            f"That cost scored {score:.4f} (lower is better). The "
+                            f"{score_block} The "
                             "first attached image overlays the motion your cost "
                             "produced (red, 'cost rollout') against the entire "
                             "intended corrected path (green, 'target corrected "
                             "path': the pre-correction motion, the correction, and "
-                            "the continuation to the goal) it should match. The "
+                            "the continuation to the goal). The "
                             "second image plots each arm joint angle over time for "
                             "the same two trajectories (green target vs red rollout) "
-                            "so you can compare the shape of the movement, not just "
-                            "endpoints. Look at where the red arm/curves diverge from "
-                            "the green ones and revise the cost to close that gap, "
-                            f"then return the JSON object again.{joint_block}{goal_block}"
+                            "so you can see the shape of the movement, not just "
+                            "endpoints. Use them to see what your cost actually does, "
+                            "revise it, and return the JSON object "
+                            f"again.{joint_block}{goal_block}"
                         ),
                         "images": [str(image_path), str(turn_dir / "angles.png")],
                     }
@@ -208,12 +235,39 @@ class TurnsCostGenerator(CostGenerator):
                     {
                         "role": "user",
                         "text": (
-                            f"That cost scored {score:.4f} (lower is better, where the "
-                            "score measures how well the resulting motion matches the "
-                            "user's correction). Revise the cost to lower the score and "
-                            f"return the JSON object again.{joint_block}{goal_block}"
+                            f"{score_block} Revise the cost accordingly and return "
+                            f"the JSON object again.{joint_block}{goal_block}"
                         ),
                     }
                 )
 
         return best
+
+
+def _feedback_score_block(ranking: CostRanking | None, score: float) -> str:
+    """Describe this turn's evaluation to the model."""
+    if ranking is None:
+        return (
+            f"That cost scored {score:.4f} (lower is better, where the score "
+            "measures how well the resulting motion matches the user's correction)."
+        )
+    if ranking.inert:
+        return (
+            "Your cost function returned (near-)identical values for every candidate "
+            "trajectory — it never discriminates, so it cannot steer the arm. "
+            "Per-trajectory costs: "
+            f"{json.dumps(ranking.costs)}. Make the cost actually respond to the "
+            "preference."
+        )
+    return (
+        "Your cost function was evaluated directly on the candidate trajectories "
+        "(each resampled to equidistant joint-space points, so only the path "
+        "matters, not timing). Per-trajectory costs: "
+        f"{json.dumps(ranking.costs)}. The user's chosen correction "
+        "('chosen_correction') must cost less than the original plan they "
+        "interrupted ('original_plan') and no more than the rejected alternatives "
+        "('rejected_cluster_*'). Rank accuracy: "
+        f"{ranking.rank_accuracy:.2f} (fraction of those orderings satisfied), "
+        f"separation margin: {ranking.normalized_margin:.2f} (both higher is "
+        "better)."
+    )

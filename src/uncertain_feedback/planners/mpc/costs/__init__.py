@@ -39,12 +39,15 @@ from uncertain_feedback.planners.mpc.costs.generated import (
 )
 from uncertain_feedback.planners.mpc.costs.cost_generator import (
     CostGenerator,
+    CostRanking,
     artifact_run_dir,
     create_cost_generator,
     evaluate_and_render,
     evaluate_candidate_cost,
     goal_reach_report,
     parse_goal_conflict,
+    rank_candidate_cost,
+    resample_equidistant,
 )
 from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
 from uncertain_feedback.planners.mpc.costs.llm_costs import LlmCostGenerator
@@ -89,6 +92,7 @@ __all__ = [
     "render_prompt_images",
     # cost generators
     "CostGenerator",
+    "CostRanking",
     "LlmCostGenerator",
     "TurnsCostGenerator",
     "AgentCostGenerator",
@@ -97,6 +101,8 @@ __all__ = [
     "evaluate_and_render",
     "goal_reach_report",
     "parse_goal_conflict",
+    "rank_candidate_cost",
+    "resample_equidistant",
     "EvalState",
     "artifact_run_dir",
     # prompts

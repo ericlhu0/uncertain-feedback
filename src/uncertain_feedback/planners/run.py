@@ -808,10 +808,16 @@ def main() -> None:
             # highlighted. Non-UQ planners pass a single path.
             candidate_trajs: dict[int, np.ndarray] | None = None
             highlight_label: int | None = None
+            rejected_trajs: tuple[np.ndarray, ...] = ()
             uqr = getattr(mpc, "last_uq_result", None)
             if uqr is not None:
                 candidate_trajs = uqr.cluster_means
                 highlight_label = uqr.chosen_label
+                rejected_trajs = tuple(
+                    traj
+                    for label, traj in sorted(uqr.cluster_means.items())
+                    if label != uqr.chosen_label
+                )
 
             # Roll the original-goal MPC out (no correction, no generated cost) so
             # the cost generator sees what the arm was driving toward and avoids
@@ -843,6 +849,7 @@ def main() -> None:
                 # reachability check assumes a single Cartesian goal.
                 cartesian_goal=goal_pos,
                 cartesian_threshold=cfg.cartesian.threshold,
+                rejected_trajs=rejected_trajs,
             )
             summaries = build_motion_summaries(
                 generated_context, cartesian_goal=goal_pos
@@ -878,6 +885,7 @@ def main() -> None:
                 full_correction_traj=full_correction_traj,
                 cartesian_goal=goal_pos,
                 cartesian_threshold=cfg.cartesian.threshold,
+                rejected_trajs=rejected_trajs,
             )
             generator = create_cost_generator(
                 cfg.llm_cost, generated_context, feedback_text,

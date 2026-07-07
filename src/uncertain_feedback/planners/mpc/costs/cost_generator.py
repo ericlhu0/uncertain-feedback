@@ -21,6 +21,7 @@ import json
 import math
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -68,18 +69,105 @@ def artifact_run_dir(base_dir: Path, artifact_dir: Path) -> Path:
     return root / stamp
 
 
-def _resample_trajectory(traj: np.ndarray, n: int) -> np.ndarray:
-    """Linearly resample a ``(T, ...)`` trajectory to ``n`` frames along axis 0."""
-    t = traj.shape[0]
-    if t == n:
-        return traj
-    src = np.linspace(0.0, 1.0, t)
-    dst = np.linspace(0.0, 1.0, n)
-    flat = traj.reshape(t, -1)
+def resample_equidistant(traj: np.ndarray, n: int) -> np.ndarray:
+    """Resample a ``(T, ...)`` trajectory to ``n`` points equidistant in joint-space
+    arclength.
+
+    Removes timing entirely — speed differences and dwell frames carry no signal
+    here (MDM frames and MPC steps are on different clocks, and MDM output is
+    systematically slower than a fresh rollout), so trajectories compare purely by
+    path. A stationary trajectory becomes its pose repeated ``n`` times.
+    """
+    traj = np.asarray(traj, dtype=np.float64)
+    flat = traj.reshape(traj.shape[0], -1)
+    segments = np.linalg.norm(np.diff(flat, axis=0), axis=1)
+    arclength = np.concatenate([[0.0], np.cumsum(segments)])
+    if arclength[-1] <= 0.0:
+        return np.repeat(traj[:1], n, axis=0)
+    targets = np.linspace(0.0, arclength[-1], n)
     out = np.stack(
-        [np.interp(dst, src, flat[:, i]) for i in range(flat.shape[1])], axis=1
+        [np.interp(targets, arclength, flat[:, i]) for i in range(flat.shape[1])],
+        axis=1,
     )
     return out.reshape((n, *traj.shape[1:]))
+
+
+@dataclass(frozen=True)
+class CostRanking:
+    """How a candidate cost orders the preferences the user actually revealed.
+
+    ``rank_accuracy`` is the fraction of preference pairs the cost orders
+    correctly; ``normalized_margin`` is the mean z-scored separation of the chosen
+    correction below the alternatives (a scale-free tiebreak, not a gate).
+    ``inert`` marks a cost that returned (near-)identical values for every
+    trajectory — it never discriminates, so its ranking is vacuous.
+    """
+
+    rank_accuracy: float
+    normalized_margin: float
+    inert: bool
+    costs: dict[str, float]
+
+    @property
+    def sort_key(self) -> tuple[float, float]:
+        """Lower-is-better selection key: rank accuracy first, margin as tiebreak."""
+        if self.inert:
+            return (math.inf, math.inf)
+        return (1.0 - self.rank_accuracy, -self.normalized_margin)
+
+
+def rank_candidate_cost(
+    context: GeneratedCostContext, cost: GeneratedPythonCost
+) -> CostRanking | None:
+    """Evaluate a candidate cost by ranking consistency, not trajectory matching.
+
+    The cost function itself is applied to the trajectories whose preference order
+    the user revealed: the chosen correction (``mdm_traj``) must cost less than the
+    original plan the user interrupted (``reference_traj``, strict) and no more
+    than the rejected UQ cluster means (weak — the user's pick may be a near-tie).
+    Any cost that captures the intent satisfies this; recreating the correction
+    trajectory is not required. All trajectories are resampled to equidistant
+    joint-space points first (timing is a pipeline artifact, not intent) and
+    compared after z-normalization (generated costs have arbitrary scale).
+
+    Returns ``None`` when the context has no comparison trajectories (no reference
+    rollout and no rejected clusters), in which case callers fall back to the L2
+    rollout score.
+    """
+    chosen = np.asarray(context.mdm_traj, dtype=np.float64)
+    if chosen.ndim != 3 or chosen.shape[0] == 0:
+        return None
+    trajs: dict[str, np.ndarray] = {}
+    if context.reference_traj is not None and context.reference_traj.size > 0:
+        trajs["original_plan"] = context.reference_traj
+    for i, rejected in enumerate(context.rejected_trajs):
+        trajs[f"rejected_cluster_{i}"] = rejected
+    if not trajs:
+        return None
+    trajs["chosen_correction"] = chosen
+    n = max(traj.shape[0] for traj in trajs.values())
+    batch = np.stack([resample_equidistant(traj, n) for traj in trajs.values()])
+    raw = np.asarray(cost(batch), dtype=np.float64)
+    costs = {name: float(value) for name, value in zip(trajs, raw)}
+    if not np.all(np.isfinite(raw)) or float(raw.std()) < 1e-12:
+        return CostRanking(0.0, 0.0, True, costs)
+    z = dict(zip(trajs, (raw - raw.mean()) / raw.std()))
+    z_chosen = z["chosen_correction"]
+    pairs: list[bool] = []
+    margins: list[float] = []
+    if "original_plan" in z:
+        pairs.append(bool(z_chosen < z["original_plan"]))
+        margins.append(float(z["original_plan"] - z_chosen))
+    for name in trajs:
+        if name.startswith("rejected_cluster_"):
+            pairs.append(bool(z_chosen <= z[name]))
+            margins.append(float(z[name] - z_chosen))
+    return CostRanking(
+        rank_accuracy=float(np.mean(pairs)),
+        normalized_margin=float(np.mean(margins)),
+        inert=False,
+        costs=costs,
+    )
 
 
 def _score_rollout(
@@ -87,8 +175,10 @@ def _score_rollout(
 ) -> float:
     """Mean per-frame FK L2 distance between a rollout and the MDM correction.
 
-    Resamples ``rollout`` to the corrected (MDM) trajectory's length and compares
-    FK joint positions. ``math.inf`` when either trajectory is empty / malformed.
+    Both trajectories are resampled to equidistant joint-space points
+    (:func:`resample_equidistant`) so the comparison is purely about path — MDM
+    output is systematically slower than a fresh rollout, so frame-wise timing is
+    a pipeline artifact. ``math.inf`` when either trajectory is empty / malformed.
     """
     rollout = np.asarray(rollout, dtype=np.float64)
     target = np.asarray(context.mdm_traj, dtype=np.float64)
@@ -99,9 +189,9 @@ def _score_rollout(
         or target.shape[0] == 0
     ):
         return math.inf
-    rollout = _resample_trajectory(rollout, target.shape[0])
-    rollout_positions = context.fk_batch(rollout)  # (T, 5, 3)
-    mdm_positions = context.mdm_positions  # (T, 5, 3)
+    n = max(rollout.shape[0], target.shape[0])
+    rollout_positions = context.fk_batch(resample_equidistant(rollout, n))
+    mdm_positions = context.fk_batch(resample_equidistant(target, n))
     return float(np.linalg.norm(rollout_positions - mdm_positions, axis=-1).mean())
 
 

@@ -68,6 +68,7 @@ _MDM_SUBDIR = MDM_ROOT / "motion-diffusion-model"
 
 _MAX_FRAMES = 196  # HumanML3D hard limit
 _FPS = 20  # HumanML3D frame rate
+N_PREFIX_FRAMES = 1  # leading frames pinned to the start pose during inpainting
 
 
 def _sync_cuda_if_needed(torch_module: Any) -> None:
@@ -370,7 +371,7 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
 
         All body joints except the left arm (left_shoulder, left_elbow,
         left_wrist) are inpainted to ``start_pose`` throughout the motion.
-        The first 10 frames are locked to the arm configuration encoded in
+        The first ``N_PREFIX_FRAMES`` frames are locked to the arm configuration encoded in
         ``start_pose``.  To start from the MPC's current arm state, pass a
         ``start_pose`` built with :meth:`build_pose_from_arm_aa`.
 
@@ -401,7 +402,7 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
                                    ``motion_length_seconds`` at 20 FPS.
             frozen_body:           If ``True``, inpaint/freeze all non-left-arm
                                    body features for the full motion.  If
-                                   ``False``, only the first 10 frames are
+                                   ``False``, only the first ``N_PREFIX_FRAMES`` frames are
                                    locked to ``start_pose``.
             spine3_aa:             Optional fixed MPC spine3 world axis-angle.
                                    When provided, the returned goals are
@@ -474,8 +475,8 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
             .unsqueeze(-1)
             .repeat(num_samples, 1, 1, n_frames)
         )
-        # Lock the first 10 frames to the start frame.
-        model_kwargs["y"]["inpainting_mask"][..., :10] = True
+        # Lock the prefix frames to the start frame.
+        model_kwargs["y"]["inpainting_mask"][..., :N_PREFIX_FRAMES] = True
 
         # --- Classifier-free guidance scale ----------------------------------
         model_kwargs["y"]["scale"] = (
@@ -657,7 +658,7 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
             .unsqueeze(-1)
             .repeat(num_samples, 1, 1, n_frames)
         )
-        model_kwargs["y"]["inpainting_mask"][..., :10] = True
+        model_kwargs["y"]["inpainting_mask"][..., :N_PREFIX_FRAMES] = True
 
         model_kwargs["y"]["scale"] = (
             torch.ones(num_samples, device=dist_util.dev()) * args.guidance_param

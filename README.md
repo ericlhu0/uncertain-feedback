@@ -99,6 +99,10 @@ uv run python src/uncertain_feedback/data_collection/labeler.py
 ```
 uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py --output_dir ./my_mdm_dataset/
 ```
+Pose-estimation results are cached as `(N, 22, 3)` position arrays in `<frames_dir>/../mdm_cache/`
+with a `_v<N>` version tag in the filename; bumping `_CACHE_VERSION` in `build_mdm_dataset.py`
+(done whenever the pose-estimation/conversion changes) invalidates old entries automatically.
+Cache files without a version tag predate the 2026-06-29 chirality fix and are mirrored; delete them.
 
 4. Fine-tune motion-diffusion-model
 First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` (or whatever was created with the trajectory editor web ui) to `.../HumanML3D`
@@ -132,13 +136,13 @@ To generate sanity-check samples from a fixed starting pose, use `train_leftarm.
 (run from repo root. argument paths should be relative to `MDM_ROOT`)
 ```
 uv run python src/uncertain_feedback/motion_generators/mdm/train_leftarm.py \
-    --save_dir ./save/customv2 \
+    --save_dir ./save/customv3 \
     --start_pose demo_pose.pt \
     --n_prefix 1 \
     --body_mode both \
     --dataset humanml \
     --resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt \
-    --diffusion_steps 100 \
+    --diffusion_steps 50 \
     --mask_frames \
     --use_ema \
     --batch_size 8 \

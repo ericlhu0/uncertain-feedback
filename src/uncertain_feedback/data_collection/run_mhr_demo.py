@@ -44,7 +44,6 @@ from uncertain_feedback.data_collection.smpl_to_hml263 import (
     load_hml_stats,
     positions_to_hml263,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 _DEMO_DIR = Path(__file__).parent
 _MDM_ROOT = (
@@ -53,7 +52,6 @@ _MDM_ROOT = (
     / "mdm"
     / "motion-diffusion-model"
 )
-_SMPL_PKL = _MDM_ROOT / "body_models" / "smpl" / "SMPL_NEUTRAL.pkl"
 _HML_STATS = _MDM_ROOT / "dataset" / "HumanML3D"
 _NPZ = _DEMO_DIR / "smpl_out.npz"
 _OUT = _DEMO_DIR / "comparison.png"
@@ -74,7 +72,6 @@ def main() -> None:
     frame_paths = data["frame_paths"]  # (N,)
     n_frames = positions_arr.shape[0]
 
-    tpose_22 = SmplLeftArmFK(_SMPL_PKL).tpose_all_joints
     mean, std = load_hml_stats(_HML_STATS)
 
     print("Converting MHR positions → HML263 …")
@@ -84,8 +81,7 @@ def main() -> None:
             positions=positions_arr,
             mean=mean,
             std=std,
-            tpose_22=tpose_22,
-        )  # (N, 263)
+        )  # (N-1, 263)
 
     positions = _hml263_to_local_positions(features, mean, std)  # (N, 22, 3)
 

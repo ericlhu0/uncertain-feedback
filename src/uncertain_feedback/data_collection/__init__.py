@@ -12,8 +12,9 @@ Stages
 2. **MHR → SMPL conversion** — uses the official MHR repo
    (``~/MHR/tools/mhr_smpl_conversion``) to fit a SMPL body model to the MHR
    predictions via optimization-based surface mapping.
-3. **SMPL → HML263** — converts SMPL ``body_pose`` / ``global_orient`` /
-   ``transl`` to the 263-dim HumanML3D feature vector.
+3. **positions → HML263** — converts world-space 22-joint positions to the
+   263-dim HumanML3D feature vector via the official HumanML3D
+   ``process_file`` (MDM submodule).
 
 Quick start::
 
@@ -42,8 +43,6 @@ from uncertain_feedback.data_collection.mhr_to_hml263_pipeline import (
 from uncertain_feedback.data_collection.smpl_to_hml263 import (
     load_hml_stats,
     positions_to_hml263,
-    smpl_params_to_hml263,
-    smpl_params_to_positions,
 )
 
 __all__ = [
@@ -53,6 +52,4 @@ __all__ = [
     "MhrToHml263Pipeline",
     "load_hml_stats",
     "positions_to_hml263",
-    "smpl_params_to_hml263",
-    "smpl_params_to_positions",
 ]

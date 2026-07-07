@@ -1,7 +1,7 @@
 # uncertain-feedback Codebase Map
 
 **Last updated:** 2026-07-07  
-**Branch:** agent-costs
+**Branch:** simulated-users-standard
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
 
@@ -101,7 +101,8 @@ uncertain-feedback/
 │   │   ├── labeler.py                # Browser-based text labeling UI (Flask)
 │   │   ├── mhr_pose_estimator.py     # MHR human pose estimation wrapper
 │   │   ├── mhr_to_hml263_pipeline.py # MHR → HML263 feature pipeline
-│   │   ├── smpl_to_hml263.py         # SMPL body_pose → HML263
+│   │   ├── smpl_to_hml263.py         # positions → HML263 via official HumanML3D process_file
+│   │   ├── t2m_example_frame.npy     # (22,3) t2m target-skeleton frame for uniform_skeleton
 │   │   ├── _mhr_inference_worker.py  # SMPL inference worker (detectron2 / SAM)
 │   │   ├── _mhr_inference_worker_conversion.py
 │   │   ├── run_mhr_demo.py           # End-to-end demo runner
@@ -373,6 +374,19 @@ Videos → _mhr_inference_worker.py (detectron2 + SAM → SMPL .npz)
 > 2026-06-29). Any `data/mdm_cache/*` or `new_joint_vecs/*` collected before that
 > fix is mirrored and must be regenerated. See
 > `.claude/POSE_REPRESENTATION_AUDIT.md` §6.
+
+> **HML263 encoding (2026-07-07):** `positions_to_hml263` now delegates to the
+> **official** HumanML3D `process_file` (MDM submodule) — `uniform_skeleton`
+> retargeting onto the t2m skeleton, quaternion IK for 6D rotations,
+> heading-local forward-difference velocities, squared-velocity foot contacts.
+> It returns **N-1** feature frames for N position frames. The custom feature
+> assembly (min-rotation identity-root IK, world-frame backward-difference
+> velocities) is gone; `smpl_params_to_hml263` / `smpl_params_to_positions`
+> were deleted (dead). `build_mdm_dataset.py` now caches `(N, 22, 3)` positions
+> (not features) in version-tagged files (`_CACHE_VERSION`), clamps sequence
+> length at the positions level, and applies augmentation noise to arm features
+> only. Start poses (`demo_pose.pt`) created with the old encoder should be
+> regenerated before the next fine-tune.
 
 ---
 

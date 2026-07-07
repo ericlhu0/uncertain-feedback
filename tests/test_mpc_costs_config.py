@@ -513,13 +513,15 @@ def test_elbow_height_cost_penalizes_outside_range() -> None:
 
 
 def test_elbow_flexion_angle_cost_zero_inside_range() -> None:
+    context = _cost_context(SmplLeftArmFK())
     q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    flexion = compute_elbow_flexion_angles(q_trajs[:, 0], context)[0]
     cost = ElbowFlexionAngleCost(
-        min_angle=0.0,
-        max_angle=0.1,
+        min_angle=flexion - 0.01,
+        max_angle=flexion + 0.01,
         weight=100.0,
         progress_weight=100.0,
-        context=_cost_context(SmplLeftArmFK()),
+        context=context,
     )
 
     np.testing.assert_allclose(cost(q_trajs), [0.0])
@@ -589,16 +591,21 @@ def test_compute_elbow_heights_uses_joint_before_wrist() -> None:
     assert not np.isclose(learned_height, wrist_height)
 
 
-def test_compute_elbow_flexion_angles_uses_elbow_joint_row() -> None:
+def test_compute_elbow_flexion_angles_measures_arm_bend() -> None:
     context = _cost_context(SmplLeftArmFK())
-    trajectory = np.zeros((1, 3, 3), dtype=np.float64)
-    trajectory[0, 0, 2] = 2.0
-    trajectory[0, 1, 0] = 0.3
-    trajectory[0, 2, 1] = 4.0
+    neutral = np.zeros((1, 3, 3), dtype=np.float64)
+    bent = np.zeros((1, 3, 3), dtype=np.float64)
+    bent[0, 2, 1] = 1.5  # wrist slot bends the forearm relative to the upper arm
+    reoriented = np.zeros((1, 3, 3), dtype=np.float64)
+    reoriented[0, 0, 2] = 2.0  # shoulder slot: moves the whole arm, no bend
+    reoriented[0, 1, 0] = 0.3  # elbow slot: reorients the upper arm, no bend
 
-    learned_flexion = compute_elbow_flexion_angles(trajectory, context)[0]
+    neutral_angle = compute_elbow_flexion_angles(neutral, context)[0]
+    bent_angle = compute_elbow_flexion_angles(bent, context)[0]
+    reoriented_angle = compute_elbow_flexion_angles(reoriented, context)[0]
 
-    np.testing.assert_allclose(learned_flexion, 0.3)
+    assert bent_angle > neutral_angle + 1.0
+    np.testing.assert_allclose(reoriented_angle, neutral_angle)
 
 
 def test_compute_shoulder_abduction_angles_changes_with_upper_arm_direction() -> None:
@@ -1201,12 +1208,14 @@ def test_mdm_validate_trajectory_warns_on_range_violation() -> None:
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3, dtype=np.float64),
     )
-    # Constrain elbow flexion to a tight range; a large elbow rotation violates it.
+    # Constrain elbow flexion to a tight range around the neutral bend; a large
+    # forearm bend (wrist slot) violates it.
+    neutral = compute_elbow_flexion_angles(np.zeros((1, 3, 3)), context)[0]
     extra_costs = CompositeTrajectoryCost(
         [
             ElbowFlexionAngleCost(
-                min_angle=0.0,
-                max_angle=0.1,
+                min_angle=neutral - 0.05,
+                max_angle=neutral + 0.05,
                 weight=1.0,
                 progress_weight=1.0,
                 context=context,
@@ -1219,7 +1228,7 @@ def test_mdm_validate_trajectory_warns_on_range_violation() -> None:
     assert mpc.validate_trajectory(safe) == []
 
     violating = np.zeros((4, 3, 3), dtype=np.float64)
-    violating[2, 1, 0] = 1.5  # large elbow axis-angle on frame 2
+    violating[2, 2, 1] = 1.5  # large forearm bend on frame 2
     warnings = mpc.validate_trajectory(violating)
     assert len(warnings) == 1
     assert "elbow_flexion_angle" in warnings[0]

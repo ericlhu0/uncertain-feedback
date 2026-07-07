@@ -539,6 +539,47 @@ score, which is still kept for selection and ranking:
 
 With `use_images: false` both backends fall back to score-only text feedback.
 
+### Simulated-user transfer experiment
+
+The transfer experiment closes the evaluation loop with a **hidden ground
+truth**: a simulated care recipient (`src/uncertain_feedback/simulated_users/`)
+holds a clinically motivated ROM restriction the cost generator never sees. The
+persona decides when feedback is given (the first step the initial plan violates
+the hidden cost), what is said (its fixed feedback line — `--text` is ignored),
+and which UQ cluster it picks (the most comfortable one). The generated cost is
+then evaluated by rolling out to the **original goal and each held-out
+`transfer.goals` entry** and measuring hidden-cost violation plus goal
+completion — so a cost only wins by generalizing beyond the correction it was
+generated from.
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_transfer_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml \
+  --persona adhesive_capsulitis \
+  --save-video
+```
+
+Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
+`stroke_flexor_synergy` (pose-dependent bound). Requires
+`planner: arm_mpc_cartesian`, `llm_cost.enabled: true`, `cartesian.goals`, and a
+`transfer:` block:
+
+```yaml
+transfer:
+  goals:                     # held-out spine3-relative wrist targets
+    - [-0.25, 0.0, -0.05]
+  trigger_threshold: 0.02    # hidden-cost violation (rad) at which the user interrupts
+```
+
+Artifacts go to `transfer_artifacts/<timestamp>/`: `initial_rollout.npy`, the
+cost-generation directory (same layout as a live run), per-condition rollouts
+(`base/`, `tracking/`, `generated/`, `oracle/`, with MP4s under `--save-video`),
+and `transfer_summary.json` with per-condition per-goal metrics
+(`mean_violation`, `max_violation`, `frac_frames_violated`, `goal_reach`).
+`tracking` (following the correction trajectory directly) is only defined for
+the original goal; on transfer goals it is identical to `base` — that contrast
+is the argument for persisting a cost function rather than a trajectory.
+
 
 ## Thanks
 This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code).

@@ -58,12 +58,15 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_llm.yaml
 │   │           ├── arm_mpc_cartesian_mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
 │   │           ├── arm_mpc_cartesian_mdm_llm_agent.yaml  # backend: agent (codex CLI)
+│   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
 │   │           └── arm_mpc_cartesian_no_mdm.yaml
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── cluster_comparison.py     # Generate + roll out one LLM cost per UQ cluster
 │   │   ├── run_experiment.py         # CLI entry point for cluster comparison experiments
 │   │   ├── backend_comparison.py     # Generate one cost per backend (llm/turns/agent), score uniformly
 │   │   ├── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
+│   │   ├── transfer_experiment.py    # Simulated-user protocol: trigger → correction → cost → transfer eval
+│   │   ├── run_transfer_experiment.py # CLI entry point for simulated-user transfer experiments
 │   │   └── render_cost_comparison.py # CLI the agent backend runs to render rollout-vs-correction overlay
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator
@@ -142,7 +145,9 @@ SmplLeftArmMPC (arm_mpc.py)
 │         clusters with XyzPositionClusterer, shows cluster picker UI (each
 │         cluster has a magnitude slider that scales the chosen motion about
 │         its start pose via scale_trajectory), enqueues the (scaled) mean of
-│         the chosen cluster.
+│         the chosen cluster. Headless selection: `auto_cluster` (fixed label)
+│         or `cluster_selector` (callable on the cluster means; used by
+│         simulated-user experiments; takes precedence).
 │
 └── _CartesianGoalsMixin (arm_mpc_cartesian_base.py)
       Adds: Cartesian wrist-goal queue; cost switches from joint-space to
@@ -321,6 +326,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model`, `strict`, `artifact_dir`, `use_images`, `cluster_experiment` |
+| `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets), `trigger_threshold` (hidden-cost violation in rad that triggers simulated feedback) |
 
 ---
 
@@ -392,6 +398,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml>` | Per-backend (llm/turns/agent) cost comparison experiment |
+| `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> --persona <name>` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals) |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |

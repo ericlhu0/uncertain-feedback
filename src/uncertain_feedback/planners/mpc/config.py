@@ -34,6 +34,14 @@ class CartesianConfig:
 
 
 @dataclass(frozen=True)
+class TransferConfig:
+    """Held-out goals + trigger settings for the simulated-user transfer experiment."""
+
+    goals: list[list[float]] = field(default_factory=list)
+    trigger_threshold: float = 0.02
+
+
+@dataclass(frozen=True)
 class LlmCostConfig:
     enabled: bool = False
     model: str | None = None
@@ -76,6 +84,7 @@ class MpcRunConfig:
     preference_alpha: float = 0.5
     preference_window: int = 50
     motion_generator: str = "mdm"
+    transfer: TransferConfig = TransferConfig()
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -140,6 +149,19 @@ def _cost_backend(value: Any) -> str:
     return backend
 
 
+def _goal_list(value: Any, name: str) -> list[list[float]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list.")
+    goals: list[list[float]] = []
+    for idx, goal in enumerate(value):
+        if not isinstance(goal, list) or len(goal) != 3:
+            raise ValueError(f"{name}[{idx}] must be a 3-number list.")
+        goals.append([_float(v, f"{name}[{idx}]") for v in goal])
+    return goals
+
+
 def _str_list(value: Any, name: str) -> list[str]:
     if not isinstance(value, list):
         raise ValueError(f"{name} must be a list of strings.")
@@ -179,16 +201,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     cost_data = _mapping(data.get("costs"), "costs")
     llm_cost_data = _mapping(data.get("llm_cost"), "llm_cost")
 
-    goals = cartesian_data.get("goals", [])
-    if goals is None:
-        goals = []
-    if not isinstance(goals, list):
-        raise ValueError("cartesian.goals must be a list.")
-    normalized_goals: list[list[float]] = []
-    for idx, goal in enumerate(goals):
-        if not isinstance(goal, list) or len(goal) != 3:
-            raise ValueError(f"cartesian.goals[{idx}] must be a 3-number list.")
-        normalized_goals.append([_float(v, f"cartesian.goals[{idx}]") for v in goal])
+    normalized_goals = _goal_list(cartesian_data.get("goals", []), "cartesian.goals")
+    transfer_data = _mapping(data.get("transfer"), "transfer")
+    transfer_goals = _goal_list(transfer_data.get("goals", []), "transfer.goals")
 
     costs: dict[str, dict[str, Any]] = {}
     cost_names = available_cost_names()
@@ -278,4 +293,11 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             data.get("preference_window", 50), "preference_window"
         ),
         motion_generator=motion_generator,
+        transfer=TransferConfig(
+            goals=transfer_goals,
+            trigger_threshold=_float(
+                transfer_data.get("trigger_threshold", 0.02),
+                "transfer.trigger_threshold",
+            ),
+        ),
     )

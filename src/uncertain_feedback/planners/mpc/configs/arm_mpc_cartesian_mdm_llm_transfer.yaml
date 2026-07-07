@@ -1,0 +1,44 @@
+planner: arm_mpc_cartesian
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.01
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt.bak"
+goal_threshold: 0.15
+advance_threshold: 0.15
+max_playback_delta: 0.1
+trajectory_fraction: 1
+mdm_frames: 50
+
+uq:
+  diffusion_samples: 500
+  n_clusters: 3
+  scale: 1.0
+
+cartesian:
+  goals:
+    - [-0.15, 0.05, -0.1]
+  threshold: 0.05
+
+# Held-out goals for the simulated-user transfer experiment. Pick wrist targets
+# (spine3-relative) inside the arm's workspace; the generated cost should keep
+# protecting the hidden preference on these even though the correction was
+# given while reaching cartesian.goals[0].
+transfer:
+  goals:
+    - [-0.25, 0.0, -0.05]
+    - [-0.1, 0.2, -0.1]
+    - [-0.2, 0.1, 0.1]
+  trigger_threshold: 0.02  # hidden-cost violation (rad) at which the user interrupts
+
+preference_learning: false
+preference_alpha: 0
+
+llm_cost:
+  enabled: true
+  model: gpt-5.4
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true
+  max_turns: 3
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"

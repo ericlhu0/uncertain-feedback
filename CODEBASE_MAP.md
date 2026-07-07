@@ -92,8 +92,9 @@ uncertain-feedback/
 │   │   │   └── xyz_clusterer.py      # XyzPositionClusterer (KMeans on FK positions)
 │   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI (stays here)
 │   ├── simulated_users/
-│   │   ├── base.py                   # SimulatedUser, HiddenBound (+conditional), violations, cluster choice, oracle cost term
-│   │   └── personas.py               # Clinically motivated personas (PERSONAS registry)
+│   │   ├── base.py                   # SimulatedUser, HiddenBound/CoupledBound, violations, cluster choice, oracle cost term
+│   │   ├── personas.py               # Clinically motivated personas (PERSONAS registry)
+│   │   └── viz.py                    # render_hidden_bounds: shaded forbidden regions + trajectories
 │   ├── data_collection/
 │   │   ├── build_mdm_dataset.py      # Build HumanML3D dataset from video/labels
 │   │   ├── extract_all_frames.py     # Video → frames
@@ -248,7 +249,7 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 | YAML key                  | Class                       | Feature                                      |
 |---------------------------|-----------------------------|----------------------------------------------|
 | `elbow_height`            | `ElbowHeightCost`           | Spine3-relative elbow Y position (meters)    |
-| `elbow_flexion_angle`     | `ElbowFlexionAngleCost`     | Elbow rotation magnitude (radians)           |
+| `elbow_flexion_angle`     | `ElbowFlexionAngleCost`     | Upper-arm/forearm bend angle (radians; 0 = straight) |
 | `shoulder_abduction_angle`| `ShoulderAbductionAngleCost`| Upper-arm angle from torso-down (radians)    |
 
 ### Cost structure
@@ -443,10 +444,14 @@ The hidden bounds are the evaluation ground truth in headless experiments
 - `HiddenBound` — one restriction over a shared joint feature (radians):
   `upper_bound` / `lower_bound` / `avoid_band` (painful range), optionally gated
   by a `FeatureCondition` on another feature.
-- `CoupledBound` — pose-dependent limit: the threshold on `feature` moves
-  linearly with `cond_feature` (e.g. stroke flexor synergy).
-- `viz.py` — `render_hidden_bounds()` debug panels: forbidden region shaded by
-  evaluating `bound.violation` on a grid, trajectories traced through it.
+- `CoupledBound` — **pose-dependent limit**: the threshold on one feature moves
+  linearly with another (`threshold = intercept + slope * cond_value`), e.g.
+  stroke flexor synergy (required elbow bend grows with abduction).
+- `render_hidden_bounds()` (`viz.py`) — one panel per bound for debugging:
+  pose-dependent bounds are drawn in the conditioning-vs-bounded feature plane
+  with the forbidden region shaded (computed by evaluating `bound.violation` on
+  a grid, so the picture cannot drift from the code) and trajectories traced
+  through it; simple bounds as feature-over-time with the forbidden range shaded.
 - `SimulatedUser` — persona: `name`, clinical `description`, `feedback_text`
   (what the user says when the robot violates a bound), `bounds`.
 - Behaviors: `first_violation_step()` (feedback trigger), `choose_cluster()`
@@ -460,6 +465,16 @@ The hidden bounds are the evaluation ground truth in headless experiments
   `adhesive_capsulitis`, `elbow_contracture`, `painful_arc` (avoid band),
   `stroke_flexor_synergy` (coupled bound).
   Registry: `PERSONAS` / `get_persona(name)`.
+
+> **Elbow-flexion feature fix (2026-07-06):**
+> `GeneratedCostContext.elbow_flexion_angles` (generator-side) and
+> `compute_elbow_flexion_angles` in `costs/base.py` (the `elbow_flexion_angle`
+> YAML cost + preference learning) both now measure the angle between the upper
+> arm and forearm from FK positions (0 = straight). The old elbow-slot rotvec
+> norm could not see an anatomical elbow bend at all — under the repo FK
+> convention (audit §3) the bend is encoded in the wrist slot — and instead
+> tracked upper-arm re-orientation. Any old `elbow_flexion_angle` min/max
+> values from before this fix are on the wrong scale.
 
 ## 14. Motion Generator Backends (`motion_generators/`)
 

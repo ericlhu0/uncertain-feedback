@@ -12,9 +12,9 @@ from scipy.spatial.transform import Rotation
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 _JOINT_BEFORE_WRIST_POS_IDX = -2
-_ELBOW_AA_IDX = 1
 _SHOULDER_POS_IDX = 2
 _ELBOW_POS_IDX = 3
+_WRIST_POS_IDX = 4
 _TORSO_DOWN = np.array([0.0, -1.0, 0.0], dtype=np.float64)
 
 
@@ -396,10 +396,24 @@ def compute_elbow_flexion_angles(
     trajectory: np.ndarray,
     context: MpcCostContext,
 ) -> np.ndarray:
-    """Return elbow controlled-axis-angle magnitudes in radians."""
-    _ = context
-    trajectory = np.asarray(trajectory, dtype=np.float64)
-    return np.linalg.norm(trajectory[:, _ELBOW_AA_IDX], axis=1)
+    """Return elbow bend as the angle between upper arm and forearm, in radians.
+
+    0 = fully extended; larger = more bent. Computed from FK positions because
+    under this repo's FK convention (joint *j*'s rotation transforms the bone
+    arriving at *j*) the anatomical bend is encoded in the wrist-slot rotvec,
+    so the elbow-slot rotvec magnitude does not measure it.
+    """
+    positions = context.fk.fk_batch(
+        trajectory,
+        context.spine3_pos,
+        context.spine3_aa,
+    )
+    upper_arm = positions[:, _ELBOW_POS_IDX] - positions[:, _SHOULDER_POS_IDX]
+    forearm = positions[:, _WRIST_POS_IDX] - positions[:, _ELBOW_POS_IDX]
+    dots = np.sum(upper_arm * forearm, axis=-1)
+    norms = np.linalg.norm(upper_arm, axis=-1) * np.linalg.norm(forearm, axis=-1)
+    cos = np.divide(dots, norms, out=np.ones_like(dots), where=norms > 1e-12)
+    return np.arccos(np.clip(cos, -1.0, 1.0))
 
 
 def compute_shoulder_abduction_angles(

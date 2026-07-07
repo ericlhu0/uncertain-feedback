@@ -119,14 +119,28 @@ class GeneratedCostContext:
             raise KeyError(f"Unknown generated-cost joint name: {name!r}") from exc
 
     def elbow_flexion_angles(self, trajectory: np.ndarray) -> np.ndarray:
-        """Return elbow bend as local elbow rotation-vector magnitude.
+        """Return elbow bend as the angle between upper arm and forearm.
 
         Accepts any leading shape ending in ``(3, 3)`` and returns that leading
-        shape. This is a coarse SMPL-space flexion proxy, not a clinical joint
-        angle decomposition.
+        shape. 0 = fully extended; larger = more bent. Computed from FK
+        positions because under this repo's FK convention (joint *j*'s rotation
+        transforms the bone arriving at *j*) the anatomical bend is encoded in
+        the wrist-slot rotvec, so the elbow-slot rotvec magnitude does not
+        measure it.
         """
-        trajectory = np.asarray(trajectory, dtype=np.float64)
-        return np.linalg.norm(trajectory[..., 1, :], axis=-1)
+        positions = self.fk_batch(trajectory)
+        upper_arm = (
+            positions[..., _JOINT_NAMES["left_elbow"], :]
+            - positions[..., _JOINT_NAMES["left_shoulder"], :]
+        )
+        forearm = (
+            positions[..., _JOINT_NAMES["left_wrist"], :]
+            - positions[..., _JOINT_NAMES["left_elbow"], :]
+        )
+        dots = np.sum(upper_arm * forearm, axis=-1)
+        norms = np.linalg.norm(upper_arm, axis=-1) * np.linalg.norm(forearm, axis=-1)
+        cos = np.divide(dots, norms, out=np.ones_like(dots), where=norms > 1e-12)
+        return np.arccos(np.clip(cos, -1.0, 1.0))
 
     def shoulder_abduction_adduction_angles(self, trajectory: np.ndarray) -> np.ndarray:
         """Return signed shoulder abduction/adduction proxy in the spine3 frame.

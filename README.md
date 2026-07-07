@@ -260,6 +260,24 @@ Both backends expose the same interface, so any MDM-backed planner
 (`arm_mpc_mdm`, `arm_mpc_mdm_uq`, `arm_mpc_cartesian`) works with either by setting
 `motion_generator:` in its config.
 
+### Simulated user (`user:`)
+
+Every run loads a simulated care recipient alongside the pose, selected by the
+optional YAML key `user:` (default `unrestricted` — no movement restrictions).
+Restricted personas (`adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
+`stroke_flexor_synergy`; see `src/uncertain_feedback/simulated_users/personas.py`)
+carry hidden joint-limit bounds and a fixed feedback line. When the configured
+user has bounds:
+
+- `--text` defaults to the user's feedback line (an explicit `--text` still wins;
+  with the unrestricted user the default stays `"move my arm up"`).
+- `uq.user_cluster: true` delegates UQ cluster selection to the user (it picks
+  the most comfortable cluster mean), taking precedence over `uq.auto_cluster`
+  and the interactive picker.
+
+The same hidden bounds are the evaluation ground truth for the
+[transfer experiment](#simulated-user-transfer-experiment).
+
 ### Minimal Joint-Space MPC Config
 Save as `src/uncertain_feedback/planners/mpc/configs/mpc_plain.yaml`:
 ```yaml
@@ -555,14 +573,15 @@ generated from.
 ```bash
 uv run python src/uncertain_feedback/experiments/run_transfer_experiment.py \
   --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml \
-  --persona adhesive_capsulitis \
   --save-video
 ```
 
-Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
-`stroke_flexor_synergy` (pose-dependent bound). Requires
-`planner: arm_mpc_cartesian`, `llm_cost.enabled: true`, `cartesian.goals`, and a
-`transfer:` block:
+The persona comes from the config's `user:` key (the example config sets
+`adhesive_capsulitis`); `--persona` overrides it. Personas:
+`adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
+`stroke_flexor_synergy` (pose-dependent bound) — the unrestricted default is
+rejected. Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
+`cartesian.goals`, and a `transfer:` block:
 
 ```yaml
 transfer:

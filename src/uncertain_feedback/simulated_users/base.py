@@ -111,18 +111,62 @@ class HiddenBound:
 
 
 @dataclass(frozen=True)
+class CoupledBound:
+    """Pose-dependent limit: the threshold on ``feature`` moves linearly with
+    ``cond_feature``.
+
+    ``threshold = intercept + slope * cond_value``. ``upper_bound`` penalizes the
+    feature above the threshold, ``lower_bound`` below it. Where the line leaves
+    the feature's physical range the bound is naturally inactive (e.g. a negative
+    lower bound on a non-negative feature).
+    """
+
+    feature: str
+    bound_type: str
+    cond_feature: str
+    intercept: float
+    slope: float
+
+    def __post_init__(self) -> None:
+        if self.feature not in FEATURE_NAMES:
+            raise ValueError(f"Unknown feature {self.feature!r}.")
+        if self.cond_feature not in FEATURE_NAMES:
+            raise ValueError(f"Unknown cond_feature {self.cond_feature!r}.")
+        if self.bound_type not in ("upper_bound", "lower_bound"):
+            raise ValueError(
+                f"CoupledBound bound_type must be upper_bound or lower_bound; "
+                f"got {self.bound_type!r}."
+            )
+
+    def threshold(self, cond_values: np.ndarray) -> np.ndarray:
+        """Return the pose-dependent threshold for conditioning-feature values."""
+        return self.intercept + self.slope * np.asarray(cond_values, dtype=np.float64)
+
+    def violation(self, features: dict[str, np.ndarray]) -> np.ndarray:
+        """Return per-frame violation magnitudes (radians), zero when satisfied."""
+        values = np.asarray(features[self.feature], dtype=np.float64)
+        threshold = self.threshold(features[self.cond_feature])
+        if self.bound_type == "upper_bound":
+            return np.maximum(values - threshold, 0.0)
+        return np.maximum(threshold - values, 0.0)
+
+
+Bound = HiddenBound | CoupledBound
+
+
+@dataclass(frozen=True)
 class SimulatedUser:
     """A care recipient persona with hidden ROM restrictions."""
 
     name: str
     description: str
     feedback_text: str
-    bounds: tuple[HiddenBound, ...]
+    bounds: tuple[Bound, ...]
 
     def violation_series(self, features: dict[str, np.ndarray]) -> np.ndarray:
         """Return summed per-frame violations across all hidden bounds."""
         total = np.zeros_like(
-            np.asarray(features[self.bounds[0].feature], dtype=np.float64)
+            np.asarray(next(iter(features.values())), dtype=np.float64)
         )
         for bound in self.bounds:
             total = total + bound.violation(features)

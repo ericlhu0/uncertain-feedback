@@ -25,6 +25,9 @@ class UqConfig:
     n_clusters: int = 3
     auto_cluster: int | None = None
     scale: float = 1.0
+    # Delegate cluster selection to the configured simulated user (takes effect
+    # only when the user has hidden bounds).
+    user_cluster: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,9 @@ class MpcRunConfig:
     preference_window: int = 50
     motion_generator: str = "mdm"
     transfer: TransferConfig = TransferConfig()
+    # Simulated-user persona name (see simulated_users.PERSONAS); every run
+    # loads this user alongside the pose.
+    user: str = "unrestricted"
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -241,6 +247,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 else int(uq_data["auto_cluster"])
             ),
             scale=_float(uq_data.get("scale", 1.0), "uq.scale"),
+            user_cluster=_bool(
+                uq_data.get("user_cluster", False), "uq.user_cluster"
+            ),
         ),
         cartesian=CartesianConfig(
             goals=normalized_goals,
@@ -293,6 +302,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             data.get("preference_window", 50), "preference_window"
         ),
         motion_generator=motion_generator,
+        user=str(data.get("user", "unrestricted")),
         transfer=TransferConfig(
             goals=transfer_goals,
             trigger_threshold=_float(

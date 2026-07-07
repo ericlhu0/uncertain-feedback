@@ -39,6 +39,11 @@ from uncertain_feedback.planners.mpc import (
 )
 from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
+from uncertain_feedback.simulated_users import (
+    SimulatedUser,
+    choose_cluster,
+    get_persona,
+)
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     EvalState,
@@ -191,8 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--text",
         type=str,
-        default="move my arm up",
-        help="Natural-language MDM motion description (mdm/uq planners only)",
+        default=None,
+        help=(
+            "Natural-language MDM motion description (mdm/uq planners only). "
+            "Defaults to the configured user's feedback line when that user "
+            "has hidden bounds, else 'move my arm up'."
+        ),
     )
     p.add_argument(
         "--text-time",
@@ -232,6 +241,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return p
+
+
+def resolve_feedback_text(args_text: str | None, user: SimulatedUser) -> str:
+    """Return the MDM instruction: explicit --text > restricted user's line > default."""
+    if args_text:
+        return args_text
+    if user.bounds and user.feedback_text:
+        return user.feedback_text
+    return "move my arm up"
 
 
 def _restore_interactive_backend() -> None:
@@ -382,6 +400,7 @@ class RunSetup:
     uses_mdm: bool
     visualize: bool
     compact: bool
+    user: SimulatedUser
 
 
 def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
@@ -506,6 +525,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         uses_mdm=uses_mdm,
         visualize=visualize,
         compact=compact,
+        user=get_persona(cfg.user),
     )
 
 
@@ -711,6 +731,7 @@ def main() -> None:
         args.mpc_config
     )
     effective_text_time = args.text_time if args.text_time is not None else cfg.text_time
+    feedback_text = resolve_feedback_text(args.text, setup.user)
 
     mdm_triggered = False
     pre_mdm_vis: ArmVisualizer | None = None
@@ -728,7 +749,7 @@ def main() -> None:
 
         if cfg.planner == "arm_mpc_mdm":
             traj = gen.generate_left_arm_trajectory(
-                args.text,
+                feedback_text,
                 start_pose=current_pose,
                 save_path=str(args.save_motion) if args.save_motion else None,
                 num_frames=mdm_frames,
@@ -737,15 +758,21 @@ def main() -> None:
             )
         else:
             uq_mpc = cast(LeftArmMPCMDMUQ, mpc)
+            cluster_selector = (
+                (lambda means: choose_cluster(setup.user, cost_context, means))
+                if cfg.uq.user_cluster and setup.user.bounds
+                else None
+            )
             traj = uq_mpc.query_mdm_with_uncertainty(
                 gen,
-                args.text,
+                feedback_text,
                 start_pose=current_pose,
                 current_arm_aa=q,
                 auto_cluster=cfg.uq.auto_cluster,
                 default_scale=cfg.uq.scale,
                 mdm_frames=mdm_frames,
                 frozen_body=args.frozen_body,
+                cluster_selector=cluster_selector,
             )
 
         if cfg.preference_learning:
@@ -853,7 +880,7 @@ def main() -> None:
                 cartesian_threshold=cfg.cartesian.threshold,
             )
             generator = create_cost_generator(
-                cfg.llm_cost, generated_context, args.text,
+                cfg.llm_cost, generated_context, feedback_text,
                 summaries=summaries, run_dir=run_dir, images=images, mpc=mpc,
                 rollout_fn=cost_eval_rollout, eval_state=eval_state,
             )
@@ -866,7 +893,7 @@ def main() -> None:
         nonlocal mdm_triggered
         if (
             setup.uses_mdm
-            and args.text
+            and feedback_text
             and step == effective_text_time
             and not mdm_triggered
         ):

@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-06  
+**Last updated:** 2026-07-07  
 **Branch:** agent-costs
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -323,7 +323,8 @@ When `llm_cost.enabled: true` in the YAML:
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
-| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless) |
+| `user`                 | str      | Simulated-user persona name (default `unrestricted`); loaded by `build_run` into `RunSetup.user` for every run |
+| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model`, `strict`, `artifact_dir`, `use_images`, `cluster_experiment` |
@@ -399,7 +400,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml>` | Per-backend (llm/turns/agent) cost comparison experiment |
-| `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> --persona <name>` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals) |
+| `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
@@ -429,13 +430,23 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 
 ## 13. Simulated Users (`simulated_users/`)
 
-Simulated care recipients with **hidden** comfort costs, used as ground truth in
-headless experiments (never shown to the cost generator).
+Simulated care recipients with **hidden** comfort costs. A user is a standard
+part of every run: `build_run` resolves the `user:` config key via
+`get_persona()` into `RunSetup.user`, so all entry points carry a
+`SimulatedUser` with joint limits alongside the loaded pose (the default
+`unrestricted` persona has no bounds). Restricted users default the MDM
+instruction to their `feedback_text` (`resolve_feedback_text` in
+`planners/run.py`) and, with `uq.user_cluster: true`, pick the UQ cluster.
+The hidden bounds are the evaluation ground truth in headless experiments
+(never shown to the cost generator).
 
 - `HiddenBound` — one restriction over a shared joint feature (radians):
   `upper_bound` / `lower_bound` / `avoid_band` (painful range), optionally gated
-  by a `FeatureCondition` on another feature (pose-dependent limits, e.g. stroke
-  flexor synergy).
+  by a `FeatureCondition` on another feature.
+- `CoupledBound` — pose-dependent limit: the threshold on `feature` moves
+  linearly with `cond_feature` (e.g. stroke flexor synergy).
+- `viz.py` — `render_hidden_bounds()` debug panels: forbidden region shaded by
+  evaluating `bound.violation` on a grid, trajectories traced through it.
 - `SimulatedUser` — persona: `name`, clinical `description`, `feedback_text`
   (what the user says when the robot violates a bound), `bounds`.
 - Behaviors: `first_violation_step()` (feedback trigger), `choose_cluster()`
@@ -445,8 +456,9 @@ headless experiments (never shown to the cost generator).
 - Features come from the same `GeneratedCostContext` joint-feature helpers the
   cost generator uses (via `feature_series()`), so hidden bounds and generated
   bounds are directly comparable.
-- Personas (`personas.py`): `adhesive_capsulitis`, `elbow_contracture`,
-  `painful_arc` (avoid band), `stroke_flexor_synergy` (conditional bound).
+- Personas (`personas.py`): `unrestricted` (default; no bounds),
+  `adhesive_capsulitis`, `elbow_contracture`, `painful_arc` (avoid band),
+  `stroke_flexor_synergy` (coupled bound).
   Registry: `PERSONAS` / `get_persona(name)`.
 
 ## 14. Motion Generator Backends (`motion_generators/`)

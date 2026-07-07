@@ -3,8 +3,9 @@
 Run as::
 
     uv run python src/uncertain_feedback/experiments/run_transfer_experiment.py \
-        --mpc-config <yaml> --persona adhesive_capsulitis [--save-video]
+        --mpc-config <yaml> [--persona adhesive_capsulitis] [--save-video]
 
+The persona defaults to the config's ``user:`` key; ``--persona`` overrides it.
 The persona's hidden comfort cost decides when feedback is given (first
 violation of the initial plan), what is said (the persona's feedback line — the
 ``--text`` flag is ignored), and which UQ cluster is picked. Conditions
@@ -32,9 +33,12 @@ def _transfer_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--persona",
         type=str,
-        required=True,
+        default=None,
         choices=sorted(PERSONAS),
-        help="Simulated-user persona providing the hidden cost and feedback.",
+        help=(
+            "Simulated-user persona providing the hidden cost and feedback. "
+            "Defaults to the config's `user:` persona."
+        ),
     )
     p.add_argument(
         "--save-video",
@@ -49,7 +53,12 @@ def main() -> None:
     args = _transfer_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
-    user = get_persona(args.persona)
+    user = get_persona(args.persona if args.persona is not None else cfg.user)
+    if not user.bounds:
+        raise ValueError(
+            f"Transfer experiments need a user with hidden bounds; {user.name!r} "
+            "has none. Set `user:` in the config or pass --persona."
+        )
 
     if cfg.planner != "arm_mpc_cartesian":
         raise ValueError(

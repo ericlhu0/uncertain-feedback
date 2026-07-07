@@ -10,10 +10,14 @@ max_playback_delta: 0.1
 trajectory_fraction: 1
 mdm_frames: 50
 
+# Simulated-user persona (hidden comfort cost + feedback line); --persona overrides.
+user: adhesive_capsulitis
+
 uq:
   diffusion_samples: 500
   n_clusters: 3
   scale: 1.0
+  user_cluster: true
 
 cartesian:
   goals:

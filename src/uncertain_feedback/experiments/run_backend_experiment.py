@@ -24,8 +24,14 @@ from typing import cast
 
 from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import load_mpc_config
-from uncertain_feedback.planners.run import build_parser, build_run, run_planning_loop
+from uncertain_feedback.planners.run import (
+    build_parser,
+    build_run,
+    resolve_feedback_text,
+    run_planning_loop,
+)
 from uncertain_feedback.experiments.backend_comparison import run_backend_comparison
+from uncertain_feedback.simulated_users import choose_cluster
 
 
 def _experiment_parser() -> argparse.ArgumentParser:
@@ -85,15 +91,22 @@ def main() -> None:
             q = q_history[-1]
 
     mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
+    feedback_text = resolve_feedback_text(args.text, setup.user)
+    cluster_selector = (
+        (lambda means: choose_cluster(setup.user, setup.cost_context, means))
+        if cfg.uq.user_cluster and setup.user.bounds
+        else None
+    )
     current_pose = setup.gen.build_pose_from_arm_aa(setup.initial_pose, q)
     mpc.query_mdm_with_uncertainty(
         setup.gen,
-        args.text,
+        feedback_text,
         start_pose=current_pose,
         current_arm_aa=q,
         auto_cluster=cfg.uq.auto_cluster,
         mdm_frames=mdm_frames,
         frozen_body=args.frozen_body,
+        cluster_selector=cluster_selector,
     )
     uq_result = mpc.last_uq_result
     if uq_result is None:
@@ -109,7 +122,7 @@ def main() -> None:
     run_backend_comparison(
         mpc,
         cfg,
-        args.text,
+        feedback_text,
         correction_traj,
         q,
         q_history,

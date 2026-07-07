@@ -743,6 +743,7 @@ def main() -> None:
                 start_pose=current_pose,
                 current_arm_aa=q,
                 auto_cluster=cfg.uq.auto_cluster,
+                default_scale=cfg.uq.scale,
                 mdm_frames=mdm_frames,
                 frozen_body=args.frozen_body,
             )

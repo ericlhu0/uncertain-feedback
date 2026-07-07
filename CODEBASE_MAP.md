@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-02  
+**Last updated:** 2026-07-03  
 **Branch:** agent-costs
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -136,8 +136,10 @@ SmplLeftArmMPC (arm_mpc.py)
 │
 │   └── LeftArmMPCMDMUQ (arm_mpc_mdm_uq.py)
 │         Adds: query_mdm_with_uncertainty() — draws N diffusion samples,
-│         clusters with XyzPositionClusterer, shows cluster picker UI,
-│         enqueues mean of chosen cluster.
+│         clusters with XyzPositionClusterer, shows cluster picker UI (each
+│         cluster has a magnitude slider that scales the chosen motion about
+│         its start pose via scale_trajectory), enqueues the (scaled) mean of
+│         the chosen cluster.
 │
 └── _CartesianGoalsMixin (arm_mpc_cartesian_base.py)
       Adds: Cartesian wrist-goal queue; cost switches from joint-space to
@@ -312,7 +314,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
-| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`    |
+| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless) |
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model`, `strict`, `artifact_dir`, `use_images`, `cluster_experiment` |

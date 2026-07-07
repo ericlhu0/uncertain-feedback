@@ -16,6 +16,7 @@ uq:
   diffusion_samples: 500
   n_clusters: 3
   auto_cluster: 1
+  scale: 1.0  # default motion-magnitude scale for the chosen cluster (GUI slider overrides)
 
 cartesian:
   goals:

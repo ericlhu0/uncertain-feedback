@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster,
     pick_cluster_positions,
+    scale_trajectory,
 )
 from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 from uncertain_feedback.uncertainty.clustering.xyz_clusterer import (
@@ -43,6 +44,7 @@ class UqClusterResult:
     chosen_label: int
     labels: np.ndarray
     cluster_means: dict[int, np.ndarray]
+    scale: float = 1.0
 
     @property
     def chosen_mean(self) -> np.ndarray:
@@ -145,6 +147,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         auto_cluster: int | None = None,
         mdm_frames: int | None = None,
         frozen_body: bool = False,
+        default_scale: float = 1.0,
     ) -> np.ndarray:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
@@ -211,7 +214,11 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
 
         if auto_cluster is not None:
             chosen_label = int(auto_cluster)
-            print(f"Auto-selected cluster {chosen_label} (headless mode).")
+            scale = default_scale
+            print(
+                f"Auto-selected cluster {chosen_label} at magnitude "
+                f"{scale:.2f} (headless mode)."
+            )
         else:
             fk = self._fk
             spine_pos = (
@@ -227,7 +234,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             )
             picker_t0 = time.perf_counter()
             if positions is not None:
-                chosen_label = pick_cluster_positions(
+                chosen_label, scale = pick_cluster_positions(
                     positions,
                     labels,
                     fk=fk,
@@ -236,10 +243,11 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     spine_aa=spine_aa,
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
+                    init_scale=default_scale,
                 )
             else:
                 assert trajectories is not None
-                chosen_label = pick_cluster(
+                chosen_label, scale = pick_cluster(
                     trajectories,
                     labels,
                     fk=fk,
@@ -248,11 +256,12 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     spine_aa=spine_aa,
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
+                    init_scale=default_scale,
                 )
             print(
                 f"[timing] cluster picker total: {time.perf_counter() - picker_t0:.3f}s"
             )
-            print(f"User selected cluster {chosen_label}.")
+            print(f"User selected cluster {chosen_label} at magnitude {scale:.2f}.")
 
         cluster_means: dict[int, np.ndarray] = {}
         for label in sorted(int(v) for v in np.unique(labels)):
@@ -265,11 +274,19 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             else:
                 assert trajectories is not None
                 cluster_means[label] = trajectories[labels == label].mean(axis=0)
+
+        # Scale the chosen cluster's motion magnitude (direction preserved).
+        # Only the tracked cluster is scaled; other means stay at raw scale.
+        if scale != 1.0:
+            cluster_means[chosen_label] = scale_trajectory(
+                cluster_means[chosen_label], scale
+            )
         chosen_mean = cluster_means[chosen_label]
         self._last_uq_result = UqClusterResult(
             chosen_label=chosen_label,
             labels=np.asarray(labels, dtype=np.intp),
             cluster_means=cluster_means,
+            scale=scale,
         )
         # chosen_mean: (n_frames, 3, 3)
 

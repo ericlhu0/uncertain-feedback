@@ -24,6 +24,7 @@ class UqConfig:
     diffusion_samples: int = 128
     n_clusters: int = 3
     auto_cluster: int | None = None
+    scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 if uq_data.get("auto_cluster") is None
                 else int(uq_data["auto_cluster"])
             ),
+            scale=_float(uq_data.get("scale", 1.0), "uq.scale"),
         ),
         cartesian=CartesianConfig(
             goals=normalized_goals,

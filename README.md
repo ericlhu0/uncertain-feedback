@@ -296,7 +296,15 @@ uq:
   diffusion_samples: 128
   n_clusters: 3
   auto_cluster: null
+  scale: 1.0  # default motion-magnitude scale for the chosen cluster
 ```
+
+In the interactive picker, each cluster panel has a **magnitude** slider
+(range 0.0–2.0) that scales that trajectory's motion up or down while
+preserving the direction of motion at every timestep (`scale` in joint-angle
+space about the start pose: `1.0` = unchanged, `0.0` = hold start). `uq.scale`
+sets the slider's initial value and is used directly as the scale in headless
+runs.
 
 Run with an interactive cluster picker:
 ```bash
@@ -308,12 +316,14 @@ uv run python src/uncertain_feedback/planners/run.py \
   --live
 ```
 
-For headless runs, set `uq.auto_cluster` in the YAML:
+For headless runs, set `uq.auto_cluster` in the YAML (and optionally `uq.scale`
+to apply a fixed magnitude without the GUI):
 ```yaml
 uq:
   diffusion_samples: 128
   n_clusters: 3
   auto_cluster: 0
+  scale: 1.0
 ```
 
 ### Cartesian MPC With MDM/UQ

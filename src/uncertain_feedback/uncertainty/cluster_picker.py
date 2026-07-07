@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, Slider
 
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_BONE_PAIRS_22,
@@ -34,6 +34,47 @@ _COLOR_ARM = "#4878CF"
 _COLOR_SELECTED = "#E87722"
 _COLOR_TRACE = "#888888"  # wrist trace
 _COLOR_CURRENT = "#AAAAAA"  # current MPC arm state
+
+_SCALE_MIN = 0.0
+_SCALE_MAX = 2.0
+_SCALE_INIT = 1.0
+
+
+def scale_trajectory(traj: np.ndarray, scale: float) -> np.ndarray:
+    """Scale a trajectory's per-timestep motion about its first frame.
+
+    Keeps the direction of motion at every timestep and multiplies its
+    magnitude by ``scale``, anchored at ``traj[0]`` so ``scale == 1.0`` is a
+    no-op and ``scale == 0.0`` holds the start pose.  Works on any array whose
+    first axis is time (e.g. ``(n_frames, 3, 3)`` axis-angle).
+    """
+    anchor = traj[0:1]
+    return anchor + scale * (traj - anchor)
+
+
+def _update_cluster_artists(
+    arm_lines_by_view: list[list],
+    arm_scats_by_view: list,
+    wrist_lines_by_view: list,
+    body_cutoff: np.ndarray,  # (22, 3)
+    wrist_trace: np.ndarray,  # (n_frames, 3)
+) -> None:
+    """Rewrite one cluster's mean-arm and wrist artists after rescaling."""
+    for view_idx, view in enumerate(_PANEL_VIEWS):
+        for (pi, ci), ln in zip(LEFT_ARM_BONE_PAIRS_22, arm_lines_by_view[view_idx]):
+            seg = body_cutoff[[pi, ci]]
+            ln.set_data(seg[:, view.hi], seg[:, view.vi])
+        arm_scats_by_view[view_idx].set_offsets(
+            np.column_stack(
+                (
+                    body_cutoff[LEFT_ARM_JOINT_INDICES_22, view.hi],
+                    body_cutoff[LEFT_ARM_JOINT_INDICES_22, view.vi],
+                )
+            )
+        )
+        wrist_lines_by_view[view_idx].set_data(
+            wrist_trace[:, view.hi], wrist_trace[:, view.vi]
+        )
 
 
 class _OrthoView(NamedTuple):
@@ -155,20 +196,22 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
         list[list[np.ndarray]] | None
     ) = None,  # each list of (22, 3)
     current_body: np.ndarray | None = None,  # (22, 3) current MPC arm state
-) -> tuple["Figure", list[list], list[list], list[list]]:
+    init_scale: float = _SCALE_INIT,
+) -> tuple["Figure", list[list], list[list], list[list], list[list], list[Slider]]:
     n_clusters = len(unique_labels)
     n_views = len(_PANEL_VIEWS)
     fig_w = max(4 * n_clusters, 8)
     fig = plt.figure(figsize=(fig_w, 3.0 * n_views + 1.0))
     fig.patch.set_facecolor("#F5F5F5")
 
+    left, right = 0.06, 0.98
     gs = fig.add_gridspec(
         n_views,
         n_clusters,
-        bottom=0.12,
+        bottom=0.17,
         top=0.92,
-        left=0.06,
-        right=0.98,
+        left=left,
+        right=right,
         wspace=0.08,
         hspace=0.30,
     )
@@ -177,14 +220,17 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
         for col in range(n_clusters)
     ]
 
-    panel_arm_lines: list[list] = []
-    panel_arm_scats: list = []
+    # Per-cluster arm/scatter/wrist handles, grouped by view for live rescaling.
+    panel_arm_lines: list[list] = []  # [cluster][view] -> list of bone Line2D
+    panel_arm_scats: list = []  # [cluster][view] -> arm joint scatter
+    panel_wrist_lines: list[list] = []  # [cluster][view] -> wrist trace Line2D
 
     for idx, (k, body_cutoff, wrist_trace, count) in enumerate(
         zip(unique_labels, cluster_body_cutoffs, cluster_wrist_traces, cluster_counts)
     ):
-        cluster_lines = []
-        cluster_scats = []
+        cluster_lines: list = []
+        cluster_scats: list = []
+        cluster_wrists: list = []
         for view_idx, view in enumerate(_PANEL_VIEWS):
             ax = axes_by_cluster[idx][view_idx]
             ax.set_aspect("equal")
@@ -202,8 +248,8 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
             else:
                 ax.set_title(view.title, fontsize=9, pad=4)
 
-            # Wrist trace (static grey)
-            ax.plot(
+            # Wrist trace of the (scaled) cluster mean — mutable for rescaling
+            (wrist_ln,) = ax.plot(
                 wrist_trace[:, view.hi],
                 wrist_trace[:, view.vi],
                 linestyle=":",
@@ -211,6 +257,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
                 linewidth=1.0,
                 alpha=0.7,
             )
+            cluster_wrists.append(wrist_ln)
 
             # Individual ghost arms (one per sample in cluster), very faint
             if cluster_individual_previews is not None:
@@ -248,12 +295,40 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
 
             # Solid mean arm at trajectory-fraction cutoff (the pose that will be enqueued)
             arm_lines, arm_scat = _draw_body(ax, body_cutoff, _COLOR_ARM, view.hi, view.vi)
-            cluster_lines.extend(arm_lines)
+            cluster_lines.append(arm_lines)
             cluster_scats.append(arm_scat)
         panel_arm_lines.append(cluster_lines)
         panel_arm_scats.append(cluster_scats)
+        panel_wrist_lines.append(cluster_wrists)
 
-    return fig, axes_by_cluster, panel_arm_lines, panel_arm_scats
+    # Per-column magnitude sliders, one under each cluster panel.
+    sliders: list[Slider] = []
+    col_w = (right - left) / n_clusters
+    for idx, k in enumerate(unique_labels):
+        col_x0 = left + idx * col_w
+        slider_ax = fig.add_axes(
+            [col_x0 + 0.15 * col_w, 0.085, 0.7 * col_w, 0.025]
+        )
+        slider = Slider(
+            slider_ax,
+            "magnitude",
+            _SCALE_MIN,
+            _SCALE_MAX,
+            valinit=init_scale,
+            valfmt="%.2f",
+        )
+        slider.label.set_fontsize(7)
+        slider.valtext.set_fontsize(7)
+        sliders.append(slider)
+
+    return (
+        fig,
+        axes_by_cluster,
+        panel_arm_lines,
+        panel_arm_scats,
+        panel_wrist_lines,
+        sliders,
+    )
 
 
 def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
@@ -266,7 +341,8 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     spine_aa: np.ndarray | None = None,
     body_pos: np.ndarray | None = None,
     current_arm_aa: np.ndarray | None = None,
-) -> int:
+    init_scale: float = _SCALE_INIT,
+) -> tuple[int, float]:
     """Show a blocking window to let the user pick a trajectory cluster.
 
     Each cluster panel shows:
@@ -297,9 +373,11 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         current_arm_aa:      ``(3, 3)`` current MPC arm axis-angles.  When
                              provided, the current arm pose is drawn in grey
                              on every cluster panel.
+        init_scale:          Initial magnitude-slider value for every cluster.
 
     Returns:
-        The integer cluster label chosen by the user.
+        ``(chosen_label, scale)`` — the integer cluster label chosen by the
+        user and the magnitude scale from that cluster's slider.
     """
     if fk is None:
         fk = SmplLeftArmFK()
@@ -316,6 +394,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         []
     )  # per-sample (22, 3) at cutoff
     cluster_wrist_traces: list[np.ndarray] = []  # (n_frames, 3)
+    cluster_mean_trajs: list[np.ndarray] = []  # (n_frames, 3, 3) unscaled mean aa
     cluster_counts: list[int] = []
 
     precompute_t0 = time.perf_counter()
@@ -346,6 +425,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         cluster_body_cutoffs.append(body_cutoff)
         cluster_individual_previews.append(individual_previews)
         cluster_wrist_traces.append(wrist_trace)
+        cluster_mean_trajs.append(mean_traj)
         cluster_counts.append(int(mask.sum()))
     print(
         f"[timing] cluster picker precompute: {time.perf_counter() - precompute_t0:.3f}s"
@@ -375,7 +455,14 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     # Build figure
     # ------------------------------------------------------------------
     figure_t0 = time.perf_counter()
-    fig, axes_by_cluster, panel_arm_lines, panel_arm_scats = _build_figure(
+    (
+        fig,
+        axes_by_cluster,
+        panel_arm_lines,
+        panel_arm_scats,
+        panel_wrist_lines,
+        sliders,
+    ) = _build_figure(
         unique_labels,
         cluster_body_cutoffs,
         cluster_wrist_traces,
@@ -383,6 +470,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         lims,
         cluster_individual_previews=cluster_individual_previews,
         current_body=current_body,
+        init_scale=init_scale,
     )
     print(
         f"[timing] cluster picker figure build: {time.perf_counter() - figure_t0:.3f}s"
@@ -393,14 +481,39 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     # ------------------------------------------------------------------
     state: dict = {"selected": None}
 
+    def _rescale(idx: int, scale: float) -> None:
+        traj = scale_trajectory(cluster_mean_trajs[idx], scale)
+        n_f = traj.shape[0]
+        pidx = max(0, round(n_f * trajectory_fraction) - 1)
+        body_cutoff = _merge_arm(
+            _full_body_positions_for_arm(fk, traj[pidx], spine_pos, spine_aa),
+            body_pos,
+        )
+        wrist_trace = _fk_batch_for_arm(fk, traj)[:, -1, :]
+        _update_cluster_artists(
+            panel_arm_lines[idx],
+            panel_arm_scats[idx],
+            panel_wrist_lines[idx],
+            body_cutoff,
+            wrist_trace,
+        )
+        fig.canvas.draw_idle()
+
+    for i, slider in enumerate(sliders):
+        slider.on_changed(lambda val, i=i: _rescale(i, val))
+    if init_scale != _SCALE_INIT:
+        for i in range(len(unique_labels)):
+            _rescale(i, init_scale)
+
     def _set_selected(idx: int) -> None:
         state["selected"] = idx
-        for i, (arm_lines, arm_scats) in enumerate(
+        for i, (arm_lines_by_view, arm_scats) in enumerate(
             zip(panel_arm_lines, panel_arm_scats)
         ):
             color = _COLOR_SELECTED if i == idx else _COLOR_ARM
-            for ln in arm_lines:
-                ln.set_color(color)
+            for view_lines in arm_lines_by_view:
+                for ln in view_lines:
+                    ln.set_color(color)
             for arm_scat in arm_scats:
                 arm_scat.set_color(color)
             for ax in axes_by_cluster[i]:
@@ -417,7 +530,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
 
     fig.canvas.mpl_connect("button_press_event", _on_click)
 
-    btn_ax = fig.add_axes([0.38, 0.04, 0.24, 0.08])
+    btn_ax = fig.add_axes([0.40, 0.02, 0.20, 0.045])
     btn = Button(btn_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
 
     def _on_confirm(_event: object) -> None:
@@ -427,7 +540,9 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
 
     btn.on_clicked(_on_confirm)
     fig.suptitle(
-        "Click a cluster to select it, then click Confirm", fontsize=10, y=0.97
+        "Click a cluster to select it, adjust its magnitude, then click Confirm",
+        fontsize=10,
+        y=0.97,
     )
 
     if save_path is not None:
@@ -443,7 +558,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     if state["selected"] is None:
         raise RuntimeError("Window closed without selecting a cluster.")
 
-    return unique_labels[state["selected"]]
+    return unique_labels[state["selected"]], float(sliders[state["selected"]].val)
 
 
 def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
@@ -456,16 +571,19 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
     spine_aa: np.ndarray | None = None,
     body_pos: np.ndarray | None = None,
     current_arm_aa: np.ndarray | None = None,
-) -> int:
+    init_scale: float = _SCALE_INIT,
+) -> tuple[int, float]:
     """Show a blocking cluster picker from precomputed SMPL XYZ positions.
 
     Args:
         positions: ``(num_samples, n_frames, 22, 3)`` global SMPL joint
             positions.
         labels: ``(num_samples,)`` integer cluster labels.
+        init_scale: Initial magnitude-slider value for every cluster.
 
     Returns:
-        The integer cluster label chosen by the user.
+        ``(chosen_label, scale)`` — the integer cluster label chosen by the
+        user and the magnitude scale from that cluster's slider.
     """
     if fk is None:
         fk = SmplLeftArmFK()
@@ -477,6 +595,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
     cluster_body_cutoffs: list[np.ndarray] = []
     cluster_individual_previews: list[list[np.ndarray]] = []
     cluster_wrist_traces: list[np.ndarray] = []
+    cluster_mean_trajs: list[np.ndarray] = []  # (n_frames, 3, 3) unscaled mean aa
     cluster_counts: list[int] = []
 
     precompute_t0 = time.perf_counter()
@@ -528,6 +647,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
         cluster_body_cutoffs.append(body_cutoff)
         cluster_individual_previews.append(individual_previews)
         cluster_wrist_traces.append(wrist_trace)
+        cluster_mean_trajs.append(mean_arm_aa)
         cluster_counts.append(int(mask.sum()))
     print(
         "[timing] position cluster picker precompute: "
@@ -553,7 +673,14 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
     ]
 
     figure_t0 = time.perf_counter()
-    fig, axes_by_cluster, panel_arm_lines, panel_arm_scats = _build_figure(
+    (
+        fig,
+        axes_by_cluster,
+        panel_arm_lines,
+        panel_arm_scats,
+        panel_wrist_lines,
+        sliders,
+    ) = _build_figure(
         unique_labels,
         cluster_body_cutoffs,
         cluster_wrist_traces,
@@ -561,6 +688,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
         lims,
         cluster_individual_previews=cluster_individual_previews,
         current_body=current_body,
+        init_scale=init_scale,
     )
     print(
         "[timing] position cluster picker figure build: "
@@ -569,14 +697,39 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
 
     state: dict = {"selected": None}
 
+    def _rescale(idx: int, scale: float) -> None:
+        traj = scale_trajectory(cluster_mean_trajs[idx], scale)
+        n_f = traj.shape[0]
+        pidx = max(0, round(n_f * trajectory_fraction) - 1)
+        body_cutoff = _merge_arm(
+            _full_body_positions_for_arm(fk, traj[pidx], display_spine_pos, spine_aa),
+            body_pos,
+        )
+        wrist_trace = fk.fk_batch(traj, display_spine_pos, spine_aa)[:, -1, :]
+        _update_cluster_artists(
+            panel_arm_lines[idx],
+            panel_arm_scats[idx],
+            panel_wrist_lines[idx],
+            body_cutoff,
+            wrist_trace,
+        )
+        fig.canvas.draw_idle()
+
+    for i, slider in enumerate(sliders):
+        slider.on_changed(lambda val, i=i: _rescale(i, val))
+    if init_scale != _SCALE_INIT:
+        for i in range(len(unique_labels)):
+            _rescale(i, init_scale)
+
     def _set_selected(idx: int) -> None:
         state["selected"] = idx
-        for i, (arm_lines, arm_scats) in enumerate(
+        for i, (arm_lines_by_view, arm_scats) in enumerate(
             zip(panel_arm_lines, panel_arm_scats)
         ):
             color = _COLOR_SELECTED if i == idx else _COLOR_ARM
-            for ln in arm_lines:
-                ln.set_color(color)
+            for view_lines in arm_lines_by_view:
+                for ln in view_lines:
+                    ln.set_color(color)
             for arm_scat in arm_scats:
                 arm_scat.set_color(color)
             for ax in axes_by_cluster[i]:
@@ -593,7 +746,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
 
     fig.canvas.mpl_connect("button_press_event", _on_click)
 
-    btn_ax = fig.add_axes([0.38, 0.04, 0.24, 0.08])
+    btn_ax = fig.add_axes([0.40, 0.02, 0.20, 0.045])
     btn = Button(btn_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
 
     def _on_confirm(_event: object) -> None:
@@ -603,7 +756,9 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
 
     btn.on_clicked(_on_confirm)
     fig.suptitle(
-        "Click a cluster to select it, then click Confirm", fontsize=10, y=0.97
+        "Click a cluster to select it, adjust its magnitude, then click Confirm",
+        fontsize=10,
+        y=0.97,
     )
 
     if save_path is not None:
@@ -619,7 +774,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
     if state["selected"] is None:
         raise RuntimeError("Window closed without selecting a cluster.")
 
-    return unique_labels[state["selected"]]
+    return unique_labels[state["selected"]], float(sliders[state["selected"]].val)
 
 
 # ---------------------------------------------------------------------------
@@ -673,24 +828,26 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
             for d in range(3)
         ]
 
-        fig, axes, _, _ = _build_figure(
+        fig, axes, _, _, _, _ = _build_figure(
             unique_labels,
             cluster_body_finals,
             cluster_wrist_traces,
             cluster_counts,
             lims,
         )
-        btn_ax = fig.add_axes([0.38, 0.04, 0.24, 0.08])
+        btn_ax = fig.add_axes([0.40, 0.02, 0.20, 0.045])
         btn_ax.set_facecolor("#DDDDDD")
         btn_ax.text(0.5, 0.5, "Confirm", ha="center", va="center", fontsize=10)
         btn_ax.set_xticks([])
         btn_ax.set_yticks([])
         fig.suptitle(
-            "Click a cluster to select it, then click Confirm", fontsize=10, y=0.97
+            "Click a cluster to select it, adjust its magnitude, then click Confirm",
+            fontsize=10,
+            y=0.97,
         )
         fig.savefig(save, dpi=150, bbox_inches="tight")
         print(f"Saved → {save.resolve()}")
         sys.exit(0)
 
-    chosen = pick_cluster(raw, demo_labels, save_path=save)
-    print(f"User chose cluster {chosen}")
+    chosen, chosen_scale = pick_cluster(raw, demo_labels, save_path=save)
+    print(f"User chose cluster {chosen} at magnitude {chosen_scale:.2f}")

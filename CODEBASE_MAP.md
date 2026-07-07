@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-03  
+**Last updated:** 2026-07-06  
 **Branch:** agent-costs
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -58,12 +58,15 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_llm.yaml
 │   │           ├── arm_mpc_cartesian_mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
 │   │           ├── arm_mpc_cartesian_mdm_llm_agent.yaml  # backend: agent (codex CLI)
+│   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
 │   │           └── arm_mpc_cartesian_no_mdm.yaml
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── cluster_comparison.py     # Generate + roll out one LLM cost per UQ cluster
 │   │   ├── run_experiment.py         # CLI entry point for cluster comparison experiments
 │   │   ├── backend_comparison.py     # Generate one cost per backend (llm/turns/agent), score uniformly
 │   │   ├── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
+│   │   ├── transfer_experiment.py    # Simulated-user protocol: trigger → correction → cost → transfer eval
+│   │   ├── run_transfer_experiment.py # CLI entry point for simulated-user transfer experiments
 │   │   └── render_cost_comparison.py # CLI the agent backend runs to render rollout-vs-correction overlay
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator
@@ -88,6 +91,9 @@ uncertain-feedback/
 │   │   │   ├── base.py               # TrajectoryClusterer (template: _to_features + _fit_predict)
 │   │   │   └── xyz_clusterer.py      # XyzPositionClusterer (KMeans on FK positions)
 │   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI (stays here)
+│   ├── simulated_users/
+│   │   ├── base.py                   # SimulatedUser, HiddenBound (+conditional), violations, cluster choice, oracle cost term
+│   │   └── personas.py               # Clinically motivated personas (PERSONAS registry)
 │   ├── data_collection/
 │   │   ├── build_mdm_dataset.py      # Build HumanML3D dataset from video/labels
 │   │   ├── extract_all_frames.py     # Video → frames
@@ -136,8 +142,12 @@ SmplLeftArmMPC (arm_mpc.py)
 │
 │   └── LeftArmMPCMDMUQ (arm_mpc_mdm_uq.py)
 │         Adds: query_mdm_with_uncertainty() — draws N diffusion samples,
-│         clusters with XyzPositionClusterer, shows cluster picker UI,
-│         enqueues mean of chosen cluster.
+│         clusters with XyzPositionClusterer, shows cluster picker UI (each
+│         cluster has a magnitude slider that scales the chosen motion about
+│         its start pose via scale_trajectory), enqueues the (scaled) mean of
+│         the chosen cluster. Headless selection: `auto_cluster` (fixed label)
+│         or `cluster_selector` (callable on the cluster means; used by
+│         simulated-user experiments; takes precedence).
 │
 └── _CartesianGoalsMixin (arm_mpc_cartesian_base.py)
       Adds: Cartesian wrist-goal queue; cost switches from joint-space to
@@ -313,10 +323,11 @@ When `llm_cost.enabled: true` in the YAML:
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
-| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`    |
+| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless) |
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model`, `strict`, `artifact_dir`, `use_images`, `cluster_experiment` |
+| `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets), `trigger_threshold` (hidden-cost violation in rad that triggers simulated feedback) |
 
 ---
 
@@ -388,6 +399,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml>` | Per-backend (llm/turns/agent) cost comparison experiment |
+| `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> --persona <name>` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals) |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
@@ -415,7 +427,29 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 
 ---
 
-## 13. Motion Generator Backends (`motion_generators/`)
+## 13. Simulated Users (`simulated_users/`)
+
+Simulated care recipients with **hidden** comfort costs, used as ground truth in
+headless experiments (never shown to the cost generator).
+
+- `HiddenBound` — one restriction over a shared joint feature (radians):
+  `upper_bound` / `lower_bound` / `avoid_band` (painful range), optionally gated
+  by a `FeatureCondition` on another feature (pose-dependent limits, e.g. stroke
+  flexor synergy).
+- `SimulatedUser` — persona: `name`, clinical `description`, `feedback_text`
+  (what the user says when the robot violates a bound), `bounds`.
+- Behaviors: `first_violation_step()` (feedback trigger), `choose_cluster()`
+  (picks the most comfortable UQ cluster mean), `violation_metrics()`
+  (mean/max/frac violated — evaluation metric), `HiddenCostTerm` (oracle
+  planner cost adapter implementing `TrajectoryCost`).
+- Features come from the same `GeneratedCostContext` joint-feature helpers the
+  cost generator uses (via `feature_series()`), so hidden bounds and generated
+  bounds are directly comparable.
+- Personas (`personas.py`): `adhesive_capsulitis`, `elbow_contracture`,
+  `painful_arc` (avoid band), `stroke_flexor_synergy` (conditional bound).
+  Registry: `PERSONAS` / `get_persona(name)`.
+
+## 14. Motion Generator Backends (`motion_generators/`)
 
 All backends implement the `MotionGenerator` ABC (`motion_generators/base.py`) and are
 selected by the `motion_generator` YAML key via the `MOTION_GENERATOR_BUILDERS` registry

@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-03  
+**Last updated:** 2026-07-06  
 **Branch:** agent-costs
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -88,6 +88,9 @@ uncertain-feedback/
 │   │   │   ├── base.py               # TrajectoryClusterer (template: _to_features + _fit_predict)
 │   │   │   └── xyz_clusterer.py      # XyzPositionClusterer (KMeans on FK positions)
 │   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI (stays here)
+│   ├── simulated_users/
+│   │   ├── base.py                   # SimulatedUser, HiddenBound (+conditional), violations, cluster choice, oracle cost term
+│   │   └── personas.py               # Clinically motivated personas (PERSONAS registry)
 │   ├── data_collection/
 │   │   ├── build_mdm_dataset.py      # Build HumanML3D dataset from video/labels
 │   │   ├── extract_all_frames.py     # Video → frames
@@ -416,7 +419,29 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 
 ---
 
-## 13. Motion Generator Backends (`motion_generators/`)
+## 13. Simulated Users (`simulated_users/`)
+
+Simulated care recipients with **hidden** comfort costs, used as ground truth in
+headless experiments (never shown to the cost generator).
+
+- `HiddenBound` — one restriction over a shared joint feature (radians):
+  `upper_bound` / `lower_bound` / `avoid_band` (painful range), optionally gated
+  by a `FeatureCondition` on another feature (pose-dependent limits, e.g. stroke
+  flexor synergy).
+- `SimulatedUser` — persona: `name`, clinical `description`, `feedback_text`
+  (what the user says when the robot violates a bound), `bounds`.
+- Behaviors: `first_violation_step()` (feedback trigger), `choose_cluster()`
+  (picks the most comfortable UQ cluster mean), `violation_metrics()`
+  (mean/max/frac violated — evaluation metric), `HiddenCostTerm` (oracle
+  planner cost adapter implementing `TrajectoryCost`).
+- Features come from the same `GeneratedCostContext` joint-feature helpers the
+  cost generator uses (via `feature_series()`), so hidden bounds and generated
+  bounds are directly comparable.
+- Personas (`personas.py`): `adhesive_capsulitis`, `elbow_contracture`,
+  `painful_arc` (avoid band), `stroke_flexor_synergy` (conditional bound).
+  Registry: `PERSONAS` / `get_persona(name)`.
+
+## 14. Motion Generator Backends (`motion_generators/`)
 
 All backends implement the `MotionGenerator` ABC (`motion_generators/base.py`) and are
 selected by the `motion_generator` YAML key via the `MOTION_GENERATOR_BUILDERS` registry

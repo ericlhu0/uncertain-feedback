@@ -10,7 +10,7 @@ in this model rather than exact clinical norms.
 from __future__ import annotations
 
 from uncertain_feedback.simulated_users.base import (
-    FeatureCondition,
+    CoupledBound,
     HiddenBound,
     SimulatedUser,
 )
@@ -69,20 +69,19 @@ STROKE_FLEXOR_SYNERGY = SimulatedUser(
     name="stroke_flexor_synergy",
     description=(
         "Post-stroke flexor synergy: shoulder abduction couples with "
-        "involuntary elbow flexion; extending the elbow while the arm is "
-        "raised (~50 deg+ abduction) is uncomfortable. Pose-dependent bound."
+        "involuntary elbow flexion; the higher the arm is raised, the more the "
+        "elbow must stay bent. Pose-dependent bound: required elbow flexion "
+        "rises linearly from 0 at ~34 deg abduction to ~69 deg bend at ~92 deg "
+        "abduction."
     ),
     feedback_text="keep my elbow bent while you lift my arm",
     bounds=(
-        HiddenBound(
+        CoupledBound(
             feature="elbow_flexion",
             bound_type="lower_bound",
-            low=1.0,
-            condition=FeatureCondition(
-                feature="shoulder_abduction_adduction",
-                low=0.9,
-                high=3.2,
-            ),
+            cond_feature="shoulder_abduction_adduction",
+            intercept=-0.72,
+            slope=1.2,
         ),
     ),
 )

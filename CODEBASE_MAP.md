@@ -89,8 +89,9 @@ uncertain-feedback/
 │   │   │   └── xyz_clusterer.py      # XyzPositionClusterer (KMeans on FK positions)
 │   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI (stays here)
 │   ├── simulated_users/
-│   │   ├── base.py                   # SimulatedUser, HiddenBound (+conditional), violations, cluster choice, oracle cost term
-│   │   └── personas.py               # Clinically motivated personas (PERSONAS registry)
+│   │   ├── base.py                   # SimulatedUser, HiddenBound/CoupledBound, violations, cluster choice, oracle cost term
+│   │   ├── personas.py               # Clinically motivated personas (PERSONAS registry)
+│   │   └── viz.py                    # render_hidden_bounds: shaded forbidden regions + trajectories
 │   ├── data_collection/
 │   │   ├── build_mdm_dataset.py      # Build HumanML3D dataset from video/labels
 │   │   ├── extract_all_frames.py     # Video → frames
@@ -426,8 +427,15 @@ headless experiments (never shown to the cost generator).
 
 - `HiddenBound` — one restriction over a shared joint feature (radians):
   `upper_bound` / `lower_bound` / `avoid_band` (painful range), optionally gated
-  by a `FeatureCondition` on another feature (pose-dependent limits, e.g. stroke
-  flexor synergy).
+  by a `FeatureCondition` on another feature.
+- `CoupledBound` — **pose-dependent limit**: the threshold on one feature moves
+  linearly with another (`threshold = intercept + slope * cond_value`), e.g.
+  stroke flexor synergy (required elbow bend grows with abduction).
+- `render_hidden_bounds()` (`viz.py`) — one panel per bound for debugging:
+  pose-dependent bounds are drawn in the conditioning-vs-bounded feature plane
+  with the forbidden region shaded (computed by evaluating `bound.violation` on
+  a grid, so the picture cannot drift from the code) and trajectories traced
+  through it; simple bounds as feature-over-time with the forbidden range shaded.
 - `SimulatedUser` — persona: `name`, clinical `description`, `feedback_text`
   (what the user says when the robot violates a bound), `bounds`.
 - Behaviors: `first_violation_step()` (feedback trigger), `choose_cluster()`
@@ -438,8 +446,17 @@ headless experiments (never shown to the cost generator).
   cost generator uses (via `feature_series()`), so hidden bounds and generated
   bounds are directly comparable.
 - Personas (`personas.py`): `adhesive_capsulitis`, `elbow_contracture`,
-  `painful_arc` (avoid band), `stroke_flexor_synergy` (conditional bound).
+  `painful_arc` (avoid band), `stroke_flexor_synergy` (coupled bound).
   Registry: `PERSONAS` / `get_persona(name)`.
+
+> **Elbow-flexion feature fix (2026-07-06):**
+> `GeneratedCostContext.elbow_flexion_angles` now measures the angle between the
+> upper arm and forearm from FK positions. The old elbow-slot rotvec norm could
+> not see an anatomical elbow bend at all — under the repo FK convention
+> (audit §3) the bend is encoded in the wrist slot — and instead tracked
+> upper-arm re-orientation. `compute_elbow_flexion_angles` in `costs/base.py`
+> (the `elbow_flexion_angle` YAML cost + preference learning) still has the old
+> definition and needs the same fix.
 
 ## 14. Motion Generator Backends (`motion_generators/`)
 

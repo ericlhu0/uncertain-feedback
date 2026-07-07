@@ -69,6 +69,8 @@ class GeneratedCostContext:
     body_pos: np.ndarray | None = None
     reference_traj: np.ndarray | None = None
     full_correction_traj: np.ndarray | None = None
+    cartesian_goal: np.ndarray | None = None
+    cartesian_threshold: float | None = None
 
     @property
     def current_positions(self) -> np.ndarray:
@@ -314,6 +316,8 @@ def build_generated_cost_context(
     body_pos: np.ndarray | None = None,
     reference_traj: np.ndarray | None = None,
     full_correction_traj: np.ndarray | None = None,
+    cartesian_goal: np.ndarray | None = None,
+    cartesian_threshold: float | None = None,
 ) -> GeneratedCostContext:
     """Build the runtime context passed to generated Python costs."""
     recent_q = np.asarray(q_history[-window:], dtype=np.float64)
@@ -337,6 +341,12 @@ def build_generated_cost_context(
             if full_correction_traj is not None
             else None
         ),
+        cartesian_goal=(
+            np.asarray(cartesian_goal, dtype=np.float64)
+            if cartesian_goal is not None
+            else None
+        ),
+        cartesian_threshold=cartesian_threshold,
     )
 
 

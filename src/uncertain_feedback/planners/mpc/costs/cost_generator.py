@@ -105,6 +105,58 @@ def _score_rollout(
     return float(np.linalg.norm(rollout_positions - mdm_positions, axis=-1).mean())
 
 
+def goal_reach_report(
+    context: GeneratedCostContext, rollout: np.ndarray | None
+) -> dict[str, Any] | None:
+    """Whether a candidate rollout still reaches the Cartesian goal.
+
+    Reproduces the MPC's own criterion (``ArmMPCCartesian.goal_reached``): forward-
+    kinematics the final rollout frame, take the spine3-relative wrist, and compare its
+    distance to ``context.cartesian_goal`` against ``context.cartesian_threshold``.
+    Returns ``None`` when no Cartesian goal is available (non-Cartesian planners) or the
+    rollout is empty/malformed, so callers degrade to no goal feedback.
+    """
+    if context.cartesian_goal is None or context.cartesian_threshold is None:
+        return None
+    if rollout is None:
+        return None
+    rollout = np.asarray(rollout, dtype=np.float64)
+    if rollout.ndim != 3 or rollout.shape[0] == 0:
+        return None
+    arm_pos = context.fk.fk(rollout[-1], context.spine3_pos, context.spine3_aa)
+    wrist_rel = arm_pos[-1] - context.spine3_pos
+    distance = float(np.linalg.norm(wrist_rel - context.cartesian_goal))
+    return {
+        "reached": distance < context.cartesian_threshold,
+        "distance": distance,
+        "threshold": float(context.cartesian_threshold),
+    }
+
+
+def parse_goal_conflict(interpret_text: str) -> bool:
+    """Read the stage-1 ``goal_conflict`` flag; ``False`` if absent/unparseable."""
+    text = interpret_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return False
+        try:
+            data = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return False
+    return bool(isinstance(data, dict) and data.get("goal_conflict", False))
+
+
 def evaluate_candidate_cost(
     context: GeneratedCostContext,
     cost: GeneratedPythonCost,

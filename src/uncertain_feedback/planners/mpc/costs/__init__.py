@@ -43,6 +43,8 @@ from uncertain_feedback.planners.mpc.costs.cost_generator import (
     create_cost_generator,
     evaluate_and_render,
     evaluate_candidate_cost,
+    goal_reach_report,
+    parse_goal_conflict,
 )
 from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
 from uncertain_feedback.planners.mpc.costs.llm_costs import LlmCostGenerator
@@ -93,6 +95,8 @@ __all__ = [
     "create_cost_generator",
     "evaluate_candidate_cost",
     "evaluate_and_render",
+    "goal_reach_report",
+    "parse_goal_conflict",
     "EvalState",
     "artifact_run_dir",
     # prompts

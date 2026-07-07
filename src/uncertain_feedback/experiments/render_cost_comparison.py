@@ -25,6 +25,7 @@ from uncertain_feedback.planners.mpc.costs import (
     EvalState,
     GeneratedPythonCost,
     evaluate_and_render,
+    goal_reach_report,
     parse_llm_cost_response,
 )
 
@@ -107,7 +108,7 @@ def main() -> None:
             rollout_path = args.out.with_suffix(".npy")
             video_path = args.out.with_suffix(".mp4")
 
-    score, image_path, _ = evaluate_and_render(
+    score, image_path, rollout = evaluate_and_render(
         context,
         cost,
         rollout_fn,
@@ -116,6 +117,7 @@ def main() -> None:
         rollout_path=rollout_path,
         video_path=video_path,
     )
+    report = goal_reach_report(context, rollout)
     if candidate_dir is not None:
         (candidate_dir / "response.json").write_text(raw_response, encoding="utf-8")
         (candidate_dir / "cost.py").write_text(response.code, encoding="utf-8")
@@ -123,6 +125,7 @@ def main() -> None:
             json.dump(
                 {
                     "score": score,
+                    "goal_reach": report,
                     "comparison_path": str(candidate_dir / "comparison.png"),
                     "angles_path": (
                         str(candidate_dir / "angles.png") if args.angles_out else None
@@ -149,6 +152,12 @@ def main() -> None:
         )
         return
     print(f"[cost-compare] L2 score (lower is better): {score:.4f}")
+    if report is not None:
+        print(
+            f"[cost-compare] goal reached: {report['reached']} "
+            f"(wrist {report['distance']:.3f} m from goal, "
+            f"threshold {report['threshold']:.3f} m)"
+        )
     print(f"[cost-compare] comparison image: {image_path}")
     if args.angles_out is not None:
         print(f"[cost-compare] joint-angle image: {args.angles_out}")

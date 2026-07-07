@@ -10,13 +10,14 @@ cost. The interpretation stays fixed — only grounding and authoring iterate.
 from __future__ import annotations
 
 import json
-import math
 from typing import Any
 
 from uncertain_feedback.planners.mpc.costs.cost_generator import (
     CostGenerator,
     evaluate_and_render,
     evaluate_candidate_cost,
+    goal_reach_report,
+    parse_goal_conflict,
 )
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
@@ -28,6 +29,31 @@ from uncertain_feedback.planners.mpc.costs.prompts import build_refine_prompt
 
 # Stop early once the score fails to improve this many turns in a row.
 _NO_IMPROVE_PATIENCE = 2
+
+
+def _goal_feedback(report: dict[str, Any] | None, goal_conflict: bool) -> str:
+    """Per-turn message telling the model whether the rollout still reaches the goal."""
+    if report is None:
+        return ""
+    dist, thr = report["distance"], report["threshold"]
+    if report["reached"]:
+        return (
+            f"\n\nGoal check: the arm still reaches the goal (wrist ended {dist:.3f} m "
+            f"away, within the {thr:.3f} m threshold)."
+        )
+    if goal_conflict:
+        return (
+            f"\n\nGoal check: the arm ended {dist:.3f} m from the goal (threshold "
+            f"{thr:.3f} m). This is acceptable here because the correction implies the "
+            "goal should not be reached this way."
+        )
+    return (
+        f"\n\nGoal check: THIS COST FAILED TO REACH THE GOAL — the wrist ended "
+        f"{dist:.3f} m short (it must finish within {thr:.3f} m). Your stage-one "
+        "interpretation said the goal is still reachable, so the motion MUST still reach "
+        "it. Revise the cost so it reaches the goal (e.g. relax or bound the constraint "
+        "near the goal) while still honoring the correction."
+    )
 
 
 class TurnsCostGenerator(CostGenerator):
@@ -62,6 +88,9 @@ class TurnsCostGenerator(CostGenerator):
         # Interpret once; the correction and its images don't change between turns, so
         # only grounding + authoring iterate against rollout feedback below.
         interpretation = self.interpret(llm)
+        # Only insist the rollout still reaches the goal when stage one judged the goal
+        # reachable; if the correction conflicts with the goal, stopping short is fine.
+        goal_conflict = parse_goal_conflict(interpretation)
         prompt_text = build_refine_prompt(interpretation, self.summaries)
         (self.run_dir / "refine_prompt.txt").write_text(prompt_text, encoding="utf-8")
         messages: list[dict[str, Any]] = [
@@ -69,7 +98,7 @@ class TurnsCostGenerator(CostGenerator):
         ]
 
         best: tuple[GeneratedPythonCost, LlmCostResponse] | None = None
-        best_score = math.inf
+        best_key: tuple[int, float] | None = None
         no_improve = 0
 
         for turn in range(self.max_turns):
@@ -119,13 +148,23 @@ class TurnsCostGenerator(CostGenerator):
                     self.context, cost, self.rollout_fn
                 )
                 image_path = None
+            report = goal_reach_report(self.context, rollout)
+            # A goal-reaching candidate beats a non-reaching one (unless the correction
+            # conflicts with the goal); ties break on the correction-match score.
+            reach_rank = (
+                1 if report is not None and not goal_conflict and not report["reached"]
+                else 0
+            )
+            key = (reach_rank, score)
             (turn_dir / "cost.py").write_text(response.code, encoding="utf-8")
             with open(turn_dir / "score.json", "w", encoding="utf-8") as f:
-                json.dump({"turn": turn, "score": score}, f, indent=2)
+                json.dump(
+                    {"turn": turn, "score": score, "goal_reach": report}, f, indent=2
+                )
             print(f"[cost-gen][turns] turn {turn}: score={score:.4f}")
 
-            if score < best_score:
-                best_score = score
+            if best_key is None or key < best_key:
+                best_key = key
                 best = (cost, response)
                 no_improve = 0
             else:
@@ -140,6 +179,8 @@ class TurnsCostGenerator(CostGenerator):
                     "\n\nJoint feature comparison (rollout vs. target):\n"
                     + json.dumps(comparison, indent=2)
                 )
+
+            goal_block = _goal_feedback(report, goal_conflict)
 
             if image_path is not None:
                 messages.append(
@@ -157,7 +198,7 @@ class TurnsCostGenerator(CostGenerator):
                             "so you can compare the shape of the movement, not just "
                             "endpoints. Look at where the red arm/curves diverge from "
                             "the green ones and revise the cost to close that gap, "
-                            f"then return the JSON object again.{joint_block}"
+                            f"then return the JSON object again.{joint_block}{goal_block}"
                         ),
                         "images": [str(image_path), str(turn_dir / "angles.png")],
                     }
@@ -170,7 +211,7 @@ class TurnsCostGenerator(CostGenerator):
                             f"That cost scored {score:.4f} (lower is better, where the "
                             "score measures how well the resulting motion matches the "
                             "user's correction). Revise the cost to lower the score and "
-                            f"return the JSON object again.{joint_block}"
+                            f"return the JSON object again.{joint_block}{goal_block}"
                         ),
                     }
                 )

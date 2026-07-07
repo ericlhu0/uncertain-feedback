@@ -47,6 +47,8 @@ class EvalState:
     spine3_aa: np.ndarray | None
     reference_traj: np.ndarray | None = None
     full_correction_traj: np.ndarray | None = None
+    cartesian_goal: np.ndarray | None = None
+    cartesian_threshold: float | None = None
 
     def save(self, path: Path) -> None:
         """Pickle this state to ``path``."""
@@ -71,6 +73,8 @@ class EvalState:
             body_pos=self.body_pos,
             reference_traj=self.reference_traj,
             full_correction_traj=self.full_correction_traj,
+            cartesian_goal=self.cartesian_goal,
+            cartesian_threshold=self.cartesian_threshold,
         )
 
     def make_rollout_fn(

@@ -811,6 +811,10 @@ def main() -> None:
                 window=cfg.preference_window, body_pos=body_pos,
                 reference_traj=reference_traj,
                 full_correction_traj=full_correction_traj,
+                # goal_pos is goals[0] (the gold-star goal the LLM sees); the
+                # reachability check assumes a single Cartesian goal.
+                cartesian_goal=goal_pos,
+                cartesian_threshold=cfg.cartesian.threshold,
             )
             summaries = build_motion_summaries(
                 generated_context, cartesian_goal=goal_pos
@@ -844,6 +848,8 @@ def main() -> None:
                 spine3_aa=spine3_aa,
                 reference_traj=reference_traj,
                 full_correction_traj=full_correction_traj,
+                cartesian_goal=goal_pos,
+                cartesian_threshold=cfg.cartesian.threshold,
             )
             generator = create_cost_generator(
                 cfg.llm_cost, generated_context, args.text,

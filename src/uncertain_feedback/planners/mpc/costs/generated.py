@@ -158,6 +158,17 @@ class GeneratedCostContext:
         upper_arm = self._upper_arm_direction_spine_frame(trajectory)
         return np.arcsin(np.clip(upper_arm[..., 2], -1.0, 1.0))
 
+    def shoulder_elevation_angles(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return shoulder elevation: upper-arm angle from straight down.
+
+        0 = arm hanging at the side, pi/2 = horizontal, pi = straight
+        overhead, regardless of the plane of elevation. This is the
+        goniometric elevation the lateral/depth component proxies cannot
+        capture (both read ~0 for a vertical upper arm).
+        """
+        upper_arm = self._upper_arm_direction_spine_frame(trajectory)
+        return np.arccos(np.clip(-upper_arm[..., 1], -1.0, 1.0))
+
     def shoulder_internal_external_rotation_angles(
         self, trajectory: np.ndarray
     ) -> np.ndarray:
@@ -166,8 +177,9 @@ class GeneratedCostContext:
         Twist is decomposed from the composed collar∘shoulder∘elbow rotation
         because under this repo's FK convention that composition orients the
         upper-arm bone — the same physical twist can live in either controlled
-        slot. Positive sign follows the T-pose shoulder-to-elbow axis
-        convention.
+        slot. Positive sign follows the right-hand rule about the T-pose
+        shoulder-to-elbow axis, which is internal (medial) rotation twisting the
+        forearm toward the body midline; negative is external rotation.
         """
         trajectory = np.asarray(trajectory, dtype=np.float64)
         leading = trajectory.shape[:-2]
@@ -567,6 +579,7 @@ def build_joint_angle_series(
         "shoulder_abduction_adduction": context.shoulder_abduction_adduction_angles(
             trajectory
         ),
+        "shoulder_elevation": context.shoulder_elevation_angles(trajectory),
         "shoulder_internal_external_rotation": (
             context.shoulder_internal_external_rotation_angles(trajectory)
         ),
@@ -609,6 +622,9 @@ def _joint_feature_summary(
         "shoulder_abduction_adduction": _series_stats(
             context.shoulder_abduction_adduction_angles(trajectory)
         ),
+        "shoulder_elevation": _series_stats(
+            context.shoulder_elevation_angles(trajectory)
+        ),
         "shoulder_internal_external_rotation": _series_stats(
             context.shoulder_internal_external_rotation_angles(trajectory)
         ),
@@ -629,6 +645,7 @@ def _joint_feature_frame_summary(
             "shoulder_abduction_adduction": (
                 context.shoulder_abduction_adduction_angles(q)
             ),
+            "shoulder_elevation": context.shoulder_elevation_angles(q),
             "shoulder_internal_external_rotation": (
                 context.shoulder_internal_external_rotation_angles(q)
             ),

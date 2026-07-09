@@ -435,7 +435,12 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
             spine3_aa if spine3_aa is not None else np.zeros(3), dtype=np.float64
         ),
     )
+    user = get_persona(cfg.user)
     extra_costs = build_extra_costs(cfg.costs, cost_context)
+    if user.joint_limits:
+        extra_costs = CompositeTrajectoryCost(
+            [*extra_costs.terms(), user.limit_cost()]
+        )
 
     # Default goal: arm raised from the initial pose
     default_goal = arm_aa.copy() + np.array(
@@ -525,7 +530,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         uses_mdm=uses_mdm,
         visualize=visualize,
         compact=compact,
-        user=get_persona(cfg.user),
+        user=user,
     )
 
 

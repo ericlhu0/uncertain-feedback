@@ -158,7 +158,7 @@ def main() -> None:
 
     # --- Panel 2: full body reconstructed through our IK → FK pipeline ------
     print("Converting via hml263_to_smpl_body_pose → IK → FK…")
-    body_pose = hml263_to_smpl_body_pose(sitting, data, model, fk.tpose_all_joints)
+    body_pose = hml263_to_smpl_body_pose(sitting, data, fk.tpose_all_joints)
     # body_pose[0] is (21, 3) — full SMPL body_pose, not just the arm.
     # Run full-body FK to recover all 22 joint positions.
     reconstructed_xyz = smpl_body_pose_to_positions(

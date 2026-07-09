@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-07  
+**Last updated:** 2026-07-09  
 **Branch:** simulated-users-standard
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -253,6 +253,10 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 | `elbow_flexion_angle`     | `ElbowFlexionAngleCost`     | Upper-arm/forearm bend angle (radians; 0 = straight) |
 | `shoulder_abduction_angle`| `ShoulderAbductionAngleCost`| Upper-arm angle from torso-down (radians)    |
 
+### Always-on cost terms (not YAML-registered)
+
+- `JointLimitCost` — linear (L1) penalty on rollout joint rotations that leave a per-slot axis-angle box. Not a YAML key: `build_run()` builds it from the active persona's `joint_limits` (`SimulatedUser.limit_cost()`) and appends it to the composite, so the planner refuses to *generate* motions outside the same anatomical box the persona uses to *score* them. Linear (not squared) so the gradient stays firm at the boundary.
+
 ### Cost structure
 
 - `_range_rollout_cost()` — shared helper: penalizes out-of-range feature values across predicted rollout, plus a progress penalty when already violating and moving farther out
@@ -332,6 +336,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model`, `strict`, `artifact_dir`, `use_images`, `cluster_experiment` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets), `trigger_threshold` (hidden-cost violation in rad that triggers simulated feedback) |
+| `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for the transfer experiment (applied in `run_transfer_experiment` for the active persona; falls back to top-level goals when absent). Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
 
 ---
 
@@ -388,6 +393,18 @@ Videos → _mhr_inference_worker.py (detectron2 + SAM → SMPL .npz)
 > length at the positions level, and applies augmentation noise to arm features
 > only. Start poses (`demo_pose.pt`) created with the old encoder should be
 > regenerated before the next fine-tune.
+
+> **HML263 decoding (2026-07-09):** the official encoding above stores 6D
+> rotations relative to the **t2m reference skeleton** (arms hanging down),
+> not this repo's SMPL T-pose — so the 6D block can no longer be read as
+> repo-convention `body_pose`. `hml263_to_smpl_body_pose` /
+> `hml263_batch_to_smpl_body_pose` now decode via `recover_from_ric`
+> positions + minimum-rotation IK (the direct 6D read produced ~90° arm
+> errors on officially-encoded poses), and `smpl_arm_aa_to_hml263_frame`
+> re-encodes the patched frame with the official `positions_to_hml263`
+> instead of writing repo-convention 6D features in place. Note the official
+> encoder re-faces the body to Z+ from hips+shoulders, so re-encoding a frame
+> whose arm moved shifts the canonical heading slightly.
 
 ---
 
@@ -461,7 +478,16 @@ The hidden bounds are the evaluation ground truth in headless experiments
   by a `FeatureCondition` on another feature.
 - `CoupledBound` — **pose-dependent limit**: the threshold on one feature moves
   linearly with another (`threshold = intercept + slope * cond_value`), e.g.
-  stroke flexor synergy (required elbow bend grows with abduction).
+  stroke flexor synergy (required elbow bend grows with shoulder elevation).
+- `JointBoxLimit` — anatomical per-axis box on one controlled slot's raw
+  axis-angle (not a feature bound). `DEFAULT_ARM_JOINT_LIMITS` in `personas.py`
+  is shared by **every** persona (including `unrestricted`): a tight box on the
+  `left_shoulder` slot (which drives the clavicle under the repo FK convention)
+  around the seated `demo_pose.pt` neutral, plus generous boxes on the
+  upper-arm and forearm slots. Summed into `compute_violations` and
+  `HiddenCostTerm` via `SimulatedUser.limit_violation_series`; the
+  feedback-gating checks still test `user.bounds` only, so `unrestricted`
+  remains a no-feedback persona.
 - `render_hidden_bounds()` (`viz.py`) — one panel per bound for debugging:
   pose-dependent bounds are drawn in the conditioning-vs-bounded feature plane
   with the forbidden region shaded (computed by evaluating `bound.violation` on
@@ -477,7 +503,7 @@ The hidden bounds are the evaluation ground truth in headless experiments
   cost generator uses (via `feature_series()`), so hidden bounds and generated
   bounds are directly comparable.
 - Personas (`personas.py`): `unrestricted` (default; no bounds),
-  `adhesive_capsulitis`, `elbow_contracture`, `painful_arc` (avoid band),
+  `adhesive_capsulitis`, `elbow_contracture`, `painful_arc` (elevation avoid band),
   `stroke_flexor_synergy` (coupled bound).
   Registry: `PERSONAS` / `get_persona(name)`.
 
@@ -501,11 +527,27 @@ The hidden bounds are the evaluation ground truth in headless experiments
 > readings for physically identical poses (and read 0 for twist encoded in the
 > elbow slot, as position-derived MDM trajectories may do).
 > Abduction/adduction and flexion/extension were audited and are correct.
-> All four joint features (and the cost-side `compute_elbow_flexion_angles` /
+> All joint features (and the cost-side `compute_elbow_flexion_angles` /
 > `compute_shoulder_abduction_angles`) are now closed-form joint-angle
 > computations — composed slot rotations applied to T-pose bone axes — with
 > outputs identical to the previous FK-position geometry (~5× faster on MPC
 > rollout batches since no FK positions are computed).
+
+> **Shoulder-elevation feature (2026-07-07):**
+> `GeneratedCostContext.shoulder_elevation_angles` — upper-arm angle from
+> straight down (0 = arm at the side, pi/2 = horizontal, pi = overhead),
+> plane-agnostic. Added because the abduction (lateral component) and flexion
+> (depth component) proxies both read ~0 for a vertical upper arm, so **no
+> combination of them can bound elevation**: poses with the arm overhead
+> satisfied any abd/flexion bound, letting planners satisfy "keep the arm low"
+> restrictions while visibly lifting the arm. It is part of
+> `build_joint_angle_series` / `_joint_feature_summary` (LLM prompts + plots)
+> and of the simulated-user `FEATURE_NAMES`. `adhesive_capsulitis` now caps
+> elevation (1.25 rad), `painful_arc` now avoids the 1.05-2.1 rad elevation
+> band, and `stroke_flexor_synergy` couples required elbow bend to elevation;
+> all previously used evadable abduction bounds.
+> `HiddenCostTerm.weight` default rose 1.0 → 10.0 so the oracle condition is
+> compliance-first rather than trading small violations for goal progress.
 
 ## 14. Motion Generator Backends (`motion_generators/`)
 

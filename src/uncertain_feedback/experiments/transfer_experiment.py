@@ -224,6 +224,18 @@ def run_transfer_experiment(  # pylint: disable=too-many-arguments,too-many-loca
         str(label): float(np.mean(compute_violations(user, context, traj)))
         for label, traj in uq_result.cluster_means.items()
     }
+    ArmVisualizer(context.fk).render_cluster_contrast_overlay(
+        root_dir / "cluster_options.png",
+        mdm_trajs=uq_result.cluster_means,
+        highlight_label=uq_result.chosen_label,
+        current_q=q_feedback,
+        spine3_pos=context.spine3_pos,
+        spine3_aa=context.spine3_aa,
+        body_pos=body_pos,
+        goal_pos=np.asarray(cfg.cartesian.goals[0], dtype=np.float64),
+        include_others=True,
+        include_reference=False,
+    )
 
     # Phase C: cost generation from the correction (identical inputs to a live
     # run; the hidden cost is not visible here).

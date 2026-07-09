@@ -17,11 +17,11 @@ import pytest
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     ARM_BODY_POSE_INDICES,
     COLLAR_BODY_POSE_INDEX,
-    HmlArmFeatureInfo,
     positions_to_smpl_body_pose,
     smpl_arm_aa_to_hml263_frame,
     smpl_body_pose_to_arm_aa,
     smpl_body_pose_to_collar_aa,
+    smpl_body_pose_to_positions,
 )
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_INDICES,
@@ -246,53 +246,84 @@ class TestSmplBodyPoseToArmAa:
     not _SMPL_PKL.exists(),
     reason="SMPL_NEUTRAL.pkl not available",
 )
-class TestSmplArmAaToHml263FrameRic:
-    """Regression test: RIC positions must use child FK convention.
+class TestSmplArmAaToHml263FrameRoundtrip:
+    """The patched arm must survive an official encode → decode roundtrip.
 
-    Constructs a base frame with identity spine/collar rotations and T-pose
-    RIC positions.  With spine3_world_rot=identity the expected shoulder,
-    elbow, and wrist RIC values are FK world positions minus T-pose root —
-    which only holds when the child rotation is applied to the bone offset,
-    not the parent rotation.
+    Encodes a T-pose base frame with the official HumanML3D pipeline, patches
+    in a non-trivial arm configuration, then decodes the result back to
+    positions (``recover_from_ric``) and checks the controlled arm bone
+    directions against repo FK of the patched body_pose.  Twist is not
+    preserved by the position pipeline, so directions — not axis-angles — are
+    the invariant; and the official encoder re-faces the body to Z+ using
+    hips + shoulders (so moving the arm shifts the canonical heading), so
+    directions are compared after yaw-aligning on the hip line.
     """
 
-    def test_ric_positions_match_fk(
+    @staticmethod
+    def _hip_yaw(positions: np.ndarray) -> float:
+        across = positions[2] - positions[1]  # r_hip - l_hip
+        return float(np.arctan2(across[0], across[2]))
+
+    def test_patched_arm_survives_official_roundtrip(
         self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
     ) -> None:
-        tpose = fk.tpose_all_joints  # (22, 3)
-        tpose_root = tpose[0]
+        # pylint: disable=import-outside-toplevel
+        import torch
 
-        # Base frame: all zeros except identity 6D for spine chain and collar,
-        # and T-pose collar RIC.
-        raw = np.zeros(263)
-        identity_r6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
-        collar_j = 13
-        for j in [3, 6, 9, collar_j]:
-            raw[67 + (j - 1) * 6 : 67 + j * 6] = identity_r6d
-        raw[4 + (collar_j - 1) * 3 : 4 + collar_j * 3] = tpose[collar_j] - tpose_root
-
-        arm_info = HmlArmFeatureInfo(
-            l_arm_joints=[16, 18, 20],
-            arm_6d_offsets=[67 + 15 * 6, 67 + 17 * 6, 67 + 19 * 6],
-            arm_vel_offsets=[193 + 16 * 3, 193 + 18 * 3, 193 + 20 * 3],
+        from uncertain_feedback.data_collection.smpl_to_hml263 import (
+            positions_to_hml263,
         )
+        from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
+            _import_recover_from_ric,
+        )
+
+        recover_from_ric = _import_recover_from_ric()
+        mean, std = np.zeros(263), np.ones(263)  # identity normalization
+
+        base_positions = fk.tpose_all_joints  # (22, 3)
+        base_frame = positions_to_hml263(
+            np.repeat(base_positions[None], 2, axis=0), mean, std
+        )[0].astype(np.float64)
 
         arm_aa = np.array(
             [[0.0, -0.8, 0.3], [0.0, 0.5, 0.0], [0.1, 0.0, 0.2]], dtype=np.float64
         )
-        out_raw = smpl_arm_aa_to_hml263_frame(
-            raw, arm_aa, arm_info, np.zeros(263), np.ones(263), fk
+        out = smpl_arm_aa_to_hml263_frame(base_frame, arm_aa, mean, std, fk)
+
+        decoded_positions = (
+            recover_from_ric(
+                torch.tensor(out, dtype=torch.float32).unsqueeze(0), 22
+            )[0]
+            .numpy()
+            .astype(np.float64)
         )
 
-        # FK with identity spine3/collar → world positions of arm chain joints.
-        fk.collar_aa = np.zeros(3)
-        fk_positions = fk.fk(
-            arm_aa,
-            spine3_pos=tpose[9],
-            spine3_aa=np.zeros(3),
-        )  # (5, 3): [spine3, collar, shoulder, elbow, wrist]
+        # Expected: base positions decoded → IK → arm slots patched → FK.
+        base_decoded = (
+            recover_from_ric(
+                torch.tensor(base_frame, dtype=torch.float32).unsqueeze(0), 22
+            )[0]
+            .numpy()
+            .astype(np.float64)
+        )
+        body_pose = positions_to_smpl_body_pose(base_decoded, fk.tpose_all_joints)
+        body_pose[ARM_BODY_POSE_INDICES] = arm_aa
+        expected_positions = smpl_body_pose_to_positions(
+            body_pose, fk.tpose_all_joints, root_pos=base_decoded[0]
+        )
 
-        for arm_idx, child_j in enumerate([16, 18, 20]):
-            ric = out_raw[4 + (child_j - 1) * 3 : 4 + child_j * 3]
-            expected = fk_positions[arm_idx + 2] - tpose_root
-            np.testing.assert_allclose(ric, expected, atol=1e-10)
+        from scipy.spatial.transform import Rotation
+
+        yaw_delta = self._hip_yaw(expected_positions) - self._hip_yaw(
+            decoded_positions
+        )
+        unyaw = Rotation.from_euler("y", yaw_delta)
+        for parent_j, child_j in [(13, 16), (16, 18), (18, 20)]:
+            got = unyaw.apply(
+                decoded_positions[child_j] - decoded_positions[parent_j]
+            )
+            want = expected_positions[child_j] - expected_positions[parent_j]
+            got = got / np.linalg.norm(got)
+            want = want / np.linalg.norm(want)
+            angle = np.degrees(np.arccos(np.clip(got @ want, -1.0, 1.0)))
+            assert angle < 3.0, f"bone {parent_j}->{child_j} off by {angle:.2f} deg"

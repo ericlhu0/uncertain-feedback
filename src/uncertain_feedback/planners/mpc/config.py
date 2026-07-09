@@ -45,6 +45,20 @@ class TransferConfig:
 
 
 @dataclass(frozen=True)
+class PersonaGoals:
+    """Per-persona override of the correction goal and transfer goals.
+
+    Each restricted persona needs goals tuned to its own restriction so the
+    default plan visually requires a correction (a frozen-shoulder user needs
+    high goals it cannot reach compliantly; a flexor-synergy user needs
+    high-but-reachable goals that force a straight-vs-bent elbow contrast).
+    """
+
+    cartesian: list[list[float]] = field(default_factory=list)
+    transfer: list[list[float]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class LlmCostConfig:
     enabled: bool = False
     model: str | None = None
@@ -91,6 +105,10 @@ class MpcRunConfig:
     # Simulated-user persona name (see simulated_users.PERSONAS); every run
     # loads this user alongside the pose.
     user: str = "unrestricted"
+    # Optional per-persona goal overrides for the transfer experiment, keyed by
+    # persona name. When the active persona is present, its goals replace the
+    # top-level cartesian/transfer goals (see PersonaGoals).
+    persona_goals: dict[str, PersonaGoals] = field(default_factory=dict)
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -211,6 +229,18 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     transfer_data = _mapping(data.get("transfer"), "transfer")
     transfer_goals = _goal_list(transfer_data.get("goals", []), "transfer.goals")
 
+    persona_goals: dict[str, PersonaGoals] = {}
+    for persona, goals in _mapping(data.get("persona_goals"), "persona_goals").items():
+        goals_map = _mapping(goals, f"persona_goals.{persona}")
+        persona_goals[persona] = PersonaGoals(
+            cartesian=_goal_list(
+                goals_map.get("cartesian", []), f"persona_goals.{persona}.cartesian"
+            ),
+            transfer=_goal_list(
+                goals_map.get("transfer", []), f"persona_goals.{persona}.transfer"
+            ),
+        )
+
     costs: dict[str, dict[str, Any]] = {}
     cost_names = available_cost_names()
     for name, params in cost_data.items():
@@ -303,6 +333,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         ),
         motion_generator=motion_generator,
         user=str(data.get("user", "unrestricted")),
+        persona_goals=persona_goals,
         transfer=TransferConfig(
             goals=transfer_goals,
             trigger_threshold=_float(

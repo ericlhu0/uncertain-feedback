@@ -11,6 +11,7 @@ memory/
 llm_cost_artifacts/
 experiment_artifacts/
 agent_handoffs/
+transfer_artifacts/
 
 .DS_Store
 .python-version

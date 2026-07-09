@@ -53,7 +53,6 @@ if str(_SRC_ROOT) not in sys.path:
 from uncertain_feedback.consts import MDM_MODEL_WEIGHTS_PATH, MDM_ROOT
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
-    HmlArmFeatureInfo,
     hml263_batch_to_smpl_body_pose,
     hml263_batch_to_smpl_positions,
     hml263_to_smpl_body_pose,
@@ -125,7 +124,6 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
         self._not_l_arm_mask: np.ndarray | None = None  # (263,) bool
 
         # Populated in _ensure_loaded() for start_arm_aa support.
-        self._arm_info: HmlArmFeatureInfo | None = None  # HML263 arm feature offsets
         self._hml_mean: np.ndarray | None = None  # (263,) normalization mean
         self._hml_std: np.ndarray | None = None  # (263,) normalization std
 
@@ -237,19 +235,6 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
         not_l_arm_mask = not_l_arm_mask | humanml_utils.HML_ROOT_MASK
         self._not_l_arm_mask = not_l_arm_mask  # (263,) bool
 
-        # Precompute HML263 feature offsets for left arm joints.
-        # HML263 block layout:
-        #   [4 root] [21×3 positions] [21×6 rotations] [22×3 velocities] [4 contacts]
-        _rot_block_offset = 4 + 63  # 6D rotation block starts at 67
-        _vel_block_offset = (
-            4 + 63 + 126
-        )  # 193; velocity block uses all 22 joints (not j-1)
-        self._arm_info = HmlArmFeatureInfo(
-            l_arm_joints=l_arm_joints,
-            arm_6d_offsets=[_rot_block_offset + (j - 1) * 6 for j in l_arm_joints],
-            arm_vel_offsets=[_vel_block_offset + j * 3 for j in l_arm_joints],
-        )
-
         # Store normalization stats for building custom start frames.
         t2m_ds = data.dataset.t2m_dataset
         self._hml_mean = np.asarray(t2m_ds.mean).flatten()[:263]
@@ -311,7 +296,9 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
         ).unsqueeze(
             0
         )  # (1, 263)
-        body_pose = hml263_to_smpl_body_pose(pose_t, self._data)  # (1, 21, 3)
+        body_pose = hml263_to_smpl_body_pose(
+            pose_t, self._data, self._fk.tpose_all_joints
+        )  # (1, 21, 3)
         arm_aa = smpl_body_pose_to_arm_aa(body_pose[0])  # (3, 3)
         collar_aa = smpl_body_pose_to_collar_aa(body_pose[0])  # (3,)
         body_positions = smpl_body_pose_to_positions(
@@ -344,13 +331,11 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
             ``arm_aa``.
         """
         self._ensure_loaded()
-        assert self._arm_info is not None
         assert self._hml_mean is not None
         assert self._hml_std is not None
         return smpl_arm_aa_to_hml263_frame(
             base_norm=np.asarray(base_pose, dtype=np.float64),
             arm_aa=np.asarray(arm_aa, dtype=np.float64),
-            arm_info=self._arm_info,
             hml_mean=self._hml_mean,
             hml_std=self._hml_std,
             fk=self._fk,
@@ -416,7 +401,6 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
         self._ensure_loaded()
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
-        assert self._arm_info is not None
         assert self._hml_mean is not None
         assert self._hml_std is not None
         self._align_fk_collar_to_pose(start_pose)
@@ -565,19 +549,21 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
             # Single-sample fast path: no ThreadPoolExecutor overhead.
             hml_vec = sample[0, :, 0, :].T  # (n_frames, 263)
             convert_t0 = time.perf_counter()
-            body_pose = hml263_to_smpl_body_pose(hml_vec, data)  # (n_frames, 21, 3)
+            body_pose = hml263_to_smpl_body_pose(
+                hml_vec, data, self._fk.tpose_all_joints
+            )  # (n_frames, 21, 3)
             print(
                 "[timing] HML-to-arm conversion: "
                 f"{time.perf_counter() - convert_t0:.3f}s"
             )
             return smpl_body_pose_to_arm_aa(body_pose)  # (n_frames, 3, 3)
 
-        # Batch path: read 6D features directly from all samples at once.
+        # Batch path: recover positions for all samples at once, then IK.
         # sample: (num_samples, 263, 1, n_frames) → (num_samples, n_frames, 263)
         hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
         convert_t0 = time.perf_counter()
         body_pose_batch = hml263_batch_to_smpl_body_pose(
-            hml_vecs, data
+            hml_vecs, data, self._fk.tpose_all_joints
         )  # (num_samples, n_frames, 21, 3)
         print(
             "[timing] HML-to-arm conversion total: "

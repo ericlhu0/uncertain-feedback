@@ -1,15 +1,21 @@
 """HML263 ↔ SMPL body_pose conversion utilities.
 
+HML263 files/model outputs follow the **official** HumanML3D encoding
+(``process_file``): the 6D rotation block stores local quaternions relative to
+the t2m reference skeleton (arms hanging down), NOT this repo's SMPL T-pose
+(arms out).  All decoding therefore goes through the RIC positions —
+convention-free — followed by minimum-rotation IK into repo body_pose; the 6D
+block is never read directly.
+
 HML → SMPL  (MDM output decoding):
 
     ``hml263_to_smpl_body_pose``
-        Full pipeline: MDM de-normalization + ``recover_from_ric`` + ``rot2xyz``
-        (all provided by the MDM repo) followed by minimum-rotation IK.
+        Full pipeline: MDM de-normalization + ``recover_from_ric`` (MDM repo)
+        followed by minimum-rotation IK.
 
     ``hml263_batch_to_smpl_body_pose``
-        Batched variant: processes all ``n_samples`` trajectories in a single
-        ``rot2xyz`` GPU call, then parallelises the per-frame IK across samples
-        with :class:`~concurrent.futures.ThreadPoolExecutor`.
+        Batched variant: recovers positions for all ``n_samples`` trajectories
+        at once, then parallelises the per-frame IK across samples.
 
     ``positions_to_smpl_body_pose``
         Core IK: ``(22, 3)`` global XYZ positions → ``(21, 3)`` SMPL local
@@ -25,10 +31,6 @@ SMPL → HML  (inpainting / input conditioning):
         Patch left-arm axis-angles back into a normalized HML263 frame.  Used
         to condition the MDM inpainting start frame on the current MPC state.
 
-    ``HmlArmFeatureInfo``
-        Precomputed HML263 feature offsets for the arm joints; bundled into
-        one dataclass so callers do not need to track four separate lists.
-
 FK utility:
 
     ``smpl_body_pose_to_positions``
@@ -39,7 +41,7 @@ FK utility:
 Conversion pipeline (HML → SMPL)::
 
     (n_frames, 263)  normalized HumanML3D
-        → inv_transform + recover_from_ric + rot2xyz   [MDM-provided]
+        → inv_transform + recover_from_ric             [MDM-provided]
         → (n_frames, 22, 3)  global XYZ joint positions
         → positions_to_smpl_body_pose  [custom IK, per frame]
         → (n_frames, 21, 3)  SMPL body_pose local axis-angles
@@ -49,11 +51,10 @@ Conversion pipeline (HML → SMPL)::
 Inverse pipeline (SMPL → HML, for inpainting)::
 
     (3, 3)  controlled left-arm axis-angles
-        → rotation matrix → 6D representation       [patch 6D rotation block]
-        → collar world rot from base 6D chain        [spine1→spine2→spine3→collar]
-        → arm FK relative to actual collar pose      [patch RIC position block]
-        → zero velocity features
-        → re-normalize
+        → recover_from_ric on the base frame → (22, 3) positions
+        → minimum-rotation IK → repo body_pose, arm slots ← arm_aa
+        → full-body FK → patched (22, 3) positions
+        → official HumanML3D ``positions_to_hml263`` re-encode
         → (263,)  patched normalized HML263 frame
 """
 
@@ -61,7 +62,6 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass
 from os import cpu_count
 from pathlib import Path
 
@@ -93,60 +93,24 @@ ARM_BODY_POSE_INDICES: list[int] = [15, 17, 19]
 
 
 # ---------------------------------------------------------------------------
-# SMPL → HML: feature-offset bookkeeping
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class HmlArmFeatureInfo:
-    """Precomputed HML263 feature offsets for the left arm joints.
-
-    HML263 block layout::
-
-        [0:4]     root (rot_vel, lin_vel_x, lin_vel_z, root_y)
-        [4:67]    RIC positions  (21 joints × 3)
-        [67:193]  6D rotations   (21 joints × 6)
-        [193:259] velocities     (22 joints × 3)
-        [259:263] foot contacts  (4)
-
-    Attributes:
-        l_arm_joints:   HML joint indices for ``[left_shoulder, left_elbow,
-                        left_wrist]`` (indices into the 22-joint array;
-                        **excludes** left_collar which has no HML rotation
-                        feature).
-        arm_6d_offsets: Starting offsets into the 6D rotation block for each
-                        arm joint.
-        arm_vel_offsets: Starting offsets into the velocity block.
-    """
-
-    l_arm_joints: list[int]
-    arm_6d_offsets: list[int]
-    arm_vel_offsets: list[int]
-
-
-# ---------------------------------------------------------------------------
 # SMPL → HML: patch arm axis-angles into a normalized HML263 frame
 # ---------------------------------------------------------------------------
 
 
-def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
+def smpl_arm_aa_to_hml263_frame(
     base_norm: np.ndarray,
     arm_aa: np.ndarray,
-    arm_info: HmlArmFeatureInfo,
     hml_mean: np.ndarray,
     hml_std: np.ndarray,
     fk: SmplLeftArmFK,
 ) -> np.ndarray:
     """Patch left-arm axis-angles into a normalized HML263 frame.
 
-    Replaces the 6D rotation features, RIC position features, and velocity
-    features for the controlled arm joints (shoulder, elbow, wrist) in a
-    normalized HML263 vector with values derived from ``arm_aa``.
-
-    RIC positions are computed by accumulating the collar's world rotation
-    from the base pose's own HML263 6D features (spine1 → spine2 → spine3 →
-    collar chain), then applying FK along the arm chain.  This avoids the
-    T-pose spine assumption of ``SmplLeftArmFK.full_body_positions``.
+    Decodes the base frame to global positions (``recover_from_ric``), swaps
+    the controlled arm slots into the repo body_pose obtained by
+    minimum-rotation IK, runs full-body FK, and re-encodes the patched frame
+    with the official HumanML3D ``process_file`` — so the conditioning frame
+    follows exactly the encoding the model was fine-tuned on.
 
     This is used to condition MDM's inpainting start frame on the current MPC
     arm state so that the generated motion starts from the actual arm
@@ -157,8 +121,6 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
                     (e.g. the sitting pose).
         arm_aa:     ``(3, 3)`` left-arm axis-angles for
                     ``[left_shoulder, left_elbow, left_wrist]``.
-        arm_info:   Precomputed feature offsets from
-                    :class:`HmlArmFeatureInfo`.
         hml_mean:   ``(263,)`` HML263 normalization mean.
         hml_std:    ``(263,)`` HML263 normalization std.
         fk:         :class:`~uncertain_feedback.planners.mpc.kinematics.SmplLeftArmFK`
@@ -167,88 +129,32 @@ def smpl_arm_aa_to_hml263_frame(  # pylint: disable=too-many-locals
     Returns:
         ``(263,)`` patched and re-normalized HML263 frame.
     """
-    arm_aa = np.asarray(arm_aa, dtype=np.float64)
+    # pylint: disable=import-outside-toplevel
+    import torch
 
-    # Un-normalize the base frame to raw HML features.
-    raw = base_norm * hml_std + hml_mean  # (263,)
-    tpose_22 = fk.tpose_all_joints  # (22, 3)
-
-    # Derive collar / spine3 joint indices from SMPL topology — no magic numbers.
-    collar_j = SMPL_PARENTS_22[arm_info.l_arm_joints[0]]  # parent of shoulder = 13
-    spine3_j = SMPL_PARENTS_22[collar_j]  # parent of collar  =  9
-
-    # --- Patch 6D rotation features: shoulder + elbow + wrist ---------------
-    # Collar is fixed from the base/start pose and is not MPC-controlled.
-    for arm_idx, joint_j in enumerate(arm_info.l_arm_joints):
-        rot_mat = Rotation.from_rotvec(arm_aa[arm_idx]).as_matrix()
-        r6d = np.concatenate([rot_mat[:, 0], rot_mat[:, 1]])  # first two columns → (6,)
-        raw[67 + (joint_j - 1) * 6 : 67 + joint_j * 6] = r6d
-
-    # --- Patch RIC position features for shoulder + elbow + wrist -----------
-    # Build spine chain from root up to (and including) spine3.  Walk upward
-    # from spine3, then reverse.  The spine is constrained to the base pose
-    # by inpainting, so reading its HML263 6D rotations is correct.
-    spine_chain: list[int] = []
-    j = spine3_j
-    while j > 0:
-        spine_chain.append(j)
-        j = SMPL_PARENTS_22[j]
-    spine_chain.reverse()  # e.g. [3, 6, 9]
-
-    # Accumulate spine3 world rotation from the base HML263 (collar excluded).
-    spine3_world_rot = Rotation.identity()
-    for j in spine_chain:
-        r6d_j = raw[67 + (j - 1) * 6 : 67 + j * 6]
-        a1, a2 = r6d_j[:3], r6d_j[3:6]
-        b1 = a1 / (np.linalg.norm(a1) + 1e-8)
-        b2 = a2 - np.dot(a2, b1) * b1
-        b2 = b2 / (np.linalg.norm(b2) + 1e-8)
-        b3 = np.cross(b1, b2)
-        spine3_world_rot = spine3_world_rot * Rotation.from_matrix(
-            np.stack([b1, b2, b3], axis=1)
-        )
-
-    collar_ric = raw[4 + (collar_j - 1) * 3 : 4 + collar_j * 3].copy()
-    collar_r6d = raw[67 + (collar_j - 1) * 6 : 67 + collar_j * 6]
-    a1, a2 = collar_r6d[:3], collar_r6d[3:6]
-    b1 = a1 / (np.linalg.norm(a1) + 1e-8)
-    b2 = a2 - np.dot(a2, b1) * b1
-    b2 = b2 / (np.linalg.norm(b2) + 1e-8)
-    b3 = np.cross(b1, b2)
-    collar_world_rot = spine3_world_rot * Rotation.from_matrix(
-        np.stack([b1, b2, b3], axis=1)
+    from uncertain_feedback.data_collection.smpl_to_hml263 import (
+        positions_to_hml263,
     )
 
-    # Walk collar → shoulder → elbow → wrist.
-    # FK rule (child convention, matches MDM Skeleton / SmplLeftArmFK):
-    # child_rot is composed first, then used to transform the outgoing bone.
-    arm_chain_smpl = [collar_j] + list(arm_info.l_arm_joints)
-    current_rot = collar_world_rot
-    current_ric = collar_ric
-    for arm_idx, (parent_j, child_j) in enumerate(
-        zip(arm_chain_smpl[:-1], arm_chain_smpl[1:])
-    ):
-        tpose_bone = tpose_22[child_j] - tpose_22[parent_j]
-        child_rot = current_rot * Rotation.from_rotvec(
-            arm_aa[arm_idx]
-        )  # child world rot
-        child_ric = current_ric + child_rot.apply(
-            tpose_bone
-        )  # child rot → child pos
-        raw[4 + (child_j - 1) * 3 : 4 + child_j * 3] = child_ric
-        current_rot = child_rot
-        current_ric = child_ric
+    recover_from_ric = _import_recover_from_ric()
 
-    # --- Zero velocity features for shoulder + elbow + wrist ----------------
-    # For a static start pose (the same frame repeated 10×), inter-frame
-    # velocity should be zero.  The base frame may carry non-zero velocities
-    # from its original motion clip, which would be inconsistent with the
-    # patched position/rotation features.
-    for vel_offset in arm_info.arm_vel_offsets:
-        raw[vel_offset : vel_offset + 3] = 0.0
+    arm_aa = np.asarray(arm_aa, dtype=np.float64)
+    raw = base_norm * hml_std + hml_mean  # (263,)
+    base_positions = (
+        recover_from_ric(torch.tensor(raw, dtype=torch.float32).unsqueeze(0), 22)[0]
+        .numpy()
+        .astype(np.float64)
+    )  # (22, 3)
 
-    # Re-normalize and return.
-    return (raw - hml_mean) / (hml_std + 1e-8)
+    body_pose = positions_to_smpl_body_pose(base_positions, fk.tpose_all_joints)
+    body_pose[ARM_BODY_POSE_INDICES] = arm_aa
+    patched_positions = smpl_body_pose_to_positions(
+        body_pose, fk.tpose_all_joints, root_pos=base_positions[0]
+    )
+
+    # process_file drops the last frame, so encode the static frame twice.
+    frames = np.repeat(patched_positions[None], 2, axis=0)
+    return positions_to_hml263(frames, hml_mean, hml_std)[0].astype(np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -414,86 +320,77 @@ def smpl_body_pose_to_spine3_aa(body_pose: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _6d_to_body_pose(rot6d: np.ndarray) -> np.ndarray:
-    """Convert 6D rotation features to SMPL body_pose axis-angles (vectorized).
+def _import_recover_from_ric():
+    """Import the MDM submodule's ``recover_from_ric`` with sys.path set up."""
+    mdm_dir = Path(__file__).resolve().parent / "motion-diffusion-model"
+    if str(mdm_dir) not in sys.path:
+        sys.path.insert(0, str(mdm_dir))
+    # pylint: disable=import-outside-toplevel,import-error
+    from data_loaders.humanml.scripts.motion_process import recover_from_ric
 
-    HML263 [67:193] stores 21 joints × 6 values = the first two columns of
-    each joint's rotation matrix.  Heading cancels in parent-relative space, so
-    these 6D values are exactly the local body_pose rotations — no FK or IK is
-    needed to decode them.
-
-    Args:
-        rot6d: ``(..., 21, 6)`` 6D rotation features.
-
-    Returns:
-        ``(..., 21, 3)`` SMPL body_pose axis-angles.
-    """
-    a1 = rot6d[..., :3]  # first column
-    a2 = rot6d[..., 3:]  # second column
-    b1 = a1 / (np.linalg.norm(a1, axis=-1, keepdims=True) + 1e-8)
-    b2 = a2 - (a2 * b1).sum(-1, keepdims=True) * b1
-    b2 = b2 / (np.linalg.norm(b2, axis=-1, keepdims=True) + 1e-8)
-    b3 = np.cross(b1, b2)
-    R = np.stack([b1, b2, b3], axis=-1)  # (..., 21, 3, 3) — cols are b1, b2, b3
-    lead = R.shape[:-2]
-    return Rotation.from_matrix(R.reshape(-1, 3, 3)).as_rotvec().reshape(*lead, 3)
+    return recover_from_ric
 
 
 def hml263_to_smpl_body_pose(
     hml_vec: "torch.Tensor",  # type: ignore[name-defined]  # noqa: F821
     dataset,
+    tpose_22: np.ndarray,
 ) -> np.ndarray:
     """Convert normalized HumanML3D vectors to SMPL body_pose.
 
-    Reads the 6D rotation block [67:193] from the de-normalized HML263 vector
-    directly.  No positions, no ``rot2xyz``, no IK — heading cancels in
-    parent-relative space so the 6D block is already body_pose in 6D form.
+    De-normalizes, recovers global XYZ via the official ``recover_from_ric``,
+    then runs minimum-rotation IK per frame.  The 6D rotation block is never
+    read directly: officially encoded rotations are relative to the t2m
+    reference skeleton (arms hanging down), not this repo's SMPL T-pose.
 
     Args:
-        hml_vec: ``(n_frames, 263)`` normalized HumanML3D motion tensor.
-        dataset: HumanML3D ``DataLoader`` — accesses
-                 ``dataset.dataset.t2m_dataset.inv_transform``.
+        hml_vec:  ``(n_frames, 263)`` normalized HumanML3D motion tensor.
+        dataset:  HumanML3D ``DataLoader`` — accesses
+                  ``dataset.dataset.t2m_dataset.inv_transform``.
+        tpose_22: ``(22, 3)`` T-pose joint positions (from
+                  :attr:`SmplLeftArmFK.tpose_all_joints`).
 
     Returns:
         ``(n_frames, 21, 3)`` SMPL body_pose axis-angles.
     """
+    recover_from_ric = _import_recover_from_ric()
     hml_vec = hml_vec.float().cpu()
-    n_frames = hml_vec.shape[0]
 
     unnorm = dataset.dataset.t2m_dataset.inv_transform(
         hml_vec.unsqueeze(0).unsqueeze(0)  # (1, 1, n_frames, 263)
     ).float()
+    positions = recover_from_ric(unnorm, 22)[0, 0].numpy().astype(np.float64)
 
-    rot6d = unnorm[0, 0, :, 67:193].numpy().reshape(n_frames, 21, 6)
-    return _6d_to_body_pose(rot6d)  # (n_frames, 21, 3)
+    return np.stack(
+        [positions_to_smpl_body_pose(frame, tpose_22) for frame in positions]
+    )  # (n_frames, 21, 3)
 
 
 def hml263_batch_to_smpl_body_pose(
     hml_vecs: "torch.Tensor",  # type: ignore[name-defined]  # noqa: F821
     dataset,
+    tpose_22: np.ndarray,
 ) -> np.ndarray:
     """Batched variant of :func:`hml263_to_smpl_body_pose`.
-
-    Reads 6D rotation features directly from the de-normalized HML263 block —
-    no ``rot2xyz`` GPU call and no per-frame IK.
 
     Args:
         hml_vecs: ``(n_samples, n_frames, 263)`` normalized HumanML3D tensor.
         dataset:  HumanML3D ``DataLoader`` — accesses
                   ``dataset.dataset.t2m_dataset.inv_transform``.
+        tpose_22: ``(22, 3)`` T-pose joint positions.
 
     Returns:
         ``(n_samples, n_frames, 21, 3)`` SMPL body_pose axis-angles.
     """
+    recover_from_ric = _import_recover_from_ric()
     hml_vecs = hml_vecs.float().cpu()
-    n_samples, n_frames = hml_vecs.shape[0], hml_vecs.shape[1]
 
     unnorm = dataset.dataset.t2m_dataset.inv_transform(
         hml_vecs.unsqueeze(1)  # (n_samples, 1, n_frames, 263)
     ).float()
+    positions = recover_from_ric(unnorm, 22)[:, 0].numpy().astype(np.float64)
 
-    rot6d = unnorm[:, 0, :, 67:193].numpy().reshape(n_samples, n_frames, 21, 6)
-    return _6d_to_body_pose(rot6d)  # (n_samples, n_frames, 21, 3)
+    return smpl_positions_batch_to_body_pose(positions, tpose_22)
 
 
 def hml263_batch_to_smpl_positions(  # pylint: disable=too-many-locals

@@ -19,7 +19,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext, TrajectoryCost
+from uncertain_feedback.planners.mpc.costs.base import (
+    JointLimitCost,
+    MpcCostContext,
+    TrajectoryCost,
+)
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostContext,
     build_joint_angle_series,
@@ -29,6 +33,7 @@ FEATURE_NAMES = (
     "elbow_flexion",
     "shoulder_flexion_extension",
     "shoulder_abduction_adduction",
+    "shoulder_elevation",
     "shoulder_internal_external_rotation",
 )
 
@@ -153,6 +158,37 @@ class CoupledBound:
 
 Bound = HiddenBound | CoupledBound
 
+# Controlled arm_aa row for each joint slot. Under the repo FK convention
+# (a joint's rotation transforms the bone arriving at it) the slots physically
+# drive: left_shoulder -> clavicle, left_elbow -> upper arm, left_wrist -> forearm.
+JOINT_SLOTS = {"left_shoulder": 0, "left_elbow": 1, "left_wrist": 2}
+
+
+@dataclass(frozen=True)
+class JointBoxLimit:
+    """Per-axis box on one controlled joint slot's axis-angle (radians).
+
+    Anatomical joint limits shared by every persona — unlike feature bounds,
+    these act on the raw controlled rotation, so they also catch implausible
+    configurations (e.g. large clavicle swings) that the anatomical joint
+    features cannot see.
+    """
+
+    joint: str
+    low: tuple[float, float, float]
+    high: tuple[float, float, float]
+
+    def __post_init__(self) -> None:
+        if self.joint not in JOINT_SLOTS:
+            raise ValueError(f"Unknown joint {self.joint!r}; expected {sorted(JOINT_SLOTS)}.")
+
+    def violation(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return per-frame violation magnitudes for ``(..., 3, 3)`` trajectories."""
+        q = np.asarray(trajectory, dtype=np.float64)[..., JOINT_SLOTS[self.joint], :]
+        low = np.asarray(self.low, dtype=np.float64)
+        high = np.asarray(self.high, dtype=np.float64)
+        return (np.maximum(q - high, 0.0) + np.maximum(low - q, 0.0)).sum(axis=-1)
+
 
 @dataclass(frozen=True)
 class SimulatedUser:
@@ -162,6 +198,7 @@ class SimulatedUser:
     description: str
     feedback_text: str
     bounds: tuple[Bound, ...]
+    joint_limits: tuple[JointBoxLimit, ...] = ()
 
     def violation_series(self, features: dict[str, np.ndarray]) -> np.ndarray:
         """Return summed per-frame violations across all hidden bounds."""
@@ -172,12 +209,34 @@ class SimulatedUser:
             total = total + bound.violation(features)
         return total
 
+    def limit_cost(self, weight: float = 50.0) -> JointLimitCost:
+        """Return the joint-box-limit penalty over this persona's controlled slots.
+
+        The same anatomical box used to *score* trajectories, turned into an
+        always-on MPC cost so the planner also refuses to *generate* motions that
+        leave the box (see JointLimitCost).
+        """
+        slots = tuple(JOINT_SLOTS[limit.joint] for limit in self.joint_limits)
+        low = np.array([limit.low for limit in self.joint_limits], dtype=np.float64)
+        high = np.array([limit.high for limit in self.joint_limits], dtype=np.float64)
+        return JointLimitCost(slots=slots, low=low, high=high, weight=weight)
+
+    def limit_violation_series(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return summed per-frame joint-box-limit violations."""
+        trajectory = np.asarray(trajectory, dtype=np.float64)
+        total = np.zeros(trajectory.shape[:-2], dtype=np.float64)
+        for limit in self.joint_limits:
+            total = total + limit.violation(trajectory)
+        return total
+
 
 def compute_violations(
     user: SimulatedUser, context: MpcCostContext, trajectory: np.ndarray
 ) -> np.ndarray:
     """Return the hidden-cost violation series for a ``(..., 3, 3)`` trajectory."""
-    return user.violation_series(feature_series(context, trajectory))
+    return user.violation_series(
+        feature_series(context, trajectory)
+    ) + user.limit_violation_series(trajectory)
 
 
 def first_violation_step(
@@ -227,10 +286,12 @@ class HiddenCostTerm(TrajectoryCost):
 
     user: SimulatedUser
     context: MpcCostContext
-    weight: float = 1.0
+    weight: float = 10.0
 
     def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
         q_trajs = np.asarray(q_trajs, dtype=np.float64)
         future = q_trajs[:, 1:] if q_trajs.shape[1] > 1 else q_trajs
-        violations = self.user.violation_series(feature_series(self.context, future))
+        violations = self.user.violation_series(
+            feature_series(self.context, future)
+        ) + self.user.limit_violation_series(future)
         return self.weight * np.mean(violations**2, axis=1)

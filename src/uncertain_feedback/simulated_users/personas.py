@@ -12,7 +12,23 @@ from __future__ import annotations
 from uncertain_feedback.simulated_users.base import (
     CoupledBound,
     HiddenBound,
+    JointBoxLimit,
     SimulatedUser,
+)
+
+# Anatomical box limits shared by every persona (radians, per axis-angle
+# component of the controlled slots). The left_shoulder slot drives the
+# clavicle under the repo FK convention, so it gets a tight box around the
+# seated demo pose neutral of ~[-0.26, 0.05, -0.44] (demo_pose.pt and
+# demo_pose_v3.pt decode to nearly the same clavicle; real clavicle range of
+# motion is ~±20-30 deg); the upper-arm (left_elbow slot) and forearm
+# (left_wrist slot) rotations get generous ball/hinge-joint boxes.
+DEFAULT_ARM_JOINT_LIMITS = (
+    JointBoxLimit(
+        joint="left_shoulder", low=(-0.7, -0.4, -0.85), high=(0.15, 0.4, 0.05)
+    ),
+    JointBoxLimit(joint="left_elbow", low=(-2.0, -2.0, -2.0), high=(2.0, 2.0, 2.0)),
+    JointBoxLimit(joint="left_wrist", low=(-2.2, -2.2, -2.2), high=(2.2, 2.2, 2.2)),
 )
 
 UNRESTRICTED = SimulatedUser(
@@ -20,23 +36,26 @@ UNRESTRICTED = SimulatedUser(
     description="No movement restrictions.",
     feedback_text="",
     bounds=(),
+    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
 ADHESIVE_CAPSULITIS = SimulatedUser(
     name="adhesive_capsulitis",
     description=(
         "Frozen shoulder (adhesive capsulitis): painful restriction of "
-        "glenohumeral elevation; comfortable abduction limited to ~63 deg, "
-        "below the ~90 deg typical of stage-2 capsulitis."
+        "glenohumeral elevation in every plane; comfortable elevation "
+        "limited to ~72 deg, below the ~90 deg typical of stage-2 "
+        "capsulitis."
     ),
-    feedback_text="keep my arm closer to my body",
+    feedback_text="keep my arm down and close to my body",
     bounds=(
         HiddenBound(
-            feature="shoulder_abduction_adduction",
+            feature="shoulder_elevation",
             bound_type="upper_bound",
-            high=1.1,
+            high=1.25,
         ),
     ),
+    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
 ELBOW_CONTRACTURE = SimulatedUser(
@@ -53,44 +72,47 @@ ELBOW_CONTRACTURE = SimulatedUser(
             low=0.5,
         ),
     ),
+    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
 PAINFUL_ARC = SimulatedUser(
     name="painful_arc",
     description=(
         "Subacromial painful arc: pain specifically in the ~60-120 deg "
-        "abduction range; comfortable below and above it."
+        "elevation range in any plane; comfortable below and above it."
     ),
-    feedback_text="lifting my arm out to the side partway up hurts",
+    feedback_text="lifting my arm partway up hurts",
     bounds=(
         HiddenBound(
-            feature="shoulder_abduction_adduction",
+            feature="shoulder_elevation",
             bound_type="avoid_band",
             low=1.05,
             high=2.1,
         ),
     ),
+    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
 STROKE_FLEXOR_SYNERGY = SimulatedUser(
     name="stroke_flexor_synergy",
     description=(
-        "Post-stroke flexor synergy: shoulder abduction couples with "
-        "involuntary elbow flexion; the higher the arm is raised, the more the "
-        "elbow must stay bent. Pose-dependent bound: required elbow flexion "
-        "rises linearly from 0 at ~34 deg abduction to ~69 deg bend at ~92 deg "
-        "abduction."
+        "Post-stroke flexor synergy: raising the arm couples with "
+        "involuntary elbow flexion; the higher the arm is elevated (in any "
+        "plane), the more the elbow must stay bent. Pose-dependent bound: "
+        "required elbow flexion rises linearly from 0 at ~66 deg elevation "
+        "to ~90 deg bend at ~96 deg elevation."
     ),
-    feedback_text="keep my elbow bent while you lift my arm",
+    feedback_text="keep my elbow bent, don't straighten it while you lift my arm",
     bounds=(
         CoupledBound(
             feature="elbow_flexion",
             bound_type="lower_bound",
-            cond_feature="shoulder_abduction_adduction",
-            intercept=-0.72,
-            slope=1.2,
+            cond_feature="shoulder_elevation",
+            intercept=-3.45,
+            slope=3.0,
         ),
     ),
+    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
 PERSONAS: dict[str, SimulatedUser] = {

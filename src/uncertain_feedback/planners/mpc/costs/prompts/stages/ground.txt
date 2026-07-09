@@ -4,10 +4,11 @@ Preference (from stage one):
 {interpretation}
 
 Available joint-angle features (all in radians, all you may specify a preference over):
-- elbow_flexion: how bent the elbow is (larger = more bent).
-- shoulder_flexion_extension: signed depth of the upper arm; positive = forward, negative = back.
-- shoulder_abduction_adduction: signed lateral position of the upper arm; positive = out away from the torso (for the left arm), negative = across the body.
-- shoulder_internal_external_rotation: signed twist of the upper arm.
+- elbow_flexion: how bent the elbow is (larger = more bent; 0 = arm fully straight, π/2 = bent to a right angle, π = forearm folded back against the upper arm).
+- shoulder_flexion_extension: signed depth of the upper arm (0 = neither forward nor back, +π/2 = pointing straight forward, −π/2 = straight back).
+- shoulder_abduction_adduction: signed lateral position of the upper arm (0 = neither out nor across, +π/2 = straight out to the side away from the torso for the left arm, −π/2 = fully across the body).
+- shoulder_elevation: total upper-arm elevation from straight down (0 = arm at side, π/2 = horizontal, π = overhead); increases as the arm is raised in any direction.
+- shoulder_internal_external_rotation: signed twist of the upper arm about its long axis (0 = neutral/untwisted, positive = internal rotation twisting the forearm toward the body midline, negative = external rotation twisting it away).
 Each of these appears in the summaries under "joint_features" for every trajectory, with min / median / max / start / end values.
 
 How to ground it:
@@ -22,7 +23,7 @@ How to ground it:
 
 Return ONLY a JSON object, no prose, with these keys:
 - "terms": a list (usually length 1) of objects, each:
-  - "feature": one of the four feature names above (string).
+  - "feature": one of the five feature names above (string).
   - "bound_type": "lower_bound" | "upper_bound" | "band" (string).
   - "values": for lower_bound/upper_bound {"threshold": float}; for band {"low": float, "high": float}. Radians.
   - "source": which trajectory + statistic each number came from, and the margin you added (string).

@@ -296,6 +296,32 @@ class ShoulderAbductionAngleCost:
         )
 
 
+@dataclass(frozen=True)
+class JointLimitCost:
+    """Penalize rollout joint rotations that leave a per-slot axis-angle box.
+
+    An always-on anatomical floor shared by every persona. Unlike the range
+    preference costs above this is a hard-ish limit, so it uses a linear (L1)
+    violation that keeps a firm gradient at the boundary rather than a squared
+    one that fades to zero there.
+    """
+
+    cost_name = "joint_limit"
+
+    slots: tuple[int, ...]
+    low: np.ndarray  # (K, 3) per-slot lower axis-angle bounds
+    high: np.ndarray  # (K, 3) per-slot upper axis-angle bounds
+    weight: float = 50.0
+
+    def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
+        q_trajs = np.asarray(q_trajs, dtype=np.float64)
+        future = q_trajs[:, 1:] if q_trajs.shape[1] > 1 else q_trajs[:, -1:]
+        q = future[..., self.slots, :]
+        violation = np.maximum(q - self.high, 0.0) + np.maximum(self.low - q, 0.0)
+        per_frame = violation.sum(axis=(-2, -1))
+        return self.weight * np.mean(per_frame, axis=1)
+
+
 def build_extra_costs(
     cost_configs: dict[str, dict[str, Any]] | None,
     context: MpcCostContext,

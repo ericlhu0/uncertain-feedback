@@ -581,8 +581,10 @@ uv run python src/uncertain_feedback/experiments/run_transfer_experiment.py \
 ```
 
 The persona comes from the config's `user:` key (the example config sets
-`adhesive_capsulitis`); `--persona` overrides it. Personas:
-`adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
+`adhesive_capsulitis`); `--persona` takes one or more persona names to run, and
+`--all-personas` runs every persona with hidden bounds. Each persona gets its
+own timestamped artifact dir, reusing one loaded MDM setup.
+Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
 `stroke_flexor_synergy` (pose-dependent bound) — the unrestricted default is
 rejected. Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
 `cartesian.goals`, and a `transfer:` block:
@@ -594,8 +596,30 @@ transfer:
   trigger_threshold: 0.02    # hidden-cost violation (rad) at which the user interrupts
 ```
 
-Artifacts go to `transfer_artifacts/<timestamp>/`: `initial_rollout.npy`, the
-cost-generation directory (same layout as a live run), per-condition rollouts
+Because the experiment runs one persona at a time, each restriction needs its
+own goal geometry to make the default plan visibly require a correction. An
+optional `persona_goals:` block overrides the correction goal and transfer goals
+for the active persona (falling back to the top-level `cartesian.goals` /
+`transfer.goals` for personas without an entry). Goals sit inside the
+constraint-compliant reach envelope: the constraint-respecting solution reaches
+the goal, while the default plan reaches the same target by violating the
+restriction (frozen shoulder raises the upper arm; flexor synergy straightens
+the elbow), so the correction is "reach it a different way," not "give up":
+
+```yaml
+persona_goals:
+  adhesive_capsulitis:       # frozen shoulder: base raises the upper arm; compliant keeps it low
+    cartesian: [[0.42, 0.30, 0.12]]                                    # low-hand lateral (hand not overhead)
+    transfer:  [[0.50, 0.20, 0.10], [0.11, 0.44, 0.26], [-0.04, 0.42, 0.18]]
+  stroke_flexor_synergy:     # flexor synergy: base straightens the elbow; compliant keeps it bent
+    cartesian: [[0.42, 0.48, 0.12]]
+    transfer:  [[0.18, 0.52, 0.14], [0.13, 0.50, 0.28], [-0.04, 0.48, 0.18]]
+```
+
+Artifacts go to `transfer_artifacts/<timestamp>/`: `initial_rollout.npy`,
+`cluster_options.png` (the UQ cluster candidates the simulated user chose among,
+chosen cluster highlighted), the cost-generation directory (same layout as a
+live run), per-condition rollouts
 (`base/`, `tracking/`, `generated/`, `oracle/`, with MP4s under `--save-video`),
 and `transfer_summary.json` with per-condition per-goal metrics
 (`mean_violation`, `max_violation`, `frac_frames_violated`, `goal_reach`).

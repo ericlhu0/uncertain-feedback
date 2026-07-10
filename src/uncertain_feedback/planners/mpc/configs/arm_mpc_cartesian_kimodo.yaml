@@ -32,7 +32,7 @@ preference_alpha: 0
 
 llm_cost:
   enabled: true
-  model: gpt-5.4
+  model: gpt-5.6-luna
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true

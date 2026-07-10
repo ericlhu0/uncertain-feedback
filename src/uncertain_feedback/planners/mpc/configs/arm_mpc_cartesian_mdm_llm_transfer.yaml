@@ -83,6 +83,25 @@ persona_goals:
       - [0.30, 0.28, 0.28]   # diagonal, mid
       - [0.20, 0.38, 0.24]   # forward, raised high
       - [0.10, 0.32, 0.35]   # straight in front, deep
+  cross_body_pain:
+    # The pose-dependent bound (tolerable elevation drops linearly with
+    # adduction depth) blocks the DIRECT route to across-body targets, so the
+    # compliant solution is a different path, not a lower endpoint: the base
+    # drags the raised arm straight across the chest up the sliding limit,
+    # while the oracle swings it up in front and reaches across from above,
+    # wrist paths diverging by up to ~0.45 m. The compliant reach frontier is
+    # tight — the deeper the cross, the lower the goal must be (x=-0.12 only
+    # reachable at y<=0.25; y=0.40 only at x>=-0.05); deeper/higher targets
+    # have no compliant reach (oracle stalls 0.07-0.15 m short). Screened
+    # base-vs-oracle 2026-07-10 with the coupled bound: base max violation
+    # 0.28-1.12 rad, oracle 0, both reach; oracle resuming AT the feedback
+    # trigger still recovers and reaches (post-feedback max violation 0.12).
+    cartesian:
+      - [-0.05, 0.40, 0.35]  # opposite-shoulder height, front (correction given here)
+    transfer:
+      - [-0.12, 0.25, 0.25]  # chest-height cross (deepest compliant cross)
+      - [-0.08, 0.32, 0.28]  # shoulder-height, shallow cross
+      - [-0.08, 0.32, 0.35]  # shoulder-height, deep in front
   elbow_contracture:
     # ALL goals are across-body by geometric necessity: only reaching across the
     # torso forces the base to drive the elbow straight through the 29 deg comfort
@@ -108,7 +127,7 @@ preference_alpha: 0
 llm_cost:
   enabled: true
   backend: agent
-  model: gpt-5.4
+  model: gpt-5.6-luna
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true

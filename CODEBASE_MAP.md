@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-09  
+**Last updated:** 2026-07-10
 **Branch:** simulated-users-standard
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -63,9 +63,9 @@ uncertain-feedback/
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
 │   │   ├── run_experiment.py         # CLI: one persona + one backend on the original goal
-│   │   ├── cluster_comparison.py     # Generate + roll out one cost per UQ cluster
+│   │   ├── cluster_comparison.py     # Per-cluster rollout + hidden-cost condition evaluation
 │   │   ├── run_cluster_experiment.py # CLI entry point for per-cluster comparison experiments
-│   │   ├── backend_comparison.py     # Generate one cost per backend (llm/turns/agent), score uniformly
+│   │   ├── backend_comparison.py     # Per-backend proxy score + hidden-cost condition evaluation
 │   │   ├── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
 │   │   ├── transfer_experiment.py    # Adds held-out transfer-goal eval around experiment_pipeline
 │   │   ├── run_transfer_experiment.py # CLI entry point for simulated-user transfer experiments
@@ -113,6 +113,10 @@ uncertain-feedback/
 │   │   └── trajectory_editor/
 │   │       ├── server.py             # Flask web UI for hand-authoring trajectories
 │   │       └── hml_decode.py         # HML decode utilities for the editor
+│   ├── demo_designer/
+│   │   ├── core.py                   # DemoSession: pipeline wrappers + persona CRUD + trajectory packaging
+│   │   ├── server.py                 # Flask web UI for designing demo scenarios (base → UQ → cost)
+│   │   └── static/                   # index.html, app.js, style.css (canvas skeleton views + backend selector + feature graphs)
 │   ├── llm/
 │   │   ├── base_model.py             # BaseModel ABC (get_full_output)
 │   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
@@ -338,7 +342,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
-| `llm_cost.*`           | LlmCostConfig | `enabled`, `model`, `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
+| `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`, reasoning effort `xhigh`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets), `trigger_threshold` (hidden-cost violation in rad that triggers simulated feedback) |
 | `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments (applied by `experiment_pipeline.apply_persona_goals`; falls back to top-level goals when absent). Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
 
@@ -436,10 +440,11 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 |-------------------------------------------------------|--------------------------------------|
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml> [--persona <name>] [--backend agent]` | One simulated-user persona/backend experiment on the original goal |
-| `uv run python src/.../experiments/run_cluster_experiment.py --mpc-config <yaml>` | Per-cluster cost comparison experiment |
-| `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison experiment |
+| `uv run python src/.../experiments/run_cluster_experiment.py --mpc-config <yaml>` | Per-cluster cost comparison with base/oracle/generated hidden-cost evaluation for Cartesian goals |
+| `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison with base/oracle/generated hidden-cost evaluation |
 | `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
+| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>]` | Browser tool for designing demo scenarios: tweak start pose / goal / persona bounds / MDM prompt / clusters / magnitude, scrub trajectories, run cost generation (see README) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |
@@ -510,7 +515,12 @@ The hidden bounds are the evaluation ground truth in headless experiments
   bounds are directly comparable.
 - Personas (`personas.py`): `unrestricted` (default; no bounds),
   `adhesive_capsulitis`, `elbow_contracture`, `painful_arc` (elevation avoid band),
-  `stroke_flexor_synergy` (coupled bound).
+  `stroke_flexor_synergy` (coupled bound), `cross_body_pain` (coupled bound:
+  tolerable elevation = 2.2 + 4.5·abduction, i.e. the limit slides down the
+  farther the upper arm adducts past the midline — blocks the direct route to
+  across-body goals so the compliant correction is a visibly different path;
+  smooth by design so escaping the painful region has a gradient, unlike a
+  hard conditional zone).
   Registry: `PERSONAS` / `get_persona(name)`.
 
 > **Elbow-flexion feature fix (2026-07-06):**

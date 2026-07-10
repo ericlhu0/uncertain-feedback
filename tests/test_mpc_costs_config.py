@@ -1740,7 +1740,9 @@ llm_cost:
         body_pos=None,
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3, dtype=np.float64),
+        initial_q=np.zeros((3, 3), dtype=np.float64),
         llm_model_factory=lambda _model_name: fake_model,
+        user=_joint_limit_user(),
     )
 
     assert selected is not None
@@ -1767,6 +1769,12 @@ llm_cost:
     assert set(summary["clusters"]) == {"0", "1"}
     assert summary["clusters"]["0"]["validation"]["ok"] is True
     assert summary["clusters"]["1"]["rollout_metrics"]["steps_completed"] == 2
+    for label in ("0", "1"):
+        evaluation = summary["clusters"][label]["hidden_cost_evaluation"]
+        assert set(evaluation) == {"base", "oracle", "generated"}
+        for condition in evaluation.values():
+            assert "mean_violation" in condition["goal_0"]
+            assert "goal_reach" in condition["goal_0"]
 
 
 def test_planning_loop_stops_when_cartesian_goal_reached() -> None:

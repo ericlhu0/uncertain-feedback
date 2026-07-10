@@ -46,6 +46,8 @@ _SYSTEM_PROMPT = (
     "You generate safe, vectorized Python MPC trajectory cost functions. "
     "Return only the requested JSON object."
 )
+_DEFAULT_LLM_MODEL = "gpt-5.6-luna"
+_DEFAULT_REASONING_EFFORT = "xhigh"
 
 
 def _make_llm_model(model_name: str) -> Any:
@@ -58,7 +60,12 @@ def _make_llm_model(model_name: str) -> Any:
         model=model_name,
         system_prompt=_SYSTEM_PROMPT,
         temperature=0.2,
-        max_tokens=1800,
+        max_tokens=16000,
+        reasoning_effort=(
+            _DEFAULT_REASONING_EFFORT
+            if model_name == _DEFAULT_LLM_MODEL
+            else None
+        ),
     )
 
 
@@ -399,7 +406,7 @@ class CostGenerator(ABC):
     @property
     def model_name(self) -> str:
         """Resolved model name (config, then env, then default)."""
-        return self.model or os.getenv("OPENAI_MODEL", "gpt-5.4")
+        return self.model or os.getenv("OPENAI_MODEL", _DEFAULT_LLM_MODEL)
 
     def make_llm(self) -> Any:
         """Construct the cost-generator LLM wrapper for this run's model."""

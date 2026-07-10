@@ -18,6 +18,7 @@ class OpenAIModel(BaseModel):
         system_prompt: str,
         temperature: float = 1,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
         api_mode: Literal["auto", "chat", "responses"] = "auto",
     ):
         """Initialize OpenAI model.
@@ -29,6 +30,7 @@ class OpenAIModel(BaseModel):
             system_prompt: System prompt prepended to every request.
             temperature: Sampling temperature.
             max_tokens: Maximum tokens in the response.
+            reasoning_effort: Optional reasoning effort for the Responses API.
             api_mode: API surface for full-output requests. ``auto`` uses the
                 Responses API for GPT-5-family models and Chat Completions for
                 older models.
@@ -36,6 +38,7 @@ class OpenAIModel(BaseModel):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.system_prompt = system_prompt
         self.api_mode = api_mode
         self.client = OpenAI(
@@ -174,8 +177,11 @@ class OpenAIModel(BaseModel):
             "model": self.model,
             "instructions": self.system_prompt,
             "input": cast(Any, api_input),
-            "temperature": self.temperature,
         }
+        if self.reasoning_effort is None:
+            request["temperature"] = self.temperature
+        if self.reasoning_effort is not None:
+            request["reasoning"] = {"effort": self.reasoning_effort}
         if self.max_tokens is not None:
             request["max_output_tokens"] = self.max_tokens
         response = self.client.responses.create(**request)
@@ -193,8 +199,11 @@ class OpenAIModel(BaseModel):
             "model": self.model,
             "instructions": self.system_prompt,
             "input": self._create_responses_input(text_input, image_input),
-            "temperature": self.temperature,
         }
+        if self.reasoning_effort is None:
+            request["temperature"] = self.temperature
+        if self.reasoning_effort is not None:
+            request["reasoning"] = {"effort": self.reasoning_effort}
         if self.max_tokens is not None:
             request["max_output_tokens"] = self.max_tokens
         response = self.client.responses.create(**request)

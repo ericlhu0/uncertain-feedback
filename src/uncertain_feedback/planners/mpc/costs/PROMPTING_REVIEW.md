@@ -286,9 +286,9 @@ construction, JSON parse/compile/smoke-test, artifact saving, and installation.
   required `ITERATION_LOG.md`.
 
 Model / config knobs (`LlmCostConfig`, `config.py`): `enabled` (default false),
-`model` (`OPENAI_MODEL` env → `gpt-5.4`), `strict`, `artifact_dir`, `use_images`
+`model` (`OPENAI_MODEL` env → `gpt-5.6-luna`, reasoning effort `xhigh`), `strict`, `artifact_dir`, `use_images`
 (default true), `prompt` (default `"1"`), `backend` (default `"llm"`), `max_turns` (6),
-`codex_cmd`. System prompt + `temperature=0.2`, `max_tokens=1800` set in
+`codex_cmd`. System prompt + `temperature=0.2`, `max_tokens=16000` set in
 `_make_llm_model`.
 
 ---

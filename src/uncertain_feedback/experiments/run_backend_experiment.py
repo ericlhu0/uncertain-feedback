@@ -151,6 +151,7 @@ def main() -> None:
         initial_q=setup.arm_aa,
         backends=args.backends,
         save_video=args.save_video,
+        user=user,
     )
 
 

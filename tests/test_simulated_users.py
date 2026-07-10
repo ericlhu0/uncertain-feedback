@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from uncertain_feedback.simulated_users.personas import PAINFUL_ARC, UNRESTRICTED
+from uncertain_feedback.simulated_users.personas import (
+    CROSS_BODY_PAIN,
+    PAINFUL_ARC,
+    UNRESTRICTED,
+)
 
 
 def test_painful_arc_uses_plane_agnostic_elevation() -> None:
@@ -23,6 +27,25 @@ def test_painful_arc_uses_plane_agnostic_elevation() -> None:
     assert violations[0] == 0.0
     assert violations[1] > 0.0
     assert violations[2] == 0.0
+
+
+def test_cross_body_pain_allowance_drops_with_adduction() -> None:
+    bound = CROSS_BODY_PAIN.bounds[0]
+
+    assert bound.feature == "shoulder_elevation"
+    assert bound.cond_feature == "shoulder_abduction_adduction"
+
+    features = {
+        "shoulder_elevation": np.array([1.5, 1.5, 1.5, 0.3]),
+        "shoulder_abduction_adduction": np.array([0.4, -0.2, -0.4, -0.4]),
+    }
+
+    violations = CROSS_BODY_PAIN.violation_series(features)
+
+    assert violations[0] == 0.0  # elevated but lateral: unrestricted
+    assert violations[1] > 0.0  # elevated at moderate adduction: hurts
+    assert violations[2] > violations[1]  # deeper across: hurts more
+    assert violations[3] == 0.0  # deep across but carried low: comfortable
 
 
 def test_limit_cost_penalizes_out_of_box_rollouts() -> None:

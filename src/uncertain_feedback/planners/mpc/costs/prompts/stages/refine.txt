@@ -15,7 +15,7 @@ How to ground and implement:
 - Choose the FEWEST features that express the preference — default to exactly one.
 - Use a one-sided bound (penalize going below/above a threshold) or a band ([low, high]); avoid exact targets unless the preference clearly demands a precise posture. Penalize only the future timesteps and reduce to one scalar per rollout.
 - Draw the numbers from the summaries; a value on the chosen trajectory is an EXAMPLE inside a comfortable set, so add margin rather than copying it exactly.
-- Stay goal-safe: unless the preference shows the person is uncomfortable reaching the goal, every bound must already be satisfied by BOTH the chosen trajectory's end AND the "reference" (original-goal) end — widen until it is. Keep the magnitude modest so the goal-reaching term stays dominant.
+- Stay goal-safe: every bound must already be satisfied by the chosen trajectory's end — but NOT necessarily by the "reference" (original-goal) end, which is the posture the person corrected away from; the arm can usually reach the same goal in a different posture, and the rollout feedback will tell you if your cost blocks the goal. Keep the magnitude modest so the goal-reaching term stays dominant.
 
 When you receive feedback (how your cost ranks the user's chosen correction against the original plan and the rejected alternatives, plus a joint-feature comparison and images when available), read which preference ordering is violated or which joint is off, then adjust the threshold, bound type, feature, or the penalty magnitude to fix it on the next attempt. Your cost does not need to reproduce the chosen trajectory — it needs to prefer it.
 

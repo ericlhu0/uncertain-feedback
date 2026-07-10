@@ -115,6 +115,31 @@ STROKE_FLEXOR_SYNERGY = SimulatedUser(
     joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
+CROSS_BODY_PAIN = SimulatedUser(
+    name="cross_body_pain",
+    description=(
+        "Acromioclavicular joint pain: moving the arm across the chest while "
+        "it is elevated compresses the AC joint and hurts (the cross-body "
+        "adduction test), and the pain grows the farther across and the "
+        "higher the arm is carried; reaching up in front or out to the side, "
+        "or carrying the arm across low, is comfortable. Pose-dependent "
+        "bound: the tolerable elevation drops linearly as the upper arm "
+        "adducts past the midline (~2.2 rad allowed at neutral, ~0 by "
+        "~0.5 rad of adduction)."
+    ),
+    feedback_text="bring my arm up in front of me, don't drag it across my chest",
+    bounds=(
+        CoupledBound(
+            feature="shoulder_elevation",
+            bound_type="upper_bound",
+            cond_feature="shoulder_abduction_adduction",
+            intercept=2.2,
+            slope=4.5,
+        ),
+    ),
+    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
+)
+
 PERSONAS: dict[str, SimulatedUser] = {
     user.name: user
     for user in (
@@ -123,6 +148,7 @@ PERSONAS: dict[str, SimulatedUser] = {
         ELBOW_CONTRACTURE,
         PAINFUL_ARC,
         STROKE_FLEXOR_SYNERGY,
+        CROSS_BODY_PAIN,
     )
 }
 

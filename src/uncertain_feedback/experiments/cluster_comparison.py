@@ -5,7 +5,8 @@ cluster, roll each one out headlessly with sampling MPC, and write per-cluster
 metrics plus a ``comparison_summary.json``. This is the "multiple runs"
 machinery that used to live inside ``planners/run.py``; it now reuses the single
 stepping primitive :func:`uncertain_feedback.planners.run.run_planning_loop` so a
-cluster rollout steps exactly like the live single run.
+cluster rollout steps exactly like the live single run. Cartesian runs also
+evaluate every generated cost against the base planner and hidden-cost oracle.
 """
 
 from __future__ import annotations
@@ -30,7 +31,10 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
     MpcCostContext,
 )
-from uncertain_feedback.experiments.experiment_pipeline import generate_cost_for_cluster
+from uncertain_feedback.experiments.experiment_pipeline import (
+    evaluate_cost_conditions,
+    generate_cost_for_cluster,
+)
 from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.mpc.costs import (
     artifact_run_dir,
@@ -40,6 +44,7 @@ from uncertain_feedback.planners.run import (
     _append_extra_cost,
     run_planning_loop,
 )
+from uncertain_feedback.simulated_users import SimulatedUser
 
 
 def _planner_frame_color(planner: SmplLeftArmMPC) -> str:
@@ -262,6 +267,7 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
     install: bool = True,
     root_dir: Path | None = None,
     save_video: bool = False,
+    user: SimulatedUser | None = None,
 ) -> GeneratedPythonCost | None:
     """Generate one LLM cost per UQ cluster and run headless comparison rollouts.
 
@@ -336,6 +342,7 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
             ),
             "params": params.get("params") if isinstance(params, dict) else None,
             "rollout_metrics": None,
+            "hidden_cost_evaluation": None,
         }
         if generated is None:
             summary["clusters"][str(label)] = entry
@@ -361,6 +368,21 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
         entry["rollout_path"] = str(cdir / "rollout.npy")
         entry["metrics_path"] = str(cdir / "metrics.json")
         entry["rollout_metrics"] = metrics
+        if user is not None and initial_q is not None and cfg.cartesian.goals:
+            entry["hidden_cost_evaluation"] = evaluate_cost_conditions(
+                cfg,
+                user,
+                initial_q,
+                context,
+                base_extra_costs,
+                gen_cost,
+                cdir / "evaluation",
+                body_pos,
+                spine3_pos,
+                spine3_aa,
+                save_video=save_video,
+                log_prefix="[cluster-compare]",
+            )
         if save_video:
             n_frames = traj.shape[0]
             cutoff = max(1, round(n_frames * cfg.trajectory_fraction))
@@ -377,13 +399,13 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
         "arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"
     ):
         for label in summary["cluster_ids"]:
-            gen_cost = generated_costs_by_label.get(int(label))
-            if gen_cost is None:
+            initial_state_cost = generated_costs_by_label.get(int(label))
+            if initial_state_cost is None:
                 continue
             cdir = root_dir / f"cluster_{label}"
             cluster_entry = summary["clusters"].get(str(label), {})
             is_rollout, is_metrics = _run_initial_state_rollout(
-                cfg, initial_q, context, base_extra_costs, gen_cost,
+                cfg, initial_q, context, base_extra_costs, initial_state_cost,
                 rollout_steps, body_pos, spine3_pos, spine3_aa,
             )
             np.save(cdir / "initial_state_rollout.npy", is_rollout)

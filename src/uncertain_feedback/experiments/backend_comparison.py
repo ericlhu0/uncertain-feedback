@@ -7,7 +7,8 @@ with each backend (``llm`` / ``turns`` / ``agent``) and score them all on the
 experiment re-scores every backend's *final* cost itself rather than reading the
 backends' internal ``score.json`` — that is the only way the three land on a
 comparable axis. Writes per-backend artifacts plus a ``backend_comparison.json``
-ranking.
+ranking. Each backend also gets an original-goal hidden-cost evaluation against
+the base planner and hidden-cost oracle.
 
 This is the backend-axis counterpart to
 :mod:`uncertain_feedback.experiments.cluster_comparison`, which instead holds the
@@ -30,13 +31,17 @@ from uncertain_feedback.planners.mpc.costs import (
     artifact_run_dir,
     evaluate_candidate_cost,
 )
-from uncertain_feedback.experiments.experiment_pipeline import generate_cost_for_cluster
+from uncertain_feedback.experiments.experiment_pipeline import (
+    evaluate_cost_conditions,
+    generate_cost_for_cluster,
+)
 from uncertain_feedback.experiments.cluster_comparison import (
     _read_json_if_exists,
     _render_rollout_video,
     _run_cluster_comparison_rollout,
     _run_initial_state_rollout,
 )
+from uncertain_feedback.simulated_users import SimulatedUser
 
 
 def _write_backend_summary(root_dir: Path, summary: dict[str, Any]) -> None:
@@ -68,6 +73,7 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
     initial_q: np.ndarray | None = None,
     backends: Sequence[str] = ("llm", "turns", "agent"),
     save_video: bool = False,
+    user: SimulatedUser | None = None,
 ) -> None:
     """Generate one cost per backend for a single correction and score them uniformly.
 
@@ -144,6 +150,7 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
             ),
             "params": params.get("params") if isinstance(params, dict) else None,
             "rollout_metrics": None,
+            "hidden_cost_evaluation": None,
         }
         if generated is None:
             summary["results"][backend] = entry
@@ -157,6 +164,22 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
         )
         entry["score"] = _finite_or_none(score)
         print(f"[backend-compare] {backend}: score={score:.4f}")
+
+        if user is not None and initial_q is not None and cfg.cartesian.goals:
+            entry["hidden_cost_evaluation"] = evaluate_cost_conditions(
+                cfg,
+                user,
+                initial_q,
+                context,
+                base_extra_costs,
+                generated,
+                backend_dir / "evaluation",
+                body_pos,
+                spine3_pos,
+                spine3_aa,
+                save_video=save_video,
+                log_prefix="[backend-compare]",
+            )
 
         if save_video:
             rollout, metrics, colors = _run_cluster_comparison_rollout(

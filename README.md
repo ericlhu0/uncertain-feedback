@@ -269,7 +269,8 @@ Both backends expose the same interface, so any MDM-backed planner
 Every run loads a simulated care recipient alongside the pose, selected by the
 optional YAML key `user:` (default `unrestricted` — no movement restrictions).
 Restricted personas (`adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
-`stroke_flexor_synergy`; see `src/uncertain_feedback/simulated_users/personas.py`)
+`stroke_flexor_synergy`, `cross_body_pain`;
+see `src/uncertain_feedback/simulated_users/personas.py`)
 carry hidden joint-limit bounds and a fixed feedback line. When the configured
 user has bounds:
 
@@ -477,7 +478,9 @@ including `experiment_summary.json`.
 The older per-cluster comparison remains available as an explicit cluster
 experiment. It drives a UQ planner to the feedback point, extracts every cluster,
 generates one cost per cluster with the selected backend, rolls each one out
-headlessly, and writes `comparison_summary.json`:
+headlessly, and writes `comparison_summary.json`. For Cartesian experiments,
+each cluster entry also contains a `hidden_cost_evaluation` comparing `base`,
+`oracle`, and that cluster's `generated` cost on the original goal:
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_cluster_experiment.py \
@@ -492,6 +495,9 @@ Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
 ### Comparing cost-generation backends
 
 `llm_cost.backend` selects how the cost is generated:
+
+Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
+`gpt-5.6-luna` with `xhigh` reasoning effort.
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
   images + compact summary → plain-language preference), **ground** (preference + full
@@ -509,7 +515,10 @@ Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
 The backend experiment is the orthogonal axis: it holds the correction fixed (the
 **chosen** UQ cluster) and generates a cost with each backend (`llm` / `turns` /
 `agent`), then scores them all on the same rollout-vs-MDM L2 metric and writes
-a `backend_comparison.json` ranking. It requires `planner: arm_mpc_cartesian` (the
+a `backend_comparison.json` ranking. Each backend entry also includes a
+`hidden_cost_evaluation` comparing `base`, `oracle`, and `generated` using the
+simulated user's hidden cost and original Cartesian goal. It requires
+`planner: arm_mpc_cartesian` (the
 scorer needs a persistent Cartesian goal) and `llm_cost.enabled: true`:
 
 ```bash
@@ -605,8 +614,9 @@ own timestamped artifact dir, reusing one loaded MDM setup. With `--save-video`,
 iterating cost backends also save candidate rollout artifacts under
 `cost_generation/`.
 Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
-`stroke_flexor_synergy` (pose-dependent bound) — the unrestricted default is
-rejected. Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
+`stroke_flexor_synergy` (pose-dependent bound), `cross_body_pain`
+(pose-dependent bound: tolerable elevation drops linearly as the upper arm
+adducts past the midline) — the unrestricted default is rejected. Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
 `cartesian.goals`, and a `transfer:` block:
 
 ```yaml
@@ -647,6 +657,72 @@ and `transfer_summary.json` with per-condition per-goal metrics
 `tracking` (following the correction trajectory directly) is only defined for
 the original goal; on transfer goals it is identical to `base` — that contrast
 is the argument for persisting a cost function rather than a trajectory.
+
+
+## Demo designer web tool
+
+Browser tool for designing simulated-user demo scenarios interactively — the
+staged pipeline above (base rollout → MDM/UQ correction → cost generation), but
+with every knob tweakable and every trajectory inspectable before committing to
+an experiment config.
+
+```bash
+uv run python src/uncertain_feedback/demo_designer/server.py \
+  [--mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml] \
+  [--personas-file demo_designer_personas.json] \
+  [--host 127.0.0.1] [--port 6780]
+```
+
+Then open `http://127.0.0.1:6780`. The config supplies the pose, MPC settings,
+UQ defaults, `mdm_frames`, per-persona goal presets, and the `llm_cost` backend
+used by the cost-generation stage. Stages (each stage's controls unlock once the
+previous one ran):
+
+1. **Scenario** — edit the start arm pose (per-joint axis-angle sliders with a
+   live skeleton preview), the spine3-relative Cartesian goal, and the simulated
+   user; *Run base rollout* rolls the headless Cartesian MPC and reports hidden
+   bound violations, the feedback trigger frame, and goal reach.
+2. **Language correction** — edit the MDM prompt (prefilled with the persona's
+   feedback line), sample count, and cluster count; *Generate* draws diffusion
+   samples from the feedback-trigger pose (shown as a purple dashed ghost arm in
+   the skeleton views; falls back to the start pose when the base never
+   violates) and clusters them (*Re-cluster* reuses cached samples). Every
+   cluster option is automatically integrated into the full corrected
+   trajectory — executed history → scaled correction → comfort-only goal
+   continuation — so cards show what actually happens if that option is taken:
+   sample count, oracle score, full-path violation, and goal reach. Click a
+   card to select it; drag *Magnitude* to rescale (re-clusters and re-assembles
+   at the new scale).
+3. **Cost generation** — runs the selected cost-generation backend (`llm`,
+   `turns`, or `agent`) on the selected correction, rolls the MPC out with the
+   generated cost installed from the original edited start pose, and shows the
+   resulting trajectory, metrics, and cost code. Its grounded feature limits are
+   overlaid on the corresponding feature graphs in blue. Artifacts go to
+   `demo_designer_artifacts/<timestamp>_<backend>/`.
+
+The center panel shows front/side/top skeleton views with base (red),
+correction (green), full corrected path (teal), and generated-cost (blue)
+overlays — wrist traces turn bright red on frames that violate the hidden
+bounds — with a scrubber/play control (arrow keys step, space plays) and
+per-trajectory violation strips aligned under the scrubber. A console panel at
+the bottom streams the server's stdout live, so long stages (MPC rollouts, MDM
+sampling, cost generation) show their progress. The right column plots each
+joint feature over time with the persona's oracle limits shaded in red and
+the generated-cost limits shaded in blue. Both limit overlays have
+independent, default-on toggles. When the persona has a `coupled`
+(pose-dependent) bound, a feature-vs-feature phase graph is added at the top of
+the column: the conditioning feature on the x-axis, the bounded feature on the
+y-axis, the pose-dependent limit as a diagonal line with its violating side
+shaded, and each trajectory traced through the plane with a dot at the scrubbed
+frame — so you can see the limit itself sliding as the two features co-vary.
+Generated-cost limits on either feature also appear here (blue), as a horizontal
+line (bound on the y feature) or vertical line (bound on the x/conditioning
+feature) — an axis-aligned approximation of the diagonal pose-dependent limit.
+
+Personas are selectable, editable, and creatable/deletable in the UI (bounds
+editor supports `hidden` and `coupled` bounds over the shared joint features).
+Custom personas persist to `--personas-file`; edits to built-in personas last
+until the server restarts.
 
 
 ## Thanks

@@ -41,6 +41,9 @@ _COMPARISON_FILE = "comparison.png"
 _ANGLES_FILE = "angles.png"
 _ITERATION_LOG_FILE = "ITERATION_LOG.md"
 _STAGE_LOG_FILE = "stage_log.md"
+_CODEX_POLL_INTERVAL_SECONDS = 30.0
+_CODEX_TIMEOUT_SECONDS = 30.0 * 60.0
+_CODEX_TERMINATE_GRACE_SECONDS = 5.0
 _RENDER_SCRIPT = (
     Path(__file__).resolve().parents[3] / "experiments" / "render_cost_comparison.py"
 )
@@ -210,7 +213,6 @@ class AgentCostGenerator(CostGenerator):
         cmd_line = shlex.join(cmd)
         start = time.perf_counter()
         returncode: int | None = None
-        completed_from_outputs = False
         print(f"[cost-gen][agent] starting codex: {cmd_line}", flush=True)
         print(f"[cost-gen][agent] live log: {log_path}", flush=True)
         try:
@@ -225,26 +227,31 @@ class AgentCostGenerator(CostGenerator):
                     text=True,
                 )
                 while True:
+                    elapsed = time.perf_counter() - start
+                    remaining = _CODEX_TIMEOUT_SECONDS - elapsed
+                    if remaining <= 0.0:
+                        message = (
+                            "[cost-gen][agent] codex exceeded the 30-minute timeout; "
+                            "terminating child"
+                        )
+                        print(message, flush=True)
+                        log.write(f"\n\n{message}\n")
+                        log.flush()
+                        process.terminate()
+                        try:
+                            process.wait(timeout=_CODEX_TERMINATE_GRACE_SECONDS)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=_CODEX_TERMINATE_GRACE_SECONDS)
+                        raise GeneratedCostValidationError(
+                            "codex timed out after 30 minutes; see codex.log"
+                        )
                     try:
-                        returncode = process.wait(timeout=30.0)
+                        returncode = process.wait(
+                            timeout=min(_CODEX_POLL_INTERVAL_SECONDS, remaining)
+                        )
                         break
                     except subprocess.TimeoutExpired:
-                        if self._required_outputs_exist():
-                            completed_from_outputs = True
-                            message = (
-                                "[cost-gen][agent] required outputs are present "
-                                "but codex is still running; terminating child"
-                            )
-                            print(message, flush=True)
-                            log.write(f"\n\n{message}\n")
-                            log.flush()
-                            process.terminate()
-                            try:
-                                returncode = process.wait(timeout=5.0)
-                            except subprocess.TimeoutExpired:
-                                process.kill()
-                                returncode = process.wait(timeout=5.0)
-                            break
                         print(
                             "[cost-gen][agent] codex still running "
                             f"({time.perf_counter() - start:.0f}s); "
@@ -264,17 +271,10 @@ class AgentCostGenerator(CostGenerator):
         )
         if returncode is None:
             raise GeneratedCostValidationError("codex did not report an exit code.")
-        if returncode != 0 and not completed_from_outputs:
+        if returncode != 0:
             raise GeneratedCostValidationError(
                 f"codex exited with code {returncode}; see codex.log"
             )
-
-    def _required_outputs_exist(self) -> bool:
-        if not (self.run_dir / _RESPONSE_FILE).exists():
-            return False
-        if not (self.run_dir / _STAGE_LOG_FILE).exists():
-            return False
-        return not self.use_images or (self.run_dir / _ITERATION_LOG_FILE).exists()
 
     def _record_stage_log(self) -> None:
         stage_log_path = self.run_dir / _STAGE_LOG_FILE

@@ -146,6 +146,7 @@ def main() -> None:
         initial_q=setup.arm_aa,
         install=False,
         save_video=args.save_video,
+        user=user,
     )
 
 

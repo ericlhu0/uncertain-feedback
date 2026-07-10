@@ -238,9 +238,7 @@ def test_turns_generator_keeps_state_and_returns_best(tmp_path) -> None:
 
 def test_evaluate_candidate_cost_is_finite() -> None:
     context = _context()
-    cost = GeneratedPythonCost(
-        code=_COST_CODE, params={"weight": 1.0}, context=context
-    )
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)
     score, rollout = evaluate_candidate_cost(context, cost, _fake_rollout)
     assert np.isfinite(score)
     assert rollout is not None
@@ -296,9 +294,7 @@ def test_resample_equidistant_removes_timing() -> None:
 
 def test_rank_candidate_cost_orders_revealed_preferences() -> None:
     context = _ranking_context()
-    cost = GeneratedPythonCost(
-        code=_COST_CODE, params={"weight": 1.0}, context=context
-    )
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)
     ranking = rank_candidate_cost(context, cost)
     assert ranking is not None and not ranking.inert
     assert ranking.rank_accuracy == 1.0
@@ -354,9 +350,7 @@ def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
 
     strict = create_cost_generator(
-        **_factory_kwargs(
-            tmp_path, fake, LlmCostConfig(backend="agent", strict=True)
-        )
+        **_factory_kwargs(tmp_path, fake, LlmCostConfig(backend="agent", strict=True))
     )
     strict.codex_cmd = "definitely-not-a-real-binary-xyz"
     with pytest.raises(GeneratedCostValidationError):
@@ -369,7 +363,9 @@ def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:
     assert lenient.generate() is None
 
 
-def test_agent_codex_wait_recovers_when_outputs_exist(tmp_path, monkeypatch) -> None:
+def test_agent_codex_waits_for_natural_exit_when_outputs_exist(
+    tmp_path, monkeypatch
+) -> None:
     fake = _FakeLlmModel(_response())
     kwargs = _factory_kwargs(
         tmp_path,
@@ -387,11 +383,13 @@ def test_agent_codex_wait_recovers_when_outputs_exist(tmp_path, monkeypatch) -> 
         def __init__(self) -> None:
             self.terminated = False
             self.killed = False
+            self.wait_calls = 0
 
         def wait(self, timeout=None) -> int:
-            if timeout == 30.0:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
                 raise agent_costs_module.subprocess.TimeoutExpired("codex", timeout)
-            return -15
+            return 0
 
         def terminate(self) -> None:
             self.terminated = True
@@ -408,11 +406,47 @@ def test_agent_codex_wait_recovers_when_outputs_exist(tmp_path, monkeypatch) -> 
 
     gen._run_codex()
 
+    assert process.wait_calls == 2
+    assert not process.terminated
+    assert not process.killed
+    assert "required outputs are present" not in (run_dir / "codex.log").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_agent_codex_hard_timeout_terminates_child(tmp_path, monkeypatch) -> None:
+    fake = _FakeLlmModel(_response())
+    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="agent"))
+    gen = create_cost_generator(**kwargs)
+    kwargs["run_dir"].mkdir(parents=True, exist_ok=True)
+
+    class _HangingProcess:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+
+        def wait(self, timeout=None) -> int:
+            return -15
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = _HangingProcess()
+    monkeypatch.setattr(
+        agent_costs_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(agent_costs_module, "_CODEX_TIMEOUT_SECONDS", 0.0)
+
+    with pytest.raises(GeneratedCostValidationError, match="timed out"):
+        gen._run_codex()
+
     assert process.terminated
     assert not process.killed
-    assert "required outputs are present" in (
-        run_dir / "codex.log"
-    ).read_text(encoding="utf-8")
 
 
 def test_agent_task_requires_stage_log(tmp_path) -> None:

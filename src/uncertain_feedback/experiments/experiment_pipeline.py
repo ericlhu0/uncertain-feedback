@@ -543,26 +543,33 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     )
 
 
-def evaluate_original_goal(  # pylint: disable=too-many-arguments
+def evaluate_cost_conditions(  # pylint: disable=too-many-arguments
     cfg: MpcRunConfig,
     user: SimulatedUser,
     initial_q: np.ndarray,
     context: MpcCostContext,
     base_extra_costs: CompositeTrajectoryCost,
     generated_cost: GeneratedPythonCost | None,
-    full_correction_traj: np.ndarray,
     root_dir: Path,
     body_pos: np.ndarray | None,
     spine3_pos: np.ndarray | None,
     spine3_aa: np.ndarray | None,
     *,
     save_video: bool,
+    q_history: list[np.ndarray] | None = None,
     log_prefix: str = "[experiment]",
 ) -> dict[str, dict[str, Any]]:
+    """Evaluate base, hidden-cost oracle, and generated costs on the first goal.
+
+    With ``q_history`` (the base rollout up to the feedback trigger), oracle and
+    generated resume from the feedback pose — the preference is unknown until
+    the user speaks — and are scored on the assembled prefix + continuation,
+    like the tracking condition. Base always rolls from ``initial_q``.
+    """
     if not cfg.cartesian.goals:
         raise ValueError("Experiment evaluation requires cartesian.goals.")
     goal_pos = np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-    _log(f"{user.name}: phase D evaluating original goal (save_video={save_video})", prefix=log_prefix)
+    _log(f"{user.name}: evaluating original goal (save_video={save_video})", prefix=log_prefix)
     conditions: dict[str, CompositeTrajectoryCost] = {
         "base": base_extra_costs,
         "oracle": CompositeTrajectoryCost(
@@ -577,14 +584,18 @@ def evaluate_original_goal(  # pylint: disable=too-many-arguments
         _log(f"{user.name}: skipping generated condition because no cost was produced", prefix=log_prefix)
 
     results: dict[str, dict[str, Any]] = {name: {} for name in conditions}
-    results["tracking"] = {}
     for cond_name, extra_costs in conditions.items():
         rollout_t0 = time.perf_counter()
         progress_label = f"{user.name} {cond_name}/goal_0"
-        _log(f"{progress_label}: rolling", prefix=log_prefix)
+        resume = q_history is not None and cond_name != "base"
+        _log(
+            f"{progress_label}: rolling"
+            + (f" (resuming from feedback step {len(q_history) - 1})" if resume else ""),
+            prefix=log_prefix,
+        )
         rollout = rollout_to_goal(
             cfg,
-            initial_q,
+            q_history[-1] if resume else initial_q,
             goal_pos,
             context,
             extra_costs,
@@ -594,6 +605,10 @@ def evaluate_original_goal(  # pylint: disable=too-many-arguments
             progress_label=progress_label,
             log_prefix=log_prefix,
         )
+        if resume:
+            rollout = np.concatenate(
+                [np.asarray(q_history[:-1], dtype=np.float64), rollout], axis=0
+            )
         metrics = evaluate_rollout(user, context, cfg, rollout, goal_pos)
         results[cond_name]["goal_0"] = metrics
         reach = metrics["goal_reach"]
@@ -617,7 +632,44 @@ def evaluate_original_goal(  # pylint: disable=too-many-arguments
             log_prefix=log_prefix,
         )
 
+    return results
+
+
+def evaluate_original_goal(  # pylint: disable=too-many-arguments
+    cfg: MpcRunConfig,
+    user: SimulatedUser,
+    initial_q: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    generated_cost: GeneratedPythonCost | None,
+    full_correction_traj: np.ndarray,
+    root_dir: Path,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+    *,
+    save_video: bool,
+    q_history: list[np.ndarray] | None = None,
+    log_prefix: str = "[experiment]",
+) -> dict[str, dict[str, Any]]:
+    results = evaluate_cost_conditions(
+        cfg,
+        user,
+        initial_q,
+        context,
+        base_extra_costs,
+        generated_cost,
+        root_dir,
+        body_pos,
+        spine3_pos,
+        spine3_aa,
+        save_video=save_video,
+        q_history=q_history,
+        log_prefix=log_prefix,
+    )
+    goal_pos = np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
     _log(f"{user.name} tracking/goal_0: scoring assembled correction trajectory", prefix=log_prefix)
+    results["tracking"] = {}
     results["tracking"]["goal_0"] = evaluate_rollout(
         user, context, cfg, full_correction_traj, goal_pos
     )
@@ -782,6 +834,7 @@ def run_experiment(  # pylint: disable=too-many-arguments,too-many-locals
         spine3_pos,
         spine3_aa,
         save_video=save_video,
+        q_history=initial.q_history,
         log_prefix=log_prefix,
     )
     summary["results"] = results

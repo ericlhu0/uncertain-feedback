@@ -35,6 +35,7 @@ def _model(model_name: str, tmp_client, **kwargs) -> OpenAIModel:
     model.model = model_name
     model.temperature = kwargs.get("temperature", 0.2)
     model.max_tokens = kwargs.get("max_tokens", 123)
+    model.reasoning_effort = kwargs.get("reasoning_effort")
     model.system_prompt = "system"
     model.api_mode = kwargs.get("api_mode", "auto")
     model.client = tmp_client
@@ -58,6 +59,21 @@ def test_gpt5_full_output_uses_responses_api_with_max_output_tokens(tmp_path) ->
     assert content[0] == {"type": "input_text", "text": "make json"}
     assert content[1]["type"] == "input_image"
     assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_responses_api_includes_reasoning_effort() -> None:
+    responses = _FakeResponses()
+    model = _model(
+        "gpt-5.6-luna",
+        SimpleNamespace(responses=responses),
+        reasoning_effort="xhigh",
+    )
+
+    model.get_full_output("make json")
+
+    assert responses.request is not None
+    assert responses.request["reasoning"] == {"effort": "xhigh"}
+    assert "temperature" not in responses.request
 
 
 def test_chat_mode_preserves_legacy_chat_completion_shape() -> None:

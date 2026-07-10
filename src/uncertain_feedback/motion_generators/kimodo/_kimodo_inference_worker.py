@@ -16,8 +16,10 @@ API for these is not fully documented):
 from __future__ import annotations
 
 import argparse
+from functools import partial
 
 import numpy as np
+from tqdm.auto import tqdm
 
 
 def _parse_args() -> argparse.Namespace:
@@ -34,6 +36,34 @@ def _parse_args() -> argparse.Namespace:
 
 
 _N_SMPL_BODY = 21  # SMPL body joints (1..21); first 63 cols of kimodo pose_body
+
+
+class _DedupTextEncoder:
+    """Encode identical prompts once.
+
+    Every UQ sample shares one prompt, but kimodo's LLM2Vec encoder runs an 8B
+    LLM forward pass per list entry (internal ``batch_size=1``), so encoding
+    ``num_samples`` copies costs ``num_samples`` serial passes — on CPU when the
+    GPU is too small to hold the encoder, this dominates runtime. Encoding each
+    unique string once and scattering the rows back is bit-identical (the
+    per-item pass is unchanged) while making encode cost independent of
+    ``num_samples``.
+    """
+
+    def __init__(self, encoder):  # type: ignore[no-untyped-def]
+        self._encoder = encoder
+
+    def __call__(self, texts):  # type: ignore[no-untyped-def]
+        if isinstance(texts, str):
+            return self._encoder(texts)
+        unique = list(dict.fromkeys(texts))
+        feat, lengths = self._encoder(unique)
+        row_of = {text: i for i, text in enumerate(unique)}
+        rows = [row_of[text] for text in texts]
+        return feat[rows], [lengths[i] for i in rows]
+
+    def __getattr__(self, name):  # type: ignore[no-untyped-def]
+        return getattr(self._encoder, name)
 
 def _positions_to_global_rots(model, positions):  # type: ignore[no-untyped-def]
     """Per-joint global rotations reproducing ``positions`` under kimodo's
@@ -132,12 +162,17 @@ def main() -> None:
     seed_everything(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # Keep the (fallback) local text encoder on the same device as the model.
-    os.environ.setdefault("TEXT_ENCODER_DEVICE", device)
+    _vram_gb = (
+        torch.cuda.get_device_properties(0).total_memory / 1024**3
+        if torch.cuda.is_available()
+        else 0
+    )
+    os.environ.setdefault("TEXT_ENCODER_DEVICE", "cpu" if _vram_gb < 18 else device)
 
     model, resolved = load_model(
         args.model_name, device=device, return_resolved_name=True
     )
+    model.text_encoder = _DedupTextEncoder(model.text_encoder)
     print(f"[kimodo worker] loaded model: {resolved} on {device}")
 
     # Condition generation on the start pose's heading. Without this the model
@@ -165,6 +200,7 @@ def main() -> None:
         first_heading_angle=first_heading_angle,
         return_numpy=True,
         post_processing=True,
+        progress_bar=partial(tqdm, desc="kimodo motion generation"),
     )
 
     local_rot_mats = np.asarray(output["local_rot_mats"])  # (B, T, J, 3, 3)

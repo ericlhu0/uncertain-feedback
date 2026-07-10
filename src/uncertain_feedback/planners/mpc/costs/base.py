@@ -12,9 +12,9 @@ from scipy.spatial.transform import Rotation
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 _JOINT_BEFORE_WRIST_POS_IDX = -2
-_ELBOW_AA_IDX = 1
 _SHOULDER_POS_IDX = 2
 _ELBOW_POS_IDX = 3
+_WRIST_POS_IDX = 4
 _TORSO_DOWN = np.array([0.0, -1.0, 0.0], dtype=np.float64)
 
 
@@ -296,6 +296,32 @@ class ShoulderAbductionAngleCost:
         )
 
 
+@dataclass(frozen=True)
+class JointLimitCost:
+    """Penalize rollout joint rotations that leave a per-slot axis-angle box.
+
+    An always-on anatomical floor shared by every persona. Unlike the range
+    preference costs above this is a hard-ish limit, so it uses a linear (L1)
+    violation that keeps a firm gradient at the boundary rather than a squared
+    one that fades to zero there.
+    """
+
+    cost_name = "joint_limit"
+
+    slots: tuple[int, ...]
+    low: np.ndarray  # (K, 3) per-slot lower axis-angle bounds
+    high: np.ndarray  # (K, 3) per-slot upper axis-angle bounds
+    weight: float = 50.0
+
+    def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
+        q_trajs = np.asarray(q_trajs, dtype=np.float64)
+        future = q_trajs[:, 1:] if q_trajs.shape[1] > 1 else q_trajs[:, -1:]
+        q = future[..., self.slots, :]
+        violation = np.maximum(q - self.high, 0.0) + np.maximum(self.low - q, 0.0)
+        per_frame = violation.sum(axis=(-2, -1))
+        return self.weight * np.mean(per_frame, axis=1)
+
+
 def build_extra_costs(
     cost_configs: dict[str, dict[str, Any]] | None,
     context: MpcCostContext,
@@ -392,14 +418,33 @@ def compute_elbow_heights(
     return positions[:, _JOINT_BEFORE_WRIST_POS_IDX, 1] - context.spine3_pos[1]
 
 
+def _tpose_bone_axis(fk: SmplLeftArmFK, start_idx: int, end_idx: int) -> np.ndarray:
+    """Return the unit T-pose bone axis between two arm-chain joints."""
+    tpose = fk.tpose_joints
+    axis = tpose[end_idx] - tpose[start_idx]
+    norm = np.linalg.norm(axis)
+    if norm <= 1e-12:
+        return np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    return axis / norm
+
+
 def compute_elbow_flexion_angles(
     trajectory: np.ndarray,
     context: MpcCostContext,
 ) -> np.ndarray:
-    """Return elbow controlled-axis-angle magnitudes in radians."""
-    _ = context
+    """Return elbow bend as the angle between upper arm and forearm, in radians.
+
+    0 = fully extended; larger = more bent. Computed from the wrist-slot joint
+    rotation — under this repo's FK convention (joint *j*'s rotation transforms
+    the bone arriving at *j*) that slot rotates the forearm relative to the
+    upper arm, so the bend is the angle it opens between the T-pose bone axes.
+    Equivalent to the FK-position angle, without running FK.
+    """
     trajectory = np.asarray(trajectory, dtype=np.float64)
-    return np.linalg.norm(trajectory[:, _ELBOW_AA_IDX], axis=1)
+    upper_axis = _tpose_bone_axis(context.fk, _SHOULDER_POS_IDX, _ELBOW_POS_IDX)
+    forearm_axis = _tpose_bone_axis(context.fk, _ELBOW_POS_IDX, _WRIST_POS_IDX)
+    forearm = Rotation.from_rotvec(trajectory[:, 2]).apply(forearm_axis)
+    return np.arccos(np.clip(forearm @ upper_axis, -1.0, 1.0))
 
 
 def compute_shoulder_abduction_angles(
@@ -408,24 +453,20 @@ def compute_shoulder_abduction_angles(
 ) -> np.ndarray:
     """Return unsigned upper-arm abduction angles in the spine3 frame.
 
-    The angle is measured between the shoulder-to-elbow vector and torso-down
-    direction. Larger values mean the upper arm is farther away from the torso.
+    The angle is measured between the shoulder-to-elbow direction and the
+    torso-down direction. Larger values mean the upper arm is farther away
+    from the torso. The direction is the composed collar∘shoulder∘elbow joint
+    rotation applied to the T-pose bone axis (the spine3 rotation cancels) —
+    equivalent to the FK elbow−shoulder difference, without running FK.
     """
-    positions = context.fk.fk_batch(
-        trajectory,
-        context.spine3_pos,
-        context.spine3_aa,
+    trajectory = np.asarray(trajectory, dtype=np.float64)
+    upper_axis = _tpose_bone_axis(context.fk, _SHOULDER_POS_IDX, _ELBOW_POS_IDX)
+    composed = (
+        Rotation.from_rotvec(context.fk.collar_aa[None])
+        * Rotation.from_rotvec(trajectory[:, 0])
+        * Rotation.from_rotvec(trajectory[:, 1])
     )
-    upper_arm_world = positions[:, _ELBOW_POS_IDX] - positions[:, _SHOULDER_POS_IDX]
-    upper_arm_norm = np.linalg.norm(upper_arm_world, axis=1)
-    safe_upper_arm = np.divide(
-        upper_arm_world,
-        upper_arm_norm[:, np.newaxis],
-        out=np.zeros_like(upper_arm_world),
-        where=upper_arm_norm[:, np.newaxis] > 1e-12,
-    )
-    spine_inv = Rotation.from_rotvec(context.spine3_aa).inv()
-    upper_arm_local = spine_inv.apply(safe_upper_arm)
+    upper_arm_local = composed.apply(upper_axis)
     dots = np.clip(upper_arm_local @ _TORSO_DOWN, -1.0, 1.0)
     return np.arccos(dots)
 

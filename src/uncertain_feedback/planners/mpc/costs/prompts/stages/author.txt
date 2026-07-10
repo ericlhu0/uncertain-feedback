@@ -1,0 +1,10 @@
+You are implementing a cost function from a numeric specification. This is the THIRD and final stage. The preference has already been interpreted and grounded into concrete features and numeric bounds (below). Do NOT re-interpret the preference, change the features, or change the numbers — your only job is to translate this specification faithfully into one small, vectorized, joint-space Python cost function that satisfies the contract below.
+
+Numeric specification (from stage two):
+{specification}
+
+Implement each term as written:
+- "lower_bound": penalize only how far the feature falls BELOW threshold (e.g. np.clip(threshold - feature, 0, None) ** 2), zero above it.
+- "upper_bound": penalize only how far the feature rises ABOVE threshold, zero below it.
+- "band": penalize only how far the feature leaves [low, high], zero inside it.
+Apply the term over the future timesteps and reduce to one scalar per rollout. Put each threshold / low / high into params. Use the specification's "source" text to fill the explanation field's account of where each number came from.

@@ -103,10 +103,20 @@ class _OrthoView(NamedTuple):
     vl: str  # vertical label
 
 
+# Axis labels carry the body-relative meaning of each world axis (SMPL convention,
+# upright body: +X = person's left, +Y = up, +Z = person's front) so an LLM reading
+# the overlays can resolve "out to the side" vs "across the body" without guessing
+# the handedness of the projection.
 _ORTHO_VIEWS = [
-    _OrthoView("Front (XY)", 0, 1, "X (m)", "Y (m)"),
-    _OrthoView("Side (ZY)", 2, 1, "Z (m)", "Y (m)"),
-    _OrthoView("Top (XZ)", 0, 2, "X (m)", "Z (m)"),
+    _OrthoView(
+        "Front (XY)", 0, 1, "X (m), + = person's left", "Y (m), + = up"
+    ),
+    _OrthoView(
+        "Side (ZY)", 2, 1, "Z (m), + = person's front", "Y (m), + = up"
+    ),
+    _OrthoView(
+        "Top (XZ)", 0, 2, "X (m), + = person's left", "Z (m), + = person's front"
+    ),
 ]
 
 
@@ -1064,6 +1074,199 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         fig.savefig(save_path, dpi=150)
         plt.close(fig)
 
+    def render_cost_feedback_overlay(
+        self,
+        save_path: str | Path,
+        *,
+        rollout_traj: np.ndarray,
+        correction_traj: np.ndarray,
+        current_q: np.ndarray,
+        spine3_pos: np.ndarray,
+        spine3_aa: np.ndarray,
+        body_pos: np.ndarray | None = None,
+        goal_pos: np.ndarray | None = None,
+    ) -> None:
+        """Overlay the cost rollout against the target correction for feedback.
+
+        Renders two full arms on shared equal-square axes across the three
+        orthographic views: the trajectory the candidate cost produced
+        (``rollout_traj``, red gradient) and the target corrected path the cost
+        should match (``correction_traj``, green gradient) — typically the entire
+        intended motion (pre-correction history, the correction, and the
+        continuation to the goal). The orange current pose and
+        gold goal star ground the scene. ``rollout_traj`` is linearly resampled to
+        ``correction_traj``'s length so the two arms are frame-comparable. This is
+        the per-iteration image fed back to the ``turns`` / ``agent`` cost
+        generators so they can see where their motion diverges from the target.
+
+        Args:
+            save_path:       Output image path (.png).
+            rollout_traj:    ``(R, 3, 3)`` arm trajectory the candidate cost produced.
+            correction_traj: ``(T, 3, 3)`` target corrected-path trajectory.
+            current_q:       ``(3, 3)`` current arm axis-angle state.
+            spine3_pos:      ``(3,)`` spine3 world position.
+            spine3_aa:       ``(3,)`` spine3 world axis-angle.
+            body_pos:        ``(22, 3)`` reference body; falls back to a translated
+                             T-pose when ``None``.
+            goal_pos:        ``(3,)`` spine3-relative wrist goal, or ``None``.
+        """
+        save_path = Path(save_path)
+        wrist_chain_idx = 4  # left_wrist in the 5-joint arm chain
+        target = np.asarray(correction_traj, dtype=np.float64)
+        rollout = _resample_traj(np.asarray(rollout_traj, dtype=np.float64), target.shape[0])
+        rollout_positions = self.fk.fk_batch(rollout, spine3_pos, spine3_aa)
+        target_positions = self.fk.fk_batch(target, spine3_pos, spine3_aa)
+        current_positions = self.fk.fk(current_q, spine3_pos, spine3_aa)
+        goal_world = (
+            spine3_pos + np.asarray(goal_pos, dtype=np.float64)
+            if goal_pos is not None
+            else None
+        )
+
+        if body_pos is not None:
+            ref_body = body_pos
+        else:
+            ref_body = self.fk.tpose_all_joints + (spine3_pos - self.fk.tpose_spine3_pos)
+        cur_full = self.fk.full_body_positions(current_q, spine3_pos, spine3_aa)
+
+        extra_pts = [
+            rollout_positions.reshape(-1, 3),
+            target_positions.reshape(-1, 3),
+        ]
+        if goal_world is not None:
+            extra_pts.append(goal_world.reshape(1, 3))
+        all_pts = np.concatenate([ref_body, current_positions] + extra_pts, axis=0)
+        mins = np.min(all_pts, axis=0)
+        maxs = np.max(all_pts, axis=0)
+        center = (mins + maxs) / 2.0
+        radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
+        lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
+
+        def _sampled_arm_frames(ax, traj, cmap, view, alpha):
+            n_total = traj.shape[0]
+            n_samples = min(12, n_total)
+            sample_indices = np.linspace(0, n_total - 1, n_samples).round().astype(int)
+            denom = max(1, n_total - 1)
+            for frame_idx in sample_indices:
+                t = 0.3 + 0.7 * (frame_idx / denom)
+                full = self.fk.full_body_positions(traj[frame_idx], spine3_pos, spine3_aa)
+                _draw_bones_2d(ax, full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
+                               cmap(t), alpha=alpha, lw=1.2)
+
+        target_cmap = plt.get_cmap("Greens")
+        rollout_cmap = plt.get_cmap("Reds")
+        target_wrist = target_positions[:, wrist_chain_idx]
+        rollout_wrist = rollout_positions[:, wrist_chain_idx]
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        for ax, view in zip(axes, _ORTHO_VIEWS):
+            ax.set_aspect("equal")
+            ax.set_title(view.title, fontsize=9)
+            ax.set_xlabel(view.hl, fontsize=8)
+            ax.set_ylabel(view.vl, fontsize=8)
+            ax.set_xlim(*lims[view.hi])
+            ax.set_ylim(*lims[view.vi])
+            ax.tick_params(labelsize=7)
+
+            _draw_bones_2d(ax, ref_body, ArmVisualizer.BODY_BONES, view.hi, view.vi,
+                           ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+
+            # Target correction: green full arm + green wrist path.
+            _sampled_arm_frames(ax, target, target_cmap, view, alpha=0.45)
+            ax.plot(target_wrist[:, view.hi], target_wrist[:, view.vi],
+                    color="green", alpha=0.7, linewidth=1.3)
+
+            # Cost rollout: red full arm + red wrist path.
+            _sampled_arm_frames(ax, rollout, rollout_cmap, view, alpha=0.5)
+            ax.plot(rollout_wrist[:, view.hi], rollout_wrist[:, view.vi],
+                    color="firebrick", alpha=0.7, linewidth=1.3)
+            ax.scatter(rollout_wrist[-1, view.hi], rollout_wrist[-1, view.vi],
+                       marker="x", color="firebrick", s=40, alpha=0.9, zorder=4)
+
+            if goal_world is not None:
+                ax.scatter(goal_world[view.hi], goal_world[view.vi],
+                           marker="*", color="gold", edgecolors="black",
+                           linewidths=0.5, s=180, zorder=6)
+
+            # Current pose arm (orange, shared start)
+            _draw_bones_2d(ax, cur_full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
+                           "tab:orange", alpha=1.0, lw=2.2)
+
+        legend_handles = [
+            plt.Line2D([0], [0], color="firebrick", linewidth=2, label="cost rollout"),
+            plt.Line2D([0], [0], color="green", linewidth=2,
+                       label="target corrected path"),
+            plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
+        ]
+        if goal_world is not None:
+            legend_handles.append(
+                plt.Line2D([0], [0], marker="*", color="gold", markeredgecolor="black",
+                           linestyle="", markersize=11, label="original goal")
+            )
+        axes[0].legend(handles=legend_handles, fontsize=7, loc="upper left")
+        fig.tight_layout()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+
+    def render_joint_angle_comparison(
+        self,
+        save_path: str | Path,
+        *,
+        target_series: dict[str, np.ndarray],
+        rollout_series: dict[str, np.ndarray],
+        reference_series: dict[str, np.ndarray] | None = None,
+    ) -> None:
+        """Plot joint angles over time: target correction vs. cost rollout.
+
+        One subplot per anatomical joint feature (keyed identically in both
+        dicts, e.g. ``elbow_flexion``), each a ``(T,)`` radian series. The target
+        corrected path is drawn in green and the candidate cost's rollout in red;
+        when ``reference_series`` is given, the initial uncorrected goal-seeking
+        path is drawn as a dashed steel-blue curve so the difference between the
+        pre-correction and corrected motion is visible. Each rollout and reference
+        series is linearly resampled to its target series' length so all curves
+        share a frame-index x-axis. Companion to
+        :meth:`render_cost_feedback_overlay`: the overlay shows Cartesian shape,
+        this shows the temporal shape of each joint angle.
+
+        Args:
+            save_path:        Output image path (.png).
+            target_series:    ``{feature_name: (T,) radians}`` for the target path.
+            rollout_series:   ``{feature_name: (R,) radians}`` for the cost rollout.
+            reference_series: ``{feature_name: (S,) radians}`` for the initial
+                              uncorrected path, or ``None`` to omit it.
+        """
+        save_path = Path(save_path)
+        names = list(target_series.keys())
+        fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+        for ax, name in zip(axes.flat, names):
+            target = np.asarray(target_series[name], dtype=np.float64)
+            rollout = _resample_traj(
+                np.asarray(rollout_series[name], dtype=np.float64), target.shape[0]
+            )
+            frames = np.arange(target.shape[0])
+            if reference_series is not None:
+                reference = _resample_traj(
+                    np.asarray(reference_series[name], dtype=np.float64),
+                    target.shape[0],
+                )
+                ax.plot(frames, reference, color="steelblue", linewidth=1.4,
+                        linestyle="--", label="initial uncorrected path")
+            ax.plot(frames, target, color="green", linewidth=1.6,
+                    label="target corrected path")
+            ax.plot(frames, rollout, color="firebrick", linewidth=1.6,
+                    label="cost rollout")
+            ax.set_title(name.replace("_", " "), fontsize=9)
+            ax.set_xlabel("frame", fontsize=8)
+            ax.set_ylabel("angle (rad)", fontsize=8)
+            ax.tick_params(labelsize=7)
+        axes.flat[0].legend(fontsize=7, loc="best")
+        fig.tight_layout()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+
     def finish_live(self, save_path: str, fps: int = 20) -> None:
         """Save the frames recorded during the live session to a video or GIF.
 
@@ -1718,6 +1921,20 @@ def _update_elbow_height_artists(
         for line, y_value in zip(a2["elbow_height_lines"], y_values):
             line.set_ydata([y_value, y_value])
             line.set_visible(visible)
+
+
+def _resample_traj(traj: np.ndarray, n: int) -> np.ndarray:
+    """Linearly resample a ``(T, ...)`` trajectory to ``n`` frames along axis 0."""
+    t = traj.shape[0]
+    if t == n:
+        return traj
+    src = np.linspace(0.0, 1.0, t)
+    dst = np.linspace(0.0, 1.0, n)
+    flat = traj.reshape(t, -1)
+    out = np.stack(
+        [np.interp(dst, src, flat[:, i]) for i in range(flat.shape[1])], axis=1
+    )
+    return out.reshape((n, *traj.shape[1:]))
 
 
 def _draw_bones_2d(

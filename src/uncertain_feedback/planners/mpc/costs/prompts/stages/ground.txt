@@ -1,0 +1,33 @@
+You are grounding a care preference in trajectory data. This is the SECOND of three stages. You are given a plain-language preference (from stage one) and the full numeric trajectory summaries. Your only job is to turn that preference into a concrete NUMERIC specification a programmer could implement directly. You are NOT writing code in this stage.
+
+Preference (from stage one):
+{interpretation}
+
+Available joint-angle features (all in radians, all you may specify a preference over):
+- elbow_flexion: how bent the elbow is (larger = more bent; 0 = arm fully straight, π/2 = bent to a right angle, π = forearm folded back against the upper arm).
+- shoulder_flexion_extension: signed depth of the upper arm (0 = neither forward nor back, +π/2 = pointing straight forward, −π/2 = straight back).
+- shoulder_abduction_adduction: signed lateral position of the upper arm (0 = neither out nor across, +π/2 = straight out to the side away from the torso for the left arm, −π/2 = fully across the body).
+- shoulder_elevation: total upper-arm elevation from straight down (0 = arm at side, π/2 = horizontal, π = overhead); increases as the arm is raised in any direction.
+- shoulder_internal_external_rotation: signed twist of the upper arm about its long axis (0 = neutral/untwisted, positive = internal rotation twisting the forearm toward the body midline, negative = external rotation twisting it away).
+Each of these appears in the summaries under "joint_features" for every trajectory, with min / median / max / start / end values.
+
+How to ground it:
+- Choose the FEWEST features that express the preference — default to exactly one. Add a second only if stage one's "secondary" clearly calls for a distinct one.
+- Translate the preference into ONE of these bound types per feature, never an exact target unless the preference clearly demands a precise posture:
+  - "lower_bound": penalize the feature going BELOW a value (e.g. keep the elbow at least this bent).
+  - "upper_bound": penalize the feature going ABOVE a value.
+  - "band": penalize leaving a [low, high] comfort range.
+- Pick the numeric value(s) from the summaries. A feature value on the CHOSEN trajectory (its "mdm_traj" end or median) is an EXAMPLE inside a broader comfortable set — turn it into a bound with margin, not the exact number. State which trajectory and which statistic each value came from.
+- Stay goal-safe. A "reference" summary (the original-goal path the robot was taking before the correction) is usually present. Every bound you choose MUST already be satisfied by the chosen trajectory's end — check the summaries. Do NOT widen a bound to contain the reference's end: the reference end is the posture the person corrected away from, and the arm can usually reach the same goal position in a different posture (goal reach is verified by rollout afterwards). If goal_conflict=true, you may set the bound to gently exclude the goal posture, but never by more than the chosen trajectory demonstrates.
+- Keep magnitudes modest: this preference is ADDED to a goal-reaching objective that must stay dominant.
+
+Return ONLY a JSON object, no prose, with these keys:
+- "terms": a list (usually length 1) of objects, each:
+  - "feature": one of the five feature names above (string).
+  - "bound_type": "lower_bound" | "upper_bound" | "band" (string).
+  - "values": for lower_bound/upper_bound {"threshold": float}; for band {"low": float, "high": float}. Radians.
+  - "source": which trajectory + statistic each number came from, and the margin you added (string).
+- "goal_safety_check": one sentence confirming each bound is satisfied by the chosen trajectory's end, noting whether it excludes the reference end (which is fine — the arm can reach the goal in a different posture) (string).
+
+Full numeric summaries:
+{summaries}

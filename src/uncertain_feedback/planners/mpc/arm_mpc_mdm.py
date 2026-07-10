@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_mpc import (
+    _as_controlled_arm_aa,
     _VisConfig,
     SmplLeftArmMPC,
 )
@@ -214,6 +215,12 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             the trajectory respects every configured range cost).
         """
         frames = np.asarray(frames, dtype=np.float64)
+        if frames.ndim != 3 or frames.shape[1:] != (3, 3):
+            raise ValueError(
+                "frames must have shape (n_frames, 3, 3) for "
+                "[left_shoulder, left_elbow, left_wrist]; "
+                f"left_collar is fixed on SmplLeftArmFK.collar_aa, got {frames.shape}"
+            )
         warnings: list[str] = []
         n_frames = len(frames)
         for term in self._extra_costs.terms():
@@ -309,7 +316,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             goal_q: ``(3, 3)`` axis-angle joint angles for the last frame of
                     the MDM-generated trajectory.
         """
-        self._mdm_goal = np.asarray(goal_q, dtype=np.float64)
+        self._mdm_goal = _as_controlled_arm_aa(goal_q, "goal_q")
         if self._vis is not None:
             self._vis.update_mdm_goal(self._mdm_goal)
 

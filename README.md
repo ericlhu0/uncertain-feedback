@@ -6,11 +6,13 @@ Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedb
 ## Running (Custom) Motion Generation
 ```
 uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
---model_path save/humanml_enc_512_50steps/model000750000.pt \
+--model_path src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/humanml_enc_512_50steps/model000750000.pt \
 --text_condition "a person barely raises their left hand." \
 --num_samples 1 \
 --num_repetitions 1 \
 --motion_length 5.0 \
+--initial_pose_path src/uncertain_feedback/motion_generators/mdm/demo_pose.pt
+--fix_body
 ```
 
 ## Get HML263 from sequence of images of human
@@ -97,6 +99,10 @@ uv run python src/uncertain_feedback/data_collection/labeler.py
 ```
 uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py --output_dir ./my_mdm_dataset/
 ```
+Pose-estimation results are cached as `(N, 22, 3)` position arrays in `<frames_dir>/../mdm_cache/`
+with a `_v<N>` version tag in the filename; bumping `_CACHE_VERSION` in `build_mdm_dataset.py`
+(done whenever the pose-estimation/conversion changes) invalidates old entries automatically.
+Cache files without a version tag predate the 2026-06-29 chirality fix and are mirrored; delete them.
 
 4. Fine-tune motion-diffusion-model
 First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` (or whatever was created with the trajectory editor web ui) to `.../HumanML3D`
@@ -130,13 +136,13 @@ To generate sanity-check samples from a fixed starting pose, use `train_leftarm.
 (run from repo root. argument paths should be relative to `MDM_ROOT`)
 ```
 uv run python src/uncertain_feedback/motion_generators/mdm/train_leftarm.py \
-    --save_dir ./save/customv2 \
+    --save_dir ./save/customv3 \
     --start_pose demo_pose.pt \
     --n_prefix 1 \
     --body_mode both \
     --dataset humanml \
     --resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt \
-    --diffusion_steps 100 \
+    --diffusion_steps 50 \
     --mask_frames \
     --use_ema \
     --batch_size 8 \
@@ -161,17 +167,16 @@ Key hyperparameter guidance:
 
 5. Run motion generation with the new model
 
-From the same directory as training (`motion-diffusion-model/`):
+From the repo root:
 ```
-# still inside motion-diffusion-model/
-uv run python ../sample_leftarm.py \
-    --model_path save/my_finetuned_v1/model000001000.pt \
+uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
+    --model_path src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_v1/model000001000.pt \
     --text_condition "raise my left arm" \
     --num_samples 3 \
     --num_repetitions 5 \
     --motion_length 5.0
 ```
-`--model_path` is always relative to `motion-diffusion-model/` regardless of cwd (the script does an internal `os.chdir`). Output videos are saved under `save/my_finetuned_v1/edit_*/`. (1s = 20 frames)
+All paths are relative to wherever you invoke the script. Output videos are saved under `save/my_finetuned_v1/edit_*/` inside `motion-diffusion-model/`. (1s = 20 frames)
 
 
 ## Kimodo backend setup
@@ -206,13 +211,22 @@ uv run python src/uncertain_feedback/planners/run.py \
 ```
 The kimodo start pose is a SMPL `body_pose (21,3)` `.npy` (`motion_generators/kimodo/start_pose.npy`). The wrapper converts it through the same FK used by the visualizer; the worker retargets that pose onto Kimodo's skeleton and applies the resulting positions and global rotations as the frame-0 Kimodo constraint. `--frozen-body` is not supported with `motion_generator: kimodo`.
 
+**Generation speed.** Kimodo's text encoder is an 8B LLM2Vec model. With no encoder
+server reachable on `127.0.0.1:9550` it loads locally, and `TEXT_ENCODER_DEVICE=cpu`
+(auto-set when VRAM < 18 GB) runs it on CPU — slow per prompt. The worker encodes the
+(shared) prompt once per call regardless of `uq.diffusion_samples`, so generation time is
+dominated by the one-time ~85 s model load plus diffusion, not the sample count. To speed
+diffusion, lower `num_denoising_steps` (top-level YAML key, kimodo only; default 100,
+try 30-50 for a quality/speed trade).
+
 To generate only a kimodo motion and render it to video, without MPC:
 ```bash
 TEXT_ENCODER_DEVICE=cpu uv run python src/uncertain_feedback/motion_generators/kimodo/generate_motion.py \
   --text "raise my left arm" \
   --num-frames 100 \
   --output-npz kimodo_motion.npz \
-  --output-video kimodo_motion.mp4
+  --output-video kimodo_motion.mp4 \
+  --start-pose src/uncertain_feedback/motion_generators/kimodo/start_pose_kimodo.npy
 ```
 
 ## Running a Single MPC Run
@@ -250,6 +264,25 @@ Both backends expose the same interface, so any MDM-backed planner
 (`arm_mpc_mdm`, `arm_mpc_mdm_uq`, `arm_mpc_cartesian`) works with either by setting
 `motion_generator:` in its config.
 
+### Simulated user (`user:`)
+
+Every run loads a simulated care recipient alongside the pose, selected by the
+optional YAML key `user:` (default `unrestricted` — no movement restrictions).
+Restricted personas (`adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
+`stroke_flexor_synergy`, `cross_body_pain`;
+see `src/uncertain_feedback/simulated_users/personas.py`)
+carry hidden joint-limit bounds and a fixed feedback line. When the configured
+user has bounds:
+
+- `--text` defaults to the user's feedback line (an explicit `--text` still wins;
+  with the unrestricted user the default stays `"move my arm up"`).
+- `uq.user_cluster: true` delegates UQ cluster selection to the user (it picks
+  the most comfortable cluster mean), taking precedence over `uq.auto_cluster`
+  and the interactive picker.
+
+The same hidden bounds are the evaluation ground truth for the
+[transfer experiment](#simulated-user-transfer-experiment).
+
 ### Minimal Joint-Space MPC Config
 Save as `src/uncertain_feedback/planners/mpc/configs/mpc_plain.yaml`:
 ```yaml
@@ -286,7 +319,15 @@ uq:
   diffusion_samples: 128
   n_clusters: 3
   auto_cluster: null
+  scale: 1.0  # default motion-magnitude scale for the chosen cluster
 ```
+
+In the interactive picker, each cluster panel has a **magnitude** slider
+(range 0.0–2.0) that scales that trajectory's motion up or down while
+preserving the direction of motion at every timestep (`scale` in joint-angle
+space about the start pose: `1.0` = unchanged, `0.0` = hold start). `uq.scale`
+sets the slider's initial value and is used directly as the scale in headless
+runs.
 
 Run with an interactive cluster picker:
 ```bash
@@ -298,12 +339,14 @@ uv run python src/uncertain_feedback/planners/run.py \
   --live
 ```
 
-For headless runs, set `uq.auto_cluster` in the YAML:
+For headless runs, set `uq.auto_cluster` in the YAML (and optionally `uq.scale`
+to apply a fixed magnitude without the GUI):
 ```yaml
 uq:
   diffusion_samples: 128
   n_clusters: 3
   auto_cluster: 0
+  scale: 1.0
 ```
 
 ### Cartesian MPC With MDM/UQ
@@ -410,25 +453,276 @@ files are accepted; the first row fixes the left collar and the remaining rows
 control shoulder, elbow, and wrist.
 
 
-## Running Cluster Experiments
+## Running Simulated-User Experiments
 
 Experiments live separately from a single run, under
-`src/uncertain_feedback/experiments/`. The experiment runner drives a UQ planner
-(`arm_mpc_mdm_uq` or `arm_mpc_cartesian`, with `llm_cost.enabled: true`) up to
-`text_time` to obtain the cluster set, then generates one LLM cost per cluster,
-rolls each one out headlessly, and writes per-cluster metrics plus a
-`comparison_summary.json`:
+`src/uncertain_feedback/experiments/`. The default experiment runs one simulated
+persona with one cost-generation backend on the original goal only: initial
+rollout, hidden-cost trigger, MDM/UQ candidates, oracle cluster selection, one
+generated cost, and original-goal evaluation (`base`, `tracking`, `generated`,
+`oracle`). It requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
+and a persona with hidden bounds:
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml \
+  --persona adhesive_capsulitis \
+  --backend agent \
+  --save-video
+```
+
+`--persona` defaults to the config's `user:` key, and `--backend` defaults to
+`llm_cost.backend`. Artifacts go to `experiment_artifacts/<timestamp>/`,
+including `experiment_summary.json`.
+
+The older per-cluster comparison remains available as an explicit cluster
+experiment. It drives a UQ planner to the feedback point, extracts every cluster,
+generates one cost per cluster with the selected backend, rolls each one out
+headlessly, and writes `comparison_summary.json`. For Cartesian experiments,
+each cluster entry also contains a `hidden_cost_evaluation` comparing `base`,
+`oracle`, and that cluster's `generated` cost on the original goal:
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_cluster_experiment.py \
   --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm.yaml \
-  --text "raise my left arm"
+  --text "raise my left arm" \
+  --backend llm
 ```
 
 Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
-`steps - text_time`), and `--save-video` to render each rollout to an MP4. The
-saved video uses the same `ArmVisualizer` layout as a live run, so the only
-difference between watching and saving is the flag.
+`steps - text_time`), and `--save-video` to render each rollout to an MP4.
+
+### Comparing cost-generation backends
+
+`llm_cost.backend` selects how the cost is generated:
+
+Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
+`gpt-5.6-luna` with `xhigh` reasoning effort.
+
+- `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
+  images + compact summary → plain-language preference), **ground** (preference + full
+  numeric summaries → concrete features and bounds), **author** (spec + runtime API /
+  output contract → cost JSON). Each stage's prompt and raw response are saved as
+  `<stage>_prompt.txt` / `<stage>_response.txt`, with a readable aggregate in
+  `stage_log.md`.
+- `turns` — a multi-turn conversation that rolls out each candidate, scores it, and feeds
+  the score plus rendered comparisons back to refine the grounding and authoring while
+  keeping the initial interpretation fixed.
+- `agent` — delegates the same staged method and optional rollout iteration to the
+  external `codex` CLI. The agent is required to write `stage_log.md` with its Stage 1,
+  Stage 2, and Stage 3 responses; that log is also appended to `codex.log`.
+
+The backend experiment is the orthogonal axis: it holds the correction fixed (the
+**chosen** UQ cluster) and generates a cost with each backend (`llm` / `turns` /
+`agent`), then scores them all on the same rollout-vs-MDM L2 metric and writes
+a `backend_comparison.json` ranking. Each backend entry also includes a
+`hidden_cost_evaluation` comparing `base`, `oracle`, and `generated` using the
+simulated user's hidden cost and original Cartesian goal. It requires
+`planner: arm_mpc_cartesian` (the
+scorer needs a persistent Cartesian goal) and `llm_cost.enabled: true`:
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_backend_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm.yaml \
+  --text "raise my left arm" \
+  --backends turns agent \
+  --save-video
+```
+
+Pass the neutral base config (`arm_mpc_cartesian_mdm_llm.yaml`), not a
+backend-specific one — the experiment sets `llm_cost.backend` itself for each
+backend. All other `llm_cost` settings (`model`, `max_turns`, `use_images`, and
+`codex_cmd` for the `agent` backend) come from that config, so
+make sure its `codex_cmd` works on this host. Use `--backends llm turns` to
+compare a subset, `--rollout-steps N` and
+`--save-video` to render an MP4 per backend. With image feedback enabled,
+`--save-video` also saves the rollout videos for every intermediate `turns` and
+`agent` candidate cost. A backend that fails to produce a cost (e.g. `codex`
+unavailable) is recorded as failed and the rest still rank.
+
+Every generated LLM-cost artifact directory also includes
+`reference_with_correction.mp4`, a video of the target reference trajectory that
+contains the correction (`full_correction_traj` when available, otherwise the
+MDM correction segment).
+
+#### Visual cost feedback (turns / agent)
+
+When `llm_cost.use_images: true`, the iterating backends refine the cost against
+**two rendered comparisons** — a spatial rollout-vs-correction overlay (red "cost
+rollout" vs green "target correction") and a joint-angle-over-time graph plotting
+the same two trajectories' arm joint angles (green target vs red rollout) so the
+model sees the shape of the movement, not just endpoints — not just the scalar L2
+score, which is still kept for selection and ranking:
+
+- `turns`: each turn renders `turn_<i>/comparison.png` and `turn_<i>/angles.png`
+  and feeds both (plus the score) back to the model via the multi-turn
+  conversation. With `--save-video`, each turn also saves `turn_<i>/rollout.npy`
+  and `turn_<i>/rollout.mp4`.
+- `agent`: codex receives the initial context overlay image paths as text in
+  `TASK.md`, is instructed to load those local files itself, and writes
+  `ITERATION_LOG.md` describing what it saw in each image, why each cost
+  revision was made, and whether it stopped because the movement matched well
+  enough or because it determined the available cost API could not make it match. It also gets a pickled `state.pkl` and a render script it
+  runs itself (writing both `comparison.png` and `angles.png`) to inspect its
+  rollout and iterate. The wrapper appends
+  `ITERATION_LOG.md` into `codex.log` when the run finishes. The script can
+  also be run standalone to re-render any candidate:
+
+  ```bash
+  uv run python src/uncertain_feedback/experiments/render_cost_comparison.py \
+    --state <run_dir>/agent/state.pkl \
+    --response <run_dir>/agent/response.json \
+    --out comparison.png \
+    --angles-out angles.png \
+    --archive-dir candidates \
+    --save-video
+  ```
+
+  It loads the pickled `EvalState`, rolls the goal-seeking MPC with the candidate
+  cost, prints the L2 score, and writes the overlay PNG (plus the joint-angle
+  graph when `--angles-out` is given). With `--archive-dir`, each invocation
+  creates `candidate_<i>/` containing `response.json`, `cost.py`, `score.json`,
+  `comparison.png`, `angles.png`, and, with `--save-video`, `rollout.npy` plus
+  `rollout.mp4`.
+
+With `use_images: false` both backends fall back to score-only text feedback.
+
+### Simulated-user transfer experiment
+
+The transfer experiment closes the evaluation loop with a **hidden ground
+truth**: a simulated care recipient (`src/uncertain_feedback/simulated_users/`)
+holds a clinically motivated ROM restriction the cost generator never sees. The
+persona decides when feedback is given (the first step the initial plan violates
+the hidden cost), what is said (its fixed feedback line — `--text` is ignored),
+and which UQ cluster it picks: transfer experiments score each scaled raw
+cluster mean with the hidden oracle cost and choose the lowest-scoring option.
+The generated cost is then evaluated by rolling out to the **original goal and
+each held-out `transfer.goals` entry** and measuring hidden-cost violation plus goal
+completion — so a cost only wins by generalizing beyond the correction it was
+generated from.
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_transfer_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml \
+  --save-video
+```
+
+The persona comes from the config's `user:` key (the example config sets
+`adhesive_capsulitis`); `--persona` takes one or more persona names to run, and
+`--all-personas` runs every persona with hidden bounds. Each persona gets its
+own timestamped artifact dir, reusing one loaded MDM setup. With `--save-video`,
+iterating cost backends also save candidate rollout artifacts under
+`cost_generation/`.
+Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
+`stroke_flexor_synergy` (pose-dependent bound), `cross_body_pain`
+(pose-dependent bound: tolerable elevation drops linearly as the upper arm
+adducts past the midline) — the unrestricted default is rejected. Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
+`cartesian.goals`, and a `transfer:` block:
+
+```yaml
+transfer:
+  goals:                     # held-out spine3-relative wrist targets
+    - [-0.25, 0.0, -0.05]
+  trigger_threshold: 0.02    # hidden-cost violation (rad) at which the user interrupts
+```
+
+Because the experiment runs one persona at a time, each restriction needs its
+own goal geometry to make the default plan visibly require a correction. An
+optional `persona_goals:` block overrides the correction goal and transfer goals
+for the active persona (falling back to the top-level `cartesian.goals` /
+`transfer.goals` for personas without an entry). Goals sit inside the
+constraint-compliant reach envelope: the constraint-respecting solution reaches
+the goal, while the default plan reaches the same target by violating the
+restriction (frozen shoulder raises the upper arm; flexor synergy straightens
+the elbow), so the correction is "reach it a different way," not "give up":
+
+```yaml
+persona_goals:
+  adhesive_capsulitis:       # frozen shoulder: base raises the upper arm; compliant keeps it low
+    cartesian: [[0.42, 0.30, 0.12]]                                    # low-hand lateral (hand not overhead)
+    transfer:  [[0.50, 0.20, 0.10], [0.11, 0.44, 0.26], [-0.04, 0.42, 0.18]]
+  stroke_flexor_synergy:     # flexor synergy: base straightens the elbow; compliant keeps it bent
+    cartesian: [[0.42, 0.48, 0.12]]
+    transfer:  [[0.18, 0.52, 0.14], [0.13, 0.50, 0.28], [-0.04, 0.48, 0.18]]
+```
+
+Artifacts go to `transfer_artifacts/<timestamp>/`: `initial_rollout.npy`,
+`cluster_options.png` (the UQ cluster candidates the simulated user chose among,
+chosen cluster highlighted), the cost-generation directory (same layout as a
+live run), per-condition rollouts
+(`base/`, `tracking/`, `generated/`, `oracle/`, with MP4s under `--save-video`),
+and `transfer_summary.json` with per-condition per-goal metrics
+(`mean_violation`, `max_violation`, `frac_frames_violated`, `goal_reach`) plus
+`cluster_selection_method` and `cluster_oracle_scores` for the UQ options.
+`tracking` (following the correction trajectory directly) is only defined for
+the original goal; on transfer goals it is identical to `base` — that contrast
+is the argument for persisting a cost function rather than a trajectory.
+
+
+## Demo designer web tool
+
+Browser tool for designing simulated-user demo scenarios interactively — the
+staged pipeline above (base rollout → MDM/UQ correction → cost generation), but
+with every knob tweakable and every trajectory inspectable before committing to
+an experiment config.
+
+```bash
+uv run python src/uncertain_feedback/demo_designer/server.py \
+  [--mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml] \
+  [--personas-file demo_designer_personas.json] \
+  [--host 127.0.0.1] [--port 6780]
+```
+
+Then open `http://127.0.0.1:6780`. The config supplies the pose, MPC settings,
+UQ defaults, `mdm_frames`, per-persona goal presets, and the `llm_cost` backend
+used by the cost-generation stage. Stages (each stage's controls unlock once the
+previous one ran):
+
+1. **Scenario** — edit the start arm pose (per-joint axis-angle sliders with a
+   live skeleton preview), the spine3-relative Cartesian goal, and the simulated
+   user; *Run base rollout* rolls the headless Cartesian MPC and reports hidden
+   bound violations, the feedback trigger frame, and goal reach.
+2. **Language correction** — edit the MDM prompt (prefilled with the persona's
+   feedback line), sample count, and cluster count; *Generate* draws diffusion
+   samples from the feedback-trigger pose (shown as a purple dashed ghost arm in
+   the skeleton views; falls back to the start pose when the base never
+   violates) and clusters them (*Re-cluster* reuses cached samples). Every
+   cluster option is automatically integrated into the full corrected
+   trajectory — executed history → scaled correction → comfort-only goal
+   continuation — so cards show what actually happens if that option is taken:
+   sample count, oracle score, full-path violation, and goal reach. Click a
+   card to select it; drag *Magnitude* to rescale (re-clusters and re-assembles
+   at the new scale).
+3. **Cost generation** — runs the selected cost-generation backend (`llm`,
+   `turns`, or `agent`) on the selected correction, rolls the MPC out with the
+   generated cost installed from the original edited start pose, and shows the
+   resulting trajectory, metrics, and cost code. Its grounded feature limits are
+   overlaid on the corresponding feature graphs in blue. Artifacts go to
+   `demo_designer_artifacts/<timestamp>_<backend>/`.
+
+The center panel shows front/side/top skeleton views with base (red),
+correction (green), full corrected path (teal), and generated-cost (blue)
+overlays — wrist traces turn bright red on frames that violate the hidden
+bounds — with a scrubber/play control (arrow keys step, space plays) and
+per-trajectory violation strips aligned under the scrubber. A console panel at
+the bottom streams the server's stdout live, so long stages (MPC rollouts, MDM
+sampling, cost generation) show their progress. The right column plots each
+joint feature over time with the persona's oracle limits shaded in red and
+the generated-cost limits shaded in blue. Both limit overlays have
+independent, default-on toggles. When the persona has a `coupled`
+(pose-dependent) bound, a feature-vs-feature phase graph is added at the top of
+the column: the conditioning feature on the x-axis, the bounded feature on the
+y-axis, the pose-dependent limit as a diagonal line with its violating side
+shaded, and each trajectory traced through the plane with a dot at the scrubbed
+frame — so you can see the limit itself sliding as the two features co-vary.
+Generated-cost limits on either feature also appear here (blue), as a horizontal
+line (bound on the y feature) or vertical line (bound on the x/conditioning
+feature) — an axis-aligned approximation of the diagonal pose-dependent limit.
+
+Personas are selectable, editable, and creatable/deletable in the UI (bounds
+editor supports `hidden` and `coupled` bounds over the shared joint features).
+Custom personas persist to `--personas-file`; edits to built-in personas last
+until the server restarts.
 
 
 ## Thanks

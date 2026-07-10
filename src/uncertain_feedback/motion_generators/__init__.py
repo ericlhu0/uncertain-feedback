@@ -14,7 +14,7 @@ from typing import Callable
 from uncertain_feedback.motion_generators.base import MotionGenerator
 
 
-def _build_mdm(model_path: Path | None) -> MotionGenerator:
+def _build_mdm(model_path: Path | None, num_denoising_steps: int | None) -> MotionGenerator:
     from uncertain_feedback.motion_generators.mdm.mdm_api import (  # pylint: disable=import-outside-toplevel
         MdmMotionGenerator,
     )
@@ -22,25 +22,36 @@ def _build_mdm(model_path: Path | None) -> MotionGenerator:
     return MdmMotionGenerator(model_path=model_path)
 
 
-def _build_kimodo(model_path: Path | None) -> MotionGenerator:
+def _build_kimodo(
+    model_path: Path | None, num_denoising_steps: int | None
+) -> MotionGenerator:
     from uncertain_feedback.motion_generators.kimodo.kimodo_api import (  # pylint: disable=import-outside-toplevel
         KimodoMotionGenerator,
     )
 
-    return KimodoMotionGenerator(model_path=model_path)
+    kwargs = {} if num_denoising_steps is None else {"num_denoising_steps": num_denoising_steps}
+    return KimodoMotionGenerator(model_path=model_path, **kwargs)
 
 
-MOTION_GENERATOR_BUILDERS: dict[str, Callable[[Path | None], MotionGenerator]] = {
+MOTION_GENERATOR_BUILDERS: dict[
+    str, Callable[[Path | None, int | None], MotionGenerator]
+] = {
     "mdm": _build_mdm,
     "kimodo": _build_kimodo,
 }
 
 
-def make_motion_generator(name: str, model_path: Path | None) -> MotionGenerator:
-    """Construct the motion generator selected by ``name``."""
+def make_motion_generator(
+    name: str, model_path: Path | None, num_denoising_steps: int | None = None
+) -> MotionGenerator:
+    """Construct the motion generator selected by ``name``.
+
+    ``num_denoising_steps`` is forwarded only to backends that support it
+    (kimodo); ``None`` keeps the backend default.
+    """
     if name not in MOTION_GENERATOR_BUILDERS:
         raise ValueError(
             f"Unknown motion_generator '{name}'. "
             f"Available: {sorted(MOTION_GENERATOR_BUILDERS)}"
         )
-    return MOTION_GENERATOR_BUILDERS[name](model_path)
+    return MOTION_GENERATOR_BUILDERS[name](model_path, num_denoising_steps)

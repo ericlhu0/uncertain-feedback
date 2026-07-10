@@ -9,7 +9,6 @@ Usage (from motion-diffusion-model/ — same cwd as plain training):
     uv run python ../train_leftarm.py \\
         --save_dir ./save/my_finetuned_v1 \\
         --start_pose sitting_pose.pt \\
-        --n_prefix 1 \\
         --body_mode freeze \\
         --dataset humanml \\
         --resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt \\
@@ -39,6 +38,7 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from uncertain_feedback.consts import MDM_ROOT  # noqa: E402
+from uncertain_feedback.motion_generators.mdm.mdm_api import N_PREFIX_FRAMES  # noqa: E402
 
 _MDM_SUBMODULE = MDM_ROOT / "motion-diffusion-model"
 if str(_MDM_SUBMODULE) not in sys.path:
@@ -64,9 +64,10 @@ _parser.add_argument(
 _parser.add_argument(
     "--n_prefix",
     type=int,
-    default=1,
+    default=N_PREFIX_FRAMES,
     help=(
-        "Number of leading frames to pin entirely to the starting pose. "
+        "Number of leading frames to pin entirely to the starting pose "
+        "(default matches inference: mdm_api.N_PREFIX_FRAMES). "
         "Set to 0 for no fixed prefix."
     ),
 )

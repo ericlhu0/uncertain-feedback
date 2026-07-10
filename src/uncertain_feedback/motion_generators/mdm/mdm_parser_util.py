@@ -1,7 +1,15 @@
 import argparse
 import json
 import os
+import sys
+from pathlib import Path
 from argparse import ArgumentParser
+
+_SRC_ROOT = Path(__file__).resolve().parents[3]
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
+from uncertain_feedback.consts import MDM_ROOT
 
 
 def parse_and_load_from_model(parser):
@@ -540,6 +548,17 @@ def add_edit_options(parser):
         default=120,
         type=int,
         help="Sequence length (frames) to use when zero_inpaint is enabled.",
+    )
+    group.add_argument(
+        "--initial_pose_path",
+        default=str(MDM_ROOT / "demo_pose.pt"),
+        type=str,
+        help="Path to a .pt file containing a (263, 1) HML263 pose tensor to use as the inpainting start pose.",
+    )
+    group.add_argument(
+        "--fix_body",
+        action="store_true",
+        help="Freeze all non-left-arm body features for every frame, not just the prefix.",
     )
 
 

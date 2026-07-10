@@ -18,10 +18,7 @@ Usage examples::
 from __future__ import annotations
 
 import argparse
-import json
-import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, cast
 
@@ -42,16 +39,22 @@ from uncertain_feedback.planners.mpc import (
 )
 from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
+from uncertain_feedback.simulated_users import (
+    SimulatedUser,
+    choose_cluster,
+    get_persona,
+)
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
+    EvalState,
     GeneratedPythonCost,
     LearnablePreferenceCost,
     MpcCostContext,
+    artifact_run_dir,
     build_extra_costs,
     build_generated_cost_context,
-    build_llm_cost_prompt,
     build_motion_summaries,
-    parse_llm_cost_response,
+    create_cost_generator,
     render_prompt_images,
     replace_cost_in_composite,
     update_preference_cost,
@@ -82,6 +85,7 @@ def _load_initial_pose_state(
     config_pose: Path | None = None,
     motion_generator: str = "mdm",
     motion_generator_factory: Callable[[Path | None], MotionGenerator] | None = None,
+    num_denoising_steps: int | None = None,
 ) -> tuple[MotionGenerator | None, _InitialPoseState]:
     """Load the optional HML pose used to initialize all planner variants.
 
@@ -96,7 +100,7 @@ def _load_initial_pose_state(
         return None, _InitialPoseState.tpose()
 
     factory = motion_generator_factory or (
-        lambda mp: make_motion_generator(motion_generator, mp)
+        lambda mp: make_motion_generator(motion_generator, mp, num_denoising_steps)
     )
     gen = factory(args.model_path)
     hml_pose = gen.load_pose(pose_path)
@@ -116,7 +120,18 @@ def _apply_arm_override(state: _InitialPoseState, arm_path: Path | None) -> None
         return
 
     arm_override = np.load(arm_path)
-    state.arm_aa = np.asarray(arm_override, dtype=np.float64)
+    arm_override = np.asarray(arm_override, dtype=np.float64)
+    if arm_override.shape == (4, 3):
+        state.fixed_collar_aa = arm_override[0].copy()
+        state.arm_aa = arm_override[1:].copy()
+    elif arm_override.shape == (3, 3):
+        state.arm_aa = arm_override.copy()
+    else:
+        raise ValueError(
+            "--arm must contain shape (3, 3) for "
+            "[left_shoulder, left_elbow, left_wrist], or legacy shape "
+            f"(4, 3) with left_collar first; got {arm_override.shape}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,7 +172,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--arm",
         type=Path,
         default=None,
-        help="Optional .npy file with (3, 3) shoulder/elbow/wrist axis-angles.",
+        help=(
+            "Optional .npy file with (3, 3) shoulder/elbow/wrist axis-angles. "
+            "Legacy (4, 3) files are interpreted as collar, shoulder, elbow, wrist."
+        ),
     )
 
     # --- Visualization ---
@@ -178,8 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--text",
         type=str,
-        default="move my arm up",
-        help="Natural-language MDM motion description (mdm/uq planners only)",
+        default=None,
+        help=(
+            "Natural-language MDM motion description (mdm/uq planners only). "
+            "Defaults to the configured user's feedback line when that user "
+            "has hidden bounds, else 'move my arm up'."
+        ),
     )
     p.add_argument(
         "--text-time",
@@ -219,6 +241,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return p
+
+
+def resolve_feedback_text(args_text: str | None, user: SimulatedUser) -> str:
+    """Return the MDM instruction: explicit --text > restricted user's line > default."""
+    if args_text:
+        return args_text
+    if user.bounds and user.feedback_text:
+        return user.feedback_text
+    return "move my arm up"
 
 
 def _restore_interactive_backend() -> None:
@@ -302,163 +333,12 @@ def _default_preference_output_path(config_path: Path) -> Path:
     return config_path.with_name(f"{config_path.stem}_learned{config_path.suffix}")
 
 
-def _make_llm_model(model_name: str) -> Any:
-    """Build the cost-generator LLM wrapper."""
-    from uncertain_feedback.llm import (
-        OpenAIModel,
-    )  # pylint: disable=import-outside-toplevel
-
-    return OpenAIModel(
-        model=model_name,
-        system_prompt=(
-            "You generate safe, vectorized Python MPC trajectory cost functions. "
-            "Return only the requested JSON object."
-        ),
-        temperature=0.2,
-        max_tokens=1800,
-    )
-
-
-def _llm_artifact_run_dir(base_dir: Path, artifact_dir: Path) -> Path:
-    """Return a unique artifact directory for one LLM-cost generation."""
-    root = artifact_dir if artifact_dir.is_absolute() else base_dir / artifact_dir
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return root / stamp
-
-
 def _append_extra_cost(
     composite: CompositeTrajectoryCost,
     cost: GeneratedPythonCost,
 ) -> CompositeTrajectoryCost:
     """Return a composite with an additional generated cost term."""
     return CompositeTrajectoryCost([*composite.terms(), cost])
-
-
-def _apply_llm_generated_cost(  # pylint: disable=too-many-arguments,too-many-locals
-    mpc: SmplLeftArmMPC,
-    instruction: str,
-    mdm_traj: np.ndarray,
-    current_q: np.ndarray,
-    q_history: list[np.ndarray],
-    context: MpcCostContext,
-    llm_cfg: Any,
-    artifact_base_dir: Path,
-    history_window: int,
-    body_pos: np.ndarray | None = None,
-    llm_model_factory: Callable[[str], Any] = _make_llm_model,
-    run_dir: Path | None = None,
-    install: bool = True,
-    candidate_trajs: dict[int, np.ndarray] | None = None,
-    highlight_label: int | None = None,
-    reference_traj: np.ndarray | None = None,
-    goal_pos: np.ndarray | None = None,
-) -> GeneratedPythonCost | None:
-    """Generate, validate, save, and install an LLM-generated MPC cost."""
-    if run_dir is None:
-        run_dir = _llm_artifact_run_dir(artifact_base_dir, llm_cfg.artifact_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    image_dir = run_dir / "images"
-    validation: dict[str, Any] = {"ok": False}
-
-    try:
-        generated_context = build_generated_cost_context(
-            context,
-            current_q,
-            mdm_traj,
-            q_history,
-            window=history_window,
-            body_pos=body_pos,
-            reference_traj=reference_traj,
-        )
-        summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
-        images: dict[str, Path] = {}
-        if llm_cfg.use_images:
-            images = render_prompt_images(
-                generated_context, image_dir, candidate_trajs, highlight_label,
-                reference_traj=reference_traj, goal_pos=goal_pos,
-            )
-        with open(run_dir / "summaries.json", "w", encoding="utf-8") as f:
-            json.dump(summaries, f, indent=2, sort_keys=True)
-
-        model_name = llm_cfg.model or os.getenv("OPENAI_MODEL", "gpt-5.4")
-        llm = llm_model_factory(model_name)
-        prompt, attached_images = build_llm_cost_prompt(
-            instruction, summaries, images, prompt=llm_cfg.prompt
-        )
-        image_input = [str(path) for path in attached_images] or None
-        (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-        raw_response = llm.get_full_output(prompt, image_input=image_input)
-        (run_dir / "raw_response.txt").write_text(raw_response, encoding="utf-8")
-        response = parse_llm_cost_response(raw_response)
-        generated_cost = GeneratedPythonCost(
-            code=response.code,
-            params=response.params,
-            description=response.description,
-            context=generated_context,
-        )
-        validation_q = np.repeat(
-            current_q[np.newaxis, np.newaxis],
-            repeats=11,
-            axis=1,
-        )
-        generated_cost(validation_q)
-
-        (run_dir / "cost.py").write_text(response.code, encoding="utf-8")
-        if response.explanation:
-            (run_dir / "explanation.txt").write_text(
-                response.explanation,
-                encoding="utf-8",
-            )
-            print(f"[llm-cost] explanation: {response.explanation}")
-        if response.recipient_explanation:
-            (run_dir / "recipient_explanation.txt").write_text(
-                response.recipient_explanation,
-                encoding="utf-8",
-            )
-            print(
-                "[llm-cost] recipient explanation: "
-                f"{response.recipient_explanation}"
-            )
-        with open(run_dir / "params.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "description": response.description,
-                    "explanation": response.explanation,
-                    "recipient_explanation": response.recipient_explanation,
-                    "params": response.params,
-                    "model": model_name,
-                },
-                f,
-                indent=2,
-                sort_keys=True,
-            )
-        if install:
-            mpc.set_extra_costs(
-                _append_extra_cost(
-                    mpc._extra_costs,  # pylint: disable=protected-access
-                    generated_cost,
-                )
-            )
-        validation = {"ok": True, "artifact_dir": str(run_dir)}
-        action = "installed" if install else "generated"
-        print(f"[llm-cost] {action} generated cost: {response.description}")
-        print(f"[llm-cost] artifacts saved to: {run_dir}")
-        return generated_cost
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        validation = {
-            "ok": False,
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-            "artifact_dir": str(run_dir),
-        }
-        action = "install" if install else "generate"
-        print(f"[llm-cost] failed to {action} generated cost: {exc}")
-        if llm_cfg.strict:
-            raise
-        return None
-    finally:
-        with open(run_dir / "validation.json", "w", encoding="utf-8") as f:
-            json.dump(validation, f, indent=2, sort_keys=True)
 
 
 def _save_learned_preference_yaml(
@@ -520,6 +400,7 @@ class RunSetup:
     uses_mdm: bool
     visualize: bool
     compact: bool
+    user: SimulatedUser
 
 
 def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
@@ -530,7 +411,11 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
     compact = (args.save is not None) and not args.live
 
     gen, initial_state = _load_initial_pose_state(
-        args, uses_mdm, cfg.pose, motion_generator=cfg.motion_generator
+        args,
+        uses_mdm,
+        cfg.pose,
+        motion_generator=cfg.motion_generator,
+        num_denoising_steps=cfg.num_denoising_steps,
     )
     _apply_arm_override(initial_state, args.arm)
     arm_aa = initial_state.arm_aa
@@ -550,7 +435,12 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
             spine3_aa if spine3_aa is not None else np.zeros(3), dtype=np.float64
         ),
     )
+    user = get_persona(cfg.user)
     extra_costs = build_extra_costs(cfg.costs, cost_context)
+    if user.joint_limits:
+        extra_costs = CompositeTrajectoryCost(
+            [*extra_costs.terms(), user.limit_cost()]
+        )
 
     # Default goal: arm raised from the initial pose
     default_goal = arm_aa.copy() + np.array(
@@ -640,6 +530,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         uses_mdm=uses_mdm,
         visualize=visualize,
         compact=compact,
+        user=user,
     )
 
 
@@ -765,6 +656,69 @@ def _rollout_reference_trajectory(
     return np.asarray([q0, *result.q_history], dtype=np.float64)
 
 
+def _assemble_full_correction_traj(
+    cfg: MpcRunConfig,
+    q_history: list[np.ndarray],
+    correction_traj: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+) -> np.ndarray:
+    """Assemble the entire corrected path: history → correction → goal continuation.
+
+    This is the target shown (green) in the cost-feedback comparison so the cost
+    generator sees the whole intended trajectory, not just the MDM correction
+    segment. The three segments are the executed pre-correction history, the MDM
+    correction itself, and a comfort-only goal-seeking continuation rolled from the
+    correction's endpoint (so the arm still reaches the goal afterwards). The
+    continuation is empty for planners without a Cartesian goal, leaving just
+    history + correction. The duplicated seam frame at the correction endpoint is
+    dropped.
+    """
+    correction_traj = np.asarray(correction_traj, dtype=np.float64)
+    segments: list[np.ndarray] = []
+    if q_history:
+        segments.append(np.asarray(q_history, dtype=np.float64))
+    segments.append(correction_traj)
+    post = _rollout_reference_trajectory(
+        cfg, correction_traj[-1], context, base_extra_costs,
+        body_pos, spine3_pos, spine3_aa,
+    )
+    if post is not None and len(post) > 1:
+        segments.append(post[1:])
+    return np.concatenate(segments, axis=0)
+
+
+def _make_cost_eval_rollout(
+    cfg: MpcRunConfig,
+    current_q: np.ndarray,
+    context: MpcCostContext,
+    base_extra_costs: CompositeTrajectoryCost,
+    body_pos: np.ndarray | None,
+    spine3_pos: np.ndarray | None,
+    spine3_aa: np.ndarray | None,
+) -> Callable[[GeneratedPythonCost], np.ndarray | None]:
+    """Return a closure rolling the goal-seeking MPC with a candidate cost installed.
+
+    The returned function appends the candidate generated cost to the comfort costs
+    and rolls toward the original Cartesian goal (reusing
+    :func:`_rollout_reference_trajectory`), yielding the ``(T, 3, 3)`` trajectory the
+    cost evaluator compares against the MDM correction. Returns ``None`` for planners
+    without a persistent Cartesian goal. Each call builds a fresh headless planner, so
+    the live MPC's goals/warm-start are untouched.
+    """
+
+    def rollout(cost: GeneratedPythonCost) -> np.ndarray | None:
+        extra = _append_extra_cost(base_extra_costs, cost)
+        return _rollout_reference_trajectory(
+            cfg, current_q, context, extra, body_pos, spine3_pos, spine3_aa
+        )
+
+    return rollout
+
+
 def main() -> None:
     args = build_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
@@ -782,6 +736,7 @@ def main() -> None:
         args.mpc_config
     )
     effective_text_time = args.text_time if args.text_time is not None else cfg.text_time
+    feedback_text = resolve_feedback_text(args.text, setup.user)
 
     mdm_triggered = False
     pre_mdm_vis: ArmVisualizer | None = None
@@ -799,7 +754,7 @@ def main() -> None:
 
         if cfg.planner == "arm_mpc_mdm":
             traj = gen.generate_left_arm_trajectory(
-                args.text,
+                feedback_text,
                 start_pose=current_pose,
                 save_path=str(args.save_motion) if args.save_motion else None,
                 num_frames=mdm_frames,
@@ -808,14 +763,21 @@ def main() -> None:
             )
         else:
             uq_mpc = cast(LeftArmMPCMDMUQ, mpc)
+            cluster_selector = (
+                (lambda means: choose_cluster(setup.user, cost_context, means))
+                if cfg.uq.user_cluster and setup.user.bounds
+                else None
+            )
             traj = uq_mpc.query_mdm_with_uncertainty(
                 gen,
-                args.text,
+                feedback_text,
                 start_pose=current_pose,
                 current_arm_aa=q,
                 auto_cluster=cfg.uq.auto_cluster,
+                default_scale=cfg.uq.scale,
                 mdm_frames=mdm_frames,
                 frozen_body=args.frozen_body,
+                cluster_selector=cluster_selector,
             )
 
         if cfg.preference_learning:
@@ -851,10 +813,16 @@ def main() -> None:
             # highlighted. Non-UQ planners pass a single path.
             candidate_trajs: dict[int, np.ndarray] | None = None
             highlight_label: int | None = None
+            rejected_trajs: tuple[np.ndarray, ...] = ()
             uqr = getattr(mpc, "last_uq_result", None)
             if uqr is not None:
                 candidate_trajs = uqr.cluster_means
                 highlight_label = uqr.chosen_label
+                rejected_trajs = tuple(
+                    traj
+                    for label, traj in sorted(uqr.cluster_means.items())
+                    if label != uqr.chosen_label
+                )
 
             # Roll the original-goal MPC out (no correction, no generated cost) so
             # the cost generator sees what the arm was driving toward and avoids
@@ -870,16 +838,66 @@ def main() -> None:
                 else None
             )
 
+            # Build the shared context/summaries/images once, then let the
+            # configured backend (llm / turns / agent) generate the cost. All three
+            # are constructed and called identically; only the factory branches.
+            full_correction_traj = _assemble_full_correction_traj(
+                cfg, list(q_history), llm_traj, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
+                body_pos, setup.spine3_pos, spine3_aa,
+            )
+            generated_context = build_generated_cost_context(
+                cost_context, q, llm_traj, list(q_history),
+                window=cfg.preference_window, body_pos=body_pos,
+                reference_traj=reference_traj,
+                full_correction_traj=full_correction_traj,
+                # goal_pos is goals[0] (the gold-star goal the LLM sees); the
+                # reachability check assumes a single Cartesian goal.
+                cartesian_goal=goal_pos,
+                cartesian_threshold=cfg.cartesian.threshold,
+                rejected_trajs=rejected_trajs,
+            )
+            summaries = build_motion_summaries(
+                generated_context, cartesian_goal=goal_pos
+            )
+            run_dir = artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
+            images: dict[str, Path] = {}
+            if cfg.llm_cost.use_images:
+                images = render_prompt_images(
+                    generated_context, run_dir / "images",
+                    candidate_trajs, highlight_label,
+                    reference_traj=reference_traj, goal_pos=goal_pos,
+                )
+
             # Generate synchronously here (the live viz is already closed for the
             # MDM compute, so this adds no extra freeze). The cost is held and
             # installed once the correction trajectory finishes (see _on_post_step).
-            pending_cost = _apply_llm_generated_cost(
-                mpc, args.text, llm_traj, q, list(q_history),
-                cost_context, cfg.llm_cost, artifact_base_dir,
-                cfg.preference_window, body_pos=body_pos, install=False,
-                candidate_trajs=candidate_trajs, highlight_label=highlight_label,
-                reference_traj=reference_traj, goal_pos=goal_pos,
+            cost_eval_rollout = _make_cost_eval_rollout(
+                cfg, q, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
+                body_pos, setup.spine3_pos, spine3_aa,
             )
+            eval_state = EvalState(
+                cfg=cfg,
+                current_q=q,
+                correction_traj=llm_traj,
+                q_history=list(q_history),
+                window=cfg.preference_window,
+                cost_context=cost_context,
+                base_extra_costs=mpc._extra_costs,  # pylint: disable=protected-access
+                body_pos=body_pos,
+                spine3_pos=setup.spine3_pos,
+                spine3_aa=spine3_aa,
+                reference_traj=reference_traj,
+                full_correction_traj=full_correction_traj,
+                cartesian_goal=goal_pos,
+                cartesian_threshold=cfg.cartesian.threshold,
+                rejected_trajs=rejected_trajs,
+            )
+            generator = create_cost_generator(
+                cfg.llm_cost, generated_context, feedback_text,
+                summaries=summaries, run_dir=run_dir, images=images, mpc=mpc,
+                rollout_fn=cost_eval_rollout, eval_state=eval_state,
+            )
+            pending_cost = generator.generate(install=False)
 
         # MDM generation can switch matplotlib to the Agg backend; restore it
         _restore_interactive_backend()
@@ -888,7 +906,7 @@ def main() -> None:
         nonlocal mdm_triggered
         if (
             setup.uses_mdm
-            and args.text
+            and feedback_text
             and step == effective_text_time
             and not mdm_triggered
         ):

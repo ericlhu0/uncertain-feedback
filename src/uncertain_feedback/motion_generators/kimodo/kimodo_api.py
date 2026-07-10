@@ -63,6 +63,7 @@ class KimodoMotionGenerator(MotionGenerator):
         model_path: str | Path | None = None,
         conda_env: str = KIMODO_CONDA_ENV,
         seed: int = 10,
+        num_denoising_steps: int = 100,
     ) -> None:
         super().__init__()
         # ``model_path`` overrides the kimodo model name when given (the builder
@@ -70,6 +71,7 @@ class KimodoMotionGenerator(MotionGenerator):
         self._model_name = str(model_path) if model_path is not None else KIMODO_MODEL
         self._conda_env = conda_env
         self._seed = seed  # forwarded to the worker for reproducible sampling
+        self._num_denoising_steps = num_denoising_steps  # DDIM steps per sample
         self._worker_path = Path(__file__).parent / "_kimodo_inference_worker.py"
         self._python: str | None = None  # resolved kimodo env interpreter
 
@@ -244,6 +246,8 @@ class KimodoMotionGenerator(MotionGenerator):
                 str(out_path),
                 "--seed",
                 str(self._seed),
+                "--num_denoising_steps",
+                str(self._num_denoising_steps),
             ]
             if start_pose is not None:
                 start_positions = self._body_pose_to_visualizer_positions(start_pose)
@@ -251,15 +255,14 @@ class KimodoMotionGenerator(MotionGenerator):
                 np.save(start_positions_path, start_positions)
                 cmd += ["--start_positions_path", str(start_positions_path)]
 
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, check=False, env=_clean_env()
-            )
-            if result.stdout:
-                print(result.stdout, end="")
+            # Inherit stdout/stderr so the worker streams live — in particular
+            # kimodo's tqdm denoising bar (it writes to stderr), which
+            # capture_output would buffer and hide until/unless the run fails.
+            result = subprocess.run(cmd, check=False, env=_clean_env())
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"kimodo worker failed (exit {result.returncode}):\n"
-                    f"{result.stderr}"
+                    f"kimodo worker failed (exit {result.returncode}); "
+                    "see the worker output above."
                 )
             data = np.load(out_path)
             return (

@@ -29,6 +29,18 @@ if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
 
 
+def _as_controlled_arm_aa(value: np.ndarray, name: str) -> np.ndarray:
+    """Return a controlled shoulder/elbow/wrist axis-angle array."""
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.shape != (_N_JOINTS, 3):
+        raise ValueError(
+            f"{name} must have shape (3, 3) for "
+            "[left_shoulder, left_elbow, left_wrist]; "
+            f"left_collar is fixed on SmplLeftArmFK.collar_aa, got {arr.shape}"
+        )
+    return arr
+
+
 @dataclass
 class _VisConfig:
     fk: SmplLeftArmFK
@@ -98,7 +110,7 @@ class SmplLeftArmMPC:
         self._extra_costs = extra_costs or CompositeTrajectoryCost()
 
         self._goals: deque[np.ndarray] = deque(
-            [np.asarray(g, dtype=np.float64) for g in goals] if goals else []
+            [_as_controlled_arm_aa(g, "goal") for g in goals] if goals else []
         )
         self._goal_threshold = goal_threshold
 
@@ -195,12 +207,12 @@ class SmplLeftArmMPC:
 
     def append_goal(self, goal: np.ndarray) -> None:
         """Add a goal to the back of the queue."""
-        self._goals.append(np.asarray(goal, dtype=np.float64))
+        self._goals.append(_as_controlled_arm_aa(goal, "goal"))
 
     def prepend_goal(self, goal: np.ndarray) -> None:
         """Insert a goal at the front of the queue (becomes the immediate next
         target)."""
-        self._goals.appendleft(np.asarray(goal, dtype=np.float64))
+        self._goals.appendleft(_as_controlled_arm_aa(goal, "goal"))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -266,7 +278,7 @@ class SmplLeftArmMPC:
             raise RuntimeError(
                 "Goal queue is empty. Add a goal before calling solve()."
             )
-        current_q = np.asarray(current_q, dtype=np.float64)
+        current_q = _as_controlled_arm_aa(current_q, "current_q")
         target_q = self.current_goal
 
         # Warm-start: shift previous best plan by one step; fill last with zeros
@@ -317,7 +329,9 @@ class SmplLeftArmMPC:
             ``(3, 3)`` updated axis-angle joint angles.
         """
         first_action, _ = self.solve(current_q)
-        next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
+        next_q = _compose_rotvec(
+            _as_controlled_arm_aa(current_q, "current_q"), first_action
+        )
 
         # Advance goal queue when the current goal is reached
         goal = self.current_goal

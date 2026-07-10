@@ -24,6 +24,10 @@ class UqConfig:
     diffusion_samples: int = 128
     n_clusters: int = 3
     auto_cluster: int | None = None
+    scale: float = 1.0
+    # Delegate cluster selection to the configured simulated user (takes effect
+    # only when the user has hidden bounds).
+    user_cluster: bool = False
 
 
 @dataclass(frozen=True)
@@ -33,13 +37,45 @@ class CartesianConfig:
 
 
 @dataclass(frozen=True)
+class TransferConfig:
+    """Held-out goals + trigger settings for the simulated-user transfer experiment."""
+
+    goals: list[list[float]] = field(default_factory=list)
+    trigger_threshold: float = 0.02
+
+
+@dataclass(frozen=True)
+class PersonaGoals:
+    """Per-persona override of the correction goal and transfer goals.
+
+    Each restricted persona needs goals tuned to its own restriction so the
+    default plan visually requires a correction (a frozen-shoulder user needs
+    high goals it cannot reach compliantly; a flexor-synergy user needs
+    high-but-reachable goals that force a straight-vs-bent elbow contrast).
+    """
+
+    cartesian: list[list[float]] = field(default_factory=list)
+    transfer: list[list[float]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class LlmCostConfig:
     enabled: bool = False
     model: str | None = None
     strict: bool = False
     artifact_dir: Path = Path("llm_cost_artifacts")
     use_images: bool = True
-    prompt: str = "2"
+    # Which cost generator to use: "llm" (single-turn, default), "turns"
+    # (multi-turn conversation), or "agent" (delegate to the codex CLI).
+    backend: str = "llm"
+    max_turns: int = 6  # used by the "turns" backend
+    # Used by the "agent" backend. --skip-git-repo-check is required because the
+    # per-generation artifact run dir is not a git repo. Depending on your codex
+    # auth/host you may also need e.g. `-m <model>` and a sandbox flag.
+    codex_cmd: str = "codex exec --skip-git-repo-check"
+
+
+COST_BACKENDS = {"llm", "turns", "agent"}
 
 
 @dataclass(frozen=True)
@@ -59,11 +95,20 @@ class MpcRunConfig:
     costs: dict[str, dict[str, Any]]
     llm_cost: LlmCostConfig
     mdm_frames: int | None = None
+    num_denoising_steps: int | None = None  # kimodo DDIM steps; None = backend default
     text_time: int = 0
     preference_learning: bool = True
     preference_alpha: float = 0.5
     preference_window: int = 50
     motion_generator: str = "mdm"
+    transfer: TransferConfig = TransferConfig()
+    # Simulated-user persona name (see simulated_users.PERSONAS); every run
+    # loads this user alongside the pose.
+    user: str = "unrestricted"
+    # Optional per-persona goal overrides for the transfer experiment, keyed by
+    # persona name. When the active persona is present, its goals replace the
+    # top-level cartesian/transfer goals (see PersonaGoals).
+    persona_goals: dict[str, PersonaGoals] = field(default_factory=dict)
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -119,6 +164,28 @@ def _optional_str(value: Any, name: str) -> str | None:
     return value
 
 
+def _cost_backend(value: Any) -> str:
+    backend = value if value is not None else "llm"
+    if backend not in COST_BACKENDS:
+        raise ValueError(
+            f"llm_cost.backend must be one of {sorted(COST_BACKENDS)}, got {value!r}."
+        )
+    return backend
+
+
+def _goal_list(value: Any, name: str) -> list[list[float]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list.")
+    goals: list[list[float]] = []
+    for idx, goal in enumerate(value):
+        if not isinstance(goal, list) or len(goal) != 3:
+            raise ValueError(f"{name}[{idx}] must be a 3-number list.")
+        goals.append([_float(v, f"{name}[{idx}]") for v in goal])
+    return goals
+
+
 def _str_list(value: Any, name: str) -> list[str]:
     if not isinstance(value, list):
         raise ValueError(f"{name} must be a list of strings.")
@@ -158,16 +225,21 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     cost_data = _mapping(data.get("costs"), "costs")
     llm_cost_data = _mapping(data.get("llm_cost"), "llm_cost")
 
-    goals = cartesian_data.get("goals", [])
-    if goals is None:
-        goals = []
-    if not isinstance(goals, list):
-        raise ValueError("cartesian.goals must be a list.")
-    normalized_goals: list[list[float]] = []
-    for idx, goal in enumerate(goals):
-        if not isinstance(goal, list) or len(goal) != 3:
-            raise ValueError(f"cartesian.goals[{idx}] must be a 3-number list.")
-        normalized_goals.append([_float(v, f"cartesian.goals[{idx}]") for v in goal])
+    normalized_goals = _goal_list(cartesian_data.get("goals", []), "cartesian.goals")
+    transfer_data = _mapping(data.get("transfer"), "transfer")
+    transfer_goals = _goal_list(transfer_data.get("goals", []), "transfer.goals")
+
+    persona_goals: dict[str, PersonaGoals] = {}
+    for persona, goals in _mapping(data.get("persona_goals"), "persona_goals").items():
+        goals_map = _mapping(goals, f"persona_goals.{persona}")
+        persona_goals[persona] = PersonaGoals(
+            cartesian=_goal_list(
+                goals_map.get("cartesian", []), f"persona_goals.{persona}.cartesian"
+            ),
+            transfer=_goal_list(
+                goals_map.get("transfer", []), f"persona_goals.{persona}.transfer"
+            ),
+        )
 
     costs: dict[str, dict[str, Any]] = {}
     cost_names = available_cost_names()
@@ -204,6 +276,10 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 if uq_data.get("auto_cluster") is None
                 else int(uq_data["auto_cluster"])
             ),
+            scale=_float(uq_data.get("scale", 1.0), "uq.scale"),
+            user_cluster=_bool(
+                uq_data.get("user_cluster", False), "uq.user_cluster"
+            ),
         ),
         cartesian=CartesianConfig(
             goals=normalized_goals,
@@ -226,15 +302,26 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             use_images=_bool(
                 llm_cost_data.get("use_images", True), "llm_cost.use_images"
             ),
-            prompt=(
-                _optional_str(llm_cost_data.get("prompt", "2"), "llm_cost.prompt")
-                or "2"
+            backend=_cost_backend(llm_cost_data.get("backend", "llm")),
+            max_turns=_positive_int(
+                llm_cost_data.get("max_turns", 6), "llm_cost.max_turns"
+            ),
+            codex_cmd=(
+                _optional_str(
+                    llm_cost_data.get("codex_cmd", "codex exec"), "llm_cost.codex_cmd"
+                )
+                or "codex exec"
             ),
         ),
         mdm_frames=(
             None
             if data.get("mdm_frames") is None
             else _positive_int(data["mdm_frames"], "mdm_frames")
+        ),
+        num_denoising_steps=(
+            None
+            if data.get("num_denoising_steps") is None
+            else _positive_int(data["num_denoising_steps"], "num_denoising_steps")
         ),
         text_time=int(data.get("text_time", 0)),
         preference_learning=_bool(
@@ -245,4 +332,13 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             data.get("preference_window", 50), "preference_window"
         ),
         motion_generator=motion_generator,
+        user=str(data.get("user", "unrestricted")),
+        persona_goals=persona_goals,
+        transfer=TransferConfig(
+            goals=transfer_goals,
+            trigger_threshold=_float(
+                transfer_data.get("trigger_threshold", 0.02),
+                "transfer.trigger_threshold",
+            ),
+        ),
     )

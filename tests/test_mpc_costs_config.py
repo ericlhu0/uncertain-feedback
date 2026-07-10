@@ -11,6 +11,7 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.experiments import cluster_comparison
+from uncertain_feedback.experiments.transfer_experiment import _choose_oracle_cluster
 from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesian
@@ -45,6 +46,7 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
     ArmMPCCartesianNoMDM,
 )
+from uncertain_feedback.simulated_users import JointBoxLimit, SimulatedUser
 from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
 
@@ -70,6 +72,22 @@ def _cost_context(fk: SmplLeftArmFK) -> MpcCostContext:
         fk=fk,
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3),
+    )
+
+
+def _joint_limit_user() -> SimulatedUser:
+    return SimulatedUser(
+        name="test_user",
+        description="test",
+        feedback_text="keep that joint comfortable",
+        bounds=(),
+        joint_limits=(
+            JointBoxLimit(
+                joint="left_elbow",
+                low=(-1.0, -1.0, -1.0),
+                high=(0.15, 1.0, 1.0),
+            ),
+        ),
     )
 
 
@@ -140,7 +158,8 @@ class _FakeLlmModel:
         self.received_images: list[str] | None = None
 
     def get_full_output(self, text_input: str, image_input=None) -> str:
-        self.received_images = image_input
+        if image_input is not None:
+            self.received_images = image_input
         # image description call — return a plain string
         if "Runtime API" not in text_input:
             return "The arm moves upward in an arc."
@@ -295,6 +314,27 @@ def test_initial_pose_cli_pose_overrides_config_pose(tmp_path) -> None:
 
     assert gen is fake_gen
     np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)
+
+
+def test_arm_override_legacy_shape_fixes_collar(tmp_path) -> None:
+    arm_path = tmp_path / "arm.npy"
+    legacy_arm = np.arange(12, dtype=np.float64).reshape(4, 3)
+    np.save(arm_path, legacy_arm)
+    state = planner_run._InitialPoseState.tpose()
+
+    planner_run._apply_arm_override(state, arm_path)
+
+    np.testing.assert_allclose(state.fixed_collar_aa, legacy_arm[0])
+    np.testing.assert_allclose(state.arm_aa, legacy_arm[1:])
+
+
+def test_arm_override_rejects_unexpected_shape(tmp_path) -> None:
+    arm_path = tmp_path / "arm.npy"
+    np.save(arm_path, np.zeros((5, 3), dtype=np.float64))
+    state = planner_run._InitialPoseState.tpose()
+
+    with pytest.raises(ValueError, match="--arm must contain shape"):
+        planner_run._apply_arm_override(state, arm_path)
 
 
 def test_load_mpc_config_with_elbow_height(tmp_path) -> None:
@@ -491,13 +531,15 @@ def test_elbow_height_cost_penalizes_outside_range() -> None:
 
 
 def test_elbow_flexion_angle_cost_zero_inside_range() -> None:
+    context = _cost_context(SmplLeftArmFK())
     q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    flexion = compute_elbow_flexion_angles(q_trajs[:, 0], context)[0]
     cost = ElbowFlexionAngleCost(
-        min_angle=0.0,
-        max_angle=0.1,
+        min_angle=flexion - 0.01,
+        max_angle=flexion + 0.01,
         weight=100.0,
         progress_weight=100.0,
-        context=_cost_context(SmplLeftArmFK()),
+        context=context,
     )
 
     np.testing.assert_allclose(cost(q_trajs), [0.0])
@@ -567,16 +609,21 @@ def test_compute_elbow_heights_uses_joint_before_wrist() -> None:
     assert not np.isclose(learned_height, wrist_height)
 
 
-def test_compute_elbow_flexion_angles_uses_elbow_joint_row() -> None:
+def test_compute_elbow_flexion_angles_measures_arm_bend() -> None:
     context = _cost_context(SmplLeftArmFK())
-    trajectory = np.zeros((1, 3, 3), dtype=np.float64)
-    trajectory[0, 0, 2] = 2.0
-    trajectory[0, 1, 0] = 0.3
-    trajectory[0, 2, 1] = 4.0
+    neutral = np.zeros((1, 3, 3), dtype=np.float64)
+    bent = np.zeros((1, 3, 3), dtype=np.float64)
+    bent[0, 2, 1] = 1.5  # wrist slot bends the forearm relative to the upper arm
+    reoriented = np.zeros((1, 3, 3), dtype=np.float64)
+    reoriented[0, 0, 2] = 2.0  # shoulder slot: moves the whole arm, no bend
+    reoriented[0, 1, 0] = 0.3  # elbow slot: reorients the upper arm, no bend
 
-    learned_flexion = compute_elbow_flexion_angles(trajectory, context)[0]
+    neutral_angle = compute_elbow_flexion_angles(neutral, context)[0]
+    bent_angle = compute_elbow_flexion_angles(bent, context)[0]
+    reoriented_angle = compute_elbow_flexion_angles(reoriented, context)[0]
 
-    np.testing.assert_allclose(learned_flexion, 0.3)
+    assert bent_angle > neutral_angle + 1.0
+    np.testing.assert_allclose(reoriented_angle, neutral_angle)
 
 
 def test_compute_shoulder_abduction_angles_changes_with_upper_arm_direction() -> None:
@@ -1046,6 +1093,14 @@ def test_mdm_push_trajectory_stores_full_trajectory_for_playback() -> None:
     np.testing.assert_allclose(mpc._goals[0], final_goal)
 
 
+def test_mdm_push_trajectory_rejects_collar_row() -> None:
+    mpc = LeftArmMPCMDM(goals=[np.zeros((3, 3), dtype=np.float64)])
+    frames = np.zeros((2, 4, 3), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="left_collar is fixed"):
+        mpc.push_trajectory(frames)
+
+
 def test_mdm_playback_smooth_frames_advance_one_per_step() -> None:
     # Consecutive frames differ by 0.1 rad on the shoulder; with a generous cap
     # each is reached in a single step (smooth motion is not slowed).
@@ -1171,12 +1226,14 @@ def test_mdm_validate_trajectory_warns_on_range_violation() -> None:
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3, dtype=np.float64),
     )
-    # Constrain elbow flexion to a tight range; a large elbow rotation violates it.
+    # Constrain elbow flexion to a tight range around the neutral bend; a large
+    # forearm bend (wrist slot) violates it.
+    neutral = compute_elbow_flexion_angles(np.zeros((1, 3, 3)), context)[0]
     extra_costs = CompositeTrajectoryCost(
         [
             ElbowFlexionAngleCost(
-                min_angle=0.0,
-                max_angle=0.1,
+                min_angle=neutral - 0.05,
+                max_angle=neutral + 0.05,
                 weight=1.0,
                 progress_weight=1.0,
                 context=context,
@@ -1189,7 +1246,7 @@ def test_mdm_validate_trajectory_warns_on_range_violation() -> None:
     assert mpc.validate_trajectory(safe) == []
 
     violating = np.zeros((4, 3, 3), dtype=np.float64)
-    violating[2, 1, 0] = 1.5  # large elbow axis-angle on frame 2
+    violating[2, 2, 1] = 1.5  # large forearm bend on frame 2
     warnings = mpc.validate_trajectory(violating)
     assert len(warnings) == 1
     assert "elbow_flexion_angle" in warnings[0]
@@ -1252,6 +1309,40 @@ def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
     np.testing.assert_allclose(chosen, result.chosen_mean)
 
 
+def test_transfer_oracle_cluster_selection_uses_scaled_raw_options() -> None:
+    context = _cost_context(SmplLeftArmFK())
+    safe = np.zeros((3, 3, 3), dtype=np.float64)
+    unsafe = np.zeros((3, 3, 3), dtype=np.float64)
+    safe[:, 1, 0] = [0.0, 0.04, 0.08]
+    unsafe[:, 1, 0] = [0.0, 0.4, 0.6]
+
+    chosen, scores = _choose_oracle_cluster(
+        _joint_limit_user(),
+        context,
+        {5: unsafe, 2: safe},
+        scale=0.5,
+    )
+
+    assert chosen == 2
+    assert scores[2] == pytest.approx(0.0)
+    assert scores[5] > scores[2]
+
+
+def test_transfer_oracle_cluster_selection_tiebreaks_by_label() -> None:
+    context = _cost_context(SmplLeftArmFK())
+    cluster = np.zeros((3, 3, 3), dtype=np.float64)
+
+    chosen, scores = _choose_oracle_cluster(
+        _joint_limit_user(),
+        context,
+        {7: cluster, 3: cluster.copy()},
+        scale=0.5,
+    )
+
+    assert chosen == 3
+    assert scores[3] == pytest.approx(scores[7])
+
+
 def test_no_mdm_cartesian_mpc_adds_extra_costs() -> None:
     fk = SmplLeftArmFK()
     q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
@@ -1290,7 +1381,7 @@ llm_cost:
 
 
 def test_llm_artifact_run_dir_resolves_relative_to_base_dir(tmp_path) -> None:
-    run_dir = planner_run._llm_artifact_run_dir(
+    run_dir = planner_run.artifact_run_dir(
         tmp_path,
         Path("llm_cost_artifacts"),
     )
@@ -1564,24 +1655,28 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
         artifact_dir=tmp_path / "artifacts",
     )
 
-    generated = planner_run._apply_llm_generated_cost(
-        mpc,
-        "raise the elbow",
-        mdm_traj,
-        np.zeros((3, 3), dtype=np.float64),
-        [],
-        context,
+    run_dir = planner_run.artifact_run_dir(tmp_path, llm_cfg.artifact_dir)
+    summaries = build_motion_summaries(generated_context)
+    images = render_prompt_images(generated_context, run_dir / "images")
+    generator = planner_run.create_cost_generator(
         llm_cfg,
-        tmp_path,
-        history_window=5,
+        generated_context,
+        "raise the elbow",
+        summaries=summaries,
+        run_dir=run_dir,
+        images=images,
+        mpc=mpc,
         llm_model_factory=lambda _model_name: fake_model,
     )
+    generated = generator.generate(install=True)
 
     assert generated is not None
     assert len(mpc._extra_costs.terms()) == 1
     artifact_dirs = list((tmp_path / "artifacts").iterdir())
     assert len(artifact_dirs) == 1
-    assert (artifact_dirs[0] / "prompt.txt").exists()
+    assert (artifact_dirs[0] / "interpret_prompt.txt").exists()
+    assert (artifact_dirs[0] / "ground_prompt.txt").exists()
+    assert (artifact_dirs[0] / "author_prompt.txt").exists()
     assert (artifact_dirs[0] / "cost.py").exists()
     assert (artifact_dirs[0] / "recipient_explanation.txt").read_text(
         encoding="utf-8"
@@ -1645,7 +1740,9 @@ llm_cost:
         body_pos=None,
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3, dtype=np.float64),
+        initial_q=np.zeros((3, 3), dtype=np.float64),
         llm_model_factory=lambda _model_name: fake_model,
+        user=_joint_limit_user(),
     )
 
     assert selected is not None
@@ -1657,7 +1754,9 @@ llm_cost:
     assert (root / "selected_cluster.txt").read_text(encoding="utf-8").strip() == "1"
     for label in (0, 1):
         cluster_dir = root / f"cluster_{label}"
-        assert (cluster_dir / "prompt.txt").exists()
+        assert (cluster_dir / "interpret_prompt.txt").exists()
+        assert (cluster_dir / "ground_prompt.txt").exists()
+        assert (cluster_dir / "author_prompt.txt").exists()
         assert (cluster_dir / "cost.py").exists()
         assert (cluster_dir / "rollout.npy").exists()
         assert (cluster_dir / "metrics.json").exists()
@@ -1670,6 +1769,12 @@ llm_cost:
     assert set(summary["clusters"]) == {"0", "1"}
     assert summary["clusters"]["0"]["validation"]["ok"] is True
     assert summary["clusters"]["1"]["rollout_metrics"]["steps_completed"] == 2
+    for label in ("0", "1"):
+        evaluation = summary["clusters"][label]["hidden_cost_evaluation"]
+        assert set(evaluation) == {"base", "oracle", "generated"}
+        for condition in evaluation.values():
+            assert "mean_violation" in condition["goal_0"]
+            assert "goal_reach" in condition["goal_0"]
 
 
 def test_planning_loop_stops_when_cartesian_goal_reached() -> None:

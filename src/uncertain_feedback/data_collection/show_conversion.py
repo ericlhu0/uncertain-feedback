@@ -44,7 +44,6 @@ from uncertain_feedback.data_collection.smpl_to_hml263 import (
     load_hml_stats,
     positions_to_hml263,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.utils.plot import ArmVisualizer
 
 _LEFT_ARM_JOINTS = {13, 16, 18, 20}
@@ -131,20 +130,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         type=int,
         help="Number of evenly-spaced frames to show (default: 3)",
     )
-    parser.add_argument(
-        "--smpl_model_path",
-        default=None,
-        type=Path,
-        help="Path to SMPL_NEUTRAL.pkl for loading T-pose joint positions.",
-    )
     args = parser.parse_args()
-
-    smpl_pkl = (
-        Path(args.smpl_model_path).expanduser()
-        if args.smpl_model_path
-        else Path("~/MHR/tools/mhr_smpl_conversion/data/SMPL_NEUTRAL.pkl").expanduser()
-    )
-    tpose_22 = SmplLeftArmFK(smpl_pkl).tpose_all_joints  # (22, 3)
 
     # Load inference output
     data = np.load(args.npz_path, allow_pickle=True)
@@ -157,8 +143,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         positions=data["smpl_positions"],
         mean=mean,
         std=std,
-        tpose_22=tpose_22,
-    )  # (N, 263) normalized
+    )  # (N-1, 263) normalized
     positions = _hml263_to_local_positions(features, mean, std)  # (N, 22, 3)
 
     n_total = len(features)

@@ -6,6 +6,7 @@ Runtime API:
   context.elbow_flexion_angles(q_trajs)
   context.shoulder_flexion_extension_angles(q_trajs)
   context.shoulder_abduction_adduction_angles(q_trajs)
+  context.shoulder_elevation_angles(q_trajs)
   context.shoulder_internal_external_rotation_angles(q_trajs)
   Each accepts any array ending in (3, 3), including q_trajs[:, 1:] or
   context.mdm_traj, and returns the matching leading shape. Values are radians.
@@ -13,7 +14,13 @@ Runtime API:
   in the spine3 frame: flexion/extension is signed upper-arm movement along
   the z axis, abduction/adduction is signed lateral upper-arm movement along
   the x axis (positive is away from the torso for the left arm), and
-  internal/external rotation is signed twist around the T-pose upper-arm axis.
+  internal/external rotation is signed twist around the T-pose upper-arm axis
+  (positive = internal rotation, twisting the forearm toward the body midline;
+  negative = external rotation).
+  shoulder_elevation is total upper-arm elevation from straight down (0 = arm
+  hanging at side, pi/2 = horizontal, pi = overhead); it increases when the arm
+  is raised in any direction and is the only feature that can express a height
+  limit independent of whether the arm was raised forward or sideways.
 - Raw joint indexing is also allowed for advanced cases: q_trajs[:, :, 0, :]
   is left_shoulder, q_trajs[:, :, 1, :] is left_elbow, and q_trajs[:, :, 2, :]
   is left_wrist. The final dimension is a 3D local axis-angle rotation vector,
@@ -22,6 +29,10 @@ Runtime API:
   in the SMPL/HML state, but this simplified arm model has no hand joint beyond
   the wrist, so use wrist joint-angle terms only when a wrist-rotation
   preference is clearly implied.
+- The Cartesian/position helpers below (fk_rollouts, mdm_positions,
+  current_positions, joint_index, ...) are provided to help you UNDERSTAND the
+  correction. The returned cost itself must stay joint-space (see Hard
+  requirements): do not use these position outputs to compute it.
 - context.fk_rollouts(q_trajs) returns positions with shape
   (n_rollouts, horizon + 1, 5, 3) for spine3, left_collar, left_shoulder,
   left_elbow, left_wrist.

@@ -46,8 +46,16 @@ from uncertain_feedback.data_collection.mhr_pose_estimator import MhrEstimatorCo
 from uncertain_feedback.data_collection.mhr_to_hml263_pipeline import (
     MhrToHml263Config,
     MhrToHml263Pipeline,
+    resample_positions,
 )
-from uncertain_feedback.data_collection.smpl_to_hml263 import load_hml_stats
+from uncertain_feedback.data_collection.smpl_to_hml263 import (
+    load_hml_stats,
+    positions_to_hml263,
+)
+
+# Bump whenever the pose-estimation / camera-to-world conversion changes so
+# stale cache entries (e.g. pre-chirality-fix mirrored data) are never reused.
+_CACHE_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Text annotation helpers
@@ -79,31 +87,26 @@ _MDM_MIN_FRAMES = 50
 _MDM_MAX_FRAMES = 190
 
 
-def _resample_hml263(hml263: np.ndarray) -> tuple[np.ndarray, bool]:
-    """Resample *hml263* so its length falls in [_MDM_MIN_FRAMES, _MDM_MAX_FRAMES].
+def _clamp_positions_length(positions: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Resample positions so the resulting feature length is in MDM's range.
 
-    Sequences shorter than the minimum are linearly interpolated up to the
-    minimum.  Sequences longer than the maximum are uniformly subsampled down
-    to the maximum.  Sequences already in range are returned unchanged.
+    ``positions_to_hml263`` yields ``N-1`` feature frames for ``N`` position
+    frames, so positions are clamped to ``[_MDM_MIN_FRAMES + 1,
+    _MDM_MAX_FRAMES + 1]``.  Resampling positions (rather than features) keeps
+    velocity and foot-contact features consistent with the final frame timing.
 
     Args:
-        hml263: Float32 array of shape ``(N, 263)``.
+        positions: ``(N, 22, 3)`` joint positions.
 
     Returns:
         Tuple of the (possibly resampled) array and a boolean that is ``True``
         when resampling was applied.
     """
-    n = len(hml263)
-    if _MDM_MIN_FRAMES <= n <= _MDM_MAX_FRAMES:
-        return hml263, False
-    target = _MDM_MIN_FRAMES if n < _MDM_MIN_FRAMES else _MDM_MAX_FRAMES
-    old_t = np.linspace(0, 1, n)
-    new_t = np.linspace(0, 1, target)
-    resampled = np.stack(
-        [np.interp(new_t, old_t, hml263[:, i]) for i in range(hml263.shape[1])],
-        axis=1,
-    ).astype(np.float32)
-    return resampled, True
+    n = len(positions)
+    if _MDM_MIN_FRAMES + 1 <= n <= _MDM_MAX_FRAMES + 1:
+        return positions, False
+    target = _MDM_MIN_FRAMES + 1 if n < _MDM_MIN_FRAMES + 1 else _MDM_MAX_FRAMES + 1
+    return resample_positions(positions, target), True
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +180,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
     labels: dict[str, list[dict[str, Any]]],
     output_dir: Path,
     pipeline: MhrToHml263Pipeline,
+    hml_mean: np.ndarray,
     hml_std: np.ndarray,
     nlp: Language,
     val_fraction: float,
@@ -198,6 +202,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             ``start_frame`` (int), ``end_frame`` (int), and ``caption`` (str).
         output_dir: Root directory to write the dataset into.
         pipeline: Configured :class:`MhrToHml263Pipeline` instance.
+        hml_mean: HumanML3D mean vector ``(263,)``.
         hml_std: HumanML3D std vector ``(263,)`` for converting augmentation
             noise from normalized space to raw HML space.
         nlp: Loaded spaCy ``Language`` model for POS tagging.
@@ -208,12 +213,13 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             values so the training data is consistent with fixed-body inference.
         n_augment: Number of additional noisy copies to save per trajectory.
             Each copy adds Gaussian noise (std=*noise_std*) to the arm features.
-        noise_std: Standard deviation of the noise added to all HML263 features
-            during augmentation, in normalized space.
-        cache_dir: Directory to cache raw HML263 pipeline outputs. When provided,
-            the raw ``pipeline.run()`` result for each ``(clip, start, end, fps)``
-            is saved as a ``.npy`` file so future runs skip re-running pose
-            estimation. Defaults to ``frames_dir.parent / "mdm_cache"``.
+        noise_std: Standard deviation of the noise added to the arm HML263
+            features during augmentation, in normalized space.
+        cache_dir: Directory to cache pose-estimation outputs. When provided,
+            the ``(N, 22, 3)`` joint positions for each ``(clip, start, end,
+            fps)`` are saved as a version-tagged ``.npy`` file so future runs
+            skip re-running pose estimation. Defaults to
+            ``frames_dir.parent / "mdm_cache"``.
     """
     (output_dir / "new_joint_vecs").mkdir(parents=True, exist_ok=True)
     (output_dir / "texts").mkdir(parents=True, exist_ok=True)
@@ -262,10 +268,14 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             print(f"[{id_str}] {clip_name}  f{start_frame}-f{end_frame}{caption_note} ...")
 
             fps_tag = f"{clip_fps:.4g}".replace(".", "p")
-            cache_file = cache_dir / clip_name / f"{start_frame:06d}_{end_frame:06d}_fps{fps_tag}.npy"
+            cache_file = (
+                cache_dir
+                / clip_name
+                / f"{start_frame:06d}_{end_frame:06d}_fps{fps_tag}_v{_CACHE_VERSION}.npy"
+            )
 
             if cache_file.exists():
-                hml263_raw = np.load(cache_file)
+                positions = np.load(cache_file)  # (N, 22, 3)
                 n_frames = end_frame - start_frame + 1
                 print(f"  (cache hit: {cache_file.relative_to(cache_dir)})")
             else:
@@ -281,16 +291,21 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                             print("  ✗ no frames found in range — skipping")
                             motion_id -= 1
                             continue
-                        hml263_raw = pipeline.run(Path(tmp_dir), source_fps=clip_fps)  # (N, 263) raw HML263
+                        positions = pipeline.run_to_smpl_positions(
+                            Path(tmp_dir), source_fps=clip_fps
+                        )  # (N, 22, 3) at 20 FPS
                     except Exception as exc:  # pylint: disable=broad-except
                         print(f"  ✗ pipeline failed ({exc}) — skipping")
                         motion_id -= 1
                         continue
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
-                np.save(cache_file, hml263_raw)
+                np.save(cache_file, positions)
 
             try:
-                hml263, resampled = _resample_hml263(hml263_raw)
+                positions, resampled = _clamp_positions_length(positions)
+                hml263 = positions_to_hml263(
+                    positions, hml_mean, hml_std, normalize=False
+                )  # (N-1, 263) raw HML263
                 if fix_body:
                     hml263 = _lock_body_to_frame0(hml263)
             except Exception as exc:  # pylint: disable=broad-except
@@ -304,7 +319,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             print(f"  ✓ frames={n_frames}, hml263={hml263.shape}{resample_note}")
             successful_ids.append(id_str)
 
-            # Noisy augmentations — perturb all features around the base trajectory
+            # Noisy augmentations — perturb arm features around the base trajectory
             aug_rng = np.random.default_rng(seed + motion_id)
             for _ in range(n_augment):
                 motion_id += 1
@@ -312,11 +327,10 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                 hml263_aug = hml263.copy()
                 # Keep --noise_std semantics in normalized space while storing
                 # raw vectors: scale Gaussian noise by per-feature Std.
-                noise_norm = aug_rng.standard_normal(hml263.shape).astype(np.float32)
-                hml263_aug += noise_norm * noise_std * hml_std
-                # Re-lock body so it stays static (at a slightly noisy pose)
-                if fix_body:
-                    hml263_aug = _lock_body_to_frame0(hml263_aug)
+                noise_norm = aug_rng.standard_normal(
+                    (len(hml263), int(arm_mask.sum()))
+                ).astype(np.float32)
+                hml263_aug[:, arm_mask] += noise_norm * noise_std * hml_std[arm_mask]
                 np.save(
                     output_dir / "new_joint_vecs" / f"{aug_id_str}.npy", hml263_aug
                 )
@@ -442,8 +456,8 @@ def main() -> None:  # pylint: disable=too-many-locals
         type=float,
         default=0.05,
         help=(
-            "Std-dev of noise added to all HML263 features per augmentation copy, "
-            "in normalized space (default: 0.05)."
+            "Std-dev of noise added to the arm HML263 features per augmentation "
+            "copy, in normalized space (default: 0.05)."
         ),
     )
     parser.add_argument(
@@ -492,7 +506,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         output_normalized=False,
     )
     pipeline = MhrToHml263Pipeline(config)
-    _, hml_std = load_hml_stats(hml_stats_dir)
+    hml_mean, hml_std = load_hml_stats(hml_stats_dir)
 
     # Load spaCy
     print("Loading spaCy model ...")
@@ -504,6 +518,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         labels=labels,
         output_dir=output_dir,
         pipeline=pipeline,
+        hml_mean=hml_mean,
         hml_std=hml_std,
         nlp=nlp,
         val_fraction=args.val_fraction,

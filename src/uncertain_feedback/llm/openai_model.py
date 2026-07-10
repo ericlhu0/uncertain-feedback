@@ -18,6 +18,7 @@ class OpenAIModel(BaseModel):
         system_prompt: str,
         temperature: float = 1,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
         api_mode: Literal["auto", "chat", "responses"] = "auto",
     ):
         """Initialize OpenAI model.
@@ -29,6 +30,7 @@ class OpenAIModel(BaseModel):
             system_prompt: System prompt prepended to every request.
             temperature: Sampling temperature.
             max_tokens: Maximum tokens in the response.
+            reasoning_effort: Optional reasoning effort for the Responses API.
             api_mode: API surface for full-output requests. ``auto`` uses the
                 Responses API for GPT-5-family models and Chat Completions for
                 older models.
@@ -36,6 +38,7 @@ class OpenAIModel(BaseModel):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.system_prompt = system_prompt
         self.api_mode = api_mode
         self.client = OpenAI(
@@ -123,6 +126,70 @@ class OpenAIModel(BaseModel):
             return self._get_responses_output(text_input, image_input)
         return self._get_chat_output(text_input, image_input)
 
+    def converse(self, messages: List[Dict[str, Any]]) -> str:
+        """Send a multi-turn conversation and return the assistant reply.
+
+        Each message is ``{"role": "user"|"assistant", "text": str,
+        "images": Optional[List[str]]}``. Image paths are only honored on ``user``
+        turns. The system prompt is prepended automatically. State is held by the
+        caller (this method is stateless); pass the growing message list each turn.
+        """
+        if self._use_responses_api():
+            return self._converse_responses(messages)
+        return self._converse_chat(messages)
+
+    def _converse_chat(self, messages: List[Dict[str, Any]]) -> str:
+        api_messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt}
+        ]
+        for msg in messages:
+            if msg["role"] == "user":
+                content: Any = self._create_prompt(
+                    msg["text"], msg.get("images")
+                )
+            else:
+                content = msg["text"]
+            api_messages.append({"role": msg["role"], "content": content})
+        request: dict[str, Any] = {
+            "model": self.model,
+            "messages": cast(Any, api_messages),
+            "temperature": self.temperature,
+        }
+        if self.max_tokens is not None:
+            request[self._chat_token_limit_name()] = self.max_tokens
+        response = self.client.chat.completions.create(**request)
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError("OpenAI API returned None content")
+        return content
+
+    def _converse_responses(self, messages: List[Dict[str, Any]]) -> str:
+        api_input: List[Dict[str, Any]] = []
+        for msg in messages:
+            if msg["role"] == "user":
+                content = self._create_responses_input(
+                    msg["text"], msg.get("images")
+                )[0]["content"]
+            else:
+                content = [{"type": "output_text", "text": msg["text"]}]
+            api_input.append({"role": msg["role"], "content": content})
+        request = {
+            "model": self.model,
+            "instructions": self.system_prompt,
+            "input": cast(Any, api_input),
+        }
+        if self.reasoning_effort is None:
+            request["temperature"] = self.temperature
+        if self.reasoning_effort is not None:
+            request["reasoning"] = {"effort": self.reasoning_effort}
+        if self.max_tokens is not None:
+            request["max_output_tokens"] = self.max_tokens
+        response = self.client.responses.create(**request)
+        output_text = getattr(response, "output_text", None)
+        if isinstance(output_text, str):
+            return output_text
+        raise ValueError("OpenAI Responses API returned no output_text")
+
     def _get_responses_output(
         self,
         text_input: str,
@@ -132,8 +199,11 @@ class OpenAIModel(BaseModel):
             "model": self.model,
             "instructions": self.system_prompt,
             "input": self._create_responses_input(text_input, image_input),
-            "temperature": self.temperature,
         }
+        if self.reasoning_effort is None:
+            request["temperature"] = self.temperature
+        if self.reasoning_effort is not None:
+            request["reasoning"] = {"effort": self.reasoning_effort}
         if self.max_tokens is not None:
             request["max_output_tokens"] = self.max_tokens
         response = self.client.responses.create(**request)

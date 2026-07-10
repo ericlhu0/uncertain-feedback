@@ -16,7 +16,6 @@ backend fixed and varies the UQ cluster.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import math
 from pathlib import Path
@@ -27,25 +26,16 @@ import numpy as np
 from uncertain_feedback.planners.mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
-    EvalState,
     MpcCostContext,
     artifact_run_dir,
-    build_generated_cost_context,
-    build_motion_summaries,
-    create_cost_generator,
     evaluate_candidate_cost,
-    render_prompt_images,
 )
+from uncertain_feedback.experiments.experiment_pipeline import generate_cost_for_cluster
 from uncertain_feedback.experiments.cluster_comparison import (
     _read_json_if_exists,
     _render_rollout_video,
     _run_cluster_comparison_rollout,
     _run_initial_state_rollout,
-)
-from uncertain_feedback.planners.run import (
-    _assemble_full_correction_traj,
-    _make_cost_eval_rollout,
-    _rollout_reference_trajectory,
 )
 
 
@@ -94,50 +84,6 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
     base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
     rollout_steps = max(1, rollout_steps)
 
-    # Correction-independent across backends: compute once and share.
-    reference_traj = _rollout_reference_trajectory(
-        cfg, current_q, context, base_extra_costs, body_pos, spine3_pos, spine3_aa,
-    )
-    goal_pos = (
-        np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-        if reference_traj is not None and cfg.cartesian.goals
-        else None
-    )
-    full_correction_traj = _assemble_full_correction_traj(
-        cfg, q_history, correction_traj, context, base_extra_costs,
-        body_pos, spine3_pos, spine3_aa,
-    )
-    generated_context = build_generated_cost_context(
-        context, current_q, correction_traj, q_history, window=history_window,
-        body_pos=body_pos, reference_traj=reference_traj,
-        full_correction_traj=full_correction_traj,
-    )
-    summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
-    images: dict[str, Path] = {}
-    if cfg.llm_cost.use_images:
-        images = render_prompt_images(
-            generated_context, root_dir / "images",
-            reference_traj=reference_traj, goal_pos=goal_pos,
-        )
-
-    rollout_fn = _make_cost_eval_rollout(
-        cfg, current_q, context, base_extra_costs, body_pos, spine3_pos, spine3_aa,
-    )
-    eval_state = EvalState(
-        cfg=cfg,
-        current_q=current_q,
-        correction_traj=correction_traj,
-        q_history=q_history,
-        window=history_window,
-        cost_context=context,
-        base_extra_costs=base_extra_costs,
-        body_pos=body_pos,
-        spine3_pos=spine3_pos,
-        spine3_aa=spine3_aa,
-        reference_traj=reference_traj,
-        full_correction_traj=full_correction_traj,
-    )
-
     cartesian_goal = (
         np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian.goals else None
     )
@@ -158,16 +104,26 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
 
     for backend in backends:
         backend_dir = root_dir / backend
-        cfg_backend = dataclasses.replace(
-            cfg, llm_cost=dataclasses.replace(cfg.llm_cost, backend=backend)
-        )
-        generator = create_cost_generator(
-            cfg_backend.llm_cost, generated_context, instruction,
-            summaries=summaries, run_dir=backend_dir, images=images, mpc=mpc,
-            rollout_fn=rollout_fn, eval_state=eval_state,
+        cost_result = generate_cost_for_cluster(
+            mpc=mpc,
+            cfg=cfg,
+            instruction=instruction,
+            cluster_traj=correction_traj,
+            current_q=current_q,
+            q_history=q_history,
+            context=context,
+            base_extra_costs=base_extra_costs,
+            cost_dir=backend_dir,
+            body_pos=body_pos,
+            spine3_pos=spine3_pos,
+            spine3_aa=spine3_aa,
+            backend=backend,
+            history_window=history_window,
+            install=False,
             save_candidate_videos=save_video,
+            log_prefix="[backend-compare]",
         )
-        generated = generator.generate(install=False)
+        generated = cost_result.generated_cost
         validation = _read_json_if_exists(backend_dir / "validation.json")
         params = _read_json_if_exists(backend_dir / "params.json")
         entry: dict[str, Any] = {
@@ -194,7 +150,11 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
             _write_backend_summary(root_dir, summary)
             continue
 
-        score, _ = evaluate_candidate_cost(generated_context, generated, rollout_fn)
+        score, _ = evaluate_candidate_cost(
+            cost_result.generated_context,
+            generated,
+            cost_result.eval_state.make_rollout_fn(),
+        )
         entry["score"] = _finite_or_none(score)
         print(f"[backend-compare] {backend}: score={score:.4f}")
 

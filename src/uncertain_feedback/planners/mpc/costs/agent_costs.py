@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -205,26 +206,75 @@ class AgentCostGenerator(CostGenerator):
 
     def _run_codex(self) -> None:
         cmd = shlex.split(self.codex_cmd) + [_CODEX_INSTRUCTION]
+        log_path = self.run_dir / "codex.log"
+        cmd_line = shlex.join(cmd)
+        start = time.perf_counter()
+        returncode: int | None = None
+        completed_from_outputs = False
+        print(f"[cost-gen][agent] starting codex: {cmd_line}", flush=True)
+        print(f"[cost-gen][agent] live log: {log_path}", flush=True)
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.run_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            with open(log_path, "w", encoding="utf-8") as log:
+                log.write("$ " + cmd_line + "\n\n")
+                log.flush()
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=self.run_dir,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                while True:
+                    try:
+                        returncode = process.wait(timeout=30.0)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if self._required_outputs_exist():
+                            completed_from_outputs = True
+                            message = (
+                                "[cost-gen][agent] required outputs are present "
+                                "but codex is still running; terminating child"
+                            )
+                            print(message, flush=True)
+                            log.write(f"\n\n{message}\n")
+                            log.flush()
+                            process.terminate()
+                            try:
+                                returncode = process.wait(timeout=5.0)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                returncode = process.wait(timeout=5.0)
+                            break
+                        print(
+                            "[cost-gen][agent] codex still running "
+                            f"({time.perf_counter() - start:.0f}s); "
+                            f"log: {log_path}",
+                            flush=True,
+                        )
+                log.flush()
         except FileNotFoundError as exc:
             raise GeneratedCostValidationError(
                 f"codex CLI not found (command: {self.codex_cmd!r}). Install codex "
                 "or set llm_cost.codex_cmd to its path."
             ) from exc
-        log_text = "$ " + shlex.join(cmd) + "\n\n"
-        log_text += (result.stdout or "") + (result.stderr or "")
-        (self.run_dir / "codex.log").write_text(log_text, encoding="utf-8")
-        if result.returncode != 0:
+        print(
+            f"[cost-gen][agent] codex finished in "
+            f"{time.perf_counter() - start:.1f}s (exit {returncode})",
+            flush=True,
+        )
+        if returncode is None:
+            raise GeneratedCostValidationError("codex did not report an exit code.")
+        if returncode != 0 and not completed_from_outputs:
             raise GeneratedCostValidationError(
-                f"codex exited with code {result.returncode}; see codex.log"
+                f"codex exited with code {returncode}; see codex.log"
             )
+
+    def _required_outputs_exist(self) -> bool:
+        if not (self.run_dir / _RESPONSE_FILE).exists():
+            return False
+        if not (self.run_dir / _STAGE_LOG_FILE).exists():
+            return False
+        return not self.use_images or (self.run_dir / _ITERATION_LOG_FILE).exists()
 
     def _record_stage_log(self) -> None:
         stage_log_path = self.run_dir / _STAGE_LOG_FILE

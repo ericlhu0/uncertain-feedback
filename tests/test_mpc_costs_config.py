@@ -11,6 +11,7 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.experiments import cluster_comparison
+from uncertain_feedback.experiments.transfer_experiment import _choose_oracle_cluster
 from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesian
@@ -45,6 +46,7 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
     ArmMPCCartesianNoMDM,
 )
+from uncertain_feedback.simulated_users import JointBoxLimit, SimulatedUser
 from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
 
@@ -70,6 +72,22 @@ def _cost_context(fk: SmplLeftArmFK) -> MpcCostContext:
         fk=fk,
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3),
+    )
+
+
+def _joint_limit_user() -> SimulatedUser:
+    return SimulatedUser(
+        name="test_user",
+        description="test",
+        feedback_text="keep that joint comfortable",
+        bounds=(),
+        joint_limits=(
+            JointBoxLimit(
+                joint="left_elbow",
+                low=(-1.0, -1.0, -1.0),
+                high=(0.15, 1.0, 1.0),
+            ),
+        ),
     )
 
 
@@ -1289,6 +1307,40 @@ def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
     np.testing.assert_allclose(result.cluster_means[0], np.full((3, 3, 3), 0.1))
     np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
     np.testing.assert_allclose(chosen, result.chosen_mean)
+
+
+def test_transfer_oracle_cluster_selection_uses_scaled_raw_options() -> None:
+    context = _cost_context(SmplLeftArmFK())
+    safe = np.zeros((3, 3, 3), dtype=np.float64)
+    unsafe = np.zeros((3, 3, 3), dtype=np.float64)
+    safe[:, 1, 0] = [0.0, 0.04, 0.08]
+    unsafe[:, 1, 0] = [0.0, 0.4, 0.6]
+
+    chosen, scores = _choose_oracle_cluster(
+        _joint_limit_user(),
+        context,
+        {5: unsafe, 2: safe},
+        scale=0.5,
+    )
+
+    assert chosen == 2
+    assert scores[2] == pytest.approx(0.0)
+    assert scores[5] > scores[2]
+
+
+def test_transfer_oracle_cluster_selection_tiebreaks_by_label() -> None:
+    context = _cost_context(SmplLeftArmFK())
+    cluster = np.zeros((3, 3, 3), dtype=np.float64)
+
+    chosen, scores = _choose_oracle_cluster(
+        _joint_limit_user(),
+        context,
+        {7: cluster, 3: cluster.copy()},
+        scale=0.5,
+    )
+
+    assert chosen == 3
+    assert scores[3] == pytest.approx(scores[7])
 
 
 def test_no_mdm_cartesian_mpc_adds_extra_costs() -> None:

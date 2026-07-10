@@ -30,19 +30,14 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
     MpcCostContext,
 )
+from uncertain_feedback.experiments.experiment_pipeline import generate_cost_for_cluster
 from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.mpc.costs import (
     artifact_run_dir,
-    build_generated_cost_context,
-    build_motion_summaries,
-    create_cost_generator,
-    render_prompt_images,
 )
 from uncertain_feedback.planners.mpc.costs.cost_generator import _make_llm_model
 from uncertain_feedback.planners.run import (
     _append_extra_cost,
-    _assemble_full_correction_traj,
-    _rollout_reference_trajectory,
     run_planning_loop,
 )
 
@@ -284,18 +279,6 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
     base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
     rollout_steps = max(1, rollout_steps)
 
-    # The original-goal reference is cluster-independent — compute it once (no MDM
-    # correction, no generated cost) and attach it to every cluster's generation so
-    # each cost can be kept from blocking the goal the arm was driving toward.
-    reference_traj = _rollout_reference_trajectory(
-        cfg, current_q, context, base_extra_costs, body_pos, spine3_pos, spine3_aa,
-    )
-    goal_pos = (
-        np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-        if reference_traj is not None and cfg.cartesian.goals
-        else None
-    )
-
     summary: dict[str, Any] = {
         "selected_cluster": uq_result.chosen_label,
         "cluster_ids": sorted(int(label) for label in uq_result.cluster_means),
@@ -312,29 +295,27 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
         cluster_traj = uq_result.cluster_means[int(label)]
         cluster_dir = root_dir / f"cluster_{label}"
         install_selected = int(label) == uq_result.chosen_label
-        full_correction_traj = _assemble_full_correction_traj(
-            cfg, q_history, cluster_traj, context, base_extra_costs,
-            body_pos, spine3_pos, spine3_aa,
-        )
-        generated_context = build_generated_cost_context(
-            context, current_q, cluster_traj, q_history, window=history_window,
-            body_pos=body_pos, reference_traj=reference_traj,
-            full_correction_traj=full_correction_traj,
-        )
-        summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
-        images: dict[str, Path] = {}
-        if cfg.llm_cost.use_images:
-            images = render_prompt_images(
-                generated_context, cluster_dir / "images",
-                uq_result.cluster_means, int(label),
-                reference_traj=reference_traj, goal_pos=goal_pos,
-            )
-        generator = create_cost_generator(
-            cfg.llm_cost, generated_context, instruction,
-            summaries=summaries, run_dir=cluster_dir, images=images, mpc=mpc,
+        cost_result = generate_cost_for_cluster(
+            mpc=mpc,
+            cfg=cfg,
+            instruction=instruction,
+            cluster_traj=cluster_traj,
+            current_q=current_q,
+            q_history=q_history,
+            context=context,
+            base_extra_costs=base_extra_costs,
+            cost_dir=cluster_dir,
+            body_pos=body_pos,
+            spine3_pos=spine3_pos,
+            spine3_aa=spine3_aa,
+            candidate_trajs=uq_result.cluster_means,
+            highlight_label=int(label),
+            history_window=history_window,
             llm_model_factory=llm_model_factory,
+            install=install_selected and install,
+            log_prefix="[cluster-compare]",
         )
-        generated = generator.generate(install=install_selected and install)
+        generated = cost_result.generated_cost
         validation = _read_json_if_exists(cluster_dir / "validation.json")
         params = _read_json_if_exists(cluster_dir / "params.json")
         entry: dict[str, Any] = {

@@ -452,25 +452,42 @@ files are accepted; the first row fixes the left collar and the remaining rows
 control shoulder, elbow, and wrist.
 
 
-## Running Cluster Experiments
+## Running Simulated-User Experiments
 
 Experiments live separately from a single run, under
-`src/uncertain_feedback/experiments/`. The experiment runner drives a UQ planner
-(`arm_mpc_mdm_uq` or `arm_mpc_cartesian`, with `llm_cost.enabled: true`) up to
-`text_time` to obtain the cluster set, then generates one LLM cost per cluster,
-rolls each one out headlessly, and writes per-cluster metrics plus a
-`comparison_summary.json`:
+`src/uncertain_feedback/experiments/`. The default experiment runs one simulated
+persona with one cost-generation backend on the original goal only: initial
+rollout, hidden-cost trigger, MDM/UQ candidates, oracle cluster selection, one
+generated cost, and original-goal evaluation (`base`, `tracking`, `generated`,
+`oracle`). It requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
+and a persona with hidden bounds:
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml \
+  --persona adhesive_capsulitis \
+  --backend agent \
+  --save-video
+```
+
+`--persona` defaults to the config's `user:` key, and `--backend` defaults to
+`llm_cost.backend`. Artifacts go to `experiment_artifacts/<timestamp>/`,
+including `experiment_summary.json`.
+
+The older per-cluster comparison remains available as an explicit cluster
+experiment. It drives a UQ planner to the feedback point, extracts every cluster,
+generates one cost per cluster with the selected backend, rolls each one out
+headlessly, and writes `comparison_summary.json`:
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_cluster_experiment.py \
   --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm.yaml \
-  --text "raise my left arm"
+  --text "raise my left arm" \
+  --backend llm
 ```
 
 Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
-`steps - text_time`), and `--save-video` to render each rollout to an MP4. The
-saved video uses the same `ArmVisualizer` layout as a live run, so the only
-difference between watching and saving is the flag.
+`steps - text_time`), and `--save-video` to render each rollout to an MP4.
 
 ### Comparing cost-generation backends
 
@@ -568,9 +585,10 @@ truth**: a simulated care recipient (`src/uncertain_feedback/simulated_users/`)
 holds a clinically motivated ROM restriction the cost generator never sees. The
 persona decides when feedback is given (the first step the initial plan violates
 the hidden cost), what is said (its fixed feedback line — `--text` is ignored),
-and which UQ cluster it picks (the most comfortable one). The generated cost is
-then evaluated by rolling out to the **original goal and each held-out
-`transfer.goals` entry** and measuring hidden-cost violation plus goal
+and which UQ cluster it picks: transfer experiments score each scaled raw
+cluster mean with the hidden oracle cost and choose the lowest-scoring option.
+The generated cost is then evaluated by rolling out to the **original goal and
+each held-out `transfer.goals` entry** and measuring hidden-cost violation plus goal
 completion — so a cost only wins by generalizing beyond the correction it was
 generated from.
 
@@ -583,7 +601,9 @@ uv run python src/uncertain_feedback/experiments/run_transfer_experiment.py \
 The persona comes from the config's `user:` key (the example config sets
 `adhesive_capsulitis`); `--persona` takes one or more persona names to run, and
 `--all-personas` runs every persona with hidden bounds. Each persona gets its
-own timestamped artifact dir, reusing one loaded MDM setup.
+own timestamped artifact dir, reusing one loaded MDM setup. With `--save-video`,
+iterating cost backends also save candidate rollout artifacts under
+`cost_generation/`.
 Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
 `stroke_flexor_synergy` (pose-dependent bound) — the unrestricted default is
 rejected. Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
@@ -622,7 +642,8 @@ chosen cluster highlighted), the cost-generation directory (same layout as a
 live run), per-condition rollouts
 (`base/`, `tracking/`, `generated/`, `oracle/`, with MP4s under `--save-video`),
 and `transfer_summary.json` with per-condition per-goal metrics
-(`mean_violation`, `max_violation`, `frac_frames_violated`, `goal_reach`).
+(`mean_violation`, `max_violation`, `frac_frames_violated`, `goal_reach`) plus
+`cluster_selection_method` and `cluster_oracle_scores` for the UQ options.
 `tracking` (following the correction trajectory directly) is only defined for
 the original goal; on transfer goals it is identical to `base` — that contrast
 is the argument for persisting a cost function rather than a trajectory.

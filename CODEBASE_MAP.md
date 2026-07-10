@@ -61,11 +61,13 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
 │   │           └── arm_mpc_cartesian_no_mdm.yaml
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
-│   │   ├── cluster_comparison.py     # Generate + roll out one LLM cost per UQ cluster
-│   │   ├── run_experiment.py         # CLI entry point for cluster comparison experiments
+│   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
+│   │   ├── run_experiment.py         # CLI: one persona + one backend on the original goal
+│   │   ├── cluster_comparison.py     # Generate + roll out one cost per UQ cluster
+│   │   ├── run_cluster_experiment.py # CLI entry point for per-cluster comparison experiments
 │   │   ├── backend_comparison.py     # Generate one cost per backend (llm/turns/agent), score uniformly
 │   │   ├── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
-│   │   ├── transfer_experiment.py    # Simulated-user protocol: trigger → correction → cost → transfer eval
+│   │   ├── transfer_experiment.py    # Adds held-out transfer-goal eval around experiment_pipeline
 │   │   ├── run_transfer_experiment.py # CLI entry point for simulated-user transfer experiments
 │   │   └── render_cost_comparison.py # CLI the agent backend runs to render rollout-vs-correction overlay
 │   ├── motion_generators/
@@ -149,7 +151,9 @@ SmplLeftArmMPC (arm_mpc.py)
 │         its start pose via scale_trajectory), enqueues the (scaled) mean of
 │         the chosen cluster. Headless selection: `auto_cluster` (fixed label)
 │         or `cluster_selector` (callable on the cluster means; used by
-│         simulated-user experiments; takes precedence).
+│         simulated-user experiments; takes precedence). Transfer experiments
+│         use a selector that scores each scaled raw cluster mean with the
+│         hidden oracle cost and chooses the lowest score.
 │
 └── _CartesianGoalsMixin (arm_mpc_cartesian_base.py)
       Adds: Cartesian wrist-goal queue; cost switches from joint-space to
@@ -334,9 +338,9 @@ When `llm_cost.enabled: true` in the YAML:
 | `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
-| `llm_cost.*`           | LlmCostConfig | `enabled`, `model`, `strict`, `artifact_dir`, `use_images`, `cluster_experiment` |
+| `llm_cost.*`           | LlmCostConfig | `enabled`, `model`, `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets), `trigger_threshold` (hidden-cost violation in rad that triggers simulated feedback) |
-| `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for the transfer experiment (applied in `run_transfer_experiment` for the active persona; falls back to top-level goals when absent). Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
+| `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments (applied by `experiment_pipeline.apply_persona_goals`; falls back to top-level goals when absent). Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
 
 ---
 
@@ -431,8 +435,9 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | Command / Script                                      | Purpose                              |
 |-------------------------------------------------------|--------------------------------------|
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
-| `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml>` | Per-cluster LLM-cost comparison experiment |
-| `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml>` | Per-backend (llm/turns/agent) cost comparison experiment |
+| `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml> [--persona <name>] [--backend agent]` | One simulated-user persona/backend experiment on the original goal |
+| `uv run python src/.../experiments/run_cluster_experiment.py --mpc-config <yaml>` | Per-cluster cost comparison experiment |
+| `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison experiment |
 | `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
@@ -498,7 +503,8 @@ The hidden bounds are the evaluation ground truth in headless experiments
 - Behaviors: `first_violation_step()` (feedback trigger), `choose_cluster()`
   (picks the most comfortable UQ cluster mean), `violation_metrics()`
   (mean/max/frac violated — evaluation metric), `HiddenCostTerm` (oracle
-  planner cost adapter implementing `TrajectoryCost`).
+  planner cost adapter implementing `TrajectoryCost`; also used by transfer
+  experiments to score scaled raw UQ cluster options before cost generation).
 - Features come from the same `GeneratedCostContext` joint-feature helpers the
   cost generator uses (via `feature_series()`), so hidden bounds and generated
   bounds are directly comparable.

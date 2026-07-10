@@ -15,8 +15,8 @@ user: adhesive_capsulitis
 
 uq:
   diffusion_samples: 500
-  n_clusters: 3
-  scale: 0.5
+  n_clusters: 6
+  scale: 0.25
   user_cluster: true
 
 cartesian:

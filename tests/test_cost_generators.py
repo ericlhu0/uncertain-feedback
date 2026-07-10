@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import uncertain_feedback.planners.mpc.costs.agent_costs as agent_costs_module
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.config import LlmCostConfig
 from uncertain_feedback.planners.mpc.costs import (
@@ -366,6 +367,52 @@ def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:
     )
     lenient.codex_cmd = "definitely-not-a-real-binary-xyz"
     assert lenient.generate() is None
+
+
+def test_agent_codex_wait_recovers_when_outputs_exist(tmp_path, monkeypatch) -> None:
+    fake = _FakeLlmModel(_response())
+    kwargs = _factory_kwargs(
+        tmp_path,
+        fake,
+        LlmCostConfig(backend="agent", use_images=True),
+    )
+    gen = create_cost_generator(**kwargs)
+    run_dir = kwargs["run_dir"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "response.json").write_text(_response(), encoding="utf-8")
+    (run_dir / "stage_log.md").write_text("## Stage 3 response\n", encoding="utf-8")
+    (run_dir / "ITERATION_LOG.md").write_text("done\n", encoding="utf-8")
+
+    class _HangingProcess:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+
+        def wait(self, timeout=None) -> int:
+            if timeout == 30.0:
+                raise agent_costs_module.subprocess.TimeoutExpired("codex", timeout)
+            return -15
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = _HangingProcess()
+    monkeypatch.setattr(
+        agent_costs_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+
+    gen._run_codex()
+
+    assert process.terminated
+    assert not process.killed
+    assert "required outputs are present" in (
+        run_dir / "codex.log"
+    ).read_text(encoding="utf-8")
 
 
 def test_agent_task_requires_stage_log(tmp_path) -> None:

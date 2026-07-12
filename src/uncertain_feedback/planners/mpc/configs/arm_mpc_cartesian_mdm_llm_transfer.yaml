@@ -1,4 +1,5 @@
 planner: arm_mpc_cartesian
+seed: 0
 steps: 300
 horizon: 10
 n_mpc_samples: 200
@@ -126,7 +127,7 @@ preference_alpha: 0
 
 llm_cost:
   enabled: true
-  backend: agent
+  backend: llm
   model: gpt-5.6-luna
   strict: false
   artifact_dir: llm_cost_artifacts

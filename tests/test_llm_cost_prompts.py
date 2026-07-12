@@ -5,6 +5,7 @@ from pathlib import Path
 from uncertain_feedback.planners.mpc.costs.prompts import (
     IMAGE_PLACEHOLDERS,
     build_author_prompt,
+    build_combine_task_body,
     build_ground_prompt,
     build_interpret_prompt,
     build_refine_prompt,
@@ -116,3 +117,29 @@ def test_compact_summaries_drop_raw_joint_arrays() -> None:
             "end_positions": {"wrist": [1, 1, 1]},
         }
     }
+
+
+def test_combine_prompt_replays_every_round_and_requires_anchors(tmp_path) -> None:
+    rounds = [
+        {
+            "index": index,
+            "goal": [0.1 * index, 0.2, 0.3],
+            "feedback_text": f"feedback {index}",
+            "trigger_step": index + 2,
+            "state_path": str(tmp_path / f"round_{index}" / "state.pkl"),
+            "summaries": {"trigger": {"joint_features": {"shoulder_elevation": index}}},
+            "cost_code": f"def cost_{index}(): pass",
+            "params": {"threshold": index},
+            "image_paths": [str(tmp_path / f"round_{index}.png")],
+        }
+        for index in range(2)
+    ]
+
+    text, images = build_combine_task_body(rounds)
+
+    assert "feedback 0" in text and "feedback 1" in text
+    assert "def cost_0" in text and "def cost_1" in text
+    assert "one anchor per round" in text
+    assert "np.interp" in text
+    assert "def cost(q_trajs, context, params):" in text
+    assert images == [tmp_path / "round_0.png", tmp_path / "round_1.png"]

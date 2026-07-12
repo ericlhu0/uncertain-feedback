@@ -1,4 +1,4 @@
-"use strict";
+import * as THREE from "three";
 
 // ---------------------------------------------------------------------------
 // State
@@ -15,15 +15,26 @@ let selectedCluster = null;
 let selectedClusterSegments = null;
 let showClusters = true;
 let showStart = true;
-let showMdmStart = true;
+let showMdmStart = false;
 let showOracleBounds = true;
 let showGeneratedBounds = true;
 let generatedBounds = [];
-let startPreview = null;    // (5,3) arm positions for the edited start pose
+let costField = null;       // {features:{name:[..]}, penalty:[..]} — compiled cost sampled over a pose cloud
+let startPreview = null;    // {arm_positions, mesh_vertices} for the edited pose
+const meshData = new Map(); // mesh id -> {frames, vertices, data: Float32Array}
+const meshLoads = new Map();
 let baseTrigger = null;
+
+// Multi-round state: committed rounds + the unified replacement cost. The
+// unified visuals survive base rollouts (only Reset rounds clears them).
+let rounds = [];
+let unified = null;         // {description, code} or null
+let unifiedCostField = null;
+let showUnifiedBounds = true;
 
 const MDM_START_COLOR = "#7b2fbe";
 const GENERATED_LIMIT_COLOR = "#3567d6";
+const UNIFIED_COLOR = "#00838f";
 
 let frame = 0;
 let playing = false;
@@ -31,8 +42,11 @@ let lastTick = 0;
 
 const TRAJ_STYLES = {
   base: { color: "#e05252", label: "base rollout" },
+  oracle: { color: "#9c5f17", label: "oracle-cost rollout" },
   full: { color: "#0e7a63", label: "full corrected path" },
-  generated: { color: "#3567d6", label: "generated-cost rollout" },
+  generated: { color: "#3567d6", label: "generated-cost corrected path" },
+  generated_start: { color: "#6fa8ff", label: "generated-cost from start" },
+  unified: { color: UNIFIED_COLOR, label: "unified-cost rollout" },
 };
 const CLUSTER_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
   "#42d4f4", "#f032e6", "#9a6324", "#800000", "#469990"];
@@ -137,6 +151,52 @@ function clientMetrics(t) {
   };
 }
 
+// --- client-side hidden-bound math (mirrors simulated_users/base.py) --------
+//
+// Violations and coupled per-frame thresholds are computed here from the
+// packaged `features` + the LIVE persona bounds, so dragging a bound on a
+// graph updates every red segment/strip instantly. Only the joint-box part
+// (`limit_violations`) is server-baked — the raw joint angles are not sent.
+
+function hiddenViolation(b, v) {
+  if (b.bound_type === "upper_bound") {
+    return b.high === null ? 0 : Math.max(0, v - b.high);
+  }
+  if (b.bound_type === "lower_bound") {
+    return b.low === null ? 0 : Math.max(0, b.low - v);
+  }
+  if (b.low === null || b.high === null) return 0;
+  return Math.max(0, Math.min(v - b.low, b.high - v));
+}
+
+function computeViolations(data) {
+  const out = (data.limit_violations || new Array(data.n_frames).fill(0)).slice();
+  const p = getPersona();
+  if (!p) return out;
+  for (const b of p.bounds) {
+    const f = data.features[b.feature];
+    if (!f) continue;
+    if (b.kind === "coupled") {
+      const cond = data.features[b.cond_feature];
+      if (!cond) continue;
+      for (let i = 0; i < out.length; i++) {
+        const thr = b.intercept + b.slope * cond[i];
+        out[i] += b.bound_type === "upper_bound"
+          ? Math.max(0, f[i] - thr) : Math.max(0, thr - f[i]);
+      }
+    } else {
+      for (let i = 0; i < out.length; i++) out[i] += hiddenViolation(b, f[i]);
+    }
+  }
+  return out;
+}
+
+function coupledThresholdSeries(b, data) {
+  const cond = data.features[b.cond_feature];
+  if (!cond) return null;
+  return cond.map((c) => b.intercept + b.slope * c);
+}
+
 function visibleTrajs() {
   return Object.entries(trajs).filter(([, t]) => t.visible && t.data);
 }
@@ -164,8 +224,19 @@ function clearTraj(...keys) {
 // ---------------------------------------------------------------------------
 
 const JOINT_NAMES = ["left_shoulder (clavicle)", "left_elbow (upper arm)", "left_wrist (forearm)"];
+const JOINT_KEYS = ["left_shoulder", "left_elbow", "left_wrist"];
 const AXES = ["x", "y", "z"];
 let armAA = null; // (3,3)
+
+function armLimit(jointIndex) {
+  const p = getPersona();
+  return p && p.joint_limits.find((limit) => limit.joint === JOINT_KEYS[jointIndex]);
+}
+
+function clampArmValue(value, jointIndex, axisIndex) {
+  const limit = armLimit(jointIndex);
+  return limit ? Math.min(limit.high[axisIndex], Math.max(limit.low[axisIndex], value)) : value;
+}
 
 function buildArmEditor() {
   const grid = $("arm-editor");
@@ -177,17 +248,27 @@ function buildArmEditor() {
     grid.appendChild(name);
     AXES.forEach((ax, a) => {
       const lab = document.createElement("span");
-      lab.textContent = ax;
+      const limit = armLimit(j);
+      lab.textContent = limit ? `${ax} [${limit.low[a]}, ${limit.high[a]}]` : ax;
       const slider = document.createElement("input");
       slider.type = "range";
-      slider.min = -3.14; slider.max = 3.14; slider.step = 0.01;
+      slider.min = limit ? limit.low[a] : -3.14;
+      slider.max = limit ? limit.high[a] : 3.14;
+      slider.step = 0.01;
       const num = document.createElement("input");
       num.type = "number";
+      num.min = slider.min; num.max = slider.max;
       num.step = 0.01;
       slider.id = `arm-s-${j}-${a}`;
       num.id = `arm-n-${j}-${a}`;
       slider.oninput = () => { num.value = slider.value; armAA[j][a] = +slider.value; schedulePreview(); };
-      num.onchange = () => { slider.value = num.value; armAA[j][a] = +num.value; schedulePreview(); };
+      num.onchange = () => {
+        const value = clampArmValue(+num.value, j, a);
+        num.value = value;
+        slider.value = value;
+        armAA[j][a] = value;
+        schedulePreview();
+      };
       grid.appendChild(lab);
       grid.appendChild(slider);
       grid.appendChild(num);
@@ -196,10 +277,10 @@ function buildArmEditor() {
 }
 
 function setArmEditorValues(aa) {
-  armAA = aa.map((r) => r.slice());
+  armAA = aa.map((row, j) => row.map((value, a) => clampArmValue(value, j, a)));
   for (let j = 0; j < 3; j++) for (let a = 0; a < 3; a++) {
-    $(`arm-s-${j}-${a}`).value = aa[j][a].toFixed(3);
-    $(`arm-n-${j}-${a}`).value = aa[j][a].toFixed(3);
+    $(`arm-s-${j}-${a}`).value = armAA[j][a].toFixed(3);
+    $(`arm-n-${j}-${a}`).value = armAA[j][a].toFixed(3);
   }
   schedulePreview();
 }
@@ -209,7 +290,7 @@ function schedulePreview() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(async () => {
     const data = await api("/api/preview_pose", { arm_aa: armAA });
-    startPreview = data.arm_positions;
+    startPreview = data;
     $("wrist-rel").textContent = data.wrist_rel.map((v) => v.toFixed(2)).join(", ");
     refreshLegend();
     renderAll();
@@ -240,7 +321,12 @@ function onPersonaChange(name) {
   const goals = INIT.persona_goals[name];
   const goal = goals && goals.cartesian.length ? goals.cartesian[0] : INIT.default_goal;
   [$("goal-x").value, $("goal-y").value, $("goal-z").value] = goal.map((v) => v.toFixed(2));
+  const currentArmAA = armAA;
+  buildArmEditor();
+  setArmEditorValues(currentArmAA.map((row, j) =>
+    row.map((value, a) => clampArmValue(value, j, a))));
   buildCoupledGraphs();
+  renderBoundControls();
   renderAll();
 }
 
@@ -347,6 +433,10 @@ async function savePersona() {
   personas = data.personas;
   currentPersona = name;
   refreshPersonaSelect();
+  if (data.retriggered) {
+    baseTrigger = data.trigger_step;
+    applyTriggerHint(data.trigger_step);
+  }
   onPersonaChange(name);
   $("modal-backdrop").classList.remove("open");
   if (editingBuiltin) setStatus("built-in persona edited in memory only (until restart)");
@@ -359,12 +449,16 @@ async function savePersona() {
 async function runBase() {
   const data = await api("/api/base_rollout", {
     arm_aa: armAA, goal: getGoal(), persona: currentPersona,
+    show_oracle: $("show-oracle").checked,
   }, "running base MPC rollout (may take a while)");
   setTraj("base", data.trajectory);
+  if (data.oracle) setTraj("oracle", data.oracle.trajectory);
+  else clearTraj("oracle");
   baseTrigger = data.trigger_step;
   showStart = false;
-  clearTraj("correction", "full", "generated");
+  clearTraj("correction", "full", "generated", "generated_start");
   generatedBounds = [];
+  costField = null;
   clusters = [];
   selectedCluster = null;
   selectedClusterSegments = null;
@@ -372,13 +466,13 @@ async function runBase() {
   $("generate").disabled = false;
   $("recluster").disabled = true;
   $("generate-cost").disabled = true;
+  $("commit-round").disabled = true;
   const trig = data.trigger_step === null
     ? "never violates — no feedback would be given (pick a different goal/persona)"
     : `user interrupts at frame ${data.trigger_step}`;
-  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) + "\n" + trig;
-  $("mdm-start-hint").textContent = data.trigger_step === null
-    ? "MDM will generate from the start pose (base never violates)."
-    : `MDM will generate from the feedback-trigger pose at frame ${data.trigger_step} (purple dashed arm).`;
+  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) + "\n" + trig
+    + (data.oracle ? "\noracle: " + fmtMetrics(data.oracle.metrics, data.oracle.goal_reach) : "");
+  applyTriggerHint(data.trigger_step);
   refreshLegend(); refreshTimeline(); renderAll();
 }
 
@@ -386,8 +480,9 @@ function applyClusterPayload(data) {
   clusters = data.clusters;
   selectedCluster = null;
   selectedClusterSegments = null;
-  clearTraj("correction", "full", "generated");
+  clearTraj("correction", "full", "generated", "generated_start");
   generatedBounds = [];
+  costField = null;
   $("generate-cost").disabled = true;
   $("correction-metrics").textContent = "";
   renderClusterList();
@@ -429,17 +524,93 @@ async function generateCost() {
   const data = await api("/api/generate_cost", { backend },
     `generating ${backend} cost + evaluation rollout — this can take several minutes`);
   generatedBounds = data.generated_bounds || [];
+  costField = data.cost_field || null;
   setTraj("generated", data.trajectory);
+  setTraj("generated_start", data.start_trajectory);
   const out = $("cost-output");
   out.innerHTML = "";
   const desc = document.createElement("div");
   desc.innerHTML = `<b>${data.description || "(no description)"}</b><br>` +
-    fmtMetrics(data.metrics, data.goal_reach).replace("\n", "<br>") +
+    "corrected path: " + fmtMetrics(data.metrics, data.goal_reach).replace("\n", "<br>") +
+    "<br>from start: " + fmtMetrics(data.start_metrics, data.start_goal_reach).replace("\n", "<br>") +
     `<br>artifacts: ${data.artifact_dir}`;
   const pre = document.createElement("pre");
   pre.textContent = data.code;
   out.appendChild(desc);
   out.appendChild(pre);
+  $("commit-round").disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-round feedback
+// ---------------------------------------------------------------------------
+
+function renderRounds() {
+  const list = $("round-list");
+  list.innerHTML = "";
+  for (const r of rounds) {
+    const div = document.createElement("div");
+    div.className = "round-card";
+    div.innerHTML = `<b>round ${r.index}</b> · goal [${r.goal.map((v) => v.toFixed(2)).join(", ")}]` +
+      ` · trigger @ ${r.trigger_step}<br>“${r.feedback_text}”<br>${r.description || ""}`;
+    list.appendChild(div);
+  }
+  $("combine-rounds").disabled = rounds.length < 2;
+  $("reset-rounds").disabled = rounds.length === 0 && !unified;
+}
+
+function renderUnifiedOutput(extraHtml) {
+  const out = $("unified-output");
+  out.innerHTML = "";
+  if (!unified) return;
+  const desc = document.createElement("div");
+  desc.innerHTML = `<b>unified: ${unified.description || "(no description)"}</b>` + (extraHtml || "");
+  const pre = document.createElement("pre");
+  pre.textContent = unified.code;
+  out.appendChild(desc);
+  out.appendChild(pre);
+}
+
+async function commitRound() {
+  const data = await api("/api/commit_round", {}, "committing round");
+  rounds = data.rounds;
+  unified = data.unified;
+  // Round 1's cost IS the unified cost, so its field carries over directly.
+  if (rounds.length === 1) unifiedCostField = costField;
+  $("commit-round").disabled = true;
+  renderRounds();
+  renderUnifiedOutput();
+  renderAll();
+}
+
+async function combineRounds() {
+  const data = await api("/api/combine_rounds", {},
+    "combining rounds with codex — this can take a long time; watch the console");
+  rounds = data.rounds;
+  unified = { description: data.description, code: data.code };
+  unifiedCostField = data.cost_field || null;
+  setTraj("unified", data.trajectory);
+  let extra = "<br>" + fmtMetrics(data.metrics, data.goal_reach).replace("\n", "<br>") +
+    `<br>artifacts: ${data.artifact_dir}`;
+  if (data.scores) {
+    extra += `<br>scores: mean ${data.scores.mean.toFixed(3)} · per round ` +
+      Object.entries(data.scores.per_round).map(([k, v]) => `#${k}=${v.toFixed(3)}`).join(" ");
+  }
+  renderRounds();
+  renderUnifiedOutput(extra);
+  renderAll();
+}
+
+async function resetRounds() {
+  await api("/api/reset_rounds", {}, "resetting rounds");
+  rounds = [];
+  unified = null;
+  unifiedCostField = null;
+  clearTraj("unified");
+  $("commit-round").disabled = true;
+  renderRounds();
+  renderUnifiedOutput();
+  refreshLegend(); refreshTimeline(); renderAll();
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +664,7 @@ function refreshLegend() {
     mk(t.label, t.color, t.visible, (v) => { trajs[key].visible = v; });
   }
   if (clusters.length) {
-    mk("cluster traces", "#888", showClusters, (v) => { showClusters = v; });
+    mk("selected cluster body + trace", "#888", showClusters, (v) => { showClusters = v; });
   }
 }
 
@@ -510,17 +681,23 @@ function tick(ts) {
     if (ts - lastTick > 50) {
       lastTick = ts;
       const slider = $("frame-slider");
-      frame = (+slider.value + 1) % (+slider.max + 1 || 1);
-      slider.value = frame;
-      $("frame-label").textContent = `frame ${frame} / ${slider.max}`;
-      renderAll();
+      const maxFrame = +slider.max;
+      if (frame >= maxFrame) {
+        playing = false;
+        $("play").innerHTML = "&#9654;";
+      } else {
+        frame = Math.min(maxFrame, +slider.value + 1);
+        slider.value = frame;
+        $("frame-label").textContent = `frame ${frame} / ${slider.max}`;
+        renderAll();
+      }
     }
   }
   requestAnimationFrame(tick);
 }
 
 // ---------------------------------------------------------------------------
-// Skeleton rendering
+// SMPL mesh rendering
 // ---------------------------------------------------------------------------
 
 function fitCanvas(canvas) {
@@ -539,153 +716,158 @@ function goalWorld() {
   return [0, 1, 2].map((i) => INIT.spine3_pos[i] + g[i]);
 }
 
+let smplRenderer = null;
+let smplScene = null;
+
+function disposeScene(scene) {
+  if (!scene) return;
+  scene.traverse((object) => {
+    if (object.geometry) object.geometry.dispose();
+    if (object.material) {
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) material.dispose();
+    }
+  });
+}
+
+function requestMesh(data) {
+  const id = data && data.mesh_id;
+  if (!id || meshData.has(id) || meshLoads.has(id)) return;
+  const load = fetch(`/api/mesh/${encodeURIComponent(id)}`).then(async (response) => {
+    if (!response.ok) throw new Error((await response.json()).error);
+    meshData.set(id, {
+      frames: +response.headers.get("X-Mesh-Frames"),
+      vertices: +response.headers.get("X-Mesh-Vertices"),
+      data: new Float32Array(await response.arrayBuffer()),
+    });
+    meshLoads.delete(id);
+    renderAll();
+  }).catch((error) => {
+    meshLoads.delete(id);
+    setStatus(`mesh load failed: ${error}`, "error");
+  });
+  meshLoads.set(id, load);
+}
+
+function lineObject(points, color, opacity = 0.7) {
+  const geometry = new THREE.BufferGeometry().setFromPoints(
+    points.map((p) => new THREE.Vector3(...p))
+  );
+  return new THREE.Line(
+    geometry,
+    new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity })
+  );
+}
+
+function meshObject(vertices, color, opacity) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
+  geometry.setIndex(INIT.smpl_faces.flat());
+  geometry.computeVertexNormals();
+  return new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({
+    color, transparent: opacity < 1, opacity, side: THREE.FrontSide, depthWrite: true,
+  }));
+}
+
+function trajectoryMesh(data, color, opacity = 0.32, atFrame = frame) {
+  requestMesh(data);
+  const cached = meshData.get(data.mesh_id);
+  if (!cached) return null;
+  const fi = Math.min(atFrame, cached.frames - 1);
+  const start = fi * cached.vertices * 3;
+  return meshObject(cached.data.subarray(start, start + cached.vertices * 3), color, opacity);
+}
+
 function renderSkeleton() {
   const canvas = $("skeleton-canvas");
-  const fit = fitCanvas(canvas);
-  if (!fit) return;
-  const { ctx, w, h } = fit;
-  ctx.clearRect(0, 0, w, h);
-  const vw = w / VIEWS.length;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height || !INIT) return;
+  if (!smplRenderer) smplRenderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  smplRenderer.setPixelRatio(window.devicePixelRatio || 1);
+  smplRenderer.setSize(rect.width, rect.height, false);
+  smplRenderer.setScissorTest(true);
+  smplRenderer.setClearColor(0xffffff, 1);
 
-  // Gather points for shared world bounds so all views use the same scale.
+  disposeScene(smplScene);
+  const scene = new THREE.Scene();
+  smplScene = scene;
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x667788, 2.2));
+  const light = new THREE.DirectionalLight(0xffffff, 1.5);
+  light.position.set(2, 3, 4); scene.add(light);
+
+  const selected = showClusters
+    ? clusters.find((c) => c.label === selectedCluster)
+    : null;
   const pts = INIT.body_pos.slice();
   pts.push(goalWorld());
-  for (const [, t] of visibleTrajs()) {
-    for (const f of t.data.arm_positions) pts.push(f[WRIST]);
-  }
-  if (showClusters) {
-    for (const c of clusters) for (const f of c.full.arm_positions) pts.push(f[WRIST]);
-  }
-  if (startPreview) for (const p of startPreview) pts.push(p);
+  for (const [, t] of visibleTrajs()) for (const f of t.data.arm_positions) pts.push(f[WRIST]);
+  if (selected) for (const f of selected.full.arm_positions) pts.push(f[WRIST]);
+  if (startPreview) for (const p of startPreview.arm_positions) pts.push(p);
+  const framingVertices = startPreview
+    ? startPreview.mesh_vertices
+    : INIT.smpl_reference_vertices;
+  const min = [0, 1, 2].map((axis) => Math.min(
+    ...pts.map((p) => p[axis]), ...framingVertices.map((p) => p[axis]),
+  ) - 0.14);
+  const max = [0, 1, 2].map((axis) => Math.max(
+    ...pts.map((p) => p[axis]), ...framingVertices.map((p) => p[axis]),
+  ) + 0.14);
+  const center = min.map((v, i) => (v + max[i]) / 2);
 
+  if (selected) {
+    const color = CLUSTER_COLORS[selected.label % CLUSTER_COLORS.length];
+    scene.add(lineObject(selected.full.arm_positions.map((f) => f[WRIST]), color, 0.4));
+    const mesh = trajectoryMesh(selected.full, color, 0.26);
+    if (mesh) scene.add(mesh);
+  }
+  for (const [key, t] of visibleTrajs()) {
+    const mesh = trajectoryMesh(t.data, t.color);
+    if (mesh) scene.add(mesh);
+    const viol = computeViolations(t.data);
+    for (let i = 1; i < t.data.n_frames; i++) {
+      scene.add(lineObject(
+        [t.data.arm_positions[i - 1][WRIST], t.data.arm_positions[i][WRIST]],
+        viol[i] > 0 ? "#ff2222" : t.color,
+        viol[i] > 0 ? 0.95 : 0.45,
+      ));
+    }
+    if (key === "base" && baseTrigger !== null) {
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.018, 12, 8),
+        new THREE.MeshBasicMaterial({ color: 0x111111, wireframe: true }),
+      );
+      marker.position.set(...t.data.arm_positions[baseTrigger][WRIST]); scene.add(marker);
+    }
+  }
+  if (startPreview && showStart) {
+    scene.add(meshObject(new Float32Array(startPreview.mesh_vertices.flat()), START_COLOR, 0.72));
+  }
+  if (showMdmStart && trajs.base && trajs.base.data) {
+    const fi = baseTrigger === null ? 0 : baseTrigger;
+    const mesh = trajectoryMesh(trajs.base.data, MDM_START_COLOR, 0.16, fi);
+    if (mesh) scene.add(mesh);
+  }
+  const goal = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.025),
+    new THREE.MeshBasicMaterial({ color: 0xc92a9b }),
+  );
+  goal.position.set(...goalWorld()); scene.add(goal);
+
+  const vw = rect.width / 3;
   VIEWS.forEach((view, vi) => {
-    const x0 = vi * vw;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x0, 0, vw, h);
-    ctx.clip();
-
-    let hmin = Infinity, hmax = -Infinity, vmin = Infinity, vmax = -Infinity;
-    for (const p of pts) {
-      hmin = Math.min(hmin, p[view.hi]); hmax = Math.max(hmax, p[view.hi]);
-      vmin = Math.min(vmin, p[view.vi]); vmax = Math.max(vmax, p[view.vi]);
-    }
-    const pad = 0.12;
-    hmin -= pad; hmax += pad; vmin -= pad; vmax += pad;
-    const scale = Math.min(vw / (hmax - hmin), h / (vmax - vmin));
-    const cx = x0 + vw / 2, cy = h / 2;
-    const hc = (hmin + hmax) / 2, vc = (vmin + vmax) / 2;
-    const X = (p) => cx + (p[view.hi] - hc) * scale;
-    const Y = (p) => cy - (p[view.vi] - vc) * scale;
-
-    // title
-    ctx.fillStyle = "#667";
-    ctx.font = "11px sans-serif";
-    ctx.fillText(view.name, x0 + 8, 14);
-
-    // background body (left-arm bones excluded server-side)
-    ctx.strokeStyle = "#c3c9d1";
-    ctx.lineWidth = 2;
-    for (const [p, c] of INIT.bone_pairs) {
-      ctx.beginPath();
-      ctx.moveTo(X(INIT.body_pos[p]), Y(INIT.body_pos[p]));
-      ctx.lineTo(X(INIT.body_pos[c]), Y(INIT.body_pos[c]));
-      ctx.stroke();
-    }
-
-    // goal star
-    const gp = goalWorld();
-    ctx.strokeStyle = "#c92a9b";
-    ctx.lineWidth = 2;
-    const gx = X(gp), gy = Y(gp), r = 7;
-    for (let k = 0; k < 4; k++) {
-      const a = (Math.PI / 4) * k;
-      ctx.beginPath();
-      ctx.moveTo(gx - r * Math.cos(a), gy - r * Math.sin(a));
-      ctx.lineTo(gx + r * Math.cos(a), gy + r * Math.sin(a));
-      ctx.stroke();
-    }
-
-    // cluster full-path wrist traces
-    if (showClusters) {
-      for (const c of clusters) {
-        ctx.strokeStyle = CLUSTER_COLORS[c.label % CLUSTER_COLORS.length];
-        ctx.lineWidth = c.label === selectedCluster ? 2 : 1;
-        ctx.globalAlpha = 0.55;
-        ctx.beginPath();
-        c.full.arm_positions.forEach((f, i) => {
-          const px = X(f[WRIST]), py = Y(f[WRIST]);
-          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-        });
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-    }
-
-    // main trajectories: wrist trace + arm chain at current frame
-    for (const [key, t] of visibleTrajs()) {
-      const T = t.data.n_frames;
-      // trace, red where the hidden bounds are violated
-      ctx.lineWidth = 1.5;
-      for (let i = 1; i < T; i++) {
-        ctx.strokeStyle = t.data.violations[i] > 0 ? "#ff2222" : t.color;
-        ctx.globalAlpha = t.data.violations[i] > 0 ? 0.9 : 0.45;
-        ctx.beginPath();
-        ctx.moveTo(X(t.data.arm_positions[i - 1][WRIST]), Y(t.data.arm_positions[i - 1][WRIST]));
-        ctx.lineTo(X(t.data.arm_positions[i][WRIST]), Y(t.data.arm_positions[i][WRIST]));
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-      // arm chain at the scrubbed frame
-      const f = t.data.arm_positions[Math.min(frame, T - 1)];
-      ctx.strokeStyle = t.color;
-      ctx.lineWidth = 3.5;
-      ctx.beginPath();
-      f.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p), Y(p)); else ctx.lineTo(X(p), Y(p)); });
-      ctx.stroke();
-      ctx.fillStyle = t.color;
-      for (const p of f) { ctx.beginPath(); ctx.arc(X(p), Y(p), 3, 0, 7); ctx.fill(); }
-      // trigger marker on the base trajectory
-      if (key === "base" && baseTrigger !== null) {
-        const tp = t.data.arm_positions[baseTrigger][WRIST];
-        ctx.strokeStyle = "#000";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(X(tp), Y(tp), 6, 0, 7); ctx.stroke();
-      }
-    }
-
-    // start-pose preview arm
-    if (startPreview && showStart) {
-      ctx.strokeStyle = START_COLOR;
-      ctx.lineWidth = 3.5;
-      ctx.beginPath();
-      startPreview.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p), Y(p)); else ctx.lineTo(X(p), Y(p)); });
-      ctx.stroke();
-    }
-
-    // MDM start pose: the arm MDM generation is conditioned on — the
-    // feedback-trigger frame, or the start pose when the base never violates
-    if (showMdmStart && trajs.base && trajs.base.data) {
-      const src = baseTrigger !== null
-        ? trajs.base.data.arm_positions[baseTrigger]
-        : trajs.base.data.arm_positions[0];
-      ctx.strokeStyle = MDM_START_COLOR;
-      ctx.lineWidth = 2.5;
-      ctx.setLineDash([7, 4]);
-      ctx.beginPath();
-      src.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p), Y(p)); else ctx.lineTo(X(p), Y(p)); });
-      ctx.stroke();
-      ctx.setLineDash([]);
-      const wp = src[WRIST];
-      ctx.fillStyle = MDM_START_COLOR;
-      ctx.beginPath(); ctx.arc(X(wp), Y(wp), 4, 0, 7); ctx.fill();
-    }
-
-    ctx.restore();
-    if (vi > 0) {
-      ctx.strokeStyle = "#e0e4ea";
-      ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, h); ctx.stroke();
-    }
+    const horizontal = max[view.hi] - min[view.hi];
+    const vertical = max[view.vi] - min[view.vi];
+    const halfH = Math.max(vertical / 2, horizontal * rect.height / (2 * vw));
+    const halfW = halfH * vw / rect.height;
+    const camera = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.01, 20);
+    if (vi === 0) { camera.position.set(center[0], center[1], center[2] + 5); camera.up.set(0, 1, 0); }
+    else if (vi === 1) { camera.position.set(center[0] + 5, center[1], center[2]); camera.up.set(0, 1, 0); }
+    else { camera.position.set(center[0], center[1] + 5, center[2]); camera.up.set(0, 0, -1); }
+    camera.lookAt(...center);
+    const x = Math.floor(vi * vw), width = Math.ceil(vw), height = Math.floor(rect.height);
+    smplRenderer.setViewport(x, 0, width, height);
+    smplRenderer.setScissor(x, 0, width, height);
+    smplRenderer.render(scene, camera);
   });
 }
 
@@ -724,6 +906,8 @@ function buildGraphs() {
     (v) => { showOracleBounds = v; });
   addToggle("generated-cost limits", GENERATED_LIMIT_COLOR, showGeneratedBounds,
     (v) => { showGeneratedBounds = v; });
+  addToggle("unified-cost limits", UNIFIED_COLOR, showUnifiedBounds,
+    (v) => { showUnifiedBounds = v; });
   holder.appendChild(controls);
   for (const name of INIT.feature_names) {
     const panel = document.createElement("div");
@@ -734,8 +918,14 @@ function buildGraphs() {
     const canvas = document.createElement("canvas");
     canvas.className = "feature-graph";
     canvas.id = `graph-${name}`;
+    canvas.addEventListener("mousedown", (e) => startFeatureDrag(name, canvas, e));
+    canvas.addEventListener("mousemove", (e) => hoverFeature(name, canvas, e));
+    const bctl = document.createElement("div");
+    bctl.className = "gbound-controls";
+    bctl.id = `gbounds-${name}`;
     panel.appendChild(title);
     panel.appendChild(canvas);
+    panel.appendChild(bctl);
     holder.appendChild(panel);
   }
 }
@@ -745,6 +935,224 @@ function personaConstantBounds(feature) {
   if (!p) return [];
   return p.bounds.filter((b) => b.kind === "hidden" && b.feature === feature);
 }
+
+// ---------------------------------------------------------------------------
+// On-graph persona bound editing
+// ---------------------------------------------------------------------------
+//
+// The graphs read bounds live from the local persona object, so editing is:
+// mutate the bound, re-render (violations recompute client-side), and save
+// the persona back to the server debounced. The server re-detects the
+// feedback trigger on the stored base rollout after each save.
+
+const graphTX = {};    // feature name -> plot transform from the last render
+const coupledTX = [];  // coupled plot index -> transform
+let boundDrag = null;
+
+let personaSaveTimer = null;
+function schedulePersonaSave() {
+  clearTimeout(personaSaveTimer);
+  personaSaveTimer = setTimeout(async () => {
+    const p = getPersona();
+    const data = await api("/api/personas", p, "saving persona bounds");
+    if (data.retriggered) {
+      baseTrigger = data.trigger_step;
+      applyTriggerHint(data.trigger_step);
+      renderAll();
+    }
+    if (p.builtin) setStatus("built-in persona edited in memory only (until restart)");
+  }, 600);
+}
+
+function applyTriggerHint(step) {
+  $("mdm-start-hint").textContent = step === null
+    ? "MDM will generate from the start pose (base never violates)."
+    : `MDM will generate from the feedback-trigger pose at frame ${step} (purple ghost body).`;
+}
+
+function retypeHiddenBound(b, newType, feature) {
+  const tx = graphTX[feature];
+  const def = tx ? tx.ymin + 0.6 * (tx.ymax - tx.ymin) : 1.0;
+  b.bound_type = newType;
+  if (newType === "upper_bound") {
+    b.high = b.high ?? b.low ?? +def.toFixed(2);
+    b.low = null;
+  } else if (newType === "lower_bound") {
+    b.low = b.low ?? b.high ?? +def.toFixed(2);
+    b.high = null;
+  } else {
+    if (b.high === null || b.high === undefined) b.high = (b.low ?? def) + 0.4;
+    if (b.low === null || b.low === undefined) b.low = b.high - 0.4;
+  }
+}
+
+function renderBoundControls() {
+  const p = getPersona();
+  for (const name of INIT.feature_names) {
+    const holder = $(`gbounds-${name}`);
+    if (!holder) continue;
+    holder.innerHTML = "";
+    if (!p) continue;
+    for (const b of personaConstantBounds(name)) {
+      const idx = p.bounds.indexOf(b);
+      const row = document.createElement("div");
+      row.className = "gbound-row";
+      const type = document.createElement("select");
+      for (const t of ["upper_bound", "lower_bound", "avoid_band"]) {
+        const opt = document.createElement("option");
+        opt.value = t; opt.textContent = t;
+        type.appendChild(opt);
+      }
+      type.value = b.bound_type;
+      type.onchange = () => {
+        retypeHiddenBound(b, type.value, name);
+        renderBoundControls(); renderAll(); schedulePersonaSave();
+      };
+      row.appendChild(type);
+      for (const key of ["low", "high"]) {
+        if (b[key] === null || b[key] === undefined) continue;
+        const n = document.createElement("input");
+        n.type = "number"; n.step = 0.05;
+        n.value = (+b[key]).toFixed(2);
+        n.id = `gb-${name}-${idx}-${key}`;
+        n.onchange = () => { b[key] = +n.value; renderAll(); schedulePersonaSave(); };
+        row.appendChild(n);
+      }
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.onclick = () => {
+        p.bounds.splice(p.bounds.indexOf(b), 1);
+        renderBoundControls(); renderAll(); schedulePersonaSave();
+      };
+      row.appendChild(del);
+      holder.appendChild(row);
+    }
+    const add = document.createElement("button");
+    add.textContent = "+ bound";
+    add.onclick = () => {
+      const tx = graphTX[name];
+      const v = tx ? tx.ymin + 0.75 * (tx.ymax - tx.ymin) : 1.0;
+      p.bounds.push({
+        kind: "hidden", feature: name, bound_type: "upper_bound",
+        low: null, high: +v.toFixed(2),
+      });
+      renderBoundControls(); renderAll(); schedulePersonaSave();
+    };
+    holder.appendChild(add);
+  }
+}
+
+function featureHit(name, canvas, e) {
+  const tx = graphTX[name];
+  if (!tx || !showOracleBounds) return null;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  if (mx < tx.ml || mx > tx.ml + tx.pw) return null;
+  const Y = (v) => tx.mt + (1 - (v - tx.ymin) / (tx.ymax - tx.ymin)) * tx.ph;
+  for (const b of personaConstantBounds(name)) {
+    for (const key of ["low", "high"]) {
+      if (b[key] === null || b[key] === undefined) continue;
+      if (Math.abs(my - Y(b[key])) <= 6) return { b, key };
+    }
+  }
+  return null;
+}
+
+function hoverFeature(name, canvas, e) {
+  if (boundDrag) return;
+  canvas.style.cursor = featureHit(name, canvas, e) ? "ns-resize" : "";
+}
+
+function startFeatureDrag(name, canvas, e) {
+  const hit = featureHit(name, canvas, e);
+  if (!hit) return;
+  const tx = graphTX[name];
+  boundDrag = {
+    kind: "feature", feature: name, canvas, b: hit.b, key: hit.key,
+    idx: getPersona().bounds.indexOf(hit.b),
+    frozen: { ymin: tx.ymin, ymax: tx.ymax },
+  };
+  e.preventDefault();
+}
+
+function dragFeature(e) {
+  const { canvas, feature, b, key, idx, frozen } = boundDrag;
+  const tx = graphTX[feature];
+  const rect = canvas.getBoundingClientRect();
+  const frac = 1 - (e.clientY - rect.top - tx.mt) / tx.ph;
+  let v = frozen.ymin + frac * (frozen.ymax - frozen.ymin);
+  if (b.bound_type === "avoid_band") {
+    if (key === "low") v = Math.min(v, b.high - 0.01);
+    else v = Math.max(v, b.low + 0.01);
+  }
+  b[key] = +v.toFixed(3);
+  const input = $(`gb-${feature}-${idx}-${key}`);
+  if (input) input.value = b[key].toFixed(2);
+  renderAll();
+}
+
+function coupledHit(gi, canvas, e) {
+  const tx = coupledTX[gi];
+  if (!tx) return null;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const b = currentCoupledBounds()[gi];
+  if (!b) return null;
+  const X = (v) => tx.ml + ((v - tx.xmin) / (tx.xmax - tx.xmin)) * tx.pw;
+  const Y = (v) => tx.mt + (1 - (v - tx.ymin) / (tx.ymax - tx.ymin)) * tx.ph;
+  for (const [h, hx] of [[0, tx.hx0], [1, tx.hx1]]) {
+    const hy = b.intercept + b.slope * hx;
+    if (Math.hypot(mx - X(hx), my - Y(hy)) <= 9) return { b, handle: h };
+  }
+  return null;
+}
+
+function hoverCoupled(gi, canvas, e) {
+  if (boundDrag) return;
+  canvas.style.cursor = coupledHit(gi, canvas, e) ? "grab" : "";
+}
+
+function startCoupledDrag(gi, canvas, e) {
+  const hit = coupledHit(gi, canvas, e);
+  if (!hit) return;
+  const tx = coupledTX[gi];
+  const hx = hit.handle === 0 ? tx.hx0 : tx.hx1;
+  const ox = hit.handle === 0 ? tx.hx1 : tx.hx0;
+  boundDrag = {
+    kind: "coupled", index: gi, canvas, b: hit.b,
+    hx, otherX: ox, otherY: hit.b.intercept + hit.b.slope * ox,
+    frozen: { xmin: tx.xmin, xmax: tx.xmax, ymin: tx.ymin, ymax: tx.ymax },
+  };
+  e.preventDefault();
+}
+
+function dragCoupled(e) {
+  const { canvas, index, b, hx, otherX, otherY, frozen } = boundDrag;
+  const tx = coupledTX[index];
+  const rect = canvas.getBoundingClientRect();
+  const frac = 1 - (e.clientY - rect.top - tx.mt) / tx.ph;
+  const y = frozen.ymin + frac * (frozen.ymax - frozen.ymin);
+  const slope = (y - otherY) / (hx - otherX);
+  b.slope = +slope.toFixed(3);
+  b.intercept = +(y - slope * hx).toFixed(3);
+  for (const key of ["intercept", "slope"]) {
+    const input = $(`cb-${index}-${key}`);
+    if (input) input.value = b[key].toFixed(2);
+  }
+  renderAll();
+}
+
+window.addEventListener("mousemove", (e) => {
+  if (!boundDrag) return;
+  if (boundDrag.kind === "feature") dragFeature(e); else dragCoupled(e);
+});
+window.addEventListener("mouseup", () => {
+  if (!boundDrag) return;
+  boundDrag = null;
+  renderBoundControls();
+  renderAll();
+  schedulePersonaSave();
+});
 
 function renderGraphs() {
   const T = maxFrames();
@@ -763,7 +1171,7 @@ function renderGraphs() {
     const seriesList = [];
     for (const [, t] of visibleTrajs()) {
       const s = t.data.features[name];
-      seriesList.push({ s, color: t.color, bounds: t.data.bounds });
+      seriesList.push({ s, color: t.color, data: t.data });
       for (const v of s) { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); }
     }
     if (showClusters) {
@@ -775,7 +1183,7 @@ function renderGraphs() {
     }
     const oracleBounds = showOracleBounds ? personaConstantBounds(name) : [];
     const costBounds = showGeneratedBounds
-      ? generatedBounds.filter((b) => b.feature === name)
+      ? generatedBounds.filter((b) => b.feature === name && !b.coupled)
       : [];
     for (const b of [...oracleBounds, ...costBounds]) {
       if (b.low !== null && b.low !== undefined) { ymin = Math.min(ymin, b.low); ymax = Math.max(ymax, b.low); }
@@ -785,6 +1193,12 @@ function renderGraphs() {
     if (!isFinite(ymin)) { ymin = 0; ymax = Math.PI; }
     const span = Math.max(0.3, ymax - ymin);
     ymin -= span * 0.15; ymax += span * 0.15;
+    // Freeze the scale while a bound is being dragged on this graph, so the
+    // value under the cursor doesn't shift as the range refits around it.
+    if (boundDrag && boundDrag.kind === "feature" && boundDrag.feature === name) {
+      ({ ymin, ymax } = boundDrag.frozen);
+    }
+    graphTX[name] = { ml, mt, pw, ph, ymin, ymax };
 
     const X = (i) => ml + (i / Math.max(1, T - 1)) * pw;
     const Y = (v) => mt + (1 - (v - ymin) / (ymax - ymin)) * ph;
@@ -828,12 +1242,21 @@ function renderGraphs() {
     drawBounds(oracleBounds, "rgba(214,69,65,0.13)", "rgba(180,40,40,0.8)");
     drawBounds(costBounds, "rgba(53,103,214,0.10)", GENERATED_LIMIT_COLOR);
 
+    // drag handles on the persona bound edges
+    ctx.fillStyle = "rgba(180,40,40,0.9)";
+    for (const b of oracleBounds) {
+      for (const key of ["low", "high"]) {
+        if (b[key] === null || b[key] === undefined) continue;
+        ctx.fillRect(ml + pw - 26, Y(b[key]) - 3, 22, 6);
+      }
+    }
+
     // coupled per-frame thresholds (dashed, per trajectory)
-    for (const { color, bounds } of showOracleBounds ? seriesList : []) {
-      if (!bounds) continue;
-      for (const b of bounds) {
+    for (const { color, data } of showOracleBounds ? seriesList : []) {
+      if (!data) continue;
+      for (const b of currentCoupledBounds()) {
         if (b.feature !== name) continue;
-        const thr = Array.isArray(b.low) ? b.low : Array.isArray(b.high) ? b.high : null;
+        const thr = coupledThresholdSeries(b, data);
         if (!thr) continue;
         ctx.strokeStyle = color;
         ctx.setLineDash([3, 3]);
@@ -882,23 +1305,100 @@ function currentCoupledBounds() {
   return p.bounds.filter((b) => b.kind === "coupled");
 }
 
+function featureBoxRange(name) {
+  const p = getPersona();
+  const range = p && p.feature_box_ranges && p.feature_box_ranges[name];
+  if (!range || range.length !== 2 || !isFinite(range[0]) || !isFinite(range[1])) return null;
+  return range;
+}
+
 function buildCoupledGraphs() {
   const holder = $("coupled-graphs");
   if (!holder) return;
   holder.innerHTML = "";
+  const p = getPersona();
   currentCoupledBounds().forEach((b, i) => {
     const panel = document.createElement("div");
     panel.className = "panel";
     const title = document.createElement("div");
     title.className = "graph-title";
     title.textContent = `${b.feature} vs ${b.cond_feature} (pose-dependent limit)`;
+    const del = document.createElement("button");
+    del.textContent = "✕";
+    del.className = "coupled-del";
+    del.onclick = () => {
+      p.bounds.splice(p.bounds.indexOf(b), 1);
+      buildCoupledGraphs(); renderAll(); schedulePersonaSave();
+    };
+    title.appendChild(del);
     const canvas = document.createElement("canvas");
     canvas.className = "coupled-graph";
     canvas.id = `coupled-graph-${i}`;
+    canvas.addEventListener("mousedown", (e) => startCoupledDrag(i, canvas, e));
+    canvas.addEventListener("mousemove", (e) => hoverCoupled(i, canvas, e));
+    const row = document.createElement("div");
+    row.className = "gbound-row";
+    const type = document.createElement("select");
+    for (const t of ["upper_bound", "lower_bound"]) {
+      const opt = document.createElement("option");
+      opt.value = t; opt.textContent = t;
+      type.appendChild(opt);
+    }
+    type.value = b.bound_type;
+    type.onchange = () => { b.bound_type = type.value; renderAll(); schedulePersonaSave(); };
+    row.appendChild(type);
+    for (const key of ["intercept", "slope"]) {
+      const lab = document.createElement("span");
+      lab.textContent = key;
+      row.appendChild(lab);
+      const n = document.createElement("input");
+      n.type = "number"; n.step = 0.05;
+      n.value = (+b[key]).toFixed(2);
+      n.id = `cb-${i}-${key}`;
+      n.onchange = () => { b[key] = +n.value; renderAll(); schedulePersonaSave(); };
+      row.appendChild(n);
+    }
     panel.appendChild(title);
     panel.appendChild(canvas);
+    panel.appendChild(row);
     holder.appendChild(panel);
   });
+  if (!p) return;
+  const addRow = document.createElement("div");
+  addRow.className = "panel gbound-row coupled-add";
+  const mkFeat = () => {
+    const s = document.createElement("select");
+    for (const f of INIT.feature_names) {
+      const opt = document.createElement("option");
+      opt.value = f; opt.textContent = f;
+      s.appendChild(opt);
+    }
+    return s;
+  };
+  const fSel = mkFeat(), cSel = mkFeat();
+  cSel.value = INIT.feature_names[1] || INIT.feature_names[0];
+  const vs = document.createElement("span");
+  vs.textContent = "vs";
+  const add = document.createElement("button");
+  add.textContent = "+ coupled bound";
+  add.onclick = () => {
+    let mid = 1.0;
+    const t = visibleTrajs()[0];
+    if (t) {
+      const f = t[1].data.features[fSel.value];
+      mid = f.reduce((a, v) => a + v, 0) / f.length;
+    }
+    p.bounds.push({
+      kind: "coupled", feature: fSel.value, bound_type: "upper_bound",
+      cond_feature: cSel.value, intercept: +mid.toFixed(2), slope: 0,
+    });
+    buildCoupledGraphs(); renderAll(); schedulePersonaSave();
+  };
+  addRow.appendChild(fSel);
+  addRow.appendChild(vs);
+  addRow.appendChild(cSel);
+  addRow.appendChild(add);
+  holder.appendChild(addRow);
 }
 
 function coupledSeriesList(b) {
@@ -943,22 +1443,22 @@ function renderCoupledGraphs() {
       for (const v of xs) { xmin = Math.min(xmin, v); xmax = Math.max(xmax, v); }
       for (const v of ys) { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); }
     }
+    const xBox = featureBoxRange(b.cond_feature);
+    const yBox = featureBoxRange(b.feature);
+    if (xBox) { xmin = Math.min(xmin, xBox[0]); xmax = Math.max(xmax, xBox[1]); }
+    if (yBox) { ymin = Math.min(ymin, yBox[0]); ymax = Math.max(ymax, yBox[1]); }
     if (!isFinite(xmin)) { xmin = -0.2; xmax = 2.6; ymin = -0.2; ymax = 2.6; }
-    // keep the limit line in view across the plotted x-range
-    for (const x of [xmin, xmax]) { const y = thr(x); ymin = Math.min(ymin, y); ymax = Math.max(ymax, y); }
-    // keep generated-cost limits on either feature in view
-    const genBounds = showGeneratedBounds
-      ? generatedBounds.filter((g) => g.feature === b.feature || g.feature === b.cond_feature)
-      : [];
-    for (const g of genBounds) {
-      for (const v of [g.low, g.high]) {
-        if (v === null || v === undefined) continue;
-        if (g.feature === b.feature) { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); }
-        else { xmin = Math.min(xmin, v); xmax = Math.max(xmax, v); }
-      }
-    }
     const xs = Math.max(0.3, xmax - xmin), ys = Math.max(0.3, ymax - ymin);
     xmin -= xs * 0.1; xmax += xs * 0.1; ymin -= ys * 0.1; ymax += ys * 0.1;
+    // Freeze the scale while a handle is being dragged on this plot.
+    if (boundDrag && boundDrag.kind === "coupled" && boundDrag.index === gi) {
+      ({ xmin, xmax, ymin, ymax } = boundDrag.frozen);
+    }
+    coupledTX[gi] = {
+      ml, mt, pw, ph, xmin, xmax, ymin, ymax,
+      hx0: xmin + 0.15 * (xmax - xmin),
+      hx1: xmax - 0.15 * (xmax - xmin),
+    };
 
     const X = (v) => ml + ((v - xmin) / (xmax - xmin)) * pw;
     const Y = (v) => mt + (1 - (v - ymin) / (ymax - ymin)) * ph;
@@ -981,32 +1481,35 @@ function renderCoupledGraphs() {
     ctx.beginPath(); ctx.moveTo(lx0, ly0); ctx.lineTo(lx1, ly1); ctx.stroke();
     ctx.setLineDash([]);
 
-    // generated-cost limits: a constant single-feature bound is a horizontal
-    // line (on the y feature) or a vertical line (on the x/cond feature) here —
-    // an axis-aligned approximation of the diagonal pose-dependent limit.
-    if (genBounds.length) {
-      ctx.fillStyle = "rgba(53,103,214,0.10)";
-      const shadeH = (v, above) => { const y = Y(v); above ? ctx.fillRect(ml, mt, pw, y - mt) : ctx.fillRect(ml, y, pw, mt + ph - y); };
-      const shadeV = (v, right) => { const x = X(v); right ? ctx.fillRect(x, mt, ml + pw - x, ph) : ctx.fillRect(ml, mt, x - ml, ph); };
-      ctx.strokeStyle = GENERATED_LIMIT_COLOR; ctx.lineWidth = 1.5; ctx.setLineDash([5, 3]);
-      for (const g of genBounds) {
-        const onY = g.feature === b.feature;
-        if (g.bound_type === "upper_bound") onY ? shadeH(g.high, true) : shadeV(g.high, true);
-        else if (g.bound_type === "lower_bound") onY ? shadeH(g.low, false) : shadeV(g.low, false);
-        else if (g.bound_type === "band") {
-          if (onY) { shadeH(g.low, false); shadeH(g.high, true); }
-          else { shadeV(g.low, false); shadeV(g.high, true); }
-        }
-        for (const v of [g.low, g.high]) {
-          if (v === null || v === undefined) continue;
-          ctx.beginPath();
-          if (onY) { ctx.moveTo(ml, Y(v)); ctx.lineTo(ml + pw, Y(v)); }
-          else { ctx.moveTo(X(v), mt); ctx.lineTo(X(v), mt + ph); }
-          ctx.stroke();
-        }
-      }
-      ctx.setLineDash([]);
+    // drag handles for editing the limit line
+    ctx.fillStyle = "rgba(180,40,40,0.95)";
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1.5;
+    for (const hx of [coupledTX[gi].hx0, coupledTX[gi].hx1]) {
+      ctx.beginPath(); ctx.arc(X(hx), Y(thr(hx)), 6, 0, 7); ctx.fill(); ctx.stroke();
     }
+
+    // generated/unified-cost penalty fields: the ACTUAL compiled cost evaluated
+    // over a cloud of plausible poses, read straight from the cost — no
+    // declared-bound parsing — so it works for any cost shape/backend and its
+    // penalized region can be compared directly against the red oracle limit.
+    const drawField = (field, rgb) => {
+      if (!field || !field.penalty.length) return;
+      const cond = field.features[b.cond_feature];
+      const feat = field.features[b.feature];
+      const pen = field.penalty;
+      let pmax = 0;
+      for (const p of pen) if (p > pmax) pmax = p;
+      if (!cond || !feat || pmax <= 0) return;
+      const eps = pmax * 0.02;
+      for (let i = 0; i < pen.length; i++) {
+        if (pen[i] <= eps) continue;
+        ctx.fillStyle = `rgba(${rgb},${0.12 + 0.5 * Math.min(1, pen[i] / pmax)})`;
+        ctx.beginPath(); ctx.arc(X(cond[i]), Y(feat[i]), 3, 0, 7); ctx.fill();
+      }
+    };
+    if (showGeneratedBounds) drawField(costField, "53,103,214");
+    if (showUnifiedBounds) drawField(unifiedCostField, "0,131,143");
 
     // trajectory paths, red on the violating side; dot at the scrubbed frame
     for (const { xs: sx, ys: sy, color, alpha } of series) {
@@ -1069,8 +1572,9 @@ function renderStrips() {
   const rh = Math.min(8, h / entries.length);
   entries.forEach(([key, t], row) => {
     const y = row * rh;
+    const viol = computeViolations(t.data);
     for (let i = 0; i < t.data.n_frames; i++) {
-      ctx.fillStyle = t.data.violations[i] > 0 ? "#e02020" : t.color + "44";
+      ctx.fillStyle = viol[i] > 0 ? "#e02020" : t.color + "44";
       ctx.fillRect((i / T) * w, y, Math.max(1, w / T), rh - 1);
     }
     if (key === "base" && baseTrigger !== null) {
@@ -1143,6 +1647,14 @@ async function main() {
   $("recluster").onclick = recluster;
   $("generate-cost").onclick = generateCost;
 
+  rounds = INIT.rounds || [];
+  unified = INIT.unified || null;
+  $("commit-round").onclick = commitRound;
+  $("combine-rounds").onclick = combineRounds;
+  $("reset-rounds").onclick = resetRounds;
+  renderRounds();
+  renderUnifiedOutput();
+
   $("scale").oninput = () => { $("scale-num").value = $("scale").value; };
   $("scale").onchange = onScaleChange;
   $("scale-num").onchange = () => { $("scale").value = $("scale-num").value; onScaleChange(); };
@@ -1159,6 +1671,11 @@ async function main() {
     renderAll();
   };
   $("play").onclick = () => {
+    const slider = $("frame-slider");
+    if (!playing && frame >= +slider.max) {
+      slider.value = 0;
+      slider.oninput();
+    }
     playing = !playing;
     $("play").innerHTML = playing ? "&#10074;&#10074;" : "&#9654;";
   };

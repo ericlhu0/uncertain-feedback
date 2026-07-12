@@ -32,6 +32,7 @@
       <div class="row">
         <button id="reset-pose">Reset pose</button>
         <button id="run-base" class="primary">Run base rollout</button>
+        <label><input type="checkbox" id="show-oracle"> Show oracle rollout</label>
       </div>
       <div class="metrics" id="base-metrics"></div>
     </div>
@@ -71,11 +72,24 @@
       <div class="row"><button id="generate-cost" class="primary" disabled>Generate cost + rollout</button></div>
       <div id="cost-output"></div>
     </div>
+
+    <div class="panel">
+      <h2>4 &middot; Multi-round feedback</h2>
+      <div class="row">
+        <button id="commit-round" disabled>Commit round</button>
+        <button id="combine-rounds" class="primary" disabled>Combine rounds (codex)</button>
+        <button id="reset-rounds" class="danger" disabled>Reset</button>
+      </div>
+      <div class="hint">Commit stores the last generated cost as a feedback round; Combine asks codex for ONE unified cost that replaces all committed round costs and automatically rolls it out from the initial pose.</div>
+      <div id="round-list"></div>
+      <div id="unified-output"></div>
+    </div>
   </div>
 
   <div id="center">
     <div class="panel" id="skeleton-panel">
       <canvas id="skeleton-canvas"></canvas>
+      <div id="view-labels"><span>Front (XY)</span><span>Side (ZY)</span><span>Top (XZ)</span></div>
       <div id="legend"></div>
     </div>
     <div class="panel">
@@ -112,6 +126,9 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.165.0/build/three.module.js"}}
+</script>
+<script type="module" src="/static/app.js"></script>
 </body>
 </html>

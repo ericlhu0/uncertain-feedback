@@ -109,6 +109,8 @@ class MpcRunConfig:
     # persona name. When the active persona is present, its goals replace the
     # top-level cartesian/transfer goals (see PersonaGoals).
     persona_goals: dict[str, PersonaGoals] = field(default_factory=dict)
+    # Seed for planner-local MPC action sampling.
+    seed: int = 0
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -126,6 +128,16 @@ def _positive_int(value: Any, name: str) -> int:
         raise ValueError(f"{name} must be a positive integer.") from exc
     if parsed <= 0:
         raise ValueError(f"{name} must be positive.")
+    return parsed
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a nonnegative integer.") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be nonnegative.")
     return parsed
 
 
@@ -313,6 +325,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 or "codex exec"
             ),
         ),
+        seed=_nonnegative_int(data.get("seed", 0), "seed"),
         mdm_frames=(
             None
             if data.get("mdm_frames") is None

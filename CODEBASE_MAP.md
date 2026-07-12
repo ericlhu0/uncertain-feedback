@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-10
+**Last updated:** 2026-07-12
 **Branch:** simulated-users-standard
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -40,12 +40,13 @@ uncertain-feedback/
 │   │       │   ├── llm_costs.py      # backend: llm (interpret→ground→author, single pass) + re-exports
 │   │       │   ├── turns_costs.py    # backend: turns (fixed interpret, ground+author refinement)
 │   │       │   ├── agent_costs.py    # backend: agent (codex CLI)
+│   │       │   ├── combine_costs.py  # Multi-round history + unified replacement-cost agent
 │   │       │   ├── cost_feedback.py  # EvalState (picklable rollout state for agent backend)
 │   │       │   └── prompts/          # Staged prompt text files
 │   │       │       ├── __init__.py   # staged prompt builders + image placeholder substitution
 │   │       │       ├── runtime_api.txt       # Shared technical contract
 │   │       │       ├── output_contract.txt   # Shared output rules
-│   │       │       └── stages/       # interpret.txt, ground.txt, author.txt, refine.txt
+│   │       │       └── stages/       # interpret.txt, ground.txt, author.txt, refine.txt, combine.txt
 │   │       ├── arm_mpc.py            # SmplLeftArmMPC (base sampling MPC)
 │   │       ├── arm_mpc_mdm.py        # LeftArmMPCMDM (+ MDM trajectory tracking)
 │   │       ├── arm_mpc_mdm_uq.py     # LeftArmMPCMDMUQ (+ UQ clustering)
@@ -59,6 +60,7 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
 │   │           ├── arm_mpc_cartesian_mdm_llm_agent.yaml  # backend: agent (codex CLI)
 │   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
+│   │           ├── arm_mpc_cartesian_mdm_llm_multiround.yaml # pose-dependent multi-round experiment
 │   │           └── arm_mpc_cartesian_no_mdm.yaml
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
@@ -69,6 +71,8 @@ uncertain-feedback/
 │   │   ├── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
 │   │   ├── transfer_experiment.py    # Adds held-out transfer-goal eval around experiment_pipeline
 │   │   ├── run_transfer_experiment.py # CLI entry point for simulated-user transfer experiments
+│   │   ├── multi_round_experiment.py # Multi-goal feedback history + cost combination loop
+│   │   ├── run_multi_round_experiment.py # CLI entry point for multi-round experiments
 │   │   └── render_cost_comparison.py # CLI the agent backend runs to render rollout-vs-correction overlay
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator
@@ -114,9 +118,10 @@ uncertain-feedback/
 │   │       ├── server.py             # Flask web UI for hand-authoring trajectories
 │   │       └── hml_decode.py         # HML decode utilities for the editor
 │   ├── demo_designer/
-│   │   ├── core.py                   # DemoSession: pipeline wrappers + persona CRUD + trajectory packaging
-│   │   ├── server.py                 # Flask web UI for designing demo scenarios (base → UQ → cost)
-│   │   └── static/                   # index.html, app.js, style.css (canvas skeleton views + backend selector + feature graphs)
+│   │   ├── smpl_mesh.py              # Neutral SMPL vertex generation + binary trajectory mesh cache
+│   │   ├── core.py                   # DemoSession: pipeline wrappers + persona CRUD + trajectory packaging + multi-round commit/combine state
+│   │   ├── server.py                 # Flask web UI for designing demo scenarios (base → UQ → cost → multi-round combine)
+│   │   └── static/                   # index.html, app.js, style.css (Three.js SMPL body views + persona bound editing + feature graphs)
 │   ├── llm/
 │   │   ├── base_model.py             # BaseModel ABC (get_full_output)
 │   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
@@ -302,6 +307,7 @@ When `llm_cost.enabled: true` in the YAML:
 - `llm` (`llm_costs.py`) — single-pass staged calls: interpret → ground → author; only the author output is parsed/compiled. Stage prompt/response pairs are aggregated in `stage_log.md`.
 - `turns` (`turns_costs.py`) — interprets once, then runs a stateful ground+author conversation; keeps the best cost by ranking consistency (`rank_candidate_cost`, falling back to the L2 rollout score when the context has no comparison trajectories). `stage_log.md` includes the interpretation plus each refine turn's prompt snapshot and response.
 - `agent` (`agent_costs.py`) — delegates the staged method to the `codex` CLI, which emits the same `response.json` and must write `stage_log.md` with Stage 1 / Stage 2 / Stage 3 responses.
+- `CombineCostGenerator` (`combine_costs.py`) is constructed directly by the multi-round experiment, not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`.
 
 ### Cost evaluation & visual feedback
 
@@ -328,6 +334,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `steps`                | int      | Total MPC steps to run                               |
 | `horizon`              | int      | MPC look-ahead steps                                 |
 | `n_mpc_samples`        | int      | Candidate action sequences per step                  |
+| `seed`                 | int      | MPC action-sampling seed (default 0)                |
 | `max_angle_delta`      | float    | Sampling std dev (radians)                           |
 | `pose`                 | path?    | HML pose `.pt` file for initial body state           |
 | `goal_threshold`       | float    | L2 dist threshold to pop goal (default 0.01)         |
@@ -443,8 +450,9 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../experiments/run_cluster_experiment.py --mpc-config <yaml>` | Per-cluster cost comparison with base/oracle/generated hidden-cost evaluation for Cartesian goals |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison with base/oracle/generated hidden-cost evaluation |
 | `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
+| `uv run python src/.../experiments/run_multi_round_experiment.py --mpc-config <yaml> [--persona <name>]` | Multi-round cost experiment; `cartesian.goals` is the ordered round sequence and successful feedback contexts are unified into one replacement cost |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
-| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>]` | Browser tool for designing demo scenarios: tweak start pose / goal / persona bounds / MDM prompt / clusters / magnitude, scrub trajectories, run cost generation (see README) |
+| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>]` | Browser tool for designing demo scenarios: tweak start pose within the selected persona's joint boxes / goal / persona bounds (draggable on the feature graphs and phase plots) / MDM prompt / clusters / magnitude, optionally compare the base rollout with the post-trigger hidden-cost oracle, scrub trajectories, run cost generation, and commit/combine multiple feedback rounds; combining automatically rolls the unified cost out from the initial pose (see README) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |
@@ -505,6 +513,9 @@ The hidden bounds are the evaluation ground truth in headless experiments
   through it; simple bounds as feature-over-time with the forbidden range shaded.
 - `SimulatedUser` — persona: `name`, clinical `description`, `feedback_text`
   (what the user says when the robot violates a bound), `bounds`.
+- Hidden feature bounds are soft oracle penalties. Persona descriptions distinguish
+  physical/symptom-limited ranges from documented movement preferences; they are
+  not enforced as hard simulator stops.
 - Behaviors: `first_violation_step()` (feedback trigger), `choose_cluster()`
   (picks the most comfortable UQ cluster mean), `violation_metrics()`
   (mean/max/frac violated — evaluation metric), `HiddenCostTerm` (oracle
@@ -515,7 +526,13 @@ The hidden bounds are the evaluation ground truth in headless experiments
   bounds are directly comparable.
 - Personas (`personas.py`): `unrestricted` (default; no bounds),
   `adhesive_capsulitis`, `elbow_contracture`, `painful_arc` (elevation avoid band),
-  `stroke_flexor_synergy` (coupled bound), `cross_body_pain` (coupled bound:
+  `stroke_flexor_synergy` (active-effort coupled proxy),
+  `out_of_synergy_reach_preference` (soft preference for more elbow extension as
+  shoulder elevation increases),
+  `triceps_long_head_contracture` (maximum elbow flexion falls with elevation),
+  `biceps_long_head_contracture` (minimum elbow flexion rises with shoulder extension),
+  `brachial_plexus_mechanosensitivity` (minimum elbow flexion rises with abduction),
+  `cross_body_pain` (coupled bound:
   tolerable elevation = 2.2 + 4.5·abduction, i.e. the limit slides down the
   farther the upper arm adducts past the midline — blocks the direct route to
   across-body goals so the compliant correction is a visibly different path;

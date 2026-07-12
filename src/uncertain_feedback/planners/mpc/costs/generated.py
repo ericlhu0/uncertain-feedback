@@ -21,6 +21,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.planners.mpc.costs.base import (
+    CompositeTrajectoryCost,
     MpcCostContext,
     TrajectoryCost,
 )
@@ -291,6 +292,19 @@ class GeneratedPythonCost(TrajectoryCost):
         return costs
 
 
+def replace_generated_costs(
+    composite: CompositeTrajectoryCost,
+    cost: GeneratedPythonCost | None,
+) -> CompositeTrajectoryCost:
+    """Replace every generated term while preserving hand-authored costs."""
+    terms = [
+        term for term in composite.terms() if not isinstance(term, GeneratedPythonCost)
+    ]
+    if cost is not None:
+        terms.append(cost)
+    return CompositeTrajectoryCost(terms)
+
+
 def parse_llm_cost_response(raw: str) -> LlmCostResponse:
     """Parse the LLM JSON response, accepting optional Markdown fences."""
     text = raw.strip()
@@ -559,6 +573,7 @@ def build_rollout_joint_comparison(
     }
 
 
+
 def build_joint_angle_series(
     context: GeneratedCostContext,
     trajectory: np.ndarray,
@@ -704,4 +719,3 @@ def _array_stats(values: np.ndarray) -> dict[str, Any]:
         "start": values[0].tolist(),
         "end": values[-1].tolist(),
     }
-

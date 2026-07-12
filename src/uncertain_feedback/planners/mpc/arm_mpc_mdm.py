@@ -104,6 +104,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         spine3_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
+        seed: int | None = None,
     ) -> None:
         # Base sets up _config, _goals deque, _prev_best, _vis.
         # Pass visualize=False; MDM overrides vis config below.
@@ -119,6 +120,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             spine3_aa=spine3_aa,
             body_pos=body_pos,
             extra_costs=extra_costs,
+            seed=seed,
         )
         self.advance_threshold = advance_threshold
         self._max_playback_delta = max_playback_delta

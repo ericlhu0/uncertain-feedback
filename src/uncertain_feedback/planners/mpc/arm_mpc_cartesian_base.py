@@ -114,10 +114,9 @@ class _CartesianGoalsMixin:
                 (self._horizon, _N_JOINTS, 3), dtype=np.float64  # type: ignore[attr-defined]
             )
 
-        actions = np.random.normal(
-            loc=mean,
-            scale=self._max_angle_delta,  # type: ignore[attr-defined]
-            size=(self._n_mpc_samples, self._horizon, _N_JOINTS, 3),  # type: ignore[attr-defined]
+        actions = self._sample_actions(  # type: ignore[attr-defined]
+            mean,
+            (self._n_mpc_samples, self._horizon, _N_JOINTS, 3),  # type: ignore[attr-defined]
         )
         q_trajs = self._rollout(current_q, actions)  # type: ignore[attr-defined]
         costs = self._cartesian_cost(q_trajs)

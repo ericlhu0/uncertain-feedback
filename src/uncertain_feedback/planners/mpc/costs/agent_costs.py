@@ -63,10 +63,15 @@ class AgentCostGenerator(CostGenerator):
     """Cost generator that runs the ``codex`` CLI to author the cost JSON."""
 
     def __init__(
-        self, *args: Any, codex_cmd: str = "codex exec", **kwargs: Any
+        self,
+        *args: Any,
+        codex_cmd: str = "codex exec",
+        timeout_seconds: float | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.codex_cmd = codex_cmd
+        self.timeout_seconds = timeout_seconds
 
     def generate(self, install: bool = False) -> GeneratedPythonCost | None:
         try:
@@ -76,14 +81,17 @@ class AgentCostGenerator(CostGenerator):
                 self.summaries,
                 self.images if self.use_images else {},
             )
-            iterate = self.use_images and self.eval_state is not None
-            if iterate:
-                self.eval_state.save(self.run_dir / _STATE_FILE)
+            eval_state = self.eval_state
+            iterate = self.use_images and eval_state is not None
+            if eval_state is not None and iterate:
+                eval_state.save(self.run_dir / _STATE_FILE)
             (self.run_dir / "TASK.md").write_text(
                 self._task_md(
                     prompt_text,
                     iterate=iterate,
-                    image_input=image_input if self.use_images else None,
+                    image_input=(
+                        [str(path) for path in image_input] if self.use_images else None
+                    ),
                 ),
                 encoding="utf-8",
             )
@@ -213,6 +221,11 @@ class AgentCostGenerator(CostGenerator):
         cmd_line = shlex.join(cmd)
         start = time.perf_counter()
         returncode: int | None = None
+        timeout_seconds = (
+            _CODEX_TIMEOUT_SECONDS
+            if self.timeout_seconds is None
+            else self.timeout_seconds
+        )
         print(f"[cost-gen][agent] starting codex: {cmd_line}", flush=True)
         print(f"[cost-gen][agent] live log: {log_path}", flush=True)
         try:
@@ -228,10 +241,10 @@ class AgentCostGenerator(CostGenerator):
                 )
                 while True:
                     elapsed = time.perf_counter() - start
-                    remaining = _CODEX_TIMEOUT_SECONDS - elapsed
+                    remaining = timeout_seconds - elapsed
                     if remaining <= 0.0:
                         message = (
-                            "[cost-gen][agent] codex exceeded the 30-minute timeout; "
+                            "[cost-gen][agent] codex exceeded its timeout; "
                             "terminating child"
                         )
                         print(message, flush=True)
@@ -244,7 +257,8 @@ class AgentCostGenerator(CostGenerator):
                             process.kill()
                             process.wait(timeout=_CODEX_TERMINATE_GRACE_SECONDS)
                         raise GeneratedCostValidationError(
-                            "codex timed out after 30 minutes; see codex.log"
+                            f"codex timed out after {timeout_seconds:g} seconds; "
+                            "see codex.log"
                         )
                     try:
                         returncode = process.wait(

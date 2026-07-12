@@ -253,6 +253,10 @@ Supported YAML `planner` values:
 - `arm_mpc_cartesian`: MDM/UQ first, then Cartesian wrist-goal MPC.
 - `arm_mpc_cartesian_no_mdm`: Cartesian wrist-goal MPC only, no MDM and no UQ.
 
+Set the optional top-level `seed` key to control MPC action sampling. It defaults
+to `0`; use another nonnegative integer to reproduce a different sampling
+sequence.
+
 ### Motion-generation backend (`motion_generator`)
 
 The text-to-motion backend is selected by the optional YAML key `motion_generator`:
@@ -269,10 +273,20 @@ Both backends expose the same interface, so any MDM-backed planner
 Every run loads a simulated care recipient alongside the pose, selected by the
 optional YAML key `user:` (default `unrestricted` — no movement restrictions).
 Restricted personas (`adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
-`stroke_flexor_synergy`, `cross_body_pain`;
+`stroke_flexor_synergy`, `triceps_long_head_contracture`,
+`biceps_long_head_contracture`, `brachial_plexus_mechanosensitivity`,
+`out_of_synergy_reach_preference`, `cross_body_pain`;
 see `src/uncertain_feedback/simulated_users/personas.py`)
 carry hidden joint-limit bounds and a fixed feedback line. When the configured
 user has bounds:
+
+Hidden feature bounds are soft comfort/evaluation penalties, not simulator hard
+stops. They may encode either a physical or symptom-limited range or a documented
+movement preference; each persona description states which interpretation applies.
+`out_of_synergy_reach_preference` models the rehabilitation goal of combining
+shoulder flexion/elevation with elbow extension during outward reaching, a movement
+outside the post-stroke flexor synergy ([Hadjiosif et al., 2024](https://pmc.ncbi.nlm.nih.gov/articles/PMC11403926/);
+[Ellis et al., 2018](https://pmc.ncbi.nlm.nih.gov/articles/PMC5825888/)).
 
 - `--text` defaults to the user's feedback line (an explicit `--text` still wins;
   with the unrestricted user the default stays `"move my arm up"`).
@@ -290,6 +304,7 @@ planner: arm_mpc
 steps: 500
 horizon: 10
 n_mpc_samples: 256
+seed: 0  # reproducible MPC action sampling
 max_angle_delta: 0.001
 goal_threshold: 0.01
 ```
@@ -501,7 +516,10 @@ Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation use
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
   images + compact summary → plain-language preference), **ground** (preference + full
-  numeric summaries → concrete features and bounds), **author** (spec + runtime API /
+  numeric summaries → concrete features and bounds — a bound is a constant threshold by
+  default, or pose-dependent, its threshold sliding with a second feature via anchor
+  points, only when the feedback ties one joint's range to another's position), **author**
+  (spec + runtime API /
   output contract → cost JSON). Each stage's prompt and raw response are saved as
   `<stage>_prompt.txt` / `<stage>_response.txt`, with a readable aggregate in
   `stage_log.md`.
@@ -614,7 +632,12 @@ own timestamped artifact dir, reusing one loaded MDM setup. With `--save-video`,
 iterating cost backends also save candidate rollout artifacts under
 `cost_generation/`.
 Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
-`stroke_flexor_synergy` (pose-dependent bound), `cross_body_pain`
+`stroke_flexor_synergy` (active-effort pose proxy),
+`out_of_synergy_reach_preference` (soft preference for progressively more elbow extension with elevation),
+`triceps_long_head_contracture` (maximum elbow flexion falls with elevation),
+`biceps_long_head_contracture` (minimum elbow flexion rises with shoulder extension),
+`brachial_plexus_mechanosensitivity` (minimum elbow flexion rises with abduction),
+and `cross_body_pain`
 (pose-dependent bound: tolerable elevation drops linearly as the upper arm
 adducts past the midline) — the unrestricted default is rejected. Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
 `cartesian.goals`, and a `transfer:` block:
@@ -658,6 +681,49 @@ and `transfer_summary.json` with per-condition per-goal metrics
 the original goal; on transfer goals it is identical to `base` — that contrast
 is the argument for persisting a cost function rather than a trajectory.
 
+### Multi-round pose-dependent experiment
+
+The multi-round experiment treats every entry in `cartesian.goals` as the next
+goal for the same care recipient. Each triggered round still runs the normal
+single-round generator against the hand-authored base comfort costs. From the
+second triggered round onward, a Codex combinator replays every round's feedback,
+trajectories, summaries, images, and generated cost to author one unified cost.
+The unified cost replaces earlier generated costs; generated terms are never
+stacked.
+
+The example config includes two base-vs-oracle-screened pose-dependent scenarios
+using `demo_pose_v3.pt` (initial spine3-relative wrist position approximately
+`[0.356, -0.091, 0.316]`). Coordinates below are spine3-relative wrist goals:
+
+| Persona | Round 1 | Round 2 | Round 3 purpose |
+|---|---|---|---|
+| `triceps_long_head_contracture` | `[0.25, 0.32, 0.15]` | `[-0.05, 0.40, 0.15]` (across body) | `[0.10, 0.10, 0.25]`: low close reach that rejects an overly global elbow-extension rule |
+| `cross_body_pain` | `[-0.04, 0.45, 0.15]` | `[-0.12, 0.25, 0.25]` | `[0.42, 0.48, 0.12]`: high lateral reach that rejects an overly global elevation cap |
+
+The first two goals deliberately sample different parts of each hidden diagonal
+boundary. The third is a comfortable generalization goal on the allowed side of
+the boundary, chosen to expose a simpler but overrestrictive rule. A sufficiently
+good generator may infer the coupled preference after the
+first correction; if it overfits that observation, the second violation supplies
+the contrasting evidence needed by the multi-round combinator.
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_multi_round_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_multiround.yaml \
+  --persona stroke_flexor_synergy \
+  --save-video
+```
+
+Artifacts go to `multi_round_artifacts/<timestamp>/`. Each `round_<k>/` contains
+the initial rollout, correction, pickled evaluation state, cluster overlay, and
+unchanged per-round `cost_generation/` artifacts. `history.json` is the durable
+full-context round history. Each `combine_round_<k>/` contains the unified cost,
+iteration log, per-round comparison images, and `scores.json`. Final
+base/generated/oracle rollouts are evaluated for every goal, and
+`hidden_bounds_goal_<k>.png` plots those trajectories against the persona's true
+forbidden region; for coupled personas this is the direct visual check that the
+learned pose-dependent anchors follow the hidden diagonal boundary.
+
 
 ## Demo designer web tool
 
@@ -675,17 +741,22 @@ uv run python src/uncertain_feedback/demo_designer/server.py \
 
 Then open `http://127.0.0.1:6780`. The config supplies the pose, MPC settings,
 UQ defaults, `mdm_frames`, per-persona goal presets, and the `llm_cost` backend
-used by the cost-generation stage. Stages (each stage's controls unlock once the
+used by the cost-generation stage. With the default config, cost generation
+starts on `llm (single-pass)`; the backend dropdown can still select `turns` or
+`agent`. Stages (each stage's controls unlock once the
 previous one ran):
 
-1. **Scenario** — edit the start arm pose (per-joint axis-angle sliders with a
-   live skeleton preview), the spine3-relative Cartesian goal, and the simulated
+1. **Scenario** — edit the start arm pose (per-joint axis-angle sliders limited
+   to the selected persona's joint boxes, with a live SMPL body preview), the
+   spine3-relative Cartesian goal, and the simulated
    user; *Run base rollout* rolls the headless Cartesian MPC and reports hidden
-   bound violations, the feedback trigger frame, and goal reach.
+   bound violations, the feedback trigger frame, and goal reach. Select *Show
+   oracle rollout* to also resume from the feedback pose with the persona's
+   hidden oracle cost and display that full rollout for comparison.
 2. **Language correction** — edit the MDM prompt (prefilled with the persona's
    feedback line), sample count, and cluster count; *Generate* draws diffusion
-   samples from the feedback-trigger pose (shown as a purple dashed ghost arm in
-   the skeleton views; falls back to the start pose when the base never
+   samples from the feedback-trigger pose (shown as a purple ghost body in
+   the SMPL body views; falls back to the start pose when the base never
    violates) and clusters them (*Re-cluster* reuses cached samples). Every
    cluster option is automatically integrated into the full corrected
    trajectory — executed history → scaled correction → comfort-only goal
@@ -699,10 +770,26 @@ previous one ran):
    resulting trajectory, metrics, and cost code. Its grounded feature limits are
    overlaid on the corresponding feature graphs in blue. Artifacts go to
    `demo_designer_artifacts/<timestamp>_<backend>/`.
+4. **Multi-round feedback** — interactive version of the multi-round
+   experiment above. *Commit round* records the last generated cost as a
+   feedback round (goal, feedback text, trigger pose, cost, pickled eval
+   state). With ≥2 committed rounds, *Combine rounds (codex)* runs the
+   `CombineCostGenerator` over all rounds and installs the resulting unified
+   cost, which **replaces** the per-round costs. Clicking *Combine rounds*
+   automatically rolls the unified cost out from the initial pose. The unified cost's
+   rollout (dark cyan), penalty field, code, and per-round scores are shown
+   in the panel and survive base rollouts; *Reset* clears all rounds. To
+   probe pose dependence, give feedback at several goals that span the
+   conditioning feature and check the unified penalty field against the
+   diagonal oracle limit in the phase plot. Combine artifacts go to
+   `demo_designer_artifacts/<timestamp>_combine/`; the round state lives in
+   server memory and is lost on restart.
 
-The center panel shows front/side/top skeleton views with base (red),
-correction (green), full corrected path (teal), and generated-cost (blue)
-overlays — wrist traces turn bright red on frames that violate the hidden
+The center panel shows front/side/top SMPL body views with base (red), optional
+oracle-cost (brown), correction (green), full corrected path (teal), and
+generated-cost (blue) overlays. Only the selected cluster's body and trace are shown in these views;
+all cluster trajectories remain plotted on the joint-angle graphs. Visible
+trajectories are translucent neutral SMPL meshes at the scrubbed frame; wrist traces turn bright red on frames that violate the hidden
 bounds — with a scrubber/play control (arrow keys step, space plays) and
 per-trajectory violation strips aligned under the scrubber. A console panel at
 the bottom streams the server's stdout live, so long stages (MPC rollouts, MDM
@@ -715,14 +802,28 @@ the column: the conditioning feature on the x-axis, the bounded feature on the
 y-axis, the pose-dependent limit as a diagonal line with its violating side
 shaded, and each trajectory traced through the plane with a dot at the scrubbed
 frame — so you can see the limit itself sliding as the two features co-vary.
-Generated-cost limits on either feature also appear here (blue), as a horizontal
-line (bound on the y feature) or vertical line (bound on the x/conditioning
-feature) — an axis-aligned approximation of the diagonal pose-dependent limit.
+The generated cost is shown here (blue) as an evaluated **penalty field**, not a
+parsed bound: after a cost is generated, the compiled cost is sampled over a cloud
+of plausible poses (executed/candidate frames plus small joint-angle perturbations)
+and each penalized pose is drawn as a blue dot shaded by penalty magnitude — so its
+actual comfortable/penalized region can be compared directly against the diagonal
+oracle limit. Because it reads the compiled cost rather than a declared spec, it
+works for any cost shape and any backend (`llm`/`turns`/`agent`). (The per-feature
+time graphs still shade the declared constant generated bound in blue when the
+backend emits one — that overlay only covers simple single-feature bounds.)
 
 Personas are selectable, editable, and creatable/deletable in the UI (bounds
 editor supports `hidden` and `coupled` bounds over the shared joint features).
-Custom personas persist to `--personas-file`; edits to built-in personas last
-until the server restarts.
+Persona bounds are also editable **directly on the graphs**: drag the red
+bound lines on the per-feature time graphs (handles on the right edge) or the
+two handles on a phase plot's diagonal limit line; each graph has compact
+controls to add/retype/delete bounds for that feature, and the phase-plot
+column has a row to add a new coupled bound for any feature pair. Violations
+(red trace segments, strips) recompute live while dragging, edits save
+automatically after ~0.6 s, and if a base rollout is loaded the server
+re-detects the feedback-trigger frame under the new bounds without re-running
+the MPC. Custom personas persist to `--personas-file`; edits to built-in
+personas last until the server restarts.
 
 
 ## Thanks

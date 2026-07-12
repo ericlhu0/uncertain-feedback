@@ -75,6 +75,7 @@ _INTERPRET_HEAD = _read(_STAGES_DIR / "interpret.txt")
 _GROUND_HEAD = _read(_STAGES_DIR / "ground.txt")
 _AUTHOR_HEAD = _read(_STAGES_DIR / "author.txt")
 _REFINE_HEAD = _read(_STAGES_DIR / "refine.txt")
+_COMBINE_HEAD = _read(_STAGES_DIR / "combine.txt")
 
 
 def _substitute_images(
@@ -223,3 +224,43 @@ def build_refine_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
         "{summaries}", _dump(summaries)
     )
     return "\n\n".join([head, _RUNTIME_API, _OUTPUT_CONTRACT]).strip()
+
+
+def build_combine_task_body(
+    rounds: list[dict[str, Any]],
+) -> tuple[str, list[Path]]:
+    """Build the full-context prompt for unifying several correction rounds."""
+    sections: list[str] = []
+    image_paths: list[Path] = []
+    for round_data in rounds:
+        paths = [Path(path) for path in round_data.get("image_paths", [])]
+        image_paths.extend(paths)
+        sections.append(
+            "\n".join(
+                [
+                    f"### Round {round_data['index']}",
+                    f"Feedback: {round_data['feedback_text']}",
+                    f"Goal: {json.dumps(round_data['goal'])}",
+                    f"Trigger step: {round_data['trigger_step']}",
+                    f"Eval state: {round_data['state_path']}",
+                    "Motion summaries:",
+                    "```json",
+                    _dump(round_data["summaries"]),
+                    "```",
+                    "Round cost code:",
+                    "```python",
+                    round_data["cost_code"],
+                    "```",
+                    "Round cost params:",
+                    "```json",
+                    _dump(round_data["params"]),
+                    "```",
+                    "Images to open:",
+                    *(f"- `{path}`" for path in paths),
+                ]
+            )
+        )
+    head = _COMBINE_HEAD.replace("{round_count}", str(len(rounds))).replace(
+        "{rounds}", "\n\n".join(sections)
+    )
+    return "\n\n".join([head, _RUNTIME_API, _OUTPUT_CONTRACT]).strip(), image_paths

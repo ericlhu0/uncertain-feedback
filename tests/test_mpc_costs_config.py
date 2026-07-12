@@ -355,6 +355,23 @@ costs:
     assert cfg.steps == 2
     assert cfg.costs == {"elbow_height": {"min": 0.1, "max": 0.45, "weight": 100}}
     assert cfg.preference_learning is True
+    assert cfg.seed == 0
+
+
+def test_seeded_mpc_sampling_is_reproducible() -> None:
+    target_q = np.zeros((3, 3), dtype=np.float64)
+    current_q = np.zeros((3, 3), dtype=np.float64)
+    first = SmplLeftArmMPC(
+        goals=[target_q], horizon=2, n_mpc_samples=8, seed=17
+    )
+    second = SmplLeftArmMPC(
+        goals=[target_q], horizon=2, n_mpc_samples=8, seed=17
+    )
+
+    _, first_plan = first.solve(current_q)
+    _, second_plan = second.solve(current_q)
+
+    np.testing.assert_array_equal(first_plan, second_plan)
 
 
 def test_load_mpc_config_with_elbow_flexion_and_shoulder_abduction(tmp_path) -> None:

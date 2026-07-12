@@ -15,7 +15,7 @@ import sys
 import threading
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from uncertain_feedback.demo_designer.core import DemoSession
 
@@ -104,8 +104,8 @@ def upsert_persona():
     data = request.get_json(force=True)
 
     def do():
-        session.upsert_persona(data)
-        return {"personas": session.personas_payload()}
+        result = session.upsert_persona(data)
+        return {"personas": session.personas_payload(), **result}
 
     return _run(do)
 
@@ -125,11 +125,29 @@ def preview_pose():
     return _run(lambda: session.preview_pose(data["arm_aa"]))
 
 
+@app.route("/api/mesh/<mesh_id>")
+def mesh(mesh_id: str):
+    try:
+        vertices = session.mesh_vertices(mesh_id)
+    except KeyError as exc:
+        return jsonify({"error": exc.args[0]}), 404
+    response = Response(vertices.tobytes(), mimetype="application/octet-stream")
+    response.headers["X-Mesh-Frames"] = str(vertices.shape[0])
+    response.headers["X-Mesh-Vertices"] = str(vertices.shape[1])
+    response.headers["X-Mesh-Dtype"] = "float32-le"
+    return response
+
+
 @app.route("/api/base_rollout", methods=["POST"])
 def base_rollout():
     data = request.get_json(force=True)
     return _run_heavy(
-        lambda: session.run_base(data["arm_aa"], data["goal"], data["persona"])
+        lambda: session.run_base(
+            data["arm_aa"],
+            data["goal"],
+            data["persona"],
+            bool(data.get("show_oracle", False)),
+        )
     )
 
 
@@ -164,6 +182,21 @@ def pick_cluster():
 def generate_cost():
     data = request.get_json(force=True)
     return _run_heavy(lambda: session.generate_cost(data["backend"]))
+
+
+@app.route("/api/commit_round", methods=["POST"])
+def commit_round():
+    return _run(session.commit_round)
+
+
+@app.route("/api/combine_rounds", methods=["POST"])
+def combine_rounds():
+    return _run_heavy(session.combine_rounds)
+
+
+@app.route("/api/reset_rounds", methods=["POST"])
+def reset_rounds():
+    return _run(session.reset_rounds)
 
 
 def main() -> None:

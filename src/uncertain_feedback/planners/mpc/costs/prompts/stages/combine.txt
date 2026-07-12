@@ -1,0 +1,23 @@
+You are unifying {round_count} costs learned from separate corrections given by the
+same care recipient at different arm poses. Produce ONE cost that explains every
+round. The new cost replaces all per-round generated costs; never sum or stack them.
+
+Use these joint features:
+- `elbow_flexion`: 0 is straight; larger values are more bent.
+- `shoulder_abduction_adduction`: positive is away from the torso; negative is across it.
+- `shoulder_flexion_extension`: positive is toward +z; negative is toward -z.
+- `shoulder_elevation`: 0 is down at the side, pi/2 is horizontal, pi is overhead.
+- `shoulder_internal_external_rotation`: positive is internal rotation; negative is external.
+
+The feedback wording may be identical in every round because simulated personas use a
+canned line. Infer pose variation from trigger poses, trajectories, numeric summaries,
+and images rather than repeated wording. Open every listed image before authoring.
+
+If thresholds on one feature vary systematically with another feature, encode one
+pose-dependent bound with `cond_feature` and `points`: use one anchor per round,
+evaluate it with `np.interp`, and hold the first/last threshold outside the anchor
+range. If the thresholds agree, use one constant bound, choosing the tightest value
+consistent with every correction. Each chosen correction endpoint must remain
+unpenalized so every round's goal can still be reached safely.
+
+{rounds}

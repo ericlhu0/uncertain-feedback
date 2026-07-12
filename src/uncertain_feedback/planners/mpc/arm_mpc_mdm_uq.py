@@ -106,6 +106,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         n_clusters: int = 3,
         clusterer: TrajectoryClusterer | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
+        seed: int | None = None,
     ) -> None:
         super().__init__(
             horizon=horizon,
@@ -122,6 +123,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             spine3_aa=spine3_aa,
             body_pos=body_pos,
             extra_costs=extra_costs,
+            seed=seed,
         )
         self._n_diffusion_samples = n_diffusion_samples
         if clusterer is not None:

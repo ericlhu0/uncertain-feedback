@@ -78,6 +78,7 @@ def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
         "spine3_aa": spine3_aa,
         "body_pos": body_pos,
         "extra_costs": extra_costs,
+        "seed": cfg.seed,
     }
     if cfg.planner == "arm_mpc_cartesian":
         planner: SmplLeftArmMPC = LeftArmMPCCartesian(
@@ -222,6 +223,7 @@ def _run_initial_state_rollout(  # pylint: disable=too-many-arguments
         spine3_aa=spine3_aa,
         body_pos=body_pos,
         extra_costs=extra_costs,
+        seed=cfg.seed,
     )
     result = run_planning_loop(
         planner, initial_q, rollout_steps, stop_on_runtime_error=True

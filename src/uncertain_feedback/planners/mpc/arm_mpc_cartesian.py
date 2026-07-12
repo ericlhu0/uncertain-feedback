@@ -77,6 +77,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
         n_clusters: int = 3,
         clusterer: TrajectoryClusterer | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
+        seed: int | None = None,
     ) -> None:
         if fk is None:
             raise ValueError("fk is required for LeftArmMPCCartesian.")
@@ -98,6 +99,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             n_clusters=n_clusters,
             clusterer=clusterer,
             extra_costs=extra_costs,
+            seed=seed,
         )
         self._init_cartesian(
             cartesian_goals, initial_arm_aa, cartesian_threshold,

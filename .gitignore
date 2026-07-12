@@ -12,6 +12,7 @@ llm_cost_artifacts/
 experiment_artifacts/
 agent_handoffs/
 transfer_artifacts/
+paper/
 
 .DS_Store
 .python-version

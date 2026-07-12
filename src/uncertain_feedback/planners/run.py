@@ -458,6 +458,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         spine3_aa=spine3_aa,
         body_pos=body_pos,
         extra_costs=extra_costs,
+        seed=cfg.seed,
     )
 
     mpc: SmplLeftArmMPC
@@ -648,6 +649,7 @@ def _rollout_reference_trajectory(
         spine3_aa=spine3_aa,
         body_pos=body_pos,
         extra_costs=base_extra_costs,
+        seed=cfg.seed,
     )
     q0 = np.asarray(current_q, dtype=np.float64).copy()
     result = run_planning_loop(

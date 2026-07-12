@@ -141,6 +141,7 @@ def rollout_to_goal(
         spine3_aa=spine3_aa,
         body_pos=body_pos,
         extra_costs=extra_costs,
+        seed=cfg.seed,
     )
     q0 = np.asarray(q0, dtype=np.float64).copy()
 

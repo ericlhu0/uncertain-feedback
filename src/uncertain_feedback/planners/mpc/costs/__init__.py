@@ -37,6 +37,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     compile_generated_cost,
     parse_llm_cost_response,
     render_prompt_images,
+    replace_generated_costs,
 )
 from uncertain_feedback.planners.mpc.costs.cost_generator import (
     CostGenerator,
@@ -54,9 +55,14 @@ from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
 from uncertain_feedback.planners.mpc.costs.llm_costs import LlmCostGenerator
 from uncertain_feedback.planners.mpc.costs.turns_costs import TurnsCostGenerator
 from uncertain_feedback.planners.mpc.costs.agent_costs import AgentCostGenerator
+from uncertain_feedback.planners.mpc.costs.combine_costs import (
+    CombineCostGenerator,
+    CostRound,
+)
 from uncertain_feedback.planners.mpc.costs.prompts import (
     IMAGE_PLACEHOLDERS,
     build_author_prompt,
+    build_combine_task_body,
     build_ground_prompt,
     build_interpret_prompt,
     build_refine_prompt,
@@ -92,12 +98,15 @@ __all__ = [
     "compile_generated_cost",
     "parse_llm_cost_response",
     "render_prompt_images",
+    "replace_generated_costs",
     # cost generators
     "CostGenerator",
     "CostRanking",
     "LlmCostGenerator",
     "TurnsCostGenerator",
     "AgentCostGenerator",
+    "CombineCostGenerator",
+    "CostRound",
     "create_cost_generator",
     "evaluate_candidate_cost",
     "evaluate_and_render",
@@ -112,6 +121,7 @@ __all__ = [
     "build_interpret_prompt",
     "build_ground_prompt",
     "build_author_prompt",
+    "build_combine_task_body",
     "build_refine_prompt",
     "build_staged_task_body",
     "compact_summaries",

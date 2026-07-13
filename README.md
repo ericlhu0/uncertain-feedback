@@ -231,10 +231,34 @@ TEXT_ENCODER_DEVICE=cpu uv run python src/uncertain_feedback/motion_generators/k
 
 ## Running a Single MPC Run
 
-`run.py` performs one end-to-end run: plan with sampling MPC, optionally inject a
-language/LLM-generated cost correction at `text_time`, and finish the trajectory
-with MPC. To compare multiple LLM costs across UQ clusters, use the experiment
-runner instead (see [Running Cluster Experiments](#running-cluster-experiments)).
+`run.py` performs one end-to-end run: plan with sampling MPC, inject the first
+language/LLM-generated correction at `text_time` (or earlier when a configured
+simulated user becomes uncomfortable), and finish the trajectory with MPC. A
+restricted simulated user can interrupt again whenever the executed motion
+crosses its discomfort threshold after first returning to the comfortable side.
+Each interruption replaces the unfinished MDM playback suffix and starts a new
+correction from the arm's actual current pose.
+
+Add the repeated-feedback threshold to an MDM config with:
+
+```yaml
+corrections:
+  trigger_threshold: 0.02
+```
+
+`transfer.trigger_threshold` is still accepted as a legacy fallback. The global
+`steps` value bounds the run; there is no separate correction-count limit. When
+LLM costs are enabled, one cost is generated and stacked per correction. At the
+end of the trajectory, the saved feedback rounds are passed through the same
+multi-round combinator used across goals, and a successful unified cost replaces
+the stacked generated terms. Configured hand-authored costs are always preserved.
+Artifacts are grouped under
+`<llm_cost.artifact_dir>/<timestamp>/trajectory_00/`, with `round_<N>/`,
+`history.json`, `executed_trajectory.npy`, and the optional
+`combine_after_trajectory_00/` directory.
+
+To compare multiple LLM costs across UQ clusters, use the experiment runner
+instead (see [Running Cluster Experiments](#running-cluster-experiments)).
 
 Use the runner from the repo root:
 ```
@@ -248,9 +272,9 @@ inputs still stay on the command line: `--model-path`, `--arm`, `--text`, `--sav
 
 Supported YAML `planner` values:
 - `arm_mpc`: joint-space MPC only, no MDM.
-- `arm_mpc_mdm`: one MDM trajectory, then MPC tracks it.
-- `arm_mpc_mdm_uq`: multiple MDM samples, clustering/picker, then MPC tracks the selected mean.
-- `arm_mpc_cartesian`: MDM/UQ first, then Cartesian wrist-goal MPC.
+- `arm_mpc_mdm`: MDM correction playback followed by joint-goal MPC, with repeated corrections for restricted users.
+- `arm_mpc_mdm_uq`: UQ clustering/picker followed by joint-goal MPC, with repeated corrections for restricted users.
+- `arm_mpc_cartesian`: MDM/UQ correction playback followed by Cartesian wrist-goal MPC, with repeated corrections for restricted users.
 - `arm_mpc_cartesian_no_mdm`: Cartesian wrist-goal MPC only, no MDM and no UQ.
 
 Set the optional top-level `seed` key to control MPC action sampling. It defaults
@@ -646,6 +670,7 @@ adducts past the midline) — the unrestricted default is rejected. Requires `pl
 transfer:
   goals:                     # held-out spine3-relative wrist targets
     - [-0.25, 0.0, -0.05]
+corrections:
   trigger_threshold: 0.02    # hidden-cost violation (rad) at which the user interrupts
 ```
 

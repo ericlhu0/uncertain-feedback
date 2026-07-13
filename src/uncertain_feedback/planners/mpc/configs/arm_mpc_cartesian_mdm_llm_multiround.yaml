@@ -12,6 +12,9 @@ mdm_frames: 50
 
 user: stroke_flexor_synergy
 
+corrections:
+  trigger_threshold: 0.02
+
 uq:
   diffusion_samples: 500
   n_clusters: 6
@@ -25,7 +28,6 @@ cartesian:
 
 transfer:
   goals: []
-  trigger_threshold: 0.02
 
 # In this experiment every cartesian goal is a successive feedback round. These
 # goals reuse the base-vs-oracle-screened reachable targets from the transfer

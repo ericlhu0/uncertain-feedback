@@ -282,7 +282,7 @@ def run_initial_rollout(
     )
     _log(f"{user.name}: scoring initial rollout for hidden-cost trigger", prefix=log_prefix)
     trigger = first_violation_step(
-        user, context, initial_traj, cfg.transfer.trigger_threshold
+        user, context, initial_traj, cfg.corrections.trigger_threshold
     )
     np.save(root_dir / "initial_rollout.npy", initial_traj)
     if trigger is None:
@@ -729,7 +729,7 @@ def run_experiment(  # pylint: disable=too-many-arguments,too-many-locals
         "persona_description": user.description,
         "feedback_text": user.feedback_text,
         "backend": cfg_backend.llm_cost.backend,
-        "trigger_threshold": cfg_backend.transfer.trigger_threshold,
+        "trigger_threshold": cfg_backend.corrections.trigger_threshold,
     }
 
     initial = run_initial_rollout(

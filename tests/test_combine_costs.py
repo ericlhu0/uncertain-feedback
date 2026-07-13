@@ -51,6 +51,9 @@ def _round(tmp_path: Path, index: int) -> CostRound:
         params={"weight": float(index + 1)},
         summaries={"round": index},
         image_paths=(round_dir / "image.png",),
+        trajectory_index=2,
+        trigger_reason="text_time" if index == 0 else "discomfort",
+        trigger_violation=None if index == 0 else 0.03,
     )
 
 
@@ -81,6 +84,19 @@ def test_cost_round_json_round_trip_uses_absolute_paths(tmp_path) -> None:
             "image_paths": tuple(path.resolve() for path in round_.image_paths),
         }
     )
+
+
+def test_cost_round_loads_legacy_history_without_new_trigger_fields(tmp_path) -> None:
+    data = _round(tmp_path, 0).to_json()
+    data.pop("trajectory_index")
+    data.pop("trigger_reason")
+    data.pop("trigger_violation")
+
+    restored = CostRound.from_json(data)
+
+    assert restored.trajectory_index == 0
+    assert restored.trigger_reason == "discomfort"
+    assert restored.trigger_violation is None
 
 
 def test_combine_generator_writes_per_round_scores_and_replaces(

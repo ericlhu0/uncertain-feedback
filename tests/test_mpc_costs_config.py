@@ -513,6 +513,51 @@ cartesian:
     assert cfg.cartesian.goals == [[0.1, 0.2, 0.3]]
 
 
+def test_correction_threshold_defaults_to_legacy_transfer_value(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+transfer:
+  trigger_threshold: 0.07
+"""),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.corrections.trigger_threshold == 0.07
+    assert cfg.transfer.trigger_threshold == 0.07
+
+
+def test_correction_threshold_overrides_legacy_transfer_value(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+corrections:
+  trigger_threshold: 0.03
+transfer:
+  trigger_threshold: 0.07
+"""),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.corrections.trigger_threshold == 0.03
+    assert cfg.transfer.trigger_threshold == 0.03
+
+
+def test_correction_threshold_rejects_negative_value(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+corrections:
+  trigger_threshold: -0.01
+"""),
+    )
+
+    with pytest.raises(ValueError, match="must be nonnegative"):
+        load_mpc_config(path)
+
+
 def test_elbow_height_cost_zero_inside_range() -> None:
     fk = SmplLeftArmFK()
     q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)

@@ -27,7 +27,7 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
     """Serializable context for one feedback-triggered cost generation round."""
 
     index: int
-    goal: tuple[float, float, float]
+    goal: tuple[float, float, float] | None
     feedback_text: str
     trigger_step: int
     round_dir: Path
@@ -36,12 +36,15 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
     params: dict[str, Any]
     summaries: dict[str, Any]
     image_paths: tuple[Path, ...]
+    trajectory_index: int = 0
+    trigger_reason: str = "discomfort"
+    trigger_violation: float | None = None
 
     def to_json(self) -> dict[str, Any]:
         """Return a JSON-safe record with absolute artifact paths."""
         return {
             "index": self.index,
-            "goal": list(self.goal),
+            "goal": list(self.goal) if self.goal is not None else None,
             "feedback_text": self.feedback_text,
             "trigger_step": self.trigger_step,
             "round_dir": str(self.round_dir.resolve()),
@@ -50,6 +53,9 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
             "params": self.params,
             "summaries": self.summaries,
             "image_paths": [str(path.resolve()) for path in self.image_paths],
+            "trajectory_index": self.trajectory_index,
+            "trigger_reason": self.trigger_reason,
+            "trigger_violation": self.trigger_violation,
         }
 
     @classmethod
@@ -57,7 +63,11 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
         """Rebuild a round from :meth:`to_json` output."""
         return cls(
             index=int(data["index"]),
-            goal=tuple(float(value) for value in data["goal"]),  # type: ignore[arg-type]
+            goal=(
+                tuple(float(value) for value in data["goal"])  # type: ignore[arg-type]
+                if data.get("goal") is not None
+                else None
+            ),
             feedback_text=str(data["feedback_text"]),
             trigger_step=int(data["trigger_step"]),
             round_dir=Path(data["round_dir"]),
@@ -66,6 +76,13 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
             params=dict(data["params"]),
             summaries=dict(data["summaries"]),
             image_paths=tuple(Path(path) for path in data["image_paths"]),
+            trajectory_index=int(data.get("trajectory_index", 0)),
+            trigger_reason=str(data.get("trigger_reason", "discomfort")),
+            trigger_violation=(
+                float(data["trigger_violation"])
+                if data.get("trigger_violation") is not None
+                else None
+            ),
         )
 
 

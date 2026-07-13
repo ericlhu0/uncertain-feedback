@@ -45,6 +45,13 @@ class TransferConfig:
 
 
 @dataclass(frozen=True)
+class CorrectionConfig:
+    """Repeated within-trajectory feedback trigger settings."""
+
+    trigger_threshold: float = 0.02
+
+
+@dataclass(frozen=True)
 class PersonaGoals:
     """Per-persona override of the correction goal and transfer goals.
 
@@ -102,6 +109,7 @@ class MpcRunConfig:
     preference_window: int = 50
     motion_generator: str = "mdm"
     transfer: TransferConfig = TransferConfig()
+    corrections: CorrectionConfig = CorrectionConfig()
     # Simulated-user persona name (see simulated_users.PERSONAS); every run
     # loads this user alongside the pose.
     user: str = "unrestricted"
@@ -239,6 +247,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
 
     normalized_goals = _goal_list(cartesian_data.get("goals", []), "cartesian.goals")
     transfer_data = _mapping(data.get("transfer"), "transfer")
+    corrections_data = _mapping(data.get("corrections"), "corrections")
     transfer_goals = _goal_list(transfer_data.get("goals", []), "transfer.goals")
 
     persona_goals: dict[str, PersonaGoals] = {}
@@ -260,6 +269,15 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             raise ValueError(f"Unknown MPC cost '{name}'.")
         params_map = _mapping(params, f"costs.{name}")
         costs[name] = dict(params_map)
+
+    trigger_threshold = _float(
+        corrections_data.get(
+            "trigger_threshold", transfer_data.get("trigger_threshold", 0.02)
+        ),
+        "corrections.trigger_threshold",
+    )
+    if trigger_threshold < 0.0:
+        raise ValueError("corrections.trigger_threshold must be nonnegative.")
 
     return MpcRunConfig(
         planner=planner,
@@ -349,9 +367,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         persona_goals=persona_goals,
         transfer=TransferConfig(
             goals=transfer_goals,
-            trigger_threshold=_float(
-                transfer_data.get("trigger_threshold", 0.02),
-                "transfer.trigger_threshold",
-            ),
+            trigger_threshold=trigger_threshold,
         ),
+        corrections=CorrectionConfig(trigger_threshold=trigger_threshold),
     )

@@ -18,6 +18,7 @@ Usage examples::
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, cast
@@ -29,6 +30,12 @@ import yaml
 from uncertain_feedback.consts import MDM_ROOT
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.motion_generators.base import MotionGenerator
+from uncertain_feedback.planners.correction_session import (
+    CorrectionRoundResult,
+    CorrectionSession,
+    CorrectionTrajectoryResult,
+    TriggerReason,
+)
 from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDM,
     LeftArmMPCCartesian,
@@ -45,7 +52,9 @@ from uncertain_feedback.simulated_users import (
     get_persona,
 )
 from uncertain_feedback.planners.mpc.costs import (
+    CombineCostGenerator,
     CompositeTrajectoryCost,
+    CostRound,
     EvalState,
     GeneratedPythonCost,
     LearnablePreferenceCost,
@@ -57,6 +66,7 @@ from uncertain_feedback.planners.mpc.costs import (
     create_cost_generator,
     render_prompt_images,
     replace_cost_in_composite,
+    replace_generated_costs,
     update_preference_cost,
 )
 
@@ -721,52 +731,81 @@ def _make_cost_eval_rollout(
     return rollout
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    artifact_base_dir = Path.cwd().resolve()
-    cfg = load_mpc_config(args.mpc_config)
-
-    setup = build_run(args, cfg)
-    mpc = setup.mpc
+def run_repeated_correction_session(
+    args: argparse.Namespace,
+    cfg: MpcRunConfig,
+    setup: RunSetup,
+    artifact_base_dir: Path,
+    preference_output_path: Path,
+    *,
+    trajectory_index: int = 0,
+    prior_rounds: tuple[CostRound, ...] = (),
+    prior_unified_cost: GeneratedPythonCost | None = None,
+) -> tuple[CorrectionTrajectoryResult, list[ArmVisualizer], tuple[CostRound, ...]]:
+    """Run one configured MDM planner with repeated feedback interruptions."""
+    mpc = cast(LeftArmMPCMDM, setup.mpc)
+    assert setup.gen is not None and setup.initial_pose is not None
     gen = setup.gen
-    cost_context = setup.cost_context
-    body_pos = setup.body_pos
-    spine3_aa = setup.spine3_aa
-    initial_pose = setup.initial_pose
-
-    preference_output_path = args.preference_output or _default_preference_output_path(
-        args.mpc_config
-    )
-    effective_text_time = args.text_time if args.text_time is not None else cfg.text_time
     feedback_text = resolve_feedback_text(args.text, setup.user)
+    effective_text_time = args.text_time if args.text_time is not None else cfg.text_time
+    configured_base_costs = replace_generated_costs(
+        mpc._extra_costs, None  # pylint: disable=protected-access
+    )
+    artifact_root = artifact_run_dir(
+        artifact_base_dir, cfg.llm_cost.artifact_dir
+    ) / f"trajectory_{trajectory_index:02d}"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    closed_visualizers: list[ArmVisualizer] = []
+    runtime_rounds: list[
+        tuple[CostRound, EvalState, Any, dict[str, Any], dict[str, Path]]
+    ] = []
 
-    mdm_triggered = False
-    pre_mdm_vis: ArmVisualizer | None = None
-    pending_cost: GeneratedPythonCost | None = None
+    def handle_correction(
+        step: int,
+        q: np.ndarray,
+        q_history: list[np.ndarray],
+        reason: TriggerReason,
+        violation: float | None,
+        local_index: int,
+    ) -> CorrectionRoundResult:
+        old_suffix = mpc.remaining_mdm_trajectory(q)
+        closed = mpc.close_visualizer()
+        if closed is not None:
+            closed_visualizers.append(closed)
+        round_index = len(prior_rounds) + local_index
+        round_dir = artifact_root / f"round_{round_index:02d}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        if old_suffix is not None:
+            np.save(round_dir / "interrupted_reference.npy", old_suffix)
 
-    def _trigger_correction(q: np.ndarray, q_history: list[np.ndarray]) -> None:
-        """Generate the MDM/UQ correction (and optional LLM cost) at text_time."""
-        nonlocal pre_mdm_vis, pending_cost
-        assert gen is not None and initial_pose is not None
-
-        # Close vis before the blocking MDM computation to avoid GUI freeze
-        pre_mdm_vis = mpc.close_visualizer()
-        current_pose = gen.build_pose_from_arm_aa(initial_pose, q)
+        current_pose = gen.build_pose_from_arm_aa(setup.initial_pose, q)
         mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
+        save_path: str | None = None
+        if args.save_motion is not None:
+            path = Path(args.save_motion)
+            save_path = str(
+                path.with_name(
+                    f"{path.stem}_round_{round_index:02d}{path.suffix}"
+                )
+            )
 
         if cfg.planner == "arm_mpc_mdm":
             traj = gen.generate_left_arm_trajectory(
                 feedback_text,
                 start_pose=current_pose,
-                save_path=str(args.save_motion) if args.save_motion else None,
+                save_path=save_path,
                 num_frames=mdm_frames,
                 frozen_body=args.frozen_body,
-                spine3_aa=spine3_aa,
+                spine3_aa=setup.spine3_aa,
             )
+            cutoff = max(1, round(len(traj) * mpc.trajectory_fraction))
+            llm_traj = np.asarray(traj[:cutoff], dtype=np.float64)
+            mpc.set_mdm_goal(llm_traj[-1])
+            mpc.push_trajectory(llm_traj)
         else:
             uq_mpc = cast(LeftArmMPCMDMUQ, mpc)
-            cluster_selector = (
-                (lambda means: choose_cluster(setup.user, cost_context, means))
+            selector = (
+                (lambda means: choose_cluster(setup.user, setup.cost_context, means))
                 if cfg.uq.user_cluster and setup.user.bounds
                 else None
             )
@@ -779,40 +818,29 @@ def main() -> None:
                 default_scale=cfg.uq.scale,
                 mdm_frames=mdm_frames,
                 frozen_body=args.frozen_body,
-                cluster_selector=cluster_selector,
+                cluster_selector=selector,
             )
+            cutoff = max(1, round(len(traj) * mpc.trajectory_fraction))
+            llm_traj = np.asarray(traj[:cutoff], dtype=np.float64)
+        np.save(round_dir / "correction.npy", llm_traj)
 
         if cfg.preference_learning:
-            learned_costs = _apply_preference_update(
-                mpc, traj, q_history, cost_context,
-                alpha=cfg.preference_alpha, window=cfg.preference_window,
+            learned = _apply_preference_update(
+                mpc,
+                llm_traj,
+                q_history,
+                setup.cost_context,
+                alpha=cfg.preference_alpha,
+                window=cfg.preference_window,
             )
-            if learned_costs:
+            if learned:
                 _save_learned_preference_yaml(
-                    args.mpc_config, preference_output_path, learned_costs
+                    args.mpc_config, preference_output_path, learned
                 )
-        else:
-            print(
-                "[preference] learning disabled; generated trajectory "
-                "will not update elbow bounds"
-            )
 
-        # arm_mpc_mdm must enqueue the correction manually; the UQ planners
-        # already enqueue the chosen cluster mean inside query_mdm_with_uncertainty.
-        if cfg.planner == "arm_mpc_mdm":
-            mdm_mpc = cast(LeftArmMPCMDM, mpc)
-            n_frames = traj.shape[0]
-            cutoff = max(1, round(n_frames * mdm_mpc.trajectory_fraction))
-            mdm_mpc.set_mdm_goal(traj[cutoff - 1])
-            mdm_mpc.push_trajectory(traj[:cutoff])
-            llm_traj = traj[:cutoff]
-        else:
-            llm_traj = traj
-
+        generated: GeneratedPythonCost | None = None
+        cost_round: CostRound | None = None
         if cfg.llm_cost.enabled:
-            # Ground the cost in all candidate paths when the planner clustered the
-            # correction, so the overlay shows every cluster mean with the chosen one
-            # highlighted. Non-UQ planners pass a single path.
             candidate_trajs: dict[int, np.ndarray] | None = None
             highlight_label: int | None = None
             rejected_trajs: tuple[np.ndarray, ...] = ()
@@ -821,134 +849,206 @@ def main() -> None:
                 candidate_trajs = uqr.cluster_means
                 highlight_label = uqr.chosen_label
                 rejected_trajs = tuple(
-                    traj
-                    for label, traj in sorted(uqr.cluster_means.items())
+                    value for label, value in sorted(uqr.cluster_means.items())
                     if label != uqr.chosen_label
                 )
-
-            # Roll the original-goal MPC out (no correction, no generated cost) so
-            # the cost generator sees what the arm was driving toward and avoids
-            # blocking it. mpc._extra_costs is still the pre-correction comfort set —
-            # the generated cost is held in pending_cost, not yet installed.
-            reference_traj = _rollout_reference_trajectory(
-                cfg, q, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
-                body_pos, setup.spine3_pos, spine3_aa,
-            )
+            reference_traj = old_suffix
+            if reference_traj is None:
+                reference_traj = _rollout_reference_trajectory(
+                    cfg, q, setup.cost_context, configured_base_costs,
+                    setup.body_pos, setup.spine3_pos, setup.spine3_aa,
+                )
             goal_pos = (
                 np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-                if reference_traj is not None and cfg.cartesian.goals
-                else None
+                if cfg.cartesian.goals else None
             )
-
-            # Build the shared context/summaries/images once, then let the
-            # configured backend (llm / turns / agent) generate the cost. All three
-            # are constructed and called identically; only the factory branches.
             full_correction_traj = _assemble_full_correction_traj(
-                cfg, list(q_history), llm_traj, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
-                body_pos, setup.spine3_pos, spine3_aa,
+                cfg, list(q_history), llm_traj, setup.cost_context,
+                configured_base_costs, setup.body_pos, setup.spine3_pos,
+                setup.spine3_aa,
             )
-            generated_context = build_generated_cost_context(
-                cost_context, q, llm_traj, list(q_history),
-                window=cfg.preference_window, body_pos=body_pos,
+            context = build_generated_cost_context(
+                setup.cost_context, q, llm_traj, list(q_history),
+                window=cfg.preference_window, body_pos=setup.body_pos,
                 reference_traj=reference_traj,
                 full_correction_traj=full_correction_traj,
-                # goal_pos is goals[0] (the gold-star goal the LLM sees); the
-                # reachability check assumes a single Cartesian goal.
                 cartesian_goal=goal_pos,
                 cartesian_threshold=cfg.cartesian.threshold,
                 rejected_trajs=rejected_trajs,
             )
-            summaries = build_motion_summaries(
-                generated_context, cartesian_goal=goal_pos
-            )
-            run_dir = artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
+            summaries = build_motion_summaries(context, cartesian_goal=goal_pos)
             images: dict[str, Path] = {}
             if cfg.llm_cost.use_images:
                 images = render_prompt_images(
-                    generated_context, run_dir / "images",
-                    candidate_trajs, highlight_label,
-                    reference_traj=reference_traj, goal_pos=goal_pos,
+                    context, round_dir / "images", candidate_trajs,
+                    highlight_label, reference_traj=reference_traj,
+                    goal_pos=goal_pos,
                 )
-
-            # Generate synchronously here (the live viz is already closed for the
-            # MDM compute, so this adds no extra freeze). The cost is held and
-            # installed once the correction trajectory finishes (see _on_post_step).
-            cost_eval_rollout = _make_cost_eval_rollout(
-                cfg, q, cost_context, mpc._extra_costs,  # pylint: disable=protected-access
-                body_pos, setup.spine3_pos, spine3_aa,
-            )
             eval_state = EvalState(
-                cfg=cfg,
-                current_q=q,
-                correction_traj=llm_traj,
-                q_history=list(q_history),
-                window=cfg.preference_window,
-                cost_context=cost_context,
-                base_extra_costs=mpc._extra_costs,  # pylint: disable=protected-access
-                body_pos=body_pos,
-                spine3_pos=setup.spine3_pos,
-                spine3_aa=spine3_aa,
-                reference_traj=reference_traj,
+                cfg=cfg, current_q=q, correction_traj=llm_traj,
+                q_history=list(q_history), window=cfg.preference_window,
+                cost_context=setup.cost_context,
+                base_extra_costs=configured_base_costs,
+                body_pos=setup.body_pos, spine3_pos=setup.spine3_pos,
+                spine3_aa=setup.spine3_aa, reference_traj=reference_traj,
                 full_correction_traj=full_correction_traj,
                 cartesian_goal=goal_pos,
                 cartesian_threshold=cfg.cartesian.threshold,
                 rejected_trajs=rejected_trajs,
             )
+            state_path = round_dir / "state.pkl"
+            eval_state.save(state_path)
             generator = create_cost_generator(
-                cfg.llm_cost, generated_context, feedback_text,
-                summaries=summaries, run_dir=run_dir, images=images, mpc=mpc,
-                rollout_fn=cost_eval_rollout, eval_state=eval_state,
+                cfg.llm_cost, context, feedback_text, summaries=summaries,
+                run_dir=round_dir / "cost_generation", images=images, mpc=None,
+                rollout_fn=eval_state.make_rollout_fn(), eval_state=eval_state,
             )
-            pending_cost = generator.generate(install=False)
-
-        # MDM generation can switch matplotlib to the Agg backend; restore it
+            generated = generator.generate(install=False)
+            if generated is not None:
+                mpc.set_extra_costs(
+                    _append_extra_cost(
+                        mpc._extra_costs, generated  # pylint: disable=protected-access
+                    )
+                )
+                goal = (
+                    tuple(float(value) for value in goal_pos)
+                    if goal_pos is not None
+                    else None
+                )
+                cost_round = CostRound(
+                    index=round_index, goal=goal, feedback_text=feedback_text,
+                    trigger_step=step, round_dir=round_dir.resolve(),
+                    state_path=state_path.resolve(), cost_code=generated.code,
+                    params=generated.params, summaries=summaries,
+                    image_paths=tuple(path.resolve() for path in images.values()),
+                    trajectory_index=trajectory_index, trigger_reason=reason,
+                    trigger_violation=violation,
+                )
+                runtime_rounds.append(
+                    (cost_round, eval_state, context, summaries, images)
+                )
+                print(f"[llm-cost] stacked correction cost {round_index}")
         _restore_interactive_backend()
+        return CorrectionRoundResult(
+            round_index=round_index, trajectory_index=trajectory_index,
+            trigger_step=step, trigger_reason=reason,
+            trigger_violation=violation, feedback_text=feedback_text,
+            correction_traj=llm_traj, generated_cost=generated,
+            cost_round=cost_round, artifact_dir=round_dir,
+        )
 
-    def _on_pre_step(step: int, q: np.ndarray, q_history: list[np.ndarray]) -> None:
-        nonlocal mdm_triggered
-        if (
-            setup.uses_mdm
-            and feedback_text
-            and step == effective_text_time
-            and not mdm_triggered
-        ):
-            mdm_triggered = True
-            _trigger_correction(q, q_history)
-
-    def _on_post_step(_step: int, _q: np.ndarray, _q_history: list[np.ndarray]) -> None:
-        nonlocal pending_cost
-        # Install the LLM cost once the correction trajectory has finished.
-        if (
-            pending_cost is not None
-            and isinstance(mpc, LeftArmMPCMDM)
-            and mpc.mdm_tracking_complete
-        ):
+    def finish(
+        rounds: list[CorrectionRoundResult]
+    ) -> GeneratedPythonCost | None:
+        all_cost_rounds = [
+            *prior_rounds,
+            *(round_.cost_round for round_ in rounds if round_.cost_round),
+        ]
+        history_path = artifact_root / "history.json"
+        history_path.write_text(
+            json.dumps([round_.to_json() for round_ in all_cost_rounds], indent=2),
+            encoding="utf-8",
+        )
+        if not runtime_rounds:
+            return prior_unified_cost
+        if len(all_cost_rounds) == 1:
+            unified = runtime_rounds[-1][0]
+            cost = next(r.generated_cost for r in rounds if r.cost_round is unified)
+            assert cost is not None
             mpc.set_extra_costs(
-                _append_extra_cost(mpc._extra_costs, pending_cost)  # pylint: disable=protected-access
+                replace_generated_costs(
+                    mpc._extra_costs, cost  # pylint: disable=protected-access
+                )
             )
-            pending_cost = None
-            print("[llm-cost] installed after correction trajectory completed")
+            return cost
+        _, eval_state, context, summaries, images = runtime_rounds[-1]
+        combinator = CombineCostGenerator(
+            context=context, instruction=feedback_text, summaries=summaries,
+            run_dir=artifact_root / f"combine_after_trajectory_{trajectory_index:02d}",
+            images=images, use_images=cfg.llm_cost.use_images,
+            model=cfg.llm_cost.model, strict=cfg.llm_cost.strict, mpc=None,
+            rollout_fn=eval_state.make_rollout_fn(), eval_state=eval_state,
+            codex_cmd=cfg.llm_cost.codex_cmd, rounds=all_cost_rounds,
+        )
+        combined = combinator.generate(install=False)
+        if combined is not None:
+            mpc.set_extra_costs(
+                replace_generated_costs(
+                    mpc._extra_costs, combined  # pylint: disable=protected-access
+                )
+            )
+            return combined
+        print("[combine] failed; retaining stacked generated costs")
+        return prior_unified_cost
 
-    run_planning_loop(
-        mpc,
-        setup.arm_aa.copy(),
-        cfg.steps,
-        on_pre_step=_on_pre_step,
-        on_post_step=_on_post_step,
-        progress=True,
-        progress_desc="MPC",
+    session = CorrectionSession(
+        mpc=mpc, user=setup.user, cost_context=setup.cost_context,
+        feedback_text=feedback_text,
+        trigger_threshold=cfg.corrections.trigger_threshold,
+        text_time=effective_text_time, artifact_dir=artifact_root,
+        handle_correction=handle_correction, finish=finish,
+        trajectory_index=trajectory_index, prior_rounds=prior_rounds,
+        prior_unified_cost=prior_unified_cost,
+    )
+    result = session.run_trajectory(
+        setup.arm_aa.copy(), cfg.steps, progress=True, progress_desc="MPC"
+    )
+    executed = np.asarray([setup.arm_aa, *result.loop_result.q_history])
+    np.save(artifact_root / "executed_trajectory.npy", executed)
+    summary = {
+        "trajectory_index": trajectory_index,
+        "correction_count": len(result.rounds),
+        "reached_goal": result.loop_result.reached_goal,
+        "error": result.loop_result.error,
+        "corrections": [
+            {
+                "round_index": round_.round_index,
+                "trigger_step": round_.trigger_step,
+                "trigger_reason": round_.trigger_reason,
+                "trigger_violation": round_.trigger_violation,
+            }
+            for round_ in result.rounds
+        ],
+    }
+    (artifact_root / "trajectory_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    cost_rounds = tuple(
+        [*prior_rounds, *(r.cost_round for r in result.rounds if r.cost_round)]
+    )
+    return result, closed_visualizers, cost_rounds
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    artifact_base_dir = Path.cwd().resolve()
+    cfg = load_mpc_config(args.mpc_config)
+    setup = build_run(args, cfg)
+    preference_output_path = args.preference_output or _default_preference_output_path(
+        args.mpc_config
     )
 
-    # --- Save video ---
+    closed_visualizers: list[ArmVisualizer] = []
+    if setup.uses_mdm:
+        _, closed_visualizers, _ = run_repeated_correction_session(
+            args, cfg, setup, artifact_base_dir, preference_output_path
+        )
+    else:
+        run_planning_loop(
+            setup.mpc, setup.arm_aa.copy(), cfg.steps,
+            progress=True, progress_desc="MPC",
+        )
+
     if args.save and setup.visualize:
-        vis = _get_vis(mpc)
+        vis = _get_vis(setup.mpc)
         if vis is not None:
-            if (
-                pre_mdm_vis is not None and pre_mdm_vis._frame_bufs
-            ):  # pylint: disable=protected-access
-                vis.prepend_frames(
-                    pre_mdm_vis._frame_bufs
-                )  # pylint: disable=protected-access
+            prior_frames = [
+                frame
+                for closed in closed_visualizers
+                for frame in closed._frame_bufs  # pylint: disable=protected-access
+            ]
+            if prior_frames:
+                vis.prepend_frames(prior_frames)
             vis.finish_live(str(args.save), fps=args.fps)
 
     if args.live:

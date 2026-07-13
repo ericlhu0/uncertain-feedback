@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-12
+**Last updated:** 2026-07-13
 **Branch:** simulated-users-standard
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -27,7 +27,8 @@ uncertain-feedback/
 ├── src/uncertain_feedback/
 │   ├── consts.py                     # Project-wide paths (MDM_ROOT, weights)
 │   ├── planners/
-│   │   ├── run.py                    # Single-run CLI: plan → language correction → finish
+│   │   ├── run.py                    # Single-run CLI + repeated-correction callbacks/artifacts
+│   │   ├── correction_session.py     # Edge-triggered repeated correction session state machine
 │   │   └── mpc/
 │   │       ├── __init__.py           # Public exports
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
@@ -151,7 +152,8 @@ SmplLeftArmMPC (arm_mpc.py)
 │     MDM-colored arm rendering, body_pos background skeleton. The MDM trajectory
 │     is played back directly (no per-step sampling) at a bounded angular speed
 │     (max_playback_delta per joint per step), so jumps are eased not snapped;
-│     the MPC then resumes sampling toward the final goal.
+│     the MPC then resumes sampling toward the final goal. A new push replaces
+│     any unfinished playback suffix; remaining_mdm_trajectory() snapshots it.
 │
 │   └── LeftArmMPCMDMUQ (arm_mpc_mdm_uq.py)
 │         Adds: query_mdm_with_uncertainty() — draws N diffusion samples,
@@ -218,6 +220,10 @@ SmplLeftArmMPC / subclass
     │   MDM trajectory validated against safety costs, then played back at a
     │   bounded angular speed (rate-limited, push_trajectory); after
     │   playback the MPC samples toward the final goal.
+    │   CorrectionSession monitors each executed pose. The first text-time or
+    │   discomfort event starts MDM; later discomfort threshold crossings replace
+    │   the active suffix and start MDM again from the actual pose. Per-correction
+    │   generated costs stack during execution and are unified at trajectory end.
     │   Each MPC step: sample N×H action sequences, rollout, compute cost, take best
     │
     ├── Joint-space cost: L2 to current goal in (3,3) axis-angle space
@@ -346,11 +352,12 @@ When `llm_cost.enabled: true` in the YAML:
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
 | `user`                 | str      | Simulated-user persona name (default `unrestricted`); loaded by `build_run` into `RunSetup.user` for every run |
+| `corrections.*`        | CorrectionConfig | `trigger_threshold` (default 0.02 rad). Restricted users trigger on a new above-threshold episode after returning to comfort; legacy `transfer.trigger_threshold` is accepted as a fallback. |
 | `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`, reasoning effort `xhigh`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
-| `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets), `trigger_threshold` (hidden-cost violation in rad that triggers simulated feedback) |
+| `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets); legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
 | `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments (applied by `experiment_pipeline.apply_persona_goals`; falls back to top-level goals when absent). Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
 
 ---

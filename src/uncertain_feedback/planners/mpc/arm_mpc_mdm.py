@@ -187,6 +187,15 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             and self._playback_idx < len(self._playback_frames)
         )
 
+    def remaining_mdm_trajectory(self, current_q: np.ndarray) -> np.ndarray | None:
+        """Return the current pose followed by the unexecuted playback targets."""
+        if not self._in_playback():
+            return None
+        current = _as_controlled_arm_aa(current_q, "current_q")
+        assert self._playback_frames is not None
+        remaining = self._playback_frames[self._playback_idx :]
+        return np.concatenate((current[np.newaxis], remaining.copy()), axis=0)
+
     def validate_trajectory(
         self,
         frames: np.ndarray,

@@ -14,6 +14,9 @@ mdm_frames: 50
 # Simulated-user persona (hidden comfort cost + feedback line); --persona overrides.
 user: adhesive_capsulitis
 
+corrections:
+  trigger_threshold: 0.02
+
 uq:
   diffusion_samples: 500
   n_clusters: 6
@@ -34,7 +37,6 @@ transfer:
     - [0.50, 0.20, 0.10]   # low-hand far lateral
     - [0.11, 0.44, 0.26]   # raised, in front
     - [-0.04, 0.42, 0.18]  # raised, across the body
-  trigger_threshold: 0.02  # hidden-cost violation (rad) at which the user interrupts
 
 # Per-persona goal overrides. The transfer experiment runs one persona at a time
 # (--persona / user:), and each restriction needs its own goal geometry so the
@@ -103,6 +105,10 @@ persona_goals:
       - [-0.12, 0.25, 0.25]  # chest-height cross (deepest compliant cross)
       - [-0.08, 0.32, 0.28]  # shoulder-height, shallow cross
       - [-0.08, 0.32, 0.35]  # shoulder-height, deep in front
+  triceps_long_head_contracture:
+    cartesian:
+      - [0.25, 0.32, 0.15]   # moderate elevation and elbow bend
+    transfer: []
   elbow_contracture:
     # ALL goals are across-body by geometric necessity: only reaching across the
     # torso forces the base to drive the elbow straight through the 29 deg comfort

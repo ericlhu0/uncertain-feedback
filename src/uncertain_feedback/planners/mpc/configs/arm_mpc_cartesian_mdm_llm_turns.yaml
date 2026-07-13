@@ -11,6 +11,9 @@ trajectory_fraction: 1
 mdm_frames: 50
 text_time: 10
 
+corrections:
+  trigger_threshold: 0.02
+
 
 uq:
   diffusion_samples: 500

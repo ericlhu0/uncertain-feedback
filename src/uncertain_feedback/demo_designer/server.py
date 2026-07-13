@@ -20,6 +20,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from uncertain_feedback.demo_designer.core import DemoSession
 
 _STATIC_DIR = Path(__file__).parent / "static"
+_ARTIFACT_ROOT = Path("demo_designer_artifacts").resolve()
 _DEFAULT_CONFIG = (
     Path(__file__).parents[1]
     / "planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml"
@@ -85,9 +86,14 @@ def static_files(filename: str):
     return send_from_directory(_STATIC_DIR, filename)
 
 
+@app.route("/api/artifact/<path:relpath>")
+def artifact_file(relpath: str):
+    return send_from_directory(_ARTIFACT_ROOT, relpath)
+
+
 @app.route("/api/init")
 def init():
-    return _run(session.init_payload)
+    return _run_heavy(session.init_payload)
 
 
 @app.route("/api/logs")
@@ -168,6 +174,11 @@ def exit_manual_trajectory():
     return _run_heavy(session.exit_manual_trajectory)
 
 
+@app.route("/api/oracle_rollout", methods=["POST"])
+def oracle_rollout():
+    return _run_heavy(lambda: session.run_oracle(from_trigger=True))
+
+
 @app.route("/api/generate", methods=["POST"])
 def generate():
     data = request.get_json(force=True)
@@ -231,6 +242,11 @@ def apply_round():
 @app.route("/api/manual_trajectory/ignore_violation", methods=["POST"])
 def ignore_comfort_violation():
     return _run_heavy(session.ignore_comfort_violation)
+
+
+@app.route("/api/rounds/<int:index>", methods=["DELETE"])
+def remove_round(index: int):
+    return _run(lambda: session.remove_round(index))
 
 
 @app.route("/api/combine_rounds", methods=["POST"])

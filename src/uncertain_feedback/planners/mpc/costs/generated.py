@@ -305,9 +305,9 @@ def replace_generated_costs(
     return CompositeTrajectoryCost(terms)
 
 
-def parse_llm_cost_response(raw: str) -> LlmCostResponse:
-    """Parse the LLM JSON response, accepting optional Markdown fences."""
-    text = raw.strip()
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    """Leniently parse a JSON object, accepting fences and surrounding prose."""
+    text = text.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if lines and lines[0].startswith("```"):
@@ -317,14 +317,23 @@ def parse_llm_cost_response(raw: str) -> LlmCostResponse:
         text = "\n".join(lines).strip()
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
-            raise GeneratedCostValidationError("LLM response is not JSON") from exc
-        data = json.loads(text[start : end + 1])
-    if not isinstance(data, dict):
-        raise GeneratedCostValidationError("LLM response must be a JSON object")
+            return None
+        try:
+            data = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
+def parse_llm_cost_response(raw: str) -> LlmCostResponse:
+    """Parse the LLM JSON response, accepting optional Markdown fences."""
+    data = extract_json_object(raw)
+    if data is None:
+        raise GeneratedCostValidationError("LLM response is not JSON")
     description = data.get("description", "")
     code = data.get("code")
     params = data.get("params", {})

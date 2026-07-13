@@ -120,9 +120,9 @@ uncertain-feedback/
 │   │       └── hml_decode.py         # HML decode utilities for the editor
 │   ├── demo_designer/
 │   │   ├── smpl_mesh.py              # Neutral SMPL vertex generation + binary trajectory mesh cache
-│   │   ├── core.py                   # DemoSession: paused manual multi-turn trajectory + refresh-restored pending costs + multi-round state
-│   │   ├── server.py                 # Flask web UI with stateful manual trajectory start/apply/ignore/exit endpoints
-│   │   └── static/                   # Three.js body views, persona/feature graphs, and manual trajectory session controls
+│   │   ├── core.py                   # DemoSession: paused manual multi-turn trajectory + refresh-restored pending costs/rationales + editable rounds
+│   │   ├── server.py                 # Flask web UI + read-only /api/artifact/<path> access rooted at demo artifacts
+│   │   └── static/                   # Three.js body views, persona/feature graphs, and generated-cost rationale disclosures
 │   ├── llm/
 │   │   ├── base_model.py             # BaseModel ABC (get_full_output)
 │   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
@@ -304,7 +304,7 @@ When `llm_cost.enabled: true` in the YAML:
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet
 7. `GeneratedCostContext` provides the runtime sandbox: `fk`, `spine3_pos/aa`, `current_q`, `mdm_traj`, `recent_q`, and FK helper methods
-8. Artifacts (stage prompts/responses, `stage_log.md`, images, cost.py, `reference_with_correction.mp4`) saved to `llm_cost_artifacts/<timestamp>/`
+8. Artifacts (stage prompts/responses, `stage_log.md`, images, cost.py, `reference_with_correction.mp4`) saved to `llm_cost_artifacts/<timestamp>/`; `CostGenerator.save_rationale()` also writes `rationale.json`, chaining the instruction, self-reported modality evidence, grounded terms and per-number sources, final explanations, and the winning `CostRanking` table (or `null` when unavailable)
 
 **LLM cost cluster experiment** (`llm_cost.cluster_experiment.enabled`): runs the LLM cost on each cluster's mean trajectory for `rollout_steps` steps and uses costs to rank / auto-select clusters.
 
@@ -312,9 +312,9 @@ When `llm_cost.enabled: true` in the YAML:
 
 `create_cost_generator()` selects one of three iteration mechanisms via `llm_cost.backend`; all share the staged prompting strategy and `CostGenerator` (stage helpers, compile/validate, save, install):
 
-- `llm` (`llm_costs.py`) — single-pass staged calls: interpret → ground → author; only the author output is parsed/compiled. Stage prompt/response pairs are aggregated in `stage_log.md`.
-- `turns` (`turns_costs.py`) — interprets once, then runs a stateful ground+author conversation; keeps the best cost by ranking consistency (`rank_candidate_cost`, falling back to the L2 rollout score when the context has no comparison trajectories). `stage_log.md` includes the interpretation plus each refine turn's prompt snapshot and response.
-- `agent` (`agent_costs.py`) — delegates the staged method to the `codex` CLI, which emits the same `response.json` and must write `stage_log.md` with Stage 1 / Stage 2 / Stage 3 responses.
+- `llm` (`llm_costs.py`) — single-pass staged calls: interpret → ground → author; only the author output is parsed/compiled. Stage prompt/response pairs are aggregated in `stage_log.md`; the authored cost is ranked for `rationale.json`.
+- `turns` (`turns_costs.py`) — interprets once, then runs a stateful ground+author conversation; keeps the best cost by ranking consistency (`rank_candidate_cost`, falling back to the L2 rollout score when the context has no comparison trajectories). `stage_log.md` includes the interpretation plus each refine turn's prompt snapshot and response, and the winning turn's ranking is copied into `rationale.json`.
+- `agent` (`agent_costs.py`) — delegates the staged method to the `codex` CLI, which emits the same `response.json` and must write `stage_log.md` with Stage 1 / Stage 2 / Stage 3 responses; those sections are parsed leniently for `rationale.json` and the final cost is ranked locally.
 - `CombineCostGenerator` (`combine_costs.py`) is constructed directly by the multi-round experiment, not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`.
 
 ### Cost evaluation & visual feedback
@@ -461,7 +461,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
 | `uv run python src/.../experiments/run_multi_round_experiment.py --mpc-config <yaml> [--persona <name>]` | Multi-round cost experiment; `cartesian.goals` is the ordered round sequence and successful feedback contexts are unified into one replacement cost |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
-| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>]` | Browser tool for one stateful trajectory paused across manual UQ/cost feedback turns; pending generated-cost payloads recover after refresh, active trajectories can be exited, and discomfort events can be ignored without adding feedback (see README) |
+| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>]` | Browser tool for one stateful trajectory paused across manual UQ/cost feedback turns; pending-cost and committed-round payloads include `rationale`, rendered as *why this cost*, while `/api/artifact/<path>` serves their `rationale.json`/`stage_log.md` files from the demo artifact root; active trajectories can be exited and committed feedback removed (see README) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |

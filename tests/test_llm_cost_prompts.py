@@ -33,6 +33,7 @@ def test_interpret_prompt_fills_placeholders_without_code_contract() -> None:
     # Interpretation sees images, but no code-writing contract.
     assert "def cost(q_trajs, context, params):" not in text
     assert "Return only JSON" not in text
+    assert '"evidence"' in text
     assert [p.name for p in attached] == [f"{key}.png" for key in IMAGE_PLACEHOLDERS]
     for key in IMAGE_PLACEHOLDERS:
         assert IMAGE_PLACEHOLDERS[key] in text
@@ -98,6 +99,7 @@ def test_staged_task_body_inlines_all_stages_for_agent() -> None:
     assert "## Stage 3" in text
     assert "raise my left arm" in text
     assert "def cost(q_trajs, context, params):" in text
+    assert '"evidence"' in text
     assert [p.name for p in attached] == ["current.png"]
 
 

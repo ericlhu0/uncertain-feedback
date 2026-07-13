@@ -327,7 +327,9 @@ function onPersonaChange(name) {
   currentPersona = name;
   const p = getPersona();
   $("persona-delete").disabled = p.builtin;
-  if (p.feedback_text) $("prompt").value = p.feedback_text;
+  const defaultPrompt = INIT.default_prompts[name];
+  if (defaultPrompt) $("prompt").value = defaultPrompt;
+  else if (p.feedback_text) $("prompt").value = p.feedback_text;
   const goals = INIT.persona_goals[name];
   const goal = goals && goals.cartesian.length ? goals.cartesian[0] : INIT.default_goal;
   [$("goal-x").value, $("goal-y").value, $("goal-z").value] = goal.map((v) => v.toFixed(2));
@@ -498,7 +500,7 @@ async function startManualTrajectory() {
   clearTraj("base", "oracle", "correction", "full", "generated", "generated_start");
   clearTraj("unified");
   setTraj("base", data.trajectory);
-  clearTraj("oracle");
+  setTraj("oracle", data.oracle.trajectory);
   baseTrigger = data.trigger ? data.trigger.step : null;
   showStart = false;
   clusters = [];
@@ -511,10 +513,12 @@ async function startManualTrajectory() {
   $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
     `\nexecuted ${data.step}/${data.step_limit} steps` +
     (data.error ? `\nerror: ${data.error}` : "");
+  renderOracleMetrics(data.oracle);
   renderTrajectorySession(data);
   setScenarioLocked(data.status === "paused");
   $("run-base").disabled = data.status === "paused";
   $("exit-trajectory").disabled = false;
+  $("run-trigger-oracle").disabled = data.status !== "paused";
   $("ignore-violation").disabled = data.status !== "paused" ||
     data.trigger.reason !== "discomfort";
   $("generate").disabled = data.status !== "paused";
@@ -547,19 +551,34 @@ async function exitManualTrajectory() {
   $("persona-delete").disabled = getPersona().builtin;
   $("run-base").disabled = false;
   $("exit-trajectory").disabled = true;
-  for (const id of ["ignore-violation", "generate", "recluster",
+  for (const id of ["run-trigger-oracle", "ignore-violation", "generate", "recluster",
     "generate-cost", "commit-round", "apply-round"]) {
     $(id).disabled = true;
   }
   $("trajectory-session").className = "trajectory-session";
   $("trajectory-session").textContent = "";
   $("base-metrics").textContent = "";
+  $("oracle-metrics").textContent = "";
   $("correction-metrics").textContent = "";
   $("cost-output").innerHTML = "";
   renderClusterList();
   renderRounds();
   renderUnifiedOutput();
   setStatus(`trajectory exited · artifacts retained at ${data.artifact_dir}`);
+  refreshLegend(); refreshTimeline(); renderAll();
+}
+
+function renderOracleMetrics(oracle) {
+  const source = oracle.source === "trigger" ? "current MDM trigger" : "initial pose";
+  $("oracle-metrics").textContent =
+    `oracle from ${source}: ${fmtMetrics(oracle.metrics, oracle.goal_reach)}`;
+}
+
+async function runTriggerOracle() {
+  const data = await api("/api/oracle_rollout", {},
+    "running oracle rollout from the current MDM trigger");
+  setTraj("oracle", data.trajectory);
+  renderOracleMetrics(data);
   refreshLegend(); refreshTimeline(); renderAll();
 }
 
@@ -584,6 +603,7 @@ async function ignoreComfortViolation() {
   renderTrajectorySession(data);
   setScenarioLocked(data.status === "paused");
   $("run-base").disabled = data.status === "paused";
+  $("run-trigger-oracle").disabled = data.status !== "paused";
   $("ignore-violation").disabled = data.status !== "paused" ||
     data.trigger.reason !== "discomfort";
   $("generate").disabled = data.status !== "paused";
@@ -665,6 +685,79 @@ async function pickCluster(label) {
   renderClusterList();
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[char]);
+}
+
+function artifactHref(artifactDir, filename) {
+  let relative = String(artifactDir || "").replaceAll("\\", "/");
+  const marker = "demo_designer_artifacts/";
+  const markerIndex = relative.lastIndexOf("/" + marker);
+  if (markerIndex >= 0) relative = relative.slice(markerIndex + marker.length + 1);
+  else if (relative.startsWith(marker)) relative = relative.slice(marker.length);
+  else return null;
+  const encoded = relative.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  return encoded ? `/api/artifact/${encoded}/${encodeURIComponent(filename)}` : null;
+}
+
+function rationaleHtml(r, artifactDir) {
+  if (!r) return "";
+  const interpret = r.interpret || {};
+  const evidence = interpret.evidence || {};
+  const ground = r.ground || {};
+  const final = r.final || {};
+  const ranking = r.ranking;
+  const lines = [];
+
+  if (interpret.preference) {
+    lines.push(`<div><b>interpretation:</b> ${escapeHtml(interpret.preference)}</div>`);
+  }
+  if (interpret.distinguishing_dimension || interpret.direction) {
+    lines.push(`<div><b>dimension:</b> ${escapeHtml(interpret.distinguishing_dimension)}` +
+      `${interpret.direction ? ` · ${escapeHtml(interpret.direction)}` : ""}</div>`);
+  }
+  for (const key of ["preference", "distinguishing_dimension", "direction"]) {
+    if (evidence[key]) lines.push(`<div class="rationale-evidence"><b>${escapeHtml(key)} evidence:</b> ${escapeHtml(evidence[key])}</div>`);
+  }
+  if (Object.hasOwn(interpret, "goal_conflict")) {
+    lines.push(`<div><b>goal conflict:</b> ${interpret.goal_conflict ? "yes" : "no"}</div>`);
+  }
+  for (const term of Array.isArray(ground.terms) ? ground.terms : []) {
+    lines.push(`<div class="rationale-term"><b>${escapeHtml(term.feature)}</b> ` +
+      `${escapeHtml(term.bound_type)} ${escapeHtml(JSON.stringify(term.values || {}))}` +
+      `${term.source ? ` — ${escapeHtml(term.source)}` : ""}</div>`);
+  }
+  if (ground.goal_safety_check) {
+    lines.push(`<div><b>goal safety check:</b> ${escapeHtml(ground.goal_safety_check)}</div>`);
+  }
+  if (final.explanation) {
+    lines.push(`<div><b>explanation:</b> ${escapeHtml(final.explanation)}</div>`);
+  }
+  if (final.recipient_explanation) {
+    lines.push(`<div><b>recipient explanation:</b> ${escapeHtml(final.recipient_explanation)}</div>`);
+  }
+  if (ranking) {
+    const rows = Object.entries(ranking.costs || {}).sort(([a], [b]) =>
+      a === "chosen_correction" ? -1 : b === "chosen_correction" ? 1 : a.localeCompare(b));
+    lines.push(`<div><b>ranking:</b> accuracy ${Number(ranking.rank_accuracy).toFixed(2)}` +
+      ` · margin ${Number(ranking.normalized_margin).toFixed(2)}` +
+      ` · inert ${ranking.inert ? "yes" : "no"}</div>`);
+    lines.push(`<table class="rationale-ranking"><tbody>${rows.map(([name, cost]) => {
+      const content = `${escapeHtml(name)}</td><td>${escapeHtml(Number(cost).toPrecision(5))}`;
+      return `<tr${name === "chosen_correction" ? ' class="chosen"' : ""}><td>${content}</td></tr>`;
+    }).join("")}</tbody></table>`);
+  }
+  const rationaleUrl = artifactHref(artifactDir, "rationale.json");
+  const stageLogUrl = artifactHref(artifactDir, "stage_log.md");
+  if (rationaleUrl && stageLogUrl) {
+    lines.push(`<div class="rationale-links"><a href="${rationaleUrl}" target="_blank" rel="noopener">rationale.json</a>` +
+      ` · <a href="${stageLogUrl}" target="_blank" rel="noopener">stage_log.md</a></div>`);
+  }
+  return `<details class="cost-rationale"><summary>why this cost</summary>${lines.join("")}</details>`;
+}
+
 function renderCostGeneration(data) {
   generatedBounds = data.generated_bounds || [];
   costField = data.cost_field || null;
@@ -673,10 +766,11 @@ function renderCostGeneration(data) {
   const out = $("cost-output");
   out.innerHTML = "";
   const desc = document.createElement("div");
-  desc.innerHTML = `<b>${data.description || "(no description)"}</b><br>` +
+  desc.innerHTML = `<b>${escapeHtml(data.description || "(no description)")}</b><br>` +
     "corrected path: " + fmtMetrics(data.metrics, data.goal_reach).replace("\n", "<br>") +
     "<br>from start: " + fmtMetrics(data.start_metrics, data.start_goal_reach).replace("\n", "<br>") +
-    `<br>artifacts: ${data.artifact_dir}`;
+    `<br>artifacts: ${escapeHtml(data.artifact_dir)}` +
+    rationaleHtml(data.rationale, data.artifact_dir);
   const pre = document.createElement("pre");
   pre.textContent = data.code;
   out.appendChild(desc);
@@ -702,8 +796,17 @@ function renderRounds() {
   for (const r of rounds) {
     const div = document.createElement("div");
     div.className = "round-card";
-    div.innerHTML = `<b>round ${r.index}</b> · goal [${r.goal.map((v) => v.toFixed(2)).join(", ")}]` +
-      ` · trigger @ ${r.trigger_step}<br>“${r.feedback_text}”<br>${r.description || ""}`;
+    const details = document.createElement("div");
+    details.innerHTML = `<b>round ${r.index + 1}</b> · goal [${r.goal.map((v) => v.toFixed(2)).join(", ")}]` +
+      ` · trigger @ ${r.trigger_step} (${r.trigger_reason || "feedback"})` +
+      `<br>“${escapeHtml(r.feedback_text)}”<br>${escapeHtml(r.description || "")}` +
+      rationaleHtml(r.rationale, r.artifact_dir);
+    const remove = document.createElement("button");
+    remove.className = "danger round-remove";
+    remove.textContent = "Remove feedback";
+    remove.onclick = () => removeRound(r.index);
+    div.appendChild(details);
+    div.appendChild(remove);
     list.appendChild(div);
   }
   $("combine-rounds").disabled = rounds.length < 2;
@@ -766,6 +869,7 @@ async function applyRoundAndContinue() {
   renderTrajectorySession(data);
   setScenarioLocked(data.status === "paused");
   $("run-base").disabled = data.status === "paused";
+  $("run-trigger-oracle").disabled = data.status !== "paused";
   $("ignore-violation").disabled = data.status !== "paused" ||
     data.trigger.reason !== "discomfort";
   $("generate").disabled = data.status !== "paused";
@@ -773,6 +877,17 @@ async function applyRoundAndContinue() {
   $("generate-cost").disabled = true;
   $("commit-round").disabled = true;
   $("apply-round").disabled = true;
+  renderRounds();
+  renderUnifiedOutput();
+  refreshLegend(); refreshTimeline(); renderAll();
+}
+
+async function removeRound(index) {
+  const data = await apiDelete(`/api/rounds/${index}`, "removing feedback");
+  rounds = data.rounds;
+  unified = data.unified;
+  unifiedCostField = null;
+  clearTraj("unified");
   renderRounds();
   renderUnifiedOutput();
   refreshLegend(); refreshTimeline(); renderAll();
@@ -1828,6 +1943,8 @@ async function main() {
   refreshPersonaSelect();
   setArmEditorValues(INIT.start_arm_aa);
   onPersonaChange(currentPersona);
+  setTraj("oracle", INIT.oracle.trajectory);
+  renderOracleMetrics(INIT.oracle);
 
   $("n-samples").value = INIT.uq.diffusion_samples;
   $("n-clusters").value = INIT.uq.n_clusters;
@@ -1839,12 +1956,17 @@ async function main() {
     const data = INIT.manual_trajectory;
     multiTurnActive = true;
     setTraj("base", data.trajectory);
+    if (data.oracle) {
+      setTraj("oracle", data.oracle.trajectory);
+      renderOracleMetrics(data.oracle);
+    }
     baseTrigger = data.trigger ? data.trigger.step : null;
     renderTrajectorySession(data);
     setScenarioLocked(data.status === "paused");
     $("run-base").disabled = data.status === "paused";
     $("exit-trajectory").disabled = false;
     $("generate").disabled = data.status !== "paused";
+    $("run-trigger-oracle").disabled = data.status !== "paused";
     $("ignore-violation").disabled = data.status !== "paused" ||
       data.trigger.reason !== "discomfort";
     $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
@@ -1873,6 +1995,7 @@ async function main() {
   $("reset-pose").onclick = () => setArmEditorValues(INIT.start_arm_aa);
   $("run-base").onclick = runBase;
   $("exit-trajectory").onclick = exitManualTrajectory;
+  $("run-trigger-oracle").onclick = runTriggerOracle;
   $("ignore-violation").onclick = ignoreComfortViolation;
   $("generate").onclick = generate;
   $("recluster").onclick = recluster;

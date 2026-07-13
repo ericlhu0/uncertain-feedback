@@ -28,6 +28,7 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
+    extract_json_object,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.utils.plot import ArmVisualizer
@@ -63,22 +64,26 @@ def _response(description: str = "fake cost") -> str:
 class _FakeLlmModel:
     """Honors both the single-turn and multi-turn call surfaces."""
 
-    def __init__(self, response: str) -> None:
+    def __init__(self, response: str, responses: list[str] | None = None) -> None:
         self.response = response
+        self.responses = list(responses or [])
         self.received_images = None
         self.full_output_calls: list[tuple[str, object]] = []
         self.converse_calls = 0
         self.last_messages = None
 
+    def _next_response(self) -> str:
+        return self.responses.pop(0) if self.responses else self.response
+
     def get_full_output(self, text_input: str, image_input=None) -> str:
         self.received_images = image_input
         self.full_output_calls.append((text_input, image_input))
-        return self.response
+        return self._next_response()
 
     def converse(self, messages) -> str:
         self.converse_calls += 1
         self.last_messages = messages
-        return self.response
+        return self._next_response()
 
 
 def _context() -> object:
@@ -164,6 +169,68 @@ def test_llm_generator_runs_three_focused_stages(tmp_path) -> None:
     assert "## author" in stage_log
     assert "### Response" in stage_log
     assert (kwargs["run_dir"] / "cost.py").exists()
+
+
+def test_llm_generator_writes_rationale(tmp_path, capsys) -> None:
+    interpretation = json.dumps(
+        {
+            "preference": "keep the elbow more bent",
+            "distinguishing_dimension": "elbow flexion",
+            "direction": "more bent",
+            "secondary": "",
+            "goal_conflict": False,
+            "evidence": {
+                "preference": "images: chosen arm ended with a bent elbow",
+                "distinguishing_dimension": "summary: chosen elbow_flexion end=1.2",
+                "direction": "instruction: 'raise the elbow'",
+            },
+        }
+    )
+    grounding = json.dumps(
+        {
+            "terms": [
+                {
+                    "feature": "elbow_flexion",
+                    "bound_type": "lower_bound",
+                    "values": {"threshold": 1.0},
+                    "source": "mdm_traj elbow_flexion minimum=1.0",
+                }
+            ],
+            "goal_safety_check": "The lower bound still permits the goal pose.",
+        }
+    )
+    fake = _FakeLlmModel(
+        _response(), responses=[interpretation, grounding, _response()]
+    )
+    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
+    kwargs["context"] = _ranking_context()
+    kwargs["summaries"] = build_motion_summaries(kwargs["context"])
+
+    assert create_cost_generator(**kwargs).generate(install=False) is not None
+
+    rationale = json.loads(
+        (kwargs["run_dir"] / "rationale.json").read_text(encoding="utf-8")
+    )
+    assert rationale["instruction"] == "raise the elbow"
+    assert rationale["backend"] == "LlmCostGenerator"
+    assert rationale["interpret"]["evidence"]["preference"].startswith("images:")
+    assert rationale["ground"]["terms"][0]["source"].startswith("mdm_traj")
+    assert rationale["final"]["explanation"] == "dev explanation"
+    assert rationale["ranking"]["rank_accuracy"] == 1.0
+    assert "[cost-gen] grounding source (elbow_flexion):" in capsys.readouterr().out
+
+
+def test_llm_generator_tolerates_unstructured_stage_rationale(tmp_path) -> None:
+    fake = _FakeLlmModel(_response(), responses=["not json", "[]", _response()])
+    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
+
+    assert create_cost_generator(**kwargs).generate(install=False) is not None
+
+    rationale = json.loads(
+        (kwargs["run_dir"] / "rationale.json").read_text(encoding="utf-8")
+    )
+    assert rationale["interpret"] is None
+    assert rationale["ground"] is None
 
 
 def test_generator_saves_reference_with_correction_video(tmp_path, monkeypatch) -> None:
@@ -341,6 +408,11 @@ def test_turns_generator_selects_by_ranking_when_available(tmp_path) -> None:
         (kwargs["run_dir"] / "turn_0" / "score.json").read_text(encoding="utf-8")
     )
     assert payload["ranking"]["rank_accuracy"] == 1.0
+    rationale = json.loads(
+        (kwargs["run_dir"] / "rationale.json").read_text(encoding="utf-8")
+    )
+    assert rationale["ranking"] == payload["ranking"]
+    assert rationale["ground"] is None
     # The feedback describes the ranking, not an L2 match to the correction.
     texts = [m["text"] for m in fake.last_messages if m["role"] == "user"]
     assert any("chosen_correction" in t for t in texts)
@@ -461,3 +533,50 @@ def test_agent_task_requires_stage_log(tmp_path) -> None:
     assert "## Stage 1 response" in task
     assert "## Stage 2 response" in task
     assert "## Stage 3 response" in task
+
+
+def test_agent_generator_writes_rationale_from_stage_log(tmp_path, monkeypatch) -> None:
+    fake = _FakeLlmModel(_response())
+    kwargs = _factory_kwargs(
+        tmp_path,
+        fake,
+        LlmCostConfig(backend="agent", use_images=False),
+    )
+    kwargs["context"] = _ranking_context()
+    kwargs["summaries"] = build_motion_summaries(kwargs["context"])
+    gen = create_cost_generator(rollout_fn=_fake_rollout, **kwargs)
+    run_dir = kwargs["run_dir"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "response.json").write_text(_response(), encoding="utf-8")
+    (run_dir / "stage_log.md").write_text(
+        "## Stage 1 response\n\n```json\n"
+        '{"preference": "bend the elbow", "evidence": '
+        '{"preference": "images: chosen pose"}}\n'
+        "```\n\n## Stage 2 response\n\n```json\n"
+        '{"terms": [{"feature": "elbow_flexion", "source": '
+        '"summary: end=1.2"}]}\n'
+        "```\n\n## Stage 3 response\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gen, "_run_codex", lambda: None)
+    monkeypatch.setattr(gen, "_save_reference_video", lambda: None)
+
+    assert gen.generate(install=False) is not None
+
+    rationale = json.loads((run_dir / "rationale.json").read_text(encoding="utf-8"))
+    assert rationale["interpret"]["preference"] == "bend the elbow"
+    assert rationale["ground"]["terms"][0]["source"] == "summary: end=1.2"
+    assert rationale["ranking"]["rank_accuracy"] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('```json\n{"value": 1}\n```', {"value": 1}),
+        ('prefix {"value": 2} suffix', {"value": 2}),
+        ("garbage", None),
+        ("[1, 2, 3]", None),
+    ],
+)
+def test_extract_json_object(text: str, expected: dict | None) -> None:
+    assert extract_json_object(text) == expected

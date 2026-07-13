@@ -35,11 +35,13 @@
         <button id="exit-trajectory" class="danger" disabled>Exit trajectory</button>
       </div>
       <div class="row">
+        <button id="run-trigger-oracle" disabled>Oracle from MDM trigger</button>
         <button id="ignore-violation" disabled>Ignore comfort violation + continue</button>
       </div>
       <div class="hint">The trajectory pauses at each feedback trigger. You keep manual control of MDM sampling, clustering, magnitude, cluster selection, and cost generation before continuing the same trajectory.</div>
       <div id="trajectory-session"></div>
       <div class="metrics" id="base-metrics"></div>
+      <div class="metrics" id="oracle-metrics"></div>
     </div>
 
     <div class="panel">
@@ -93,7 +95,7 @@
         <button id="combine-rounds" class="primary" disabled>Combine rounds (codex)</button>
         <button id="reset-rounds" class="danger" disabled>Reset</button>
       </div>
-      <div class="hint">Apply feedback + continue installs the chosen correction and cost, then advances the same trajectory to its next trigger.</div>
+      <div class="hint">In multi-turn mode, Apply feedback + continue installs the chosen correction and cost, then advances the same trajectory to its next trigger. Remove unwanted feedback from its round card before combining; removal changes future planning and combination, but does not rewind already executed frames.</div>
       <div id="round-list"></div>
       <div id="unified-output"></div>
     </div>

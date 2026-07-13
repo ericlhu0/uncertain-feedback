@@ -166,6 +166,14 @@ button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
   font-size: 11px;
   line-height: 1.4;
 }
+.round-card .round-remove { margin-top: 5px; padding: 2px 6px; font-size: 10px; }
+.cost-rationale { margin-top: 5px; }
+.cost-rationale summary { cursor: pointer; font-weight: 600; }
+.cost-rationale > div { margin: 3px 0; }
+.rationale-evidence, .rationale-term { padding-left: 8px; }
+.rationale-ranking { border-collapse: collapse; margin: 3px 0; }
+.rationale-ranking td { border: 1px solid #d8dce2; padding: 1px 5px; }
+.rationale-ranking .chosen { font-weight: 700; }
 
 /* persona modal */
 #modal-backdrop {

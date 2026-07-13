@@ -78,6 +78,9 @@ from uncertain_feedback.uncertainty.clustering.xyz_clusterer import (
 )
 
 _LOG_PREFIX = "[demo_designer]"
+_DEFAULT_PROMPTS = {
+    "triceps_long_head_contracture": "Bring my left elbow closer to my body.",
+}
 
 
 def _log(message: str) -> None:
@@ -148,6 +151,18 @@ def _generated_bounds_from_artifacts(cost_dir: Path) -> list[dict[str, Any]]:
             }
         )
     return bounds
+
+
+def _rationale_from_artifacts(cost_dir: Path) -> dict[str, Any] | None:
+    """Read the structured cost rationale when the backend produced one."""
+    path = cost_dir / "rationale.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 # --- Persona (de)serialization ------------------------------------------------
@@ -293,6 +308,8 @@ class DemoSession:
         self.manual_trajectory: ManualTrajectorySession | None = None
         self.trigger_reason: TriggerReason | None = None
         self.trigger_violation: float | None = None
+        self.oracle_traj: np.ndarray | None = None
+        self.oracle_source: str | None = None
 
         # Multi-round state (unified cost is unpicklable; lost on restart)
         self.rounds: list[CostRound] = []
@@ -471,6 +488,17 @@ class DemoSession:
         }
 
     def init_payload(self) -> dict[str, Any]:
+        if self.oracle_traj is None:
+            persona_goals = self.cfg.persona_goals.get(self.persona_name)
+            goals = (
+                persona_goals.cartesian
+                if persona_goals is not None and persona_goals.cartesian
+                else self.cfg.cartesian.goals
+            )
+            self.goal = np.asarray(
+                goals[0] if goals else [0.4, 0.3, 0.1], dtype=np.float64
+            )
+            self.run_oracle(from_trigger=False)
         arm_bones = {
             (p, c)
             for p, c in SMPL_BONE_PAIRS_22
@@ -486,6 +514,7 @@ class DemoSession:
                 if self.cfg.cartesian.goals
                 else [0.4, 0.3, 0.1]
             ),
+            "default_prompts": _DEFAULT_PROMPTS,
             "persona_goals": {
                 name: {"cartesian": [list(g) for g in goals.cartesian]}
                 for name, goals in self.cfg.persona_goals.items()
@@ -508,6 +537,7 @@ class DemoSession:
                 "scale": self.cfg.uq.scale,
             },
             "cost_backend": self.cfg.llm_cost.backend,
+            "oracle": self._oracle_payload(),
             "rounds": self.round_records,
             "unified": self._unified_record(),
             "mdm_frames": self.cfg.mdm_frames,
@@ -723,6 +753,7 @@ class DemoSession:
         self._clear_pending_feedback()
         _log(f"multi-turn trajectory started: persona={persona} goal={goal}")
         self._advance_manual_trajectory()
+        self.run_oracle(from_trigger=False)
         return self._manual_trajectory_payload()
 
     def exit_manual_trajectory(self) -> dict[str, Any]:
@@ -738,10 +769,64 @@ class DemoSession:
         self.trigger_violation = None
         self.q_feedback = None
         self.q_history = []
+        self.oracle_traj = None
+        self.oracle_source = None
         self._clear_pending_feedback()
         self.reset_rounds()
         _log(f"trajectory exited (artifacts retained at {artifact_dir})")
         return {"ok": True, "artifact_dir": str(artifact_dir)}
+
+    def run_oracle(self, from_trigger: bool) -> dict[str, Any]:
+        if self.goal is None:
+            raise ValueError("Start a trajectory first.")
+        if from_trigger and self.q_feedback is None:
+            raise ValueError("The trajectory is not paused at an MDM trigger point.")
+        user = self.get_persona(self.persona_name)
+        cfg_goal = self._cfg_with_goal(self.goal)
+        oracle_costs = CompositeTrajectoryCost(
+            [
+                *self._extra_costs(user).terms(),
+                HiddenCostTerm(user, self.context),
+            ]
+        )
+        start = self.q_feedback if from_trigger else self.start_arm_aa
+        source = "trigger" if from_trigger else "initial"
+        _log(f"oracle rollout: starting from the {source} pose")
+        trajectory = rollout_to_goal(
+            cfg_goal,
+            start,
+            self.goal,
+            self.context,
+            oracle_costs,
+            self.body_pos,
+            self.spine3_pos,
+            self.spine3_aa,
+            progress_label="oracle",
+            log_prefix=_LOG_PREFIX,
+        )
+        if from_trigger and self.q_history:
+            trajectory = np.concatenate(
+                [np.asarray(self.q_history[:-1]), trajectory], axis=0
+            )
+        self.oracle_traj = trajectory
+        self.oracle_source = source
+        return self._oracle_payload()
+
+    def _oracle_payload(self) -> dict[str, Any]:
+        if self.oracle_traj is None or self.oracle_source is None or self.goal is None:
+            raise ValueError("Run an oracle rollout first.")
+        user = self.get_persona(self.persona_name)
+        return {
+            "trajectory": self.package_trajectory(self.oracle_traj, user),
+            "metrics": violation_metrics(user, self.context, self.oracle_traj),
+            "goal_reach": goal_reach(
+                self.context,
+                self._cfg_with_goal(self.goal),
+                self.oracle_traj,
+                self.goal,
+            ),
+            "source": self.oracle_source,
+        }
 
     def _advance_manual_trajectory(self) -> None:
         state = self.manual_trajectory
@@ -812,6 +897,7 @@ class DemoSession:
         )
         return {
             "trajectory": self.package_trajectory(trajectory, user),
+            "oracle": None if self.oracle_traj is None else self._oracle_payload(),
             "metrics": violation_metrics(user, self.context, trajectory),
             "goal_reach": goal_reach(
                 self.context, self._cfg_with_goal(self.goal), trajectory, self.goal
@@ -1087,6 +1173,7 @@ class DemoSession:
             ),
             "cost_field": self.generated_cost_field(cost),
             "generated_bounds": _generated_bounds_from_artifacts(cost_dir),
+            "rationale": _rationale_from_artifacts(cost_dir),
             "description": cost.description,
             "code": cost.code,
             "artifact_dir": str(cost_dir),
@@ -1146,6 +1233,7 @@ class DemoSession:
                 "trigger_reason": cost_round.trigger_reason,
                 "trigger_violation": cost_round.trigger_violation,
                 "description": self._last_cost.description,
+                "rationale": _rationale_from_artifacts(self._last_cost_dir),
                 "artifact_dir": str(self._last_cost_dir),
             }
         )
@@ -1197,6 +1285,36 @@ class DemoSession:
         self._clear_pending_feedback()
         self._advance_manual_trajectory()
         return self._manual_trajectory_payload()
+
+    def remove_round(self, index: int) -> dict[str, Any]:
+        if index < 0 or index >= len(self.rounds):
+            raise ValueError(f"Unknown feedback round {index}.")
+        removed = self.rounds.pop(index)
+        self.round_records.pop(index)
+        self._round_costs.pop(index)
+        self._round_generations.pop(index)
+        self.rounds = [replace(round_, index=i) for i, round_ in enumerate(self.rounds)]
+        for i, record in enumerate(self.round_records):
+            record["index"] = i
+        self._latest_round_generation = (
+            self._round_generations[-1] if self._round_generations else None
+        )
+        self.unified_cost = (
+            self._round_costs[0] if len(self._round_costs) == 1 else None
+        )
+        if getattr(self, "manual_trajectory", None) is not None:
+            self.manual_trajectory.mpc.set_extra_costs(
+                CompositeTrajectoryCost(
+                    [
+                        *self._extra_costs(
+                            self.get_persona(self.persona_name)
+                        ).terms(),
+                        *self._round_costs,
+                    ]
+                )
+            )
+        _log(f"removed feedback round {removed.index}")
+        return {"rounds": self.round_records, "unified": self._unified_record()}
 
     def combine_rounds(self) -> dict[str, Any]:
         if len(self.rounds) < 2:

@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import MethodType
 
 import numpy as np
@@ -7,6 +8,7 @@ from uncertain_feedback.demo_designer.core import DemoSession
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
+    CostRound,
     MpcCostContext,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
@@ -147,6 +149,7 @@ def test_exit_manual_trajectory_clears_trajectory_state(monkeypatch, tmp_path) -
     assert session.trigger_step is None
     assert session.q_feedback is None
     assert session.q_history == []
+    assert session.oracle_traj is None
     assert session.rounds == []
     assert session.samples is None
 
@@ -219,3 +222,36 @@ def test_ignore_comfort_violation_resumes_until_a_new_violation(
     }
     assert payload["trajectory"]["n_frames"] == 4
     assert payload["rounds"] == []
+
+
+def test_remove_round_reindexes_remaining_feedback(tmp_path) -> None:
+    def round_(index: int) -> CostRound:
+        return CostRound(
+            index=index,
+            goal=(0.1, 0.2, 0.3),
+            feedback_text=f"feedback {index}",
+            trigger_step=index,
+            round_dir=Path(tmp_path),
+            state_path=Path(tmp_path) / "state.pkl",
+            cost_code="code",
+            params={},
+            summaries={},
+            image_paths=(),
+        )
+
+    session = DemoSession.__new__(DemoSession)
+    session.rounds = [round_(0), round_(1), round_(2)]
+    session.round_records = [{"index": 0}, {"index": 1}, {"index": 2}]
+    session._round_costs = [FakeCost(), FakeCost(), FakeCost()]
+    session._round_generations = [object(), object(), object()]
+    session.manual_trajectory = None
+    session.unified_cost = FakeCost()
+
+    payload = session.remove_round(1)
+
+    assert [round_.index for round_ in session.rounds] == [0, 1]
+    assert [round_.feedback_text for round_ in session.rounds] == [
+        "feedback 0",
+        "feedback 2",
+    ]
+    assert payload["unified"] is None

@@ -28,6 +28,7 @@ from typing import Any
 from uncertain_feedback.planners.mpc.costs.cost_generator import (
     CostGenerator,
     evaluate_candidate_cost,
+    rank_candidate_cost,
 )
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
@@ -57,6 +58,16 @@ _CODEX_INSTRUCTION = (
     f"(keys: description, code, params, explanation, recipient_explanation) into "
     f"{_RESPONSE_FILE}."
 )
+
+
+def _stage_section(stage_log: str, heading: str) -> str | None:
+    """Return one stage-log section, ending before the next level-two heading."""
+    start = stage_log.find(heading)
+    if start < 0:
+        return None
+    start += len(heading)
+    end = stage_log.find("\n## ", start)
+    return (stage_log[start:] if end < 0 else stage_log[start:end]).strip()
 
 
 class AgentCostGenerator(CostGenerator):
@@ -108,11 +119,19 @@ class AgentCostGenerator(CostGenerator):
             raw = response_path.read_text(encoding="utf-8")
             (self.run_dir / "raw_response.txt").write_text(raw, encoding="utf-8")
             response, cost = self.parse_cost(raw)
+            ranking = rank_candidate_cost(self.context, cost)
             score, _ = evaluate_candidate_cost(self.context, cost, self.rollout_fn)
             with open(self.run_dir / "score.json", "w", encoding="utf-8") as f:
                 json.dump({"score": score}, f, indent=2)
             print(f"[cost-gen][agent] score={score:.4f}")
             self.save_response(response)
+            stage_log = (self.run_dir / _STAGE_LOG_FILE).read_text(encoding="utf-8")
+            self.save_rationale(
+                response,
+                interpret_raw=_stage_section(stage_log, "## Stage 1 response"),
+                ground_raw=_stage_section(stage_log, "## Stage 2 response"),
+                ranking=ranking,
+            )
             if install:
                 self.install(cost)
             self._on_success(cost, installed=install)

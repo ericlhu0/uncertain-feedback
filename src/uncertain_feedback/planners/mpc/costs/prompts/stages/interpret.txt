@@ -21,6 +21,7 @@ Return ONLY a JSON object, no prose, with these keys:
 - "direction": which way along that joint the chosen path differs (string), e.g. "more bent", "raised more forward", "less out to the side".
 - "secondary": an optional second preference only if one is clearly implied, else "" (string).
 - "goal_conflict": true only if the correction implies the person is uncomfortable reaching the original goal that way; false if the goal is still reachable and they only want the motion shaped (boolean).
+- "evidence": an object with keys "preference", "distinguishing_dimension", and "direction"; each value is ONE short string citing the strongest basis for that conclusion, prefixed by its kind: "images: ..." (which attached image and what it showed), "summary: ..." (which trajectory's feature/statistic and its value), or "instruction: '...'" (a short quote).
 
 Compact summary:
 {summaries}

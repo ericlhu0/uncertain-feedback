@@ -75,13 +75,21 @@ class TurnsCostGenerator(CostGenerator):
     def generate(self, install: bool = False) -> GeneratedPythonCost | None:
         try:
             self.begin()
-            best = self._converse()
+            llm = self.make_llm()
+            interpretation = self.interpret(llm)
+            best = self._converse(llm, interpretation)
             if best is None:
                 raise GeneratedCostValidationError(
                     "no valid cost produced across turns"
                 )
-            best_cost, best_response = best
+            best_cost, best_response, best_ranking = best
             self.save_response(best_response)
+            self.save_rationale(
+                best_response,
+                interpret_raw=interpretation,
+                ground_raw=None,
+                ranking=best_ranking,
+            )
             if install:
                 self.install(best_cost)
             self._on_success(best_cost, installed=install)
@@ -92,21 +100,19 @@ class TurnsCostGenerator(CostGenerator):
 
     def _converse(
         self,
-    ) -> tuple[GeneratedPythonCost, LlmCostResponse] | None:
-        llm = self.make_llm()
-        # Interpret once; the correction and its images don't change between turns, so
-        # only grounding + authoring iterate against rollout feedback below.
-        interpretation = self.interpret(llm)
+        llm: Any,
+        interpretation: str,
+    ) -> tuple[GeneratedPythonCost, LlmCostResponse, CostRanking | None] | None:
         # Only insist the rollout still reaches the goal when stage one judged the goal
         # reachable; if the correction conflicts with the goal, stopping short is fine.
         goal_conflict = parse_goal_conflict(interpretation)
         prompt_text = build_refine_prompt(interpretation, self.summaries)
         (self.run_dir / "refine_prompt.txt").write_text(prompt_text, encoding="utf-8")
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "text": prompt_text}
-        ]
+        messages: list[dict[str, Any]] = [{"role": "user", "text": prompt_text}]
 
-        best: tuple[GeneratedPythonCost, LlmCostResponse] | None = None
+        best: tuple[GeneratedPythonCost, LlmCostResponse, CostRanking | None] | None = (
+            None
+        )
         best_key: tuple[float, float, float] | None = None
         no_improve = 0
 
@@ -171,12 +177,7 @@ class TurnsCostGenerator(CostGenerator):
             (turn_dir / "cost.py").write_text(response.code, encoding="utf-8")
             payload: dict[str, Any] = {"turn": turn, "l2_score": score}
             if ranking is not None:
-                payload["ranking"] = {
-                    "rank_accuracy": ranking.rank_accuracy,
-                    "normalized_margin": ranking.normalized_margin,
-                    "inert": ranking.inert,
-                    "costs": ranking.costs,
-                }
+                payload["ranking"] = ranking.as_json()
             payload["goal_reach"] = report
             with open(turn_dir / "score.json", "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
@@ -192,7 +193,7 @@ class TurnsCostGenerator(CostGenerator):
 
             if best_key is None or key < best_key:
                 best_key = key
-                best = (cost, response)
+                best = (cost, response, ranking)
                 no_improve = 0
             else:
                 no_improve += 1

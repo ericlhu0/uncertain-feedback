@@ -34,6 +34,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedPythonCost,
     LlmCostResponse,
     build_joint_angle_series,
+    extract_json_object,
     parse_llm_cost_response,
 )
 from uncertain_feedback.planners.mpc.costs.prompts import (
@@ -60,7 +61,7 @@ def _make_llm_model(model_name: str) -> Any:
         model=model_name,
         system_prompt=_SYSTEM_PROMPT,
         temperature=0.2,
-        max_tokens=16000,
+        max_tokens=None,
         reasoning_effort=(
             _DEFAULT_REASONING_EFFORT
             if model_name == _DEFAULT_LLM_MODEL
@@ -121,6 +122,15 @@ class CostRanking:
         if self.inert:
             return (math.inf, math.inf)
         return (1.0 - self.rank_accuracy, -self.normalized_margin)
+
+    def as_json(self) -> dict[str, Any]:
+        """JSON-safe payload for score/rationale artifacts."""
+        return {
+            "rank_accuracy": self.rank_accuracy,
+            "normalized_margin": self.normalized_margin,
+            "inert": self.inert,
+            "costs": self.costs,
+        }
 
 
 def rank_candidate_cost(
@@ -232,26 +242,8 @@ def goal_reach_report(
 
 def parse_goal_conflict(interpret_text: str) -> bool:
     """Read the stage-1 ``goal_conflict`` flag; ``False`` if absent/unparseable."""
-    text = interpret_text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            return False
-        try:
-            data = json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return False
-    return bool(isinstance(data, dict) and data.get("goal_conflict", False))
+    data = extract_json_object(interpret_text)
+    return bool(data is not None and data.get("goal_conflict", False))
 
 
 def evaluate_candidate_cost(
@@ -568,6 +560,47 @@ class CostGenerator(ABC):
                 indent=2,
                 sort_keys=True,
             )
+
+    def save_rationale(
+        self,
+        response: LlmCostResponse,
+        *,
+        interpret_raw: str | None,
+        ground_raw: str | None,
+        ranking: CostRanking | None,
+    ) -> None:
+        """Write ``rationale.json`` chaining instruction -> interpret -> ground -> final.
+
+        Stage sections are the stage JSONs parsed leniently and dumped verbatim —
+        no key validation, so a malformed or missing stage degrades to ``null``
+        rather than failing the generation.
+        """
+        interpret = extract_json_object(interpret_raw) if interpret_raw else None
+        ground = extract_json_object(ground_raw) if ground_raw else None
+        if isinstance(ground, dict):
+            terms = ground.get("terms", [])
+            for term in terms if isinstance(terms, list) else []:
+                if isinstance(term, dict) and term.get("source"):
+                    print(
+                        f"[cost-gen] grounding source ({term.get('feature')}): "
+                        f"{term['source']}"
+                    )
+        payload = {
+            "instruction": self.instruction,
+            "backend": type(self).__name__,
+            "model": self.model_name,
+            "interpret": interpret,
+            "ground": ground,
+            "final": {
+                "description": response.description,
+                "params": response.params,
+                "explanation": response.explanation,
+                "recipient_explanation": response.recipient_explanation,
+            },
+            "ranking": ranking.as_json() if ranking is not None else None,
+        }
+        with open(self.run_dir / "rationale.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
 
     def install(self, cost: GeneratedPythonCost) -> None:
         """Append the generated cost to the planner's extra-cost set."""

@@ -773,11 +773,24 @@ previous one ran):
 
 1. **Scenario** — edit the start arm pose (per-joint axis-angle sliders limited
    to the selected persona's joint boxes, with a live SMPL body preview), the
-   spine3-relative Cartesian goal, and the simulated
-   user; *Run base rollout* rolls the headless Cartesian MPC and reports hidden
-   bound violations, the feedback trigger frame, and goal reach. Select *Show
-   oracle rollout* to also resume from the feedback pose with the persona's
-   hidden oracle cost and display that full rollout for comparison.
+   spine3-relative Cartesian goal, and the simulated user. *Start trajectory*
+   starts one stateful `arm_mpc_cartesian` execution and keeps it open across
+   feedback turns. Demo Designer ignores `text_time`; the trajectory advances
+   until the selected persona crosses its discomfort threshold and pauses. Run
+   the normal language-correction stage, manually inspect/re-cluster/scale/select
+   an MDM cluster, and run the normal cost-generation stage. *Apply feedback +
+   continue trajectory* installs that selected correction and cost and advances
+   the same planner to the next trigger. This pause → choose → generate cost →
+   continue cycle can repeat until the goal is reached or `steps` is exhausted;
+   no cluster is selected automatically. *Ignore comfort violation + continue*
+   dismisses only the current discomfort event without adding feedback; the
+   trajectory can pause again after it returns to comfort and crosses a bound
+   later. The accumulated executed trajectory is saved under
+   `demo_designer_artifacts/<timestamp>_trajectory/`. The live planner session
+   is held in server memory and is lost when the server restarts. *Exit
+   trajectory* abandons that live planner and its pending feedback rounds,
+   retains the already-written trajectory artifacts, and unlocks the scenario
+   controls so another persona or trajectory can be started.
 2. **Language correction** — edit the MDM prompt (prefilled with the persona's
    feedback line), sample count, and cluster count; *Generate* draws diffusion
    samples from the feedback-trigger pose (shown as a purple ghost body in
@@ -794,11 +807,16 @@ previous one ran):
    generated cost installed from the original edited start pose, and shows the
    resulting trajectory, metrics, and cost code. Its grounded feature limits are
    overlaid on the corresponding feature graphs in blue. Artifacts go to
-   `demo_designer_artifacts/<timestamp>_<backend>/`.
+   `demo_designer_artifacts/<timestamp>_<backend>/`. The complete browser
+   payload is also saved as `demo_designer_payload.json`; refreshing the browser
+   restores the generated trajectories, overlays, code, and pending Apply action
+   without rerunning cost generation. This refresh recovery uses the live server
+   session; restarting the server still clears the pending action.
 4. **Multi-round feedback** — interactive version of the multi-round
-   experiment above. *Commit round* records the last generated cost as a
-   feedback round (goal, feedback text, trigger pose, cost, pickled eval
-   state). With ≥2 committed rounds, *Combine rounds (codex)* runs the
+   experiment above. *Apply feedback + continue trajectory* records the last
+   generated cost as a feedback round (goal, feedback text, trigger pose, cost,
+   pickled eval state), installs it, and resumes the same planner. With ≥2
+   committed rounds, *Combine rounds (codex)* runs the
    `CombineCostGenerator` over all rounds and installs the resulting unified
    cost, which **replaces** the per-round costs. Clicking *Combine rounds*
    automatically rolls the unified cost out from the initial pose. The unified cost's
@@ -810,7 +828,8 @@ previous one ran):
    `demo_designer_artifacts/<timestamp>_combine/`; the round state lives in
    server memory and is lost on restart.
 
-The center panel shows front/side/top SMPL body views with base (red), optional
+The center panel shows front/side/top SMPL body views with the base or
+accumulated multi-turn execution (red), optional
 oracle-cost (brown), correction (green), full corrected path (teal), and
 generated-cost (blue) overlays. Only the selected cluster's body and trace are shown in these views;
 all cluster trajectories remain plotted on the joint-angle graphs. Visible

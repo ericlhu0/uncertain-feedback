@@ -24,6 +24,7 @@ let startPreview = null;    // {arm_positions, mesh_vertices} for the edited pos
 const meshData = new Map(); // mesh id -> {frames, vertices, data: Float32Array}
 const meshLoads = new Map();
 let baseTrigger = null;
+let multiTurnActive = false;
 
 // Multi-round state: committed rounds + the unified replacement cost. The
 // unified visuals survive base rollouts (only Reset rounds clears them).
@@ -446,33 +447,138 @@ async function savePersona() {
 // Pipeline actions
 // ---------------------------------------------------------------------------
 
+function setScenarioLocked(locked) {
+  for (const id of ["persona-select", "persona-edit", "persona-new", "persona-delete",
+    "goal-x", "goal-y", "goal-z", "reset-pose"]) {
+    $(id).disabled = locked;
+  }
+  for (const input of document.querySelectorAll("#arm-editor input")) input.disabled = locked;
+}
+
 async function runBase() {
-  const data = await api("/api/base_rollout", {
-    arm_aa: armAA, goal: getGoal(), persona: currentPersona,
-    show_oracle: $("show-oracle").checked,
-  }, "running base MPC rollout (may take a while)");
+  await startManualTrajectory();
+}
+
+function renderTrajectorySession(data) {
+  const out = $("trajectory-session");
+  out.className = `trajectory-session ${data.status}`;
+  if (data.status === "paused") {
+    const violation = data.trigger.violation === null
+      ? "n/a"
+      : data.trigger.violation.toFixed(3);
+    out.textContent = `Paused at frame ${data.trigger.step}/${data.step_limit} · ` +
+      `${data.trigger.reason} · violation ${violation} · ` +
+      `feedback turn ${data.rounds.length + 1}`;
+  } else {
+    out.textContent = `Trajectory complete at frame ${data.step}/${data.step_limit}` +
+      (data.reached_goal ? " · goal reached" : "") +
+      (data.error ? ` · error: ${data.error}` : "");
+  }
+}
+
+async function startManualTrajectory() {
+  const data = await api("/api/manual_trajectory/start", {
+    arm_aa: armAA,
+    goal: getGoal(),
+    persona: currentPersona,
+  }, "advancing trajectory to the next feedback trigger");
+  multiTurnActive = true;
+  rounds = data.rounds;
+  unified = data.unified;
+  unifiedCostField = null;
+  clearTraj("base", "oracle", "correction", "full", "generated", "generated_start");
+  clearTraj("unified");
   setTraj("base", data.trajectory);
-  if (data.oracle) setTraj("oracle", data.oracle.trajectory);
-  else clearTraj("oracle");
-  baseTrigger = data.trigger_step;
+  clearTraj("oracle");
+  baseTrigger = data.trigger ? data.trigger.step : null;
   showStart = false;
-  clearTraj("correction", "full", "generated", "generated_start");
-  generatedBounds = [];
-  costField = null;
   clusters = [];
   selectedCluster = null;
   selectedClusterSegments = null;
+  generatedBounds = [];
+  costField = null;
   renderClusterList();
-  $("generate").disabled = false;
+  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
+    `\nexecuted ${data.step}/${data.step_limit} steps` +
+    (data.error ? `\nerror: ${data.error}` : "");
+  renderTrajectorySession(data);
+  setScenarioLocked(data.status === "paused");
+  $("run-base").disabled = data.status === "paused";
+  $("exit-trajectory").disabled = false;
+  $("ignore-violation").disabled = data.status !== "paused" ||
+    data.trigger.reason !== "discomfort";
+  $("generate").disabled = data.status !== "paused";
   $("recluster").disabled = true;
   $("generate-cost").disabled = true;
   $("commit-round").disabled = true;
-  const trig = data.trigger_step === null
-    ? "never violates — no feedback would be given (pick a different goal/persona)"
-    : `user interrupts at frame ${data.trigger_step}`;
-  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) + "\n" + trig
-    + (data.oracle ? "\noracle: " + fmtMetrics(data.oracle.metrics, data.oracle.goal_reach) : "");
-  applyTriggerHint(data.trigger_step);
+  $("apply-round").disabled = true;
+  renderRounds();
+  renderUnifiedOutput();
+  refreshLegend(); refreshTimeline(); renderAll();
+}
+
+async function exitManualTrajectory() {
+  const data = await api("/api/manual_trajectory/exit", {}, "exiting trajectory");
+  multiTurnActive = false;
+  baseTrigger = null;
+  rounds = [];
+  unified = null;
+  unifiedCostField = null;
+  clusters = [];
+  selectedCluster = null;
+  selectedClusterSegments = null;
+  generatedBounds = [];
+  costField = null;
+  clearTraj(...Object.keys(trajs));
+  showStart = true;
+  showMdmStart = false;
+  setScenarioLocked(false);
+  $("persona-delete").disabled = getPersona().builtin;
+  $("run-base").disabled = false;
+  $("exit-trajectory").disabled = true;
+  for (const id of ["ignore-violation", "generate", "recluster",
+    "generate-cost", "commit-round", "apply-round"]) {
+    $(id).disabled = true;
+  }
+  $("trajectory-session").className = "trajectory-session";
+  $("trajectory-session").textContent = "";
+  $("base-metrics").textContent = "";
+  $("correction-metrics").textContent = "";
+  $("cost-output").innerHTML = "";
+  renderClusterList();
+  renderRounds();
+  renderUnifiedOutput();
+  setStatus(`trajectory exited · artifacts retained at ${data.artifact_dir}`);
+  refreshLegend(); refreshTimeline(); renderAll();
+}
+
+async function ignoreComfortViolation() {
+  const data = await api("/api/manual_trajectory/ignore_violation", {},
+    "ignoring the current comfort violation and advancing the trajectory");
+  setTraj("base", data.trajectory);
+  baseTrigger = data.trigger ? data.trigger.step : null;
+  clearTraj("correction", "full", "generated", "generated_start");
+  clusters = [];
+  selectedCluster = null;
+  selectedClusterSegments = null;
+  generatedBounds = [];
+  costField = null;
+  renderClusterList();
+  $("cost-output").innerHTML = "";
+  $("correction-metrics").textContent = "";
+  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
+    `\nexecuted ${data.step}/${data.step_limit} steps` +
+    (data.error ? `\nerror: ${data.error}` : "");
+  renderTrajectorySession(data);
+  setScenarioLocked(data.status === "paused");
+  $("run-base").disabled = data.status === "paused";
+  $("ignore-violation").disabled = data.status !== "paused" ||
+    data.trigger.reason !== "discomfort";
+  $("generate").disabled = data.status !== "paused";
+  $("recluster").disabled = true;
+  $("generate-cost").disabled = true;
+  $("commit-round").disabled = true;
+  $("apply-round").disabled = true;
   refreshLegend(); refreshTimeline(); renderAll();
 }
 
@@ -519,10 +625,7 @@ async function pickCluster(label) {
   renderClusterList();
 }
 
-async function generateCost() {
-  const backend = $("cost-backend").value;
-  const data = await api("/api/generate_cost", { backend },
-    `generating ${backend} cost + evaluation rollout — this can take several minutes`);
+function renderCostGeneration(data) {
   generatedBounds = data.generated_bounds || [];
   costField = data.cost_field || null;
   setTraj("generated", data.trajectory);
@@ -538,7 +641,15 @@ async function generateCost() {
   pre.textContent = data.code;
   out.appendChild(desc);
   out.appendChild(pre);
-  $("commit-round").disabled = false;
+}
+
+async function generateCost() {
+  const backend = $("cost-backend").value;
+  const data = await api("/api/generate_cost", { backend },
+    `generating ${backend} cost + evaluation rollout — this can take several minutes`);
+  renderCostGeneration(data);
+  $("commit-round").disabled = multiTurnActive;
+  $("apply-round").disabled = !multiTurnActive;
 }
 
 // ---------------------------------------------------------------------------
@@ -577,10 +688,53 @@ async function commitRound() {
   unified = data.unified;
   // Round 1's cost IS the unified cost, so its field carries over directly.
   if (rounds.length === 1) unifiedCostField = costField;
+  if (!unified) {
+    unifiedCostField = null;
+    clearTraj("unified");
+  }
   $("commit-round").disabled = true;
+  $("apply-round").disabled = true;
   renderRounds();
   renderUnifiedOutput();
   renderAll();
+}
+
+async function applyRoundAndContinue() {
+  const data = await api("/api/apply_round", {},
+    "applying feedback and advancing the same trajectory to its next trigger");
+  rounds = data.rounds;
+  unified = data.unified;
+  if (!unified) {
+    unifiedCostField = null;
+    clearTraj("unified");
+  }
+  setTraj("base", data.trajectory);
+  baseTrigger = data.trigger ? data.trigger.step : null;
+  clusters = [];
+  selectedCluster = null;
+  selectedClusterSegments = null;
+  generatedBounds = [];
+  costField = null;
+  clearTraj("correction", "full", "generated", "generated_start");
+  renderClusterList();
+  $("cost-output").innerHTML = "";
+  $("correction-metrics").textContent = "";
+  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
+    `\nexecuted ${data.step}/${data.step_limit} steps` +
+    (data.error ? `\nerror: ${data.error}` : "");
+  renderTrajectorySession(data);
+  setScenarioLocked(data.status === "paused");
+  $("run-base").disabled = data.status === "paused";
+  $("ignore-violation").disabled = data.status !== "paused" ||
+    data.trigger.reason !== "discomfort";
+  $("generate").disabled = data.status !== "paused";
+  $("recluster").disabled = true;
+  $("generate-cost").disabled = true;
+  $("commit-round").disabled = true;
+  $("apply-round").disabled = true;
+  renderRounds();
+  renderUnifiedOutput();
+  refreshLegend(); refreshTimeline(); renderAll();
 }
 
 async function combineRounds() {
@@ -608,6 +762,7 @@ async function resetRounds() {
   unifiedCostField = null;
   clearTraj("unified");
   $("commit-round").disabled = true;
+  $("apply-round").disabled = true;
   renderRounds();
   renderUnifiedOutput();
   refreshLegend(); refreshTimeline(); renderAll();
@@ -1627,6 +1782,27 @@ async function main() {
   $("scale-num").value = INIT.uq.scale;
   $("cost-backend").value = INIT.cost_backend;
 
+  if (INIT.manual_trajectory) {
+    const data = INIT.manual_trajectory;
+    multiTurnActive = true;
+    setTraj("base", data.trajectory);
+    baseTrigger = data.trigger ? data.trigger.step : null;
+    renderTrajectorySession(data);
+    setScenarioLocked(data.status === "paused");
+    $("run-base").disabled = data.status === "paused";
+    $("exit-trajectory").disabled = false;
+    $("generate").disabled = data.status !== "paused";
+    $("ignore-violation").disabled = data.status !== "paused" ||
+      data.trigger.reason !== "discomfort";
+    $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
+      `\nexecuted ${data.step}/${data.step_limit} steps`;
+  }
+  if (INIT.pending_cost) {
+    renderCostGeneration(INIT.pending_cost);
+    $("commit-round").disabled = multiTurnActive;
+    $("apply-round").disabled = !multiTurnActive;
+  }
+
   $("persona-select").onchange = (e) => onPersonaChange(e.target.value);
   $("persona-edit").onclick = () => openPersonaModal(getPersona());
   $("persona-new").onclick = () => openPersonaModal(null);
@@ -1643,6 +1819,8 @@ async function main() {
 
   $("reset-pose").onclick = () => setArmEditorValues(INIT.start_arm_aa);
   $("run-base").onclick = runBase;
+  $("exit-trajectory").onclick = exitManualTrajectory;
+  $("ignore-violation").onclick = ignoreComfortViolation;
   $("generate").onclick = generate;
   $("recluster").onclick = recluster;
   $("generate-cost").onclick = generateCost;
@@ -1650,6 +1828,7 @@ async function main() {
   rounds = INIT.rounds || [];
   unified = INIT.unified || null;
   $("commit-round").onclick = commitRound;
+  $("apply-round").onclick = applyRoundAndContinue;
   $("combine-rounds").onclick = combineRounds;
   $("reset-rounds").onclick = resetRounds;
   renderRounds();

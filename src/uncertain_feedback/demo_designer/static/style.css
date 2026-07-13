@@ -75,6 +75,15 @@ button.primary:hover:not(:disabled) { background: #2258bb; }
 button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
 .hint { color: #778; font-size: 11px; margin: 4px 0; }
 .metrics { font-size: 11px; color: #333; white-space: pre-line; margin-top: 6px; }
+.trajectory-session {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.trajectory-session.paused { background: #fff3cd; color: #6b5100; }
+.trajectory-session.complete { background: #d9f2e3; color: #185b35; }
 
 .joint-grid { display: grid; grid-template-columns: 105px 1fr auto; gap: 4px 6px; align-items: center; }
 .joint-grid .jname { grid-column: 1 / -1; font-weight: 600; color: #445; margin-top: 4px; }

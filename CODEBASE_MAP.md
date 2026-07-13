@@ -120,9 +120,9 @@ uncertain-feedback/
 │   │       └── hml_decode.py         # HML decode utilities for the editor
 │   ├── demo_designer/
 │   │   ├── smpl_mesh.py              # Neutral SMPL vertex generation + binary trajectory mesh cache
-│   │   ├── core.py                   # DemoSession: pipeline wrappers + persona CRUD + trajectory packaging + multi-round commit/combine state
-│   │   ├── server.py                 # Flask web UI for designing demo scenarios (base → UQ → cost → multi-round combine)
-│   │   └── static/                   # index.html, app.js, style.css (Three.js SMPL body views + persona bound editing + feature graphs)
+│   │   ├── core.py                   # DemoSession: paused manual multi-turn trajectory + refresh-restored pending costs + multi-round state
+│   │   ├── server.py                 # Flask web UI with stateful manual trajectory start/apply/ignore/exit endpoints
+│   │   └── static/                   # Three.js body views, persona/feature graphs, and manual trajectory session controls
 │   ├── llm/
 │   │   ├── base_model.py             # BaseModel ABC (get_full_output)
 │   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
@@ -459,7 +459,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
 | `uv run python src/.../experiments/run_multi_round_experiment.py --mpc-config <yaml> [--persona <name>]` | Multi-round cost experiment; `cartesian.goals` is the ordered round sequence and successful feedback contexts are unified into one replacement cost |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
-| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>]` | Browser tool for designing demo scenarios: tweak start pose within the selected persona's joint boxes / goal / persona bounds (draggable on the feature graphs and phase plots) / MDM prompt / clusters / magnitude, optionally compare the base rollout with the post-trigger hidden-cost oracle, scrub trajectories, run cost generation, and commit/combine multiple feedback rounds; combining automatically rolls the unified cost out from the initial pose (see README) |
+| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>]` | Browser tool for one stateful trajectory paused across manual UQ/cost feedback turns; pending generated-cost payloads recover after refresh, active trajectories can be exited, and discomfort events can be ignored without adding feedback (see README) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |

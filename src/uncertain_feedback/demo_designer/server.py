@@ -151,6 +151,23 @@ def base_rollout():
     )
 
 
+@app.route("/api/manual_trajectory/start", methods=["POST"])
+def start_manual_trajectory():
+    data = request.get_json(force=True)
+    return _run_heavy(
+        lambda: session.start_manual_trajectory(
+            data["arm_aa"],
+            data["goal"],
+            data["persona"],
+        )
+    )
+
+
+@app.route("/api/manual_trajectory/exit", methods=["POST"])
+def exit_manual_trajectory():
+    return _run_heavy(session.exit_manual_trajectory)
+
+
 @app.route("/api/generate", methods=["POST"])
 def generate():
     data = request.get_json(force=True)
@@ -187,6 +204,16 @@ def generate_cost():
 @app.route("/api/commit_round", methods=["POST"])
 def commit_round():
     return _run(session.commit_round)
+
+
+@app.route("/api/apply_round", methods=["POST"])
+def apply_round():
+    return _run_heavy(session.apply_round_and_continue)
+
+
+@app.route("/api/manual_trajectory/ignore_violation", methods=["POST"])
+def ignore_comfort_violation():
+    return _run_heavy(session.ignore_comfort_violation)
 
 
 @app.route("/api/combine_rounds", methods=["POST"])

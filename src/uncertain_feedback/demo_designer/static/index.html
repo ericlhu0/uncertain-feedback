@@ -31,9 +31,14 @@
       <div class="hint">Goal is the spine3-relative wrist target. Start wrist: <span id="wrist-rel">?</span></div>
       <div class="row">
         <button id="reset-pose">Reset pose</button>
-        <button id="run-base" class="primary">Run base rollout</button>
-        <label><input type="checkbox" id="show-oracle"> Show oracle rollout</label>
+        <button id="run-base" class="primary">Start trajectory</button>
+        <button id="exit-trajectory" class="danger" disabled>Exit trajectory</button>
       </div>
+      <div class="row">
+        <button id="ignore-violation" disabled>Ignore comfort violation + continue</button>
+      </div>
+      <div class="hint">The trajectory pauses at each feedback trigger. You keep manual control of MDM sampling, clustering, magnitude, cluster selection, and cost generation before continuing the same trajectory.</div>
+      <div id="trajectory-session"></div>
       <div class="metrics" id="base-metrics"></div>
     </div>
 
@@ -76,11 +81,14 @@
     <div class="panel">
       <h2>4 &middot; Multi-round feedback</h2>
       <div class="row">
-        <button id="commit-round" disabled>Commit round</button>
+        <button id="apply-round" class="primary" disabled>Apply feedback + continue trajectory</button>
+      </div>
+      <div class="row">
+        <button id="commit-round" disabled>Commit only</button>
         <button id="combine-rounds" class="primary" disabled>Combine rounds (codex)</button>
         <button id="reset-rounds" class="danger" disabled>Reset</button>
       </div>
-      <div class="hint">Commit stores the last generated cost as a feedback round; Combine asks codex for ONE unified cost that replaces all committed round costs and automatically rolls it out from the initial pose.</div>
+      <div class="hint">Apply feedback + continue installs the chosen correction and cost, then advances the same trajectory to its next trigger.</div>
       <div id="round-list"></div>
       <div id="unified-output"></div>
     </div>

@@ -13,6 +13,9 @@ const trajs = {};
 let clusters = [];          // [{label, count, oracle_score, trajectory}]
 let selectedCluster = null;
 let selectedClusterSegments = null;
+let clusterDepth = 0;
+let clusterPath = [];
+let canGoBack = false;
 let showClusters = true;
 let showStart = true;
 let showMdmStart = false;
@@ -25,6 +28,12 @@ const meshData = new Map(); // mesh id -> {frames, vertices, data: Float32Array}
 const meshLoads = new Map();
 let baseTrigger = null;
 let multiTurnActive = false;
+
+function resetClusterNavigation() {
+  clusterDepth = 0;
+  clusterPath = [];
+  canGoBack = false;
+}
 
 // Multi-round state: committed rounds + the unified replacement cost. The
 // unified visuals survive base rollouts (only Reset rounds clears them).
@@ -495,6 +504,7 @@ async function startManualTrajectory() {
   clusters = [];
   selectedCluster = null;
   selectedClusterSegments = null;
+  resetClusterNavigation();
   generatedBounds = [];
   costField = null;
   renderClusterList();
@@ -527,6 +537,7 @@ async function exitManualTrajectory() {
   clusters = [];
   selectedCluster = null;
   selectedClusterSegments = null;
+  resetClusterNavigation();
   generatedBounds = [];
   costField = null;
   clearTraj(...Object.keys(trajs));
@@ -561,6 +572,7 @@ async function ignoreComfortViolation() {
   clusters = [];
   selectedCluster = null;
   selectedClusterSegments = null;
+  resetClusterNavigation();
   generatedBounds = [];
   costField = null;
   renderClusterList();
@@ -584,13 +596,25 @@ async function ignoreComfortViolation() {
 
 function applyClusterPayload(data) {
   clusters = data.clusters;
-  selectedCluster = null;
-  selectedClusterSegments = null;
+  selectedCluster = data.selected_label ?? null;
+  clusterDepth = data.depth;
+  clusterPath = data.path;
+  canGoBack = data.can_go_back;
+  $("scale").value = data.scale;
+  $("scale-num").value = data.scale;
   clearTraj("correction", "full", "generated", "generated_start");
   generatedBounds = [];
   costField = null;
-  $("generate-cost").disabled = true;
-  $("correction-metrics").textContent = "";
+  const selected = clusters.find((c) => c.label === selectedCluster);
+  selectedClusterSegments = selected ? selected.full_segments : null;
+  if (selected) {
+    setTraj("full", selected.full);
+    $("correction-metrics").textContent =
+      "full path: " + fmtMetrics(selected.full_metrics, selected.full_goal_reach);
+  } else {
+    $("correction-metrics").textContent = "";
+  }
+  $("generate-cost").disabled = !selected;
   renderClusterList();
   refreshLegend(); refreshTimeline(); renderAll();
 }
@@ -610,6 +634,22 @@ async function recluster() {
   const data = await api("/api/recluster", {
     n_clusters: +$("n-clusters").value, scale: getScale(),
   }, "re-clustering + assembling cluster paths");
+  applyClusterPayload(data);
+}
+
+async function refineCluster() {
+  if (selectedCluster === null) return;
+  const data = await api("/api/refine_cluster", {
+    label: selectedCluster,
+    n_clusters: +$("n-clusters").value,
+    scale: getScale(),
+  }, "refining selected cluster + assembling child paths");
+  applyClusterPayload(data);
+}
+
+async function backCluster() {
+  const data = await api("/api/back_cluster", {},
+    "restoring parent cluster level");
   applyClusterPayload(data);
 }
 
@@ -713,6 +753,7 @@ async function applyRoundAndContinue() {
   clusters = [];
   selectedCluster = null;
   selectedClusterSegments = null;
+  resetClusterNavigation();
   generatedBounds = [];
   costField = null;
   clearTraj("correction", "full", "generated", "generated_start");
@@ -791,6 +832,18 @@ function renderClusterList() {
     card.onclick = () => pickCluster(c.label);
     list.appendChild(card);
   }
+  const selected = clusters.find((c) => c.label === selectedCluster);
+  const nClusters = +$("n-clusters").value;
+  $("cluster-refine").disabled = !selected || nClusters < 2 ||
+    selected.count < nClusters;
+  $("cluster-back").disabled = !canGoBack;
+  const path = clusterPath.length
+    ? "root > " + clusterPath.map((label) => `cluster ${label}`).join(" > ")
+    : "root";
+  const sampleCount = clusters.reduce((total, c) => total + c.count, 0);
+  $("cluster-navigation").textContent = clusters.length
+    ? `${path} · level ${clusterDepth} · ${sampleCount} samples`
+    : "";
 }
 
 // ---------------------------------------------------------------------------
@@ -1823,7 +1876,10 @@ async function main() {
   $("ignore-violation").onclick = ignoreComfortViolation;
   $("generate").onclick = generate;
   $("recluster").onclick = recluster;
+  $("cluster-refine").onclick = refineCluster;
+  $("cluster-back").onclick = backCluster;
   $("generate-cost").onclick = generateCost;
+  $("n-clusters").onchange = renderClusterList;
 
   rounds = INIT.rounds || [];
   unified = INIT.unified || null;

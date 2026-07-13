@@ -366,7 +366,11 @@ In the interactive picker, each cluster panel has a **magnitude** slider
 preserving the direction of motion at every timestep (`scale` in joint-angle
 space about the start pose: `1.0` = unchanged, `0.0` = hold start). `uq.scale`
 sets the slider's initial value and is used directly as the scale in headless
-runs.
+runs. Select a panel and click **Refine selected** to cluster only that
+panel's raw trajectories into `uq.n_clusters` child options; refinement can be
+repeated while the selected subset has enough samples. **Back** restores the
+parent options and selection, and **Confirm** accepts the selected mean at the
+current depth.
 
 Run with an interactive cluster picker:
 ```bash
@@ -795,13 +799,17 @@ previous one ran):
    feedback line), sample count, and cluster count; *Generate* draws diffusion
    samples from the feedback-trigger pose (shown as a purple ghost body in
    the SMPL body views; falls back to the start pose when the base never
-   violates) and clusters them (*Re-cluster* reuses cached samples). Every
+   violates) and clusters them (*Re-cluster* reuses cached samples at the
+   currently displayed refinement level). Every
    cluster option is automatically integrated into the full corrected
    trajectory — executed history → scaled correction → comfort-only goal
    continuation — so cards show what actually happens if that option is taken:
    sample count, oracle score, full-path violation, and goal reach. Click a
-   card to select it; drag *Magnitude* to rescale (re-clusters and re-assembles
-   at the new scale).
+   card to select it; *Refine selected* clusters only that card's samples and
+   can be used recursively, while *Back* restores the prior options and
+   selection. The breadcrumb reports the current depth and subset size. Drag
+   *Magnitude* to rescale (re-clusters the current subset and re-assembles at
+   the new scale).
 3. **Cost generation** — runs the selected cost-generation backend (`llm`,
    `turns`, or `agent`) on the selected correction, rolls the MPC out with the
    generated cost installed from the original edited start pose, and shows the

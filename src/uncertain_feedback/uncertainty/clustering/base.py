@@ -39,6 +39,11 @@ class TrajectoryClusterer(ABC):
         self._n_clusters = n_clusters
         self._random_state = random_state
 
+    @property
+    def n_clusters(self) -> int:
+        """Return the configured number of clusters."""
+        return self._n_clusters
+
     @abstractmethod
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
         """Convert a trajectory batch to a ``(num_samples, n_features)`` matrix.

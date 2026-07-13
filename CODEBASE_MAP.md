@@ -97,7 +97,7 @@ uncertain-feedback/
 │   │   ├── clustering/               # Trajectory clustering methods (subclass to add)
 │   │   │   ├── base.py               # TrajectoryClusterer (template: _to_features + _fit_predict)
 │   │   │   └── xyz_clusterer.py      # XyzPositionClusterer (KMeans on FK positions)
-│   │   └── cluster_picker.py         # Interactive matplotlib cluster picker UI (stays here)
+│   │   └── cluster_picker.py         # Recursive matplotlib cluster picker with refine/back navigation
 │   ├── simulated_users/
 │   │   ├── base.py                   # SimulatedUser, HiddenBound/CoupledBound, violations, cluster choice, oracle cost term
 │   │   ├── personas.py               # Clinically motivated personas (PERSONAS registry)
@@ -159,8 +159,10 @@ SmplLeftArmMPC (arm_mpc.py)
 │         Adds: query_mdm_with_uncertainty() — draws N diffusion samples,
 │         clusters with XyzPositionClusterer, shows cluster picker UI (each
 │         cluster has a magnitude slider that scales the chosen motion about
-│         its start pose via scale_trajectory), enqueues the (scaled) mean of
-│         the chosen cluster. Headless selection: `auto_cluster` (fixed label)
+│         its start pose via scale_trajectory); the user can recursively
+│         re-cluster a selected cluster's raw samples and back up through the
+│         hierarchy before enqueuing the final subset mean. Headless selection:
+│         `auto_cluster` (fixed label)
 │         or `cluster_selector` (callable on the cluster means; used by
 │         simulated-user experiments; takes precedence). Transfer experiments
 │         use a selector that scores each scaled raw cluster mean with the

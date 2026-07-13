@@ -195,6 +195,23 @@ def pick_cluster():
     return _run(lambda: session.pick_cluster(int(data["label"])))
 
 
+@app.route("/api/refine_cluster", methods=["POST"])
+def refine_cluster():
+    data = request.get_json(force=True)
+    return _run_heavy(
+        lambda: session.refine_cluster(
+            int(data["label"]),
+            int(data["n_clusters"]),
+            float(data["scale"]),
+        )
+    )
+
+
+@app.route("/api/back_cluster", methods=["POST"])
+def back_cluster():
+    return _run_heavy(session.back_cluster)
+
+
 @app.route("/api/generate_cost", methods=["POST"])
 def generate_cost():
     data = request.get_json(force=True)

@@ -262,7 +262,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             )
             picker_t0 = time.perf_counter()
             if positions is not None:
-                chosen_label, scale = pick_cluster_positions(
+                pick_result = pick_cluster_positions(
                     positions,
                     labels,
                     fk=fk,
@@ -272,10 +272,19 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
                     init_scale=default_scale,
+                    recluster=self._clusterer.cluster_positions,  # type: ignore[attr-defined]
+                    n_clusters=self._clusterer.n_clusters,
+                )
+                refined_positions = positions[pick_result.sample_indices].mean(axis=0)
+                cluster_means[pick_result.root_label] = (
+                    gen.smpl_positions_to_left_arm_trajectory(
+                        refined_positions,
+                        spine3_aa=base_spine_aa,
+                    )
                 )
             else:
                 assert trajectories is not None
-                chosen_label, scale = pick_cluster(
+                pick_result = pick_cluster(
                     trajectories,
                     labels,
                     fk=fk,
@@ -285,7 +294,14 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
                     init_scale=default_scale,
+                    recluster=self._clusterer.cluster,
+                    n_clusters=self._clusterer.n_clusters,
                 )
+                cluster_means[pick_result.root_label] = trajectories[
+                    pick_result.sample_indices
+                ].mean(axis=0)
+            chosen_label = pick_result.root_label
+            scale = pick_result.scale
             print(
                 f"[timing] cluster picker total: {time.perf_counter() - picker_t0:.3f}s"
             )

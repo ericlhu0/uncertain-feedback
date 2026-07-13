@@ -47,6 +47,7 @@ from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
     ArmMPCCartesianNoMDM,
 )
 from uncertain_feedback.simulated_users import JointBoxLimit, SimulatedUser
+from uncertain_feedback.uncertainty.cluster_picker import ClusterPickResult
 from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
 
@@ -1369,6 +1370,88 @@ def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
     np.testing.assert_allclose(result.cluster_means[0], np.full((3, 3, 3), 0.1))
     np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
     np.testing.assert_allclose(chosen, result.chosen_mean)
+
+
+def test_uq_axis_angle_picker_uses_refined_subset_mean(monkeypatch) -> None:
+    trajectories = np.zeros((4, 3, 3, 3), dtype=np.float64)
+    trajectories[0] = 0.0
+    trajectories[1] = 0.2
+    trajectories[2] = 1.0
+    trajectories[3] = 1.2
+    gen = _FakeTrajectoryGenerator(trajectories)
+    mpc = LeftArmMPCMDMUQ(
+        n_diffusion_samples=4,
+        clusterer=_TwoTrajectoryClusterer(n_clusters=2),
+    )
+    monkeypatch.setattr(
+        "uncertain_feedback.planners.mpc.arm_mpc_mdm_uq.pick_cluster",
+        lambda *_args, **_kwargs: ClusterPickResult(
+            root_label=0,
+            sample_indices=np.array([1], dtype=np.intp),
+            scale=1.0,
+        ),
+    )
+
+    chosen = mpc.query_mdm_with_uncertainty(
+        cast(Any, gen), "move differently", start_pose=np.zeros(263)
+    )
+
+    result = mpc.last_uq_result
+    assert result is not None
+    assert result.chosen_label == 0
+    np.testing.assert_allclose(chosen, np.full((3, 3, 3), 0.2))
+    np.testing.assert_allclose(result.cluster_means[0], chosen)
+    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
+
+
+def test_uq_position_picker_uses_refined_subset_mean(monkeypatch) -> None:
+    class TwoPositionClusterer(TrajectoryClusterer):
+        def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
+            raise AssertionError("position path does not use axis-angle features")
+
+        def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
+            assert positions.shape[0] == 4
+            return np.array([0, 0, 1, 1], dtype=np.intp)
+
+    class PositionGenerator:
+        def generate_left_arm_position_samples(self, *_args, **_kwargs):
+            return positions
+
+        def smpl_positions_to_left_arm_trajectory(
+            self, selected: np.ndarray, spine3_aa: np.ndarray | None = None
+        ) -> np.ndarray:
+            del spine3_aa
+            return np.full((3, 3, 3), selected.mean())
+
+    positions = np.zeros((4, 3, 22, 3), dtype=np.float64)
+    positions[0] = 0.0
+    positions[1] = 0.2
+    positions[2] = 1.0
+    positions[3] = 1.2
+    mpc = LeftArmMPCMDMUQ(
+        n_diffusion_samples=4,
+        clusterer=TwoPositionClusterer(n_clusters=2),
+    )
+    monkeypatch.setattr(
+        "uncertain_feedback.planners.mpc.arm_mpc_mdm_uq.pick_cluster_positions",
+        lambda *_args, **_kwargs: ClusterPickResult(
+            root_label=0,
+            sample_indices=np.array([1], dtype=np.intp),
+            scale=1.0,
+        ),
+    )
+
+    chosen = mpc.query_mdm_with_uncertainty(
+        cast(Any, PositionGenerator()),
+        "move differently",
+        start_pose=np.zeros(263),
+    )
+
+    result = mpc.last_uq_result
+    assert result is not None
+    np.testing.assert_allclose(chosen, np.full((3, 3, 3), 0.2))
+    np.testing.assert_allclose(result.cluster_means[0], chosen)
+    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
 
 
 def test_transfer_oracle_cluster_selection_uses_scaled_raw_options() -> None:

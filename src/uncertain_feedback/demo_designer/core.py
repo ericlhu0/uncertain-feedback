@@ -230,6 +230,18 @@ class ManualTrajectorySession:
     error: str | None = None
 
 
+@dataclass
+class ClusterLevel:
+    """One recursively clustered subset of the generated MDM samples."""
+
+    sample_indices: np.ndarray
+    labels: np.ndarray
+    selected_label: int | None
+    n_clusters: int
+    scale: float
+
+
+
 class DemoSession:
     """Holds the loaded pose/config and the results of each pipeline stage."""
 
@@ -269,6 +281,7 @@ class DemoSession:
         self.q_feedback: np.ndarray | None = None
         self.q_history: list[np.ndarray] = []
         self.samples: np.ndarray | None = None  # (N, T, 22, 3)
+        self.cluster_levels: list[ClusterLevel] = []
         self.prompt: str | None = None
         self.labels: np.ndarray | None = None
         self.cluster_means: dict[int, np.ndarray] = {}
@@ -601,6 +614,7 @@ class DemoSession:
                 )
         # Downstream stages are stale once the base changes.
         self.samples = None
+        self.cluster_levels = []
         self.labels = None
         self.cluster_means = {}
         self.cluster_corrections = {}
@@ -656,6 +670,7 @@ class DemoSession:
 
     def _clear_pending_feedback(self) -> None:
         self.samples = None
+        self.cluster_levels = []
         self.labels = None
         self.cluster_means = {}
         self.cluster_corrections = {}
@@ -829,10 +844,11 @@ class DemoSession:
         )
         _log(f"MDM generation done in {time.perf_counter() - t0:.1f}s")
         self.prompt = prompt
+        self.cluster_levels = []
         return self.recluster(n_clusters, scale)
 
     def recluster(self, n_clusters: int, scale: float) -> dict[str, Any]:
-        """Cluster the cached samples and assemble each option into a full path.
+        """Cluster the current sample subset and assemble each option.
 
         Every cluster option is integrated into the full corrected trajectory
         (executed history → scaled correction → comfort-only goal continuation)
@@ -843,19 +859,47 @@ class DemoSession:
             raise ValueError("Generate MDM samples first.")
         if self.goal is None:
             raise ValueError("Run the base rollout first.")
+        sample_indices = (
+            self.cluster_levels[-1].sample_indices
+            if self.cluster_levels
+            else np.arange(self.samples.shape[0], dtype=np.intp)
+        )
+        labels = XyzPositionClusterer(n_clusters, fk=self.fk).cluster_positions(
+            self.samples[sample_indices]
+        )
+        level = ClusterLevel(
+            sample_indices=sample_indices,
+            labels=np.asarray(labels, dtype=np.intp),
+            selected_label=None,
+            n_clusters=n_clusters,
+            scale=scale,
+        )
+        if self.cluster_levels:
+            self.cluster_levels[-1] = level
+        else:
+            self.cluster_levels.append(level)
+        return self._activate_cluster_level()
+
+    def _activate_cluster_level(self) -> dict[str, Any]:
+        """Build the current level's trajectories and navigation payload."""
+        if self.samples is None or not self.cluster_levels:
+            raise ValueError("Generate and cluster MDM samples first.")
+        if self.goal is None:
+            raise ValueError("Run the base rollout first.")
         user = self.get_persona(self.persona_name)
         cfg_goal = self._cfg_with_goal(self.goal)
-        self.labels = XyzPositionClusterer(n_clusters, fk=self.fk).cluster_positions(
-            self.samples
-        )
+        level = self.cluster_levels[-1]
+        scale = level.scale
+        level_samples = self.samples[level.sample_indices]
+        self.labels = level.labels
         self.cluster_means = {
             label: self.gen.smpl_positions_to_left_arm_trajectory(
-                self.samples[self.labels == label].mean(axis=0),
+                level_samples[level.labels == label].mean(axis=0),
                 spine3_aa=self.spine3_aa,
             )
-            for label in sorted(int(v) for v in np.unique(self.labels))
+            for label in sorted(int(v) for v in np.unique(level.labels))
         }
-        self.chosen_label = None
+        self.chosen_label = level.selected_label
         self.scaled_correction = None
         self.scale = scale
         self.cluster_corrections = {}
@@ -873,10 +917,12 @@ class DemoSession:
             )
             self.cluster_corrections[label] = scaled
             self.cluster_fulls[label] = full
+            count = int(np.sum(level.labels == label))
             clusters.append(
                 {
                     "label": label,
-                    "count": int(np.sum(self.labels == label)),
+                    "count": count,
+                    "can_refine": level.n_clusters >= 2 and count >= level.n_clusters,
                     "oracle_score": oracle[label],
                     "correction": self.package_trajectory(scaled, user),
                     "full": self.package_trajectory(full, user),
@@ -890,14 +936,68 @@ class DemoSession:
                     ),
                 }
             )
-        return {"clusters": clusters}
+        if self.chosen_label is not None:
+            self.scaled_correction = self.cluster_corrections[self.chosen_label]
+        path = [
+            int(parent.selected_label)
+            for parent in self.cluster_levels[:-1]
+            if parent.selected_label is not None
+        ]
+        return {
+            "clusters": clusters,
+            "selected_label": self.chosen_label,
+            "depth": len(self.cluster_levels) - 1,
+            "path": path,
+            "can_go_back": len(self.cluster_levels) > 1,
+            "active_sample_count": int(level.sample_indices.size),
+            "scale": scale,
+        }
 
     def pick_cluster(self, label: int) -> dict[str, Any]:
         if label not in self.cluster_corrections:
             raise ValueError(f"Unknown cluster label {label}.")
+        if not self.cluster_levels:
+            raise ValueError("Cluster samples first.")
+        self.cluster_levels[-1].selected_label = label
         self.chosen_label = label
         self.scaled_correction = self.cluster_corrections[label]
         return {"ok": True}
+
+    def refine_cluster(
+        self, label: int, n_clusters: int, scale: float
+    ) -> dict[str, Any]:
+        """Cluster only the raw samples belonging to the selected option."""
+        if self.samples is None or not self.cluster_levels:
+            raise ValueError("Generate and cluster MDM samples first.")
+        level = self.cluster_levels[-1]
+        if label not in self.cluster_corrections:
+            raise ValueError(f"Unknown cluster label {label}.")
+        selected_indices = level.sample_indices[level.labels == label]
+        if n_clusters < 2 or selected_indices.size < n_clusters:
+            raise ValueError(
+                "Refinement needs at least two clusters and enough selected samples."
+            )
+        level.selected_label = label
+        labels = XyzPositionClusterer(n_clusters, fk=self.fk).cluster_positions(
+            self.samples[selected_indices]
+        )
+        self.cluster_levels.append(
+            ClusterLevel(
+                sample_indices=selected_indices,
+                labels=np.asarray(labels, dtype=np.intp),
+                selected_label=None,
+                n_clusters=n_clusters,
+                scale=scale,
+            )
+        )
+        return self._activate_cluster_level()
+
+    def back_cluster(self) -> dict[str, Any]:
+        """Return to the parent cluster level and restore its selection."""
+        if len(self.cluster_levels) <= 1:
+            raise ValueError("Already at the root cluster level.")
+        self.cluster_levels.pop()
+        return self._activate_cluster_level()
 
     def generate_cost(self, backend: str) -> dict[str, Any]:
         if self.scaled_correction is None or self.goal is None:

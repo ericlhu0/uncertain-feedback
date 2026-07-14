@@ -15,6 +15,7 @@ from uncertain_feedback.experiments.experiment_pipeline import (
     generate_uq_correction,
     run_initial_rollout,
 )
+from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
@@ -65,6 +66,7 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
     """Run successive goal/correction rounds and learn one replacement cost."""
     root_dir = artifact_run_dir(artifact_base_dir, Path("multi_round_artifacts"))
     root_dir.mkdir(parents=True, exist_ok=True)
+    corpus = TrajectoryCorpus.create(root_dir / "trajectory_corpus", context)
     _write_json(root_dir / "history.json", [])
     base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
     rounds: list[CostRound] = []
@@ -94,6 +96,15 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
             spine3_aa,
             round_dir,
             log_prefix="[multi-round]",
+        )
+        corpus.log(
+            initial.initial_traj,
+            kind="round_initial",
+            round_index=index,
+            goal=goal,
+            trigger_step=initial.trigger_step,
+            trigger_violation=initial.trigger_violation,
+            feedback_text=user.feedback_text if initial.trigger_step is not None else None,
         )
         round_summary: dict[str, Any] = {
             "index": index,
@@ -133,6 +144,7 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
             context=context,
             base_extra_costs=base_extra_costs,
             cost_dir=round_dir / "cost_generation",
+            corpus_dir=corpus.dir,
             body_pos=body_pos,
             spine3_pos=spine3_pos,
             spine3_aa=spine3_aa,
@@ -163,6 +175,10 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
             params=generated.params,
             summaries=generation.summaries,
             image_paths=tuple(path.resolve() for path in generation.images.values()),
+            description=generation.description,
+            explanation=generation.explanation,
+            interpretation=generation.interpretation,
+            grounding=generation.grounding,
         )
         rounds.append(cost_round)
         _write_json(root_dir / "history.json", [round_.to_json() for round_ in rounds])
@@ -185,6 +201,7 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
                 eval_state=generation.eval_state,
                 save_candidate_videos=save_video,
                 codex_cmd=cfg.llm_cost.codex_cmd,
+                corpus_dir=corpus.dir,
                 rounds=rounds,
             )
             combined = combinator.generate(install=False)

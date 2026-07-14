@@ -11,11 +11,44 @@ header {
   align-items: center;
   gap: 12px;
   padding: 8px 14px;
+  height: 58px;
   background: #23303e;
   color: #fff;
 }
-header h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; }
+header h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; white-space: nowrap; }
+header label, header button { white-space: nowrap; }
 header select { padding: 3px 6px; }
+#session-bar { position: relative; }
+#session-summary {
+  padding: 5px 8px;
+  border: 1px solid #536577;
+  border-radius: 4px;
+  background: #23303e;
+  color: #fff;
+  font-size: 11px;
+  min-width: 345px;
+  line-height: 1.35;
+  text-align: left;
+}
+#session-summary:hover { background: #35485c; }
+#session-summary span { display: block; }
+#session-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 20;
+  width: 560px;
+  padding: 8px;
+  border: 1px solid #9aa4b0;
+  border-radius: 5px;
+  background: #fff;
+  color: #222;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+}
+#session-dropdown.open { display: block; }
+.session-new-row { display: flex; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid #d8dce2; }
+.session-new-row select { flex: 1; min-width: 0; }
 #status {
   margin-left: auto;
   padding: 4px 10px;
@@ -34,7 +67,7 @@ header select { padding: 3px 6px; }
   grid-template-columns: 300px 1fr 380px;
   gap: 10px;
   padding: 10px;
-  height: calc(100vh - 42px);
+  height: calc(100vh - 58px);
 }
 #controls, #graphs {
   overflow-y: auto;
@@ -60,6 +93,9 @@ header select { padding: 3px 6px; }
 .row input[type="number"] { width: 62px; }
 .row input[type="range"] { flex: 1; }
 .row input[type="text"], .row textarea { flex: 1; }
+.config-select-row select, .config-save-row input { flex: 1; min-width: 0; }
+.config-save-row { margin-left: 64px; }
+.config-save-row button { white-space: nowrap; }
 textarea { width: 100%; resize: vertical; font-family: inherit; }
 button {
   padding: 5px 10px;
@@ -159,7 +195,7 @@ button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
 }
 
 #round-list { display: flex; flex-direction: column; gap: 5px; margin: 6px 0; }
-.round-card {
+.round-card, .corpus-card, .session-picker-card {
   border: 1px solid #d8dce2;
   border-radius: 5px;
   padding: 5px 8px;
@@ -167,6 +203,12 @@ button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
   line-height: 1.4;
 }
 .round-card .round-remove { margin-top: 5px; padding: 2px 6px; font-size: 10px; }
+#corpus-list, #session-picker { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.corpus-card button { margin-top: 5px; padding: 2px 6px; font-size: 10px; }
+.session-picker-card { display: flex; align-items: center; gap: 8px; }
+.session-picker-card > div:first-child { flex: 1; }
+.session-picker-actions { display: flex; gap: 5px; }
+.session-picker-actions button { padding: 3px 7px; font-size: 10px; }
 .cost-rationale { margin-top: 5px; }
 .cost-rationale summary { cursor: pointer; font-weight: 600; }
 .cost-rationale > div { margin: 3px 0; }
@@ -176,7 +218,7 @@ button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
 .rationale-ranking .chosen { font-weight: 700; }
 
 /* persona modal */
-#modal-backdrop {
+.modal-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,0.45);
@@ -185,8 +227,8 @@ button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
   justify-content: center;
   z-index: 10;
 }
-#modal-backdrop.open { display: flex; }
-#persona-modal {
+.modal-backdrop.open { display: flex; }
+.modal-card {
   background: #fff;
   border-radius: 8px;
   padding: 16px;
@@ -194,7 +236,7 @@ button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
   max-height: 85vh;
   overflow-y: auto;
 }
-#persona-modal h2 { margin-top: 0; }
+.modal-card h2 { margin-top: 0; }
 .bound-row {
   display: flex;
   flex-wrap: wrap;

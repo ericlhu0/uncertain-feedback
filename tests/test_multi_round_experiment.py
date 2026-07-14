@@ -99,6 +99,10 @@ def test_multi_round_loop_persists_history_and_replaces_costs(
             generated_context=generated_context,
             summaries={"round": generation_calls},
             images={},
+            description="generated cost",
+            explanation="why",
+            interpretation="preference",
+            grounding="threshold",
         )
 
     combine_round_counts: list[int] = []

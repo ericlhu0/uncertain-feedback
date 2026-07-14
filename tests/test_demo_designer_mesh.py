@@ -74,7 +74,7 @@ def test_mesh_endpoint_returns_float32_binary(monkeypatch) -> None:
     vertices = np.arange(24, dtype="<f4").reshape(2, 4, 3)
     monkeypatch.setattr(
         server,
-        "session",
+        "rig",
         SimpleNamespace(mesh_vertices=lambda mesh_id: vertices),
     )
 
@@ -90,7 +90,7 @@ def test_mesh_endpoint_reports_stale_identifier(monkeypatch) -> None:
     def missing(mesh_id: str) -> np.ndarray:
         raise KeyError(f"Unknown or stale mesh id {mesh_id!r}.")
 
-    monkeypatch.setattr(server, "session", SimpleNamespace(mesh_vertices=missing))
+    monkeypatch.setattr(server, "rig", SimpleNamespace(mesh_vertices=missing))
 
     response = server.app.test_client().get("/api/mesh/stale")
 

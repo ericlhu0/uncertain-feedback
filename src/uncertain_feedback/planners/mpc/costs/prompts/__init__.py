@@ -7,6 +7,9 @@ files next to this module so they are easy to read and diff:
 
 - ``runtime_api.txt`` and ``output_contract.txt`` are the shared technical contract
   appended to the code-writing stages.
+- ``corpus_task_section.txt`` (TASK.md block) and ``corpus_grounding.txt`` (Stage 2 /
+  combine note) are the optional executed-trajectory-corpus prose the codex backends
+  splice in when a corpus is available (``{corpus_dir}`` placeholder).
 - ``stages/interpret.txt`` — instruction + contrast images + a compact summary ->
   a plain-language preference (no API, no numbers, no code).
 - ``stages/ground.txt`` — that preference + the full numeric summaries -> a concrete
@@ -67,6 +70,21 @@ def _read(path: Path) -> str:
 # Shared technical contract, identical across every prompt variant.
 _RUNTIME_API = _read(_DIR / "runtime_api.txt")
 _OUTPUT_CONTRACT = _read(_DIR / "output_contract.txt")
+
+# Optional executed-trajectory-corpus prose, spliced in by the codex backends only
+# when a corpus is available (``{corpus_dir}`` placeholder).
+_CORPUS_TASK_SECTION = _read(_DIR / "corpus_task_section.txt")
+_CORPUS_GROUNDING = _read(_DIR / "corpus_grounding.txt")
+
+
+def corpus_task_section(corpus_dir: Path) -> str:
+    """TASK.md block describing the executed-trajectory corpus at ``corpus_dir``."""
+    return _CORPUS_TASK_SECTION.replace("{corpus_dir}", str(corpus_dir))
+
+
+def corpus_grounding_note(corpus_dir: Path) -> str:
+    """Stage-2 / combine grounding note referencing the corpus at ``corpus_dir``."""
+    return _CORPUS_GROUNDING.replace("{corpus_dir}", str(corpus_dir))
 
 # Stage heads: interpret -> ground -> author for single-shot; interpret -> refine loop
 # for the iterating backend. Each is a focused subtask.
@@ -174,6 +192,7 @@ def build_staged_task_body(
     instruction: str,
     summaries: dict[str, Any],
     images: dict[str, Path],
+    corpus_note: str | None = None,
 ) -> tuple[str, list[Path]]:
     """Compose the three stages into one method document for the autonomous agent.
 
@@ -183,6 +202,10 @@ def build_staged_task_body(
     lines; ground referring back to the agent's own stage-1 output; author plus the
     shared runtime API and output contract — so codex follows the same decomposition
     and produces one final author-stage cost JSON. Returns ``(text, image_paths)``.
+
+    ``corpus_note``, when given, is appended inside the Stage 2 (ground) section so
+    the agent grounds candidate bounds against the executed-trajectory corpus; when
+    ``None`` the assembled text is byte-identical to the no-corpus form.
     """
     interpret_text, image_paths = _substitute_images(_INTERPRET_HEAD, images)
     interpret_text = interpret_text.replace("{instruction}", instruction).replace(
@@ -191,6 +214,8 @@ def build_staged_task_body(
     ground_text = _GROUND_HEAD.replace(
         "{interpretation}", "(the preference you wrote in Stage 1)"
     ).replace("{summaries}", _dump(summaries))
+    if corpus_note is not None:
+        ground_text = "\n\n".join([ground_text, corpus_note])
     author_text = _AUTHOR_HEAD.replace(
         "{specification}", "(the numeric specification you wrote in Stage 2)"
     )
@@ -226,10 +251,31 @@ def build_refine_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
     return "\n\n".join([head, _RUNTIME_API, _OUTPUT_CONTRACT]).strip()
 
 
+def _round_rationale_lines(round_data: dict[str, Any]) -> list[str]:
+    """Render a round's generation evidence chain; empty when no fields are set."""
+    fields = (
+        ("Interpretation (stage 1)", "interpretation"),
+        ("Grounding (stage 2)", "grounding"),
+        ("Explanation", "explanation"),
+    )
+    lines: list[str] = []
+    for label, key in fields:
+        value = round_data.get(key, "")
+        if value:
+            lines.extend([f"{label}:", value])
+    return ["Why this cost was generated:", *lines] if lines else []
+
+
 def build_combine_task_body(
     rounds: list[dict[str, Any]],
+    corpus_note: str | None = None,
 ) -> tuple[str, list[Path]]:
-    """Build the full-context prompt for unifying several correction rounds."""
+    """Build the full-context prompt for unifying several correction rounds.
+
+    ``corpus_note``, when given, is appended after the combine head (before the
+    runtime API / output contract); when ``None`` the text is byte-identical to the
+    no-corpus form.
+    """
     sections: list[str] = []
     image_paths: list[Path] = []
     for round_data in rounds:
@@ -255,6 +301,7 @@ def build_combine_task_body(
                     "```json",
                     _dump(round_data["params"]),
                     "```",
+                    *_round_rationale_lines(round_data),
                     "Images to open:",
                     *(f"- `{path}`" for path in paths),
                 ]
@@ -263,4 +310,6 @@ def build_combine_task_body(
     head = _COMBINE_HEAD.replace("{round_count}", str(len(rounds))).replace(
         "{rounds}", "\n\n".join(sections)
     )
-    return "\n\n".join([head, _RUNTIME_API, _OUTPUT_CONTRACT]).strip(), image_paths
+    parts = [head] if corpus_note is None else [head, corpus_note]
+    parts += [_RUNTIME_API, _OUTPUT_CONTRACT]
+    return "\n\n".join(parts).strip(), image_paths

@@ -1,81 +1,61 @@
-"""Session state and pipeline wrappers for the demo-designer web tool.
+"""Rig state and session management for the demo-designer web tool.
 
-One :class:`DemoSession` per server process. It wraps the same headless
-pipeline the simulated-user experiments use — base Cartesian MPC rollout,
-MDM/UQ correction, magnitude scaling, full-correction assembly, and cost
-generation — and packages every trajectory into a JSON-ready dict (FK arm
-positions, joint-feature series, hidden-bound violations, per-frame bound
-thresholds, and generated-cost feature limits) for the browser UI.
+One :class:`DemoRig` per server process holds everything that outlives an
+individual session: the loaded config, the persona library (with CRUD), the
+motion generator, the initial pose / body / spine, forward kinematics, the mesh
+cache, and the shared :class:`MpcCostContext`. A :class:`~uncertain_feedback.demo_designer.session.Session`
+is spawned from the rig; it owns one simulated user plus the context accumulated
+while correcting them (trajectory corpus, correction rounds, unified cost) and
+each trajectory driven under that user.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from itertools import product
 from math import prod
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from uncertain_feedback.demo_designer.smpl_mesh import SmplMeshCache
-
-from uncertain_feedback.experiments.experiment_pipeline import (
-    CostGenerationResult,
-    generate_cost_for_cluster,
-    goal_reach,
-    oracle_cluster_scores,
-    rollout_to_goal,
-)
+from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators import make_motion_generator
+from uncertain_feedback.planners.mpc import LeftArmMPCCartesian
 from uncertain_feedback.planners.mpc.config import (
-    COST_BACKENDS,
     MpcRunConfig,
     load_mpc_config,
 )
-from uncertain_feedback.planners.mpc import LeftArmMPCCartesian
 from uncertain_feedback.planners.mpc.costs import (
-    CombineCostGenerator,
     CompositeTrajectoryCost,
-    CostRound,
     MpcCostContext,
     build_extra_costs,
-    replace_generated_costs,
 )
-from uncertain_feedback.planners.mpc.costs.generated import GeneratedPythonCost
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_INDICES,
     SMPL_BONE_PAIRS_22,
     SmplLeftArmFK,
 )
-from uncertain_feedback.planners.correction_session import (
-    CorrectionTrigger,
-    TriggerReason,
-)
-from uncertain_feedback.planners.run import _assemble_full_correction_traj
 from uncertain_feedback.simulated_users.base import (
     FEATURE_NAMES,
     Bound,
     CoupledBound,
-    HiddenCostTerm,
     HiddenBound,
     JOINT_SLOTS,
     SimulatedUser,
-    compute_violations,
     feature_series,
-    first_violation_step,
-    violation_metrics,
 )
 from uncertain_feedback.simulated_users.personas import (
     DEFAULT_ARM_JOINT_LIMITS,
     PERSONAS,
 )
-from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
-from uncertain_feedback.uncertainty.clustering.xyz_clusterer import (
-    XyzPositionClusterer,
-)
+
+if TYPE_CHECKING:
+    from uncertain_feedback.demo_designer.session import Session
 
 _LOG_PREFIX = "[demo_designer]"
 _DEFAULT_PROMPTS = {
@@ -85,84 +65,6 @@ _DEFAULT_PROMPTS = {
 
 def _log(message: str) -> None:
     print(f"{_LOG_PREFIX} {message}", flush=True)
-
-
-def _json_object(text: str) -> dict[str, Any]:
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1]).strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        data = json.loads(text[start : end + 1])
-    return data if isinstance(data, dict) else {}
-
-
-def _generated_bounds_from_artifacts(cost_dir: Path) -> list[dict[str, Any]]:
-    ground_response = cost_dir / "ground_response.txt"
-    if ground_response.exists():
-        payload = _json_object(ground_response.read_text(encoding="utf-8"))
-    else:
-        stage_log = cost_dir / "stage_log.md"
-        if not stage_log.exists():
-            return []
-        text = stage_log.read_text(encoding="utf-8")
-        marker = "## Stage 2 response"
-        start = text.find(marker)
-        if start < 0:
-            return []
-        start += len(marker)
-        end = text.find("\n## ", start)
-        payload = _json_object(text[start:] if end < 0 else text[start:end])
-
-    bounds: list[dict[str, Any]] = []
-    for term in payload.get("terms", []):
-        values = term.get("values", {})
-        bound_type = term.get("bound_type")
-        if bound_type not in ("lower_bound", "upper_bound", "band"):
-            continue
-        # Pose-dependent (coupled) bound: threshold slides with another feature.
-        if bound_type != "band" and "cond_feature" in values and values.get("points"):
-            bounds.append(
-                {
-                    "feature": term.get("feature"),
-                    "bound_type": bound_type,
-                    "coupled": True,
-                    "cond_feature": values.get("cond_feature"),
-                    "points": [[float(c), float(t)] for c, t in values["points"]],
-                }
-            )
-            continue
-        if bound_type == "lower_bound":
-            low, high = values.get("threshold"), None
-        elif bound_type == "upper_bound":
-            low, high = None, values.get("threshold")
-        else:
-            low, high = values.get("low"), values.get("high")
-        bounds.append(
-            {
-                "feature": term.get("feature"),
-                "bound_type": bound_type,
-                "low": low,
-                "high": high,
-            }
-        )
-    return bounds
-
-
-def _rationale_from_artifacts(cost_dir: Path) -> dict[str, Any] | None:
-    """Read the structured cost rationale when the backend produced one."""
-    path = cost_dir / "rationale.json"
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 # --- Persona (de)serialization ------------------------------------------------
@@ -228,41 +130,27 @@ def persona_from_json(data: dict[str, Any]) -> SimulatedUser:
     )
 
 
-# --- Session -------------------------------------------------------------------
+# --- Rig ----------------------------------------------------------------------
 
 
-@dataclass
-class ManualTrajectorySession:
-    mpc: LeftArmMPCCartesian
-    trigger: CorrectionTrigger
-    q: np.ndarray
-    executed: list[np.ndarray]
-    artifact_dir: Path
-    step: int = 0
-    paused: bool = False
-    complete: bool = False
-    reached_goal: bool = False
-    error: str | None = None
+class DemoRig:
+    """Holds the loaded pose/config and manages the active session."""
 
-
-@dataclass
-class ClusterLevel:
-    """One recursively clustered subset of the generated MDM samples."""
-
-    sample_indices: np.ndarray
-    labels: np.ndarray
-    selected_label: int | None
-    n_clusters: int
-    scale: float
-
-
-
-class DemoSession:
-    """Holds the loaded pose/config and the results of each pipeline stage."""
-
-    def __init__(self, config_path: Path, personas_path: Path) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        personas_path: Path,
+        trajectory_configs_path: Path,
+    ) -> None:
         self.cfg: MpcRunConfig = load_mpc_config(config_path)
-        self.personas_path = personas_path
+        self.artifact_root = Path("demo_designer_artifacts").resolve()
+        self.personas_path = personas_path.resolve()
+        self.trajectory_configs_path = trajectory_configs_path.resolve()
+        self.trajectory_configs: dict[str, list[dict[str, Any]]] = {
+            "initial_poses": [],
+            "goals": [],
+        }
+        self._load_trajectory_configs()
         self.personas: dict[str, SimulatedUser] = dict(PERSONAS)
         self.builtin_names = set(PERSONAS)
         self._load_custom_personas()
@@ -287,42 +175,7 @@ class DemoSession:
             fk=self.fk, spine3_pos=self.spine3_pos, spine3_aa=self.spine3_aa
         )
 
-        # Stage state (set by the pipeline endpoints)
-        self.persona_name: str = self.cfg.user
-        self.start_arm_aa: np.ndarray = self.default_arm_aa.copy()
-        self.goal: np.ndarray | None = None
-        self.base_traj: np.ndarray | None = None
-        self.trigger_step: int | None = None
-        self.q_feedback: np.ndarray | None = None
-        self.q_history: list[np.ndarray] = []
-        self.samples: np.ndarray | None = None  # (N, T, 22, 3)
-        self.cluster_levels: list[ClusterLevel] = []
-        self.prompt: str | None = None
-        self.labels: np.ndarray | None = None
-        self.cluster_means: dict[int, np.ndarray] = {}
-        self.cluster_corrections: dict[int, np.ndarray] = {}
-        self.cluster_fulls: dict[int, np.ndarray] = {}
-        self.chosen_label: int | None = None
-        self.scale: float = self.cfg.uq.scale
-        self.scaled_correction: np.ndarray | None = None
-        self.manual_trajectory: ManualTrajectorySession | None = None
-        self.trigger_reason: TriggerReason | None = None
-        self.trigger_violation: float | None = None
-        self.oracle_traj: np.ndarray | None = None
-        self.oracle_source: str | None = None
-
-        # Multi-round state (unified cost is unpicklable; lost on restart)
-        self.rounds: list[CostRound] = []
-        self.round_records: list[dict[str, Any]] = []
-        self._round_costs: list[GeneratedPythonCost] = []
-        self._round_generations: list[CostGenerationResult] = []
-        self.unified_cost: GeneratedPythonCost | None = None
-        self._latest_round_generation: CostGenerationResult | None = None
-        self._last_generation: CostGenerationResult | None = None
-        self._last_cost: GeneratedPythonCost | None = None
-        self._last_cost_dir: Path | None = None
-        self._last_instruction: str | None = None
-        self._last_cost_payload: dict[str, Any] | None = None
+        self.session: "Session | None" = None
 
     # --- personas ---------------------------------------------------------
 
@@ -364,9 +217,7 @@ class DemoSession:
                 size=(sample_count, 3),
             )
         corners = [
-            np.asarray(
-                list(product(*zip(limit.low, limit.high))), dtype=np.float64
-            )
+            np.asarray(list(product(*zip(limit.low, limit.high))), dtype=np.float64)
             for limit in user.joint_limits
         ]
         corner_poses = np.zeros((prod(len(values) for values in corners), 3, 3))
@@ -388,20 +239,8 @@ class DemoSession:
         self.personas[user.name] = user
         if user.name not in self.builtin_names:
             self._save_custom_personas()
-        if self.base_traj is not None and user.name == self.persona_name:
-            if (
-                getattr(self, "manual_trajectory", None) is not None
-                and self.manual_trajectory.paused
-                and self.q_feedback is not None
-            ):
-                self.trigger_violation = float(
-                    compute_violations(
-                        user, self.context, self.q_feedback[np.newaxis]
-                    )[0]
-                )
-                return {"retriggered": True, "trigger_step": self.trigger_step}
-            self._set_trigger(user, self.base_traj)
-            return {"retriggered": True, "trigger_step": self.trigger_step}
+        if self.session is not None and user.name == self.session.persona_name:
+            return self.session.update_persona(user)
         return {"retriggered": False, "trigger_step": None}
 
     def delete_persona(self, name: str) -> None:
@@ -417,6 +256,57 @@ class DemoSession:
             raise ValueError(f"Unknown persona {name!r}.")
         return self.personas[name]
 
+    # --- named trajectory configs ---------------------------------------
+
+    def _load_trajectory_configs(self) -> None:
+        if not self.trajectory_configs_path.exists():
+            return
+        data = json.loads(self.trajectory_configs_path.read_text(encoding="utf-8"))
+        self.trajectory_configs = {
+            "initial_poses": list(data.get("initial_poses", [])),
+            "goals": list(data.get("goals", [])),
+        }
+
+    def _save_trajectory_configs(self) -> None:
+        self.trajectory_configs_path.write_text(
+            json.dumps(self.trajectory_configs, indent=2), encoding="utf-8"
+        )
+
+    def trajectory_configs_payload(self) -> dict[str, list[dict[str, Any]]]:
+        return self.trajectory_configs
+
+    def upsert_trajectory_config(
+        self, kind: str, data: dict[str, Any]
+    ) -> dict[str, list[dict[str, Any]]]:
+        name = data["name"].strip()
+        if not name:
+            raise ValueError("Config name is required.")
+        if kind == "initial_poses":
+            value = np.asarray(data["arm_aa"], dtype=np.float64)
+            if value.shape != (3, 3):
+                raise ValueError("Initial pose must contain three axis-angle joints.")
+            entry = {"name": name, "arm_aa": value.tolist()}
+        elif kind == "goals":
+            value = np.asarray(data["goal"], dtype=np.float64)
+            if value.shape != (3,):
+                raise ValueError("Goal must contain three Cartesian coordinates.")
+            entry = {"name": name, "goal": value.tolist()}
+        else:
+            raise ValueError(f"Unknown trajectory config kind {kind!r}.")
+
+        configs = self.trajectory_configs[kind]
+        existing = next(
+            (index for index, config in enumerate(configs) if config["name"] == name),
+            None,
+        )
+        if existing is None:
+            configs.append(entry)
+        else:
+            configs[existing] = entry
+        configs.sort(key=lambda config: config["name"])
+        self._save_trajectory_configs()
+        return self.trajectory_configs_payload()
+
     # --- shared helpers ---------------------------------------------------
 
     def _cfg_with_goal(self, goal: np.ndarray) -> MpcRunConfig:
@@ -430,6 +320,34 @@ class DemoSession:
         if user.joint_limits:
             extra = CompositeTrajectoryCost([*extra.terms(), user.limit_cost()])
         return extra
+
+    def _manual_planner(
+        self,
+        start_arm_aa: np.ndarray,
+        goal: np.ndarray,
+        extra_costs: CompositeTrajectoryCost,
+    ) -> LeftArmMPCCartesian:
+        return LeftArmMPCCartesian(
+            cartesian_goals=[goal.copy()],
+            initial_arm_aa=start_arm_aa,
+            cartesian_threshold=self.cfg.cartesian.threshold,
+            horizon=self.cfg.horizon,
+            n_mpc_samples=self.cfg.n_mpc_samples,
+            max_angle_delta=self.cfg.max_angle_delta,
+            goal_threshold=self.cfg.goal_threshold,
+            visualize=False,
+            fk=self.fk,
+            spine3_pos=self.spine3_pos,
+            spine3_aa=self.spine3_aa,
+            body_pos=self.body_pos,
+            extra_costs=extra_costs,
+            seed=self.cfg.seed,
+            advance_threshold=self.cfg.advance_threshold,
+            max_playback_delta=self.cfg.max_playback_delta,
+            trajectory_fraction=self.cfg.trajectory_fraction,
+            n_diffusion_samples=self.cfg.uq.diffusion_samples,
+            n_clusters=self.cfg.uq.n_clusters,
+        )
 
     def package_trajectory(
         self, traj: np.ndarray, user: SimulatedUser
@@ -452,53 +370,19 @@ class DemoSession:
             "limit_violations": user.limit_violation_series(traj).tolist(),
         }
 
-    def generated_cost_field(self, cost: GeneratedPythonCost) -> dict[str, Any]:
-        """Evaluate the compiled generated cost over a cloud of plausible poses.
-
-        Returns per-pose joint-feature values and the cost's penalty there, read
-        straight from the compiled cost (no declared-bound parsing), so the UI can
-        draw the cost's ACTUAL penalized region in any feature plane for any cost
-        shape and any backend. The cloud is the executed/candidate trajectory frames
-        plus small joint-angle perturbations to fill the plane around them.
-        """
-        frames = [
-            np.asarray(f, dtype=np.float64).reshape(-1, 3, 3)
-            for f in [
-                self.base_traj,
-                *self.cluster_fulls.values(),
-                *self.cluster_corrections.values(),
-            ]
-            if f is not None
-        ]
-        anchors = np.concatenate(frames, axis=0)
-        rng = np.random.default_rng(0)
-        perturbed = anchors[None] + rng.normal(0.0, 0.25, size=(8, *anchors.shape))
-        poses = np.concatenate([anchors[None], perturbed], axis=0).reshape(-1, 3, 3)
-        if poses.shape[0] > 1500:
-            poses = poses[rng.choice(poses.shape[0], 1500, replace=False)]
-        feats = feature_series(self.context, poses)
-        batch = np.repeat(poses[:, None, :, :], 2, axis=1)
-        try:
-            penalty = np.asarray(cost(batch), dtype=np.float64)
-        except Exception:  # pragma: no cover - viz must not sink an expensive cost
-            return {"features": {}, "penalty": []}
+    def preview_pose(self, arm_aa: list[list[float]]) -> dict[str, Any]:
+        q = np.asarray(arm_aa, dtype=np.float64)
+        arm_pos = self.fk.fk(q, self.spine3_pos, self.spine3_aa)
         return {
-            "features": {k: v.tolist() for k, v in feats.items()},
-            "penalty": penalty.tolist(),
+            "arm_positions": arm_pos.tolist(),
+            "mesh_vertices": self.meshes.preview(arm_pos).tolist(),
+            "wrist_rel": (arm_pos[-1] - self.spine3_pos).tolist(),
         }
 
+    def mesh_vertices(self, mesh_id: str) -> np.ndarray:
+        return self.meshes.vertices(mesh_id)
+
     def init_payload(self) -> dict[str, Any]:
-        if self.oracle_traj is None:
-            persona_goals = self.cfg.persona_goals.get(self.persona_name)
-            goals = (
-                persona_goals.cartesian
-                if persona_goals is not None and persona_goals.cartesian
-                else self.cfg.cartesian.goals
-            )
-            self.goal = np.asarray(
-                goals[0] if goals else [0.4, 0.3, 0.1], dtype=np.float64
-            )
-            self.run_oracle(from_trigger=False)
         arm_bones = {
             (p, c)
             for p, c in SMPL_BONE_PAIRS_22
@@ -506,9 +390,8 @@ class DemoSession:
         }
         return {
             "personas": self.personas_payload(),
-            "current_persona": self.persona_name,
             "feature_names": list(FEATURE_NAMES),
-            "start_arm_aa": self.start_arm_aa.tolist(),
+            "start_arm_aa": self.default_arm_aa.tolist(),
             "default_goal": (
                 list(self.cfg.cartesian.goals[0])
                 if self.cfg.cartesian.goals
@@ -519,6 +402,7 @@ class DemoSession:
                 name: {"cartesian": [list(g) for g in goals.cartesian]}
                 for name, goals in self.cfg.persona_goals.items()
             },
+            "trajectory_configs": self.trajectory_configs_payload(),
             "body_pos": self.body_pos.tolist(),
             "spine3_pos": self.spine3_pos.tolist(),
             "bone_pairs": [
@@ -537,870 +421,83 @@ class DemoSession:
                 "scale": self.cfg.uq.scale,
             },
             "cost_backend": self.cfg.llm_cost.backend,
-            "oracle": self._oracle_payload(),
-            "rounds": self.round_records,
-            "unified": self._unified_record(),
+            "default_persona": self.cfg.user,
             "mdm_frames": self.cfg.mdm_frames,
             "steps": self.cfg.steps,
             "trigger_threshold": self.cfg.corrections.trigger_threshold,
             "cartesian_threshold": self.cfg.cartesian.threshold,
-            "manual_trajectory": (
-                None
-                if self.manual_trajectory is None
-                else self._manual_trajectory_payload()
-            ),
-            "pending_cost": self._last_cost_payload,
+            "session": None if self.session is None else self.session.payload(),
         }
 
-    # --- pipeline stages ---------------------------------------------------
+    # --- session management -----------------------------------------------
 
-    def preview_pose(self, arm_aa: list[list[float]]) -> dict[str, Any]:
-        q = np.asarray(arm_aa, dtype=np.float64)
-        arm_pos = self.fk.fk(q, self.spine3_pos, self.spine3_aa)
-        return {
-            "arm_positions": arm_pos.tolist(),
-            "mesh_vertices": self.meshes.preview(arm_pos).tolist(),
-            "wrist_rel": (arm_pos[-1] - self.spine3_pos).tolist(),
-        }
+    def begin_session(self, persona: str) -> "Session":
+        from uncertain_feedback.demo_designer.session import Session
 
-    def mesh_vertices(self, mesh_id: str) -> np.ndarray:
-        return self.meshes.vertices(mesh_id)
-
-    def _set_trigger(self, user: SimulatedUser, traj: np.ndarray) -> None:
-        self.trigger_step = first_violation_step(
-            user, self.context, traj, self.cfg.corrections.trigger_threshold
-        )
-        if self.trigger_step is not None:
-            self.q_feedback = traj[self.trigger_step]
-            self.q_history = [
-                np.asarray(q, dtype=np.float64) for q in traj[: self.trigger_step + 1]
-            ]
-        else:
-            self.q_feedback = None
-            self.q_history = []
-
-    def run_base(
-        self,
-        arm_aa: list[list[float]],
-        goal: list[float],
-        persona: str,
-        show_oracle: bool = False,
-    ) -> dict[str, Any]:
-        self.manual_trajectory = None
-        self.trigger_reason = None
-        self.trigger_violation = None
         user = self.get_persona(persona)
-        self.persona_name = persona
-        self.start_arm_aa = np.asarray(arm_aa, dtype=np.float64)
-        self.goal = np.asarray(goal, dtype=np.float64)
-        cfg_goal = self._cfg_with_goal(self.goal)
-        base_costs = self._extra_costs(user)
-        t0 = time.perf_counter()
-        _log(f"base rollout: persona={persona} goal={goal}")
-        traj = rollout_to_goal(
-            cfg_goal,
-            self.start_arm_aa,
-            self.goal,
-            self.context,
-            base_costs,
-            self.body_pos,
-            self.spine3_pos,
-            self.spine3_aa,
-            progress_label="base",
-            log_prefix=_LOG_PREFIX,
+        session_dir = self.artifact_root / (
+            f"{time.strftime('%Y%m%d_%H%M%S')}_session_{persona}"
         )
-        _log(f"base rollout done in {time.perf_counter() - t0:.1f}s")
-        self.base_traj = traj
-        self._set_trigger(user, traj)
-        oracle_traj = None
-        if show_oracle:
-            oracle_costs = CompositeTrajectoryCost(
-                [*base_costs.terms(), HiddenCostTerm(user, self.context)]
-            )
-            oracle_start = (
-                self.q_feedback if self.q_feedback is not None else self.start_arm_aa
-            )
-            oracle_mode = (
-                "resuming from the feedback pose"
-                if self.q_feedback is not None
-                else "starting from the initial pose"
-            )
-            _log(f"oracle rollout: {oracle_mode}")
-            oracle_traj = rollout_to_goal(
-                cfg_goal,
-                oracle_start,
-                self.goal,
-                self.context,
-                oracle_costs,
-                self.body_pos,
-                self.spine3_pos,
-                self.spine3_aa,
-                progress_label="oracle",
-                log_prefix=_LOG_PREFIX,
-            )
-            if self.q_history:
-                oracle_traj = np.concatenate(
-                    [np.asarray(self.q_history[:-1]), oracle_traj], axis=0
-                )
-        # Downstream stages are stale once the base changes.
-        self.samples = None
-        self.cluster_levels = []
-        self.labels = None
-        self.cluster_means = {}
-        self.cluster_corrections = {}
-        self.cluster_fulls = {}
-        self.chosen_label = None
-        self.scaled_correction = None
-        self._last_generation = None
-        self._last_cost = None
-        self._last_cost_dir = None
-        self._last_instruction = None
-        self._last_cost_payload = None
-        oracle_payload = None
-        if oracle_traj is not None:
-            oracle_payload = {
-                "trajectory": self.package_trajectory(oracle_traj, user),
-                "metrics": violation_metrics(user, self.context, oracle_traj),
-                "goal_reach": goal_reach(
-                    self.context, cfg_goal, oracle_traj, self.goal
-                ),
-            }
-        return {
-            "trajectory": self.package_trajectory(traj, user),
-            "oracle": oracle_payload,
-            "trigger_step": self.trigger_step,
-            "metrics": violation_metrics(user, self.context, traj),
-            "goal_reach": goal_reach(self.context, cfg_goal, traj, self.goal),
-        }
-
-    def _manual_planner(
-        self, start_arm_aa: np.ndarray, goal: np.ndarray, user: SimulatedUser
-    ) -> LeftArmMPCCartesian:
-        return LeftArmMPCCartesian(
-            cartesian_goals=[goal.copy()],
-            initial_arm_aa=start_arm_aa,
-            cartesian_threshold=self.cfg.cartesian.threshold,
-            horizon=self.cfg.horizon,
-            n_mpc_samples=self.cfg.n_mpc_samples,
-            max_angle_delta=self.cfg.max_angle_delta,
-            goal_threshold=self.cfg.goal_threshold,
-            visualize=False,
-            fk=self.fk,
-            spine3_pos=self.spine3_pos,
-            spine3_aa=self.spine3_aa,
-            body_pos=self.body_pos,
-            extra_costs=self._extra_costs(user),
-            seed=self.cfg.seed,
-            advance_threshold=self.cfg.advance_threshold,
-            max_playback_delta=self.cfg.max_playback_delta,
-            trajectory_fraction=self.cfg.trajectory_fraction,
-            n_diffusion_samples=self.cfg.uq.diffusion_samples,
-            n_clusters=self.cfg.uq.n_clusters,
-        )
-
-    def _clear_pending_feedback(self) -> None:
-        self.samples = None
-        self.cluster_levels = []
-        self.labels = None
-        self.cluster_means = {}
-        self.cluster_corrections = {}
-        self.cluster_fulls = {}
-        self.chosen_label = None
-        self.scaled_correction = None
-        self._last_generation = None
-        self._last_cost = None
-        self._last_cost_dir = None
-        self._last_instruction = None
-        self._last_cost_payload = None
-
-    def start_manual_trajectory(
-        self,
-        arm_aa: list[list[float]],
-        goal: list[float],
-        persona: str,
-    ) -> dict[str, Any]:
-        """Start one trajectory and pause before each manually handled correction."""
-        if self.cfg.planner != "arm_mpc_cartesian":
-            raise ValueError(
-                "Multi-turn trajectories require planner: arm_mpc_cartesian."
-            )
-        user = self.get_persona(persona)
-        self.persona_name = persona
-        self.start_arm_aa = np.asarray(arm_aa, dtype=np.float64)
-        self.goal = np.asarray(goal, dtype=np.float64)
-        artifact_dir = (
-            Path("demo_designer_artifacts")
-            / f"{time.strftime('%Y%m%d_%H%M%S')}_trajectory"
-        )
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        self.manual_trajectory = ManualTrajectorySession(
-            mpc=self._manual_planner(self.start_arm_aa, self.goal, user),
-            trigger=CorrectionTrigger(
-                threshold=self.cfg.corrections.trigger_threshold,
-                text_time=None,
-                automatic=bool(user.bounds and user.feedback_text),
+        self.session = Session(
+            rig=self,
+            persona_name=persona,
+            user=user,
+            dir=session_dir,
+            corpus=TrajectoryCorpus.create(
+                session_dir / "trajectory_corpus", self.context
             ),
-            q=self.start_arm_aa.copy(),
-            executed=[self.start_arm_aa.copy()],
-            artifact_dir=artifact_dir,
         )
-        self.rounds = []
-        self.round_records = []
-        self._round_costs = []
-        self._round_generations = []
-        self.unified_cost = None
-        self._latest_round_generation = None
-        self._clear_pending_feedback()
-        _log(f"multi-turn trajectory started: persona={persona} goal={goal}")
-        self._advance_manual_trajectory()
-        self.run_oracle(from_trigger=False)
-        return self._manual_trajectory_payload()
+        self.session._save()
+        _log(f"session started: persona={persona} dir={session_dir}")
+        return self.session
 
-    def exit_manual_trajectory(self) -> dict[str, Any]:
-        """Discard the active trajectory so a new scenario can be designed."""
-        if self.manual_trajectory is None:
-            raise ValueError("No trajectory is active.")
-        artifact_dir = self.manual_trajectory.artifact_dir
-        self.manual_trajectory = None
-        self.base_traj = None
-        self.goal = None
-        self.trigger_step = None
-        self.trigger_reason = None
-        self.trigger_violation = None
-        self.q_feedback = None
-        self.q_history = []
-        self.oracle_traj = None
-        self.oracle_source = None
-        self._clear_pending_feedback()
-        self.reset_rounds()
-        _log(f"trajectory exited (artifacts retained at {artifact_dir})")
-        return {"ok": True, "artifact_dir": str(artifact_dir)}
-
-    def run_oracle(self, from_trigger: bool) -> dict[str, Any]:
-        if self.goal is None:
-            raise ValueError("Start a trajectory first.")
-        if from_trigger and self.q_feedback is None:
-            raise ValueError("The trajectory is not paused at an MDM trigger point.")
-        user = self.get_persona(self.persona_name)
-        cfg_goal = self._cfg_with_goal(self.goal)
-        oracle_costs = CompositeTrajectoryCost(
-            [
-                *self._extra_costs(user).terms(),
-                HiddenCostTerm(user, self.context),
-            ]
-        )
-        start = self.q_feedback if from_trigger else self.start_arm_aa
-        source = "trigger" if from_trigger else "initial"
-        _log(f"oracle rollout: starting from the {source} pose")
-        trajectory = rollout_to_goal(
-            cfg_goal,
-            start,
-            self.goal,
-            self.context,
-            oracle_costs,
-            self.body_pos,
-            self.spine3_pos,
-            self.spine3_aa,
-            progress_label="oracle",
-            log_prefix=_LOG_PREFIX,
-        )
-        if from_trigger and self.q_history:
-            trajectory = np.concatenate(
-                [np.asarray(self.q_history[:-1]), trajectory], axis=0
+    def list_sessions(self) -> list[dict[str, Any]]:
+        root = getattr(self, "artifact_root", Path("demo_designer_artifacts"))
+        sessions: list[dict[str, Any]] = []
+        if not root.exists():
+            return sessions
+        for path in sorted(root.glob("*_session_*"), reverse=True):
+            manifest = path / "session.json"
+            if not manifest.exists():
+                continue
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            corpus_manifest = path / "trajectory_corpus" / "manifest.json"
+            corpus_entries = (
+                json.loads(corpus_manifest.read_text(encoding="utf-8"))
+                if corpus_manifest.exists()
+                else []
             )
-        self.oracle_traj = trajectory
-        self.oracle_source = source
-        return self._oracle_payload()
-
-    def _oracle_payload(self) -> dict[str, Any]:
-        if self.oracle_traj is None or self.oracle_source is None or self.goal is None:
-            raise ValueError("Run an oracle rollout first.")
-        user = self.get_persona(self.persona_name)
-        return {
-            "trajectory": self.package_trajectory(self.oracle_traj, user),
-            "metrics": violation_metrics(user, self.context, self.oracle_traj),
-            "goal_reach": goal_reach(
-                self.context,
-                self._cfg_with_goal(self.goal),
-                self.oracle_traj,
-                self.goal,
-            ),
-            "source": self.oracle_source,
-        }
-
-    def _advance_manual_trajectory(self) -> None:
-        state = self.manual_trajectory
-        if state is None:
-            raise ValueError("Start a multi-turn trajectory first.")
-        user = self.get_persona(self.persona_name)
-        state.paused = False
-        while state.step < self.cfg.steps:
-            violation = None
-            if state.trigger.automatic:
-                violation = float(
-                    compute_violations(user, self.context, state.q[np.newaxis])[0]
-                )
-            reason = state.trigger.evaluate(state.step, violation)
-            if reason is not None:
-                state.paused = True
-                self.trigger_step = state.step
-                self.trigger_reason = reason
-                self.trigger_violation = violation
-                self.q_feedback = state.q.copy()
-                self.q_history = [q.copy() for q in state.executed]
-                _log(
-                    f"trajectory paused at frame {state.step}: "
-                    f"{reason} (violation={violation})"
-                )
-                break
-            try:
-                state.q = state.mpc.step(state.q)
-            except RuntimeError as exc:
-                state.error = str(exc)
-                state.complete = True
-                break
-            state.executed.append(state.q.copy())
-            state.step += 1
-            if state.mpc.mdm_ready_to_terminate and state.mpc.goal_reached(state.q):
-                state.reached_goal = True
-                state.complete = True
-                break
-        if state.step >= self.cfg.steps:
-            state.complete = True
-        self.base_traj = np.asarray(state.executed, dtype=np.float64)
-        np.save(state.artifact_dir / "executed_trajectory.npy", self.base_traj)
-        if state.complete:
-            self.trigger_step = None
-            self.trigger_reason = None
-            self.trigger_violation = None
-            self.q_feedback = None
-            self.q_history = [q.copy() for q in state.executed]
-            _log(
-                f"multi-turn trajectory complete: steps={state.step} "
-                f"reached_goal={state.reached_goal}"
-            )
-
-    def _manual_trajectory_payload(self) -> dict[str, Any]:
-        state = self.manual_trajectory
-        if state is None or self.goal is None:
-            raise ValueError("Start a multi-turn trajectory first.")
-        user = self.get_persona(self.persona_name)
-        trajectory = np.asarray(state.executed, dtype=np.float64)
-        trigger = (
-            None
-            if not state.paused
-            else {
-                "step": self.trigger_step,
-                "reason": self.trigger_reason,
-                "violation": self.trigger_violation,
-            }
-        )
-        return {
-            "trajectory": self.package_trajectory(trajectory, user),
-            "oracle": None if self.oracle_traj is None else self._oracle_payload(),
-            "metrics": violation_metrics(user, self.context, trajectory),
-            "goal_reach": goal_reach(
-                self.context, self._cfg_with_goal(self.goal), trajectory, self.goal
-            ),
-            "status": "complete" if state.complete else "paused",
-            "trigger": trigger,
-            "step": state.step,
-            "step_limit": self.cfg.steps,
-            "reached_goal": state.reached_goal,
-            "error": state.error,
-            "artifact_dir": str(state.artifact_dir),
-            "rounds": self.round_records,
-            "unified": self._unified_record(),
-        }
-
-    def generate(
-        self, prompt: str, n_samples: int, n_clusters: int, scale: float
-    ) -> dict[str, Any]:
-        if self.base_traj is None:
-            raise ValueError("Run the base rollout first.")
-        q_start = self.q_feedback if self.q_feedback is not None else self.start_arm_aa
-        start_pose = self.gen.build_pose_from_arm_aa(self.initial_hml_pose, q_start)
-        t0 = time.perf_counter()
-        _log(f"MDM generation: {n_samples} samples for {prompt!r}")
-        self.samples = self.gen.generate_left_arm_position_samples(
-            prompt,
-            start_pose=start_pose,
-            num_samples=n_samples,
-            num_frames=self.cfg.mdm_frames,
-        )
-        _log(f"MDM generation done in {time.perf_counter() - t0:.1f}s")
-        self.prompt = prompt
-        self.cluster_levels = []
-        return self.recluster(n_clusters, scale)
-
-    def recluster(self, n_clusters: int, scale: float) -> dict[str, Any]:
-        """Cluster the current sample subset and assemble each option.
-
-        Every cluster option is integrated into the full corrected trajectory
-        (executed history → scaled correction → comfort-only goal continuation)
-        so the cards show what actually happens if that option is taken, not
-        just the raw MDM segment.
-        """
-        if self.samples is None:
-            raise ValueError("Generate MDM samples first.")
-        if self.goal is None:
-            raise ValueError("Run the base rollout first.")
-        sample_indices = (
-            self.cluster_levels[-1].sample_indices
-            if self.cluster_levels
-            else np.arange(self.samples.shape[0], dtype=np.intp)
-        )
-        labels = XyzPositionClusterer(n_clusters, fk=self.fk).cluster_positions(
-            self.samples[sample_indices]
-        )
-        level = ClusterLevel(
-            sample_indices=sample_indices,
-            labels=np.asarray(labels, dtype=np.intp),
-            selected_label=None,
-            n_clusters=n_clusters,
-            scale=scale,
-        )
-        if self.cluster_levels:
-            self.cluster_levels[-1] = level
-        else:
-            self.cluster_levels.append(level)
-        return self._activate_cluster_level()
-
-    def _activate_cluster_level(self) -> dict[str, Any]:
-        """Build the current level's trajectories and navigation payload."""
-        if self.samples is None or not self.cluster_levels:
-            raise ValueError("Generate and cluster MDM samples first.")
-        if self.goal is None:
-            raise ValueError("Run the base rollout first.")
-        user = self.get_persona(self.persona_name)
-        cfg_goal = self._cfg_with_goal(self.goal)
-        level = self.cluster_levels[-1]
-        scale = level.scale
-        level_samples = self.samples[level.sample_indices]
-        self.labels = level.labels
-        self.cluster_means = {
-            label: self.gen.smpl_positions_to_left_arm_trajectory(
-                level_samples[level.labels == label].mean(axis=0),
-                spine3_aa=self.spine3_aa,
-            )
-            for label in sorted(int(v) for v in np.unique(level.labels))
-        }
-        self.chosen_label = level.selected_label
-        self.scaled_correction = None
-        self.scale = scale
-        self.cluster_corrections = {}
-        self.cluster_fulls = {}
-        oracle = oracle_cluster_scores(user, self.context, self.cluster_means, scale)
-        clusters = []
-        for label, mean in self.cluster_means.items():
-            scaled = scale_trajectory(mean, scale)
-            full = (
-                np.concatenate(
-                    [np.asarray(self.q_history, dtype=np.float64), scaled], axis=0
-                )
-                if self.q_history
-                else scaled
-            )
-            self.cluster_corrections[label] = scaled
-            self.cluster_fulls[label] = full
-            count = int(np.sum(level.labels == label))
-            clusters.append(
+            sessions.append(
                 {
-                    "label": label,
-                    "count": count,
-                    "can_refine": level.n_clusters >= 2 and count >= level.n_clusters,
-                    "oracle_score": oracle[label],
-                    "correction": self.package_trajectory(scaled, user),
-                    "full": self.package_trajectory(full, user),
-                    "full_segments": {
-                        "history": len(self.q_history),
-                        "correction": int(scaled.shape[0]),
-                    },
-                    "full_metrics": violation_metrics(user, self.context, full),
-                    "full_goal_reach": goal_reach(
-                        self.context, cfg_goal, full, self.goal
-                    ),
+                    "name": path.name,
+                    "dir": str(path),
+                    "persona": data.get("persona"),
+                    "started": data.get("started"),
+                    "trajectory_count": data.get("trajectory_count", 0),
+                    "round_count": len(data.get("rounds", [])),
+                    "corpus_count": len(corpus_entries),
                 }
             )
-        if self.chosen_label is not None:
-            self.scaled_correction = self.cluster_corrections[self.chosen_label]
-        path = [
-            int(parent.selected_label)
-            for parent in self.cluster_levels[:-1]
-            if parent.selected_label is not None
-        ]
-        return {
-            "clusters": clusters,
-            "selected_label": self.chosen_label,
-            "depth": len(self.cluster_levels) - 1,
-            "path": path,
-            "can_go_back": len(self.cluster_levels) > 1,
-            "active_sample_count": int(level.sample_indices.size),
-            "scale": scale,
-        }
+        return sessions
 
-    def pick_cluster(self, label: int) -> dict[str, Any]:
-        if label not in self.cluster_corrections:
-            raise ValueError(f"Unknown cluster label {label}.")
-        if not self.cluster_levels:
-            raise ValueError("Cluster samples first.")
-        self.cluster_levels[-1].selected_label = label
-        self.chosen_label = label
-        self.scaled_correction = self.cluster_corrections[label]
-        return {"ok": True}
+    def resume_session(self, dir: str) -> "Session":
+        from uncertain_feedback.demo_designer.session import Session
 
-    def refine_cluster(
-        self, label: int, n_clusters: int, scale: float
-    ) -> dict[str, Any]:
-        """Cluster only the raw samples belonging to the selected option."""
-        if self.samples is None or not self.cluster_levels:
-            raise ValueError("Generate and cluster MDM samples first.")
-        level = self.cluster_levels[-1]
-        if label not in self.cluster_corrections:
-            raise ValueError(f"Unknown cluster label {label}.")
-        selected_indices = level.sample_indices[level.labels == label]
-        if n_clusters < 2 or selected_indices.size < n_clusters:
-            raise ValueError(
-                "Refinement needs at least two clusters and enough selected samples."
-            )
-        level.selected_label = label
-        labels = XyzPositionClusterer(n_clusters, fk=self.fk).cluster_positions(
-            self.samples[selected_indices]
-        )
-        self.cluster_levels.append(
-            ClusterLevel(
-                sample_indices=selected_indices,
-                labels=np.asarray(labels, dtype=np.intp),
-                selected_label=None,
-                n_clusters=n_clusters,
-                scale=scale,
-            )
-        )
-        return self._activate_cluster_level()
+        self.session = Session.load(self, Path(dir))
+        _log(f"session resumed: dir={dir} persona={self.session.persona_name}")
+        return self.session
 
-    def back_cluster(self) -> dict[str, Any]:
-        """Return to the parent cluster level and restore its selection."""
-        if len(self.cluster_levels) <= 1:
-            raise ValueError("Already at the root cluster level.")
-        self.cluster_levels.pop()
-        return self._activate_cluster_level()
-
-    def generate_cost(self, backend: str) -> dict[str, Any]:
-        if self.scaled_correction is None or self.goal is None:
-            raise ValueError("Pick a cluster first.")
-        if backend not in COST_BACKENDS:
-            raise ValueError(f"Unknown cost-generation backend {backend!r}.")
-        user = self.get_persona(self.persona_name)
-        cfg_goal = self._cfg_with_goal(self.goal)
-        extra = self._extra_costs(user)
-        cost_q_start = (
-            self.q_feedback if self.q_feedback is not None else self.start_arm_aa
+    def delete_session(self, name: str) -> dict[str, Any]:
+        root = self.artifact_root.resolve()
+        session_dir = (root / name).resolve()
+        if session_dir.parent != root or not (session_dir / "session.json").exists():
+            raise ValueError("Unknown session.")
+        active_deleted = (
+            self.session is not None
+            and self.session.dir.resolve() == session_dir
         )
-        cost_dir = (
-            Path("demo_designer_artifacts")
-            / f"{time.strftime('%Y%m%d_%H%M%S')}_{backend}"
-        )
-        instruction = self.prompt or user.feedback_text
-        result = generate_cost_for_cluster(
-            mpc=None,
-            cfg=cfg_goal,
-            instruction=instruction,
-            cluster_traj=self.scaled_correction,
-            current_q=cost_q_start,
-            q_history=self.q_history,
-            context=self.context,
-            base_extra_costs=extra,
-            cost_dir=cost_dir,
-            body_pos=self.body_pos,
-            spine3_pos=self.spine3_pos,
-            spine3_aa=self.spine3_aa,
-            candidate_trajs=self.cluster_means,
-            highlight_label=self.chosen_label,
-            backend=backend,
-            install=False,
-            log_prefix=_LOG_PREFIX,
-        )
-        cost = result.generated_cost
-        if cost is None:
-            raise ValueError(f"Cost generation produced no cost (see {cost_dir}).")
-        self._last_generation = result
-        self._last_cost = cost
-        self._last_cost_dir = cost_dir
-        self._last_instruction = instruction
-        cost_set = CompositeTrajectoryCost([*extra.terms(), cost])
-        t0 = time.perf_counter()
-        _log("assembling the chosen corrected path with the generated cost")
-        rollout = _assemble_full_correction_traj(
-            cfg_goal,
-            self.q_history,
-            self.scaled_correction,
-            self.context,
-            cost_set,
-            self.body_pos,
-            self.spine3_pos,
-            self.spine3_aa,
-        )
-        _log(
-            "generated-cost corrected path assembled in "
-            f"{time.perf_counter() - t0:.1f}s"
-        )
-        t0 = time.perf_counter()
-        _log("rolling out the generated cost from the initial pose")
-        start_rollout = rollout_to_goal(
-            cfg_goal,
-            self.start_arm_aa,
-            self.goal,
-            self.context,
-            cost_set,
-            self.body_pos,
-            self.spine3_pos,
-            self.spine3_aa,
-            progress_label="generated-from-start",
-            log_prefix=_LOG_PREFIX,
-        )
-        _log(
-            "generated-cost rollout from the initial pose done in "
-            f"{time.perf_counter() - t0:.1f}s"
-        )
-        payload = {
-            "trajectory": self.package_trajectory(rollout, user),
-            "metrics": violation_metrics(user, self.context, rollout),
-            "goal_reach": goal_reach(self.context, cfg_goal, rollout, self.goal),
-            "start_trajectory": self.package_trajectory(start_rollout, user),
-            "start_metrics": violation_metrics(user, self.context, start_rollout),
-            "start_goal_reach": goal_reach(
-                self.context, cfg_goal, start_rollout, self.goal
-            ),
-            "cost_field": self.generated_cost_field(cost),
-            "generated_bounds": _generated_bounds_from_artifacts(cost_dir),
-            "rationale": _rationale_from_artifacts(cost_dir),
-            "description": cost.description,
-            "code": cost.code,
-            "artifact_dir": str(cost_dir),
-        }
-        self._last_cost_payload = payload
-        (cost_dir / "demo_designer_payload.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
-        return payload
-
-    # --- multi-round feedback ----------------------------------------------
-
-    def _unified_record(self) -> dict[str, Any] | None:
-        if self.unified_cost is None:
-            return None
-        return {
-            "description": self.unified_cost.description,
-            "code": self.unified_cost.code,
-        }
-
-    def commit_round(self) -> dict[str, Any]:
-        if (
-            self._last_generation is None
-            or self._last_cost is None
-            or self._last_cost_dir is None
-            or self._last_instruction is None
-            or self.goal is None
-        ):
-            raise ValueError("Generate a cost first.")
-        state_path = self._last_cost_dir / "state.pkl"
-        self._last_generation.eval_state.save(state_path)
-        cost_round = CostRound(
-            index=len(self.rounds),
-            goal=(float(self.goal[0]), float(self.goal[1]), float(self.goal[2])),
-            feedback_text=self._last_instruction,
-            trigger_step=self.trigger_step if self.trigger_step is not None else 0,
-            round_dir=self._last_cost_dir.resolve(),
-            state_path=state_path.resolve(),
-            cost_code=self._last_cost.code,
-            params=self._last_cost.params,
-            summaries=self._last_generation.summaries,
-            image_paths=tuple(
-                path.resolve() for path in self._last_generation.images.values()
-            ),
-            trigger_reason=self.trigger_reason or "discomfort",
-            trigger_violation=self.trigger_violation,
-        )
-        self.rounds.append(cost_round)
-        self._round_costs.append(self._last_cost)
-        self._round_generations.append(self._last_generation)
-        self.round_records.append(
-            {
-                "index": cost_round.index,
-                "goal": list(cost_round.goal),
-                "feedback_text": cost_round.feedback_text,
-                "trigger_step": cost_round.trigger_step,
-                "trigger_reason": cost_round.trigger_reason,
-                "trigger_violation": cost_round.trigger_violation,
-                "description": self._last_cost.description,
-                "rationale": _rationale_from_artifacts(self._last_cost_dir),
-                "artifact_dir": str(self._last_cost_dir),
-            }
-        )
-        self.unified_cost = self._last_cost if len(self.rounds) == 1 else None
-        self._latest_round_generation = self._last_generation
-        self._last_generation = None
-        self._last_cost = None
-        self._last_cost_dir = None
-        self._last_instruction = None
-        self._last_cost_payload = None
-        _log(f"committed round {cost_round.index} (goal={list(cost_round.goal)})")
-        return {"rounds": self.round_records, "unified": self._unified_record()}
-
-    def apply_round_and_continue(self) -> dict[str, Any]:
-        """Commit the selected feedback, install it, and resume to the next pause."""
-        state = self.manual_trajectory
-        if state is None or not state.paused:
-            raise ValueError("The multi-turn trajectory is not paused for feedback.")
-        if self.scaled_correction is None or self._last_cost is None:
-            raise ValueError("Generate a cost for the selected cluster first.")
-        correction = self.scaled_correction.copy()
-        self.commit_round()
-        cutoff = max(1, round(len(correction) * self.cfg.trajectory_fraction))
-        correction = correction[:cutoff]
-        state.mpc.set_mdm_goal(correction[-1])
-        state.mpc.push_trajectory(correction)
-        state.mpc.set_extra_costs(
-            CompositeTrajectoryCost(
-                [
-                    *self._extra_costs(self.get_persona(self.persona_name)).terms(),
-                    *self._round_costs,
-                ]
-            )
-        )
-        state.paused = False
-        self._clear_pending_feedback()
-        self._advance_manual_trajectory()
-        return self._manual_trajectory_payload()
-
-    def ignore_comfort_violation(self) -> dict[str, Any]:
-        """Resume without feedback after ignoring the current discomfort event."""
-        state = self.manual_trajectory
-        if state is None or not state.paused:
-            raise ValueError("The multi-turn trajectory is not paused for feedback.")
-        if self.trigger_reason != "discomfort":
-            raise ValueError("The current feedback trigger is not a comfort violation.")
-        _log(f"ignored comfort violation at frame {state.step}")
-        state.paused = False
-        self._clear_pending_feedback()
-        self._advance_manual_trajectory()
-        return self._manual_trajectory_payload()
-
-    def remove_round(self, index: int) -> dict[str, Any]:
-        if index < 0 or index >= len(self.rounds):
-            raise ValueError(f"Unknown feedback round {index}.")
-        removed = self.rounds.pop(index)
-        self.round_records.pop(index)
-        self._round_costs.pop(index)
-        self._round_generations.pop(index)
-        self.rounds = [replace(round_, index=i) for i, round_ in enumerate(self.rounds)]
-        for i, record in enumerate(self.round_records):
-            record["index"] = i
-        self._latest_round_generation = (
-            self._round_generations[-1] if self._round_generations else None
-        )
-        self.unified_cost = (
-            self._round_costs[0] if len(self._round_costs) == 1 else None
-        )
-        if getattr(self, "manual_trajectory", None) is not None:
-            self.manual_trajectory.mpc.set_extra_costs(
-                CompositeTrajectoryCost(
-                    [
-                        *self._extra_costs(
-                            self.get_persona(self.persona_name)
-                        ).terms(),
-                        *self._round_costs,
-                    ]
-                )
-            )
-        _log(f"removed feedback round {removed.index}")
-        return {"rounds": self.round_records, "unified": self._unified_record()}
-
-    def combine_rounds(self) -> dict[str, Any]:
-        if len(self.rounds) < 2:
-            raise ValueError("Commit at least two rounds before combining.")
-        generation = self._latest_round_generation
-        if generation is None or self.goal is None:
-            raise ValueError("No committed round generation available.")
-        user = self.get_persona(self.persona_name)
-        combine_dir = (
-            Path("demo_designer_artifacts")
-            / f"{time.strftime('%Y%m%d_%H%M%S')}_combine"
-        )
-        combinator = CombineCostGenerator(
-            context=generation.generated_context,
-            instruction=self.rounds[-1].feedback_text,
-            summaries=generation.summaries,
-            run_dir=combine_dir,
-            images=generation.images,
-            use_images=self.cfg.llm_cost.use_images,
-            model=self.cfg.llm_cost.model,
-            strict=self.cfg.llm_cost.strict,
-            mpc=None,
-            rollout_fn=generation.eval_state.make_rollout_fn(),
-            eval_state=generation.eval_state,
-            codex_cmd=self.cfg.llm_cost.codex_cmd,
-            rounds=self.rounds,
-        )
-        t0 = time.perf_counter()
-        _log(f"combining {len(self.rounds)} rounds (artifacts={combine_dir})")
-        combined = combinator.generate(install=False)
-        if combined is None:
-            raise ValueError(f"Round combination failed (see {combine_dir}).")
-        _log(f"combination done in {time.perf_counter() - t0:.1f}s")
-        self.unified_cost = combined
-        cfg_goal = self._cfg_with_goal(self.goal)
-        installed = replace_generated_costs(self._extra_costs(user), combined)
-        if getattr(self, "manual_trajectory", None) is not None:
-            self.manual_trajectory.mpc.set_extra_costs(installed)
-        t0 = time.perf_counter()
-        _log("rolling out the unified cost from the initial pose")
-        rollout = rollout_to_goal(
-            cfg_goal,
-            self.start_arm_aa,
-            self.goal,
-            self.context,
-            installed,
-            self.body_pos,
-            self.spine3_pos,
-            self.spine3_aa,
-            progress_label="unified-from-start",
-            log_prefix=_LOG_PREFIX,
-        )
-        _log(f"unified-cost rollout done in {time.perf_counter() - t0:.1f}s")
-        scores_path = combine_dir / "scores.json"
-        scores = (
-            json.loads(scores_path.read_text(encoding="utf-8"))
-            if scores_path.exists()
-            else None
-        )
-        return {
-            "trajectory": self.package_trajectory(rollout, user),
-            "cost_field": self.generated_cost_field(combined),
-            "metrics": violation_metrics(user, self.context, rollout),
-            "goal_reach": goal_reach(self.context, cfg_goal, rollout, self.goal),
-            "description": combined.description,
-            "code": combined.code,
-            "scores": scores,
-            "artifact_dir": str(combine_dir),
-            "rounds": self.round_records,
-        }
-
-    def reset_rounds(self) -> dict[str, Any]:
-        self.rounds = []
-        self.round_records = []
-        self._round_costs = []
-        self._round_generations = []
-        self.unified_cost = None
-        self._latest_round_generation = None
-        self._last_generation = None
-        self._last_cost = None
-        self._last_cost_dir = None
-        self._last_instruction = None
-        self._last_cost_payload = None
-        if getattr(self, "manual_trajectory", None) is not None:
-            self.manual_trajectory.mpc.set_extra_costs(
-                self._extra_costs(self.get_persona(self.persona_name))
-            )
-        _log("multi-round state reset")
-        return {"ok": True}
+        if active_deleted:
+            self.session = None
+        shutil.rmtree(session_dir)
+        _log(f"session deleted: dir={session_dir}")
+        return {"sessions": self.list_sessions(), "active_deleted": active_deleted}

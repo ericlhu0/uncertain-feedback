@@ -7,12 +7,13 @@ from uncertain_feedback.llm.openai_model import OpenAIModel
 
 
 class _FakeResponses:
-    def __init__(self) -> None:
+    def __init__(self, response: Any | None = None) -> None:
         self.request: dict[str, Any] | None = None
+        self.response = response or SimpleNamespace(output_text="response text")
 
     def create(self, **kwargs):
         self.request = kwargs
-        return SimpleNamespace(output_text="response text")
+        return self.response
 
 
 class _FakeChatCompletions:
@@ -36,6 +37,7 @@ def _model(model_name: str, tmp_client, **kwargs) -> OpenAIModel:
     model.temperature = kwargs.get("temperature", 0.2)
     model.max_tokens = kwargs.get("max_tokens", 123)
     model.reasoning_effort = kwargs.get("reasoning_effort")
+    model.stream_reasoning_summary = kwargs.get("stream_reasoning_summary", False)
     model.system_prompt = "system"
     model.api_mode = kwargs.get("api_mode", "auto")
     model.client = tmp_client
@@ -74,6 +76,44 @@ def test_responses_api_includes_reasoning_effort() -> None:
     assert responses.request is not None
     assert responses.request["reasoning"] == {"effort": "xhigh"}
     assert "temperature" not in responses.request
+
+
+def test_responses_api_streams_reasoning_summary(capsys) -> None:
+    completed = SimpleNamespace(output_text="response text")
+    events = iter(
+        [
+            SimpleNamespace(
+                type="response.reasoning_summary_text.delta",
+                delta="Checking the requested constraint. ",
+            ),
+            SimpleNamespace(
+                type="response.reasoning_summary_text.delta",
+                delta="Writing the cost.",
+            ),
+            SimpleNamespace(type="response.completed", response=completed),
+        ]
+    )
+    responses = _FakeResponses(events)
+    model = _model(
+        "gpt-5.6-luna",
+        SimpleNamespace(responses=responses),
+        reasoning_effort="xhigh",
+        stream_reasoning_summary=True,
+    )
+
+    output = model.get_full_output("make json")
+
+    assert output == "response text"
+    assert responses.request is not None
+    assert responses.request["reasoning"] == {
+        "effort": "xhigh",
+        "summary": "auto",
+    }
+    assert responses.request["stream"] is True
+    assert capsys.readouterr().out == (
+        "[cost-gen][llm] reasoning summary:\n"
+        "Checking the requested constraint. Writing the cost.\n"
+    )
 
 
 def test_chat_mode_preserves_legacy_chat_completion_shape() -> None:

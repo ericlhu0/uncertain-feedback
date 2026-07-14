@@ -1,10 +1,13 @@
+import json
 from pathlib import Path
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 
-from uncertain_feedback.demo_designer import core
-from uncertain_feedback.demo_designer.core import DemoSession
+from uncertain_feedback.demo_designer.core import DemoRig
+from uncertain_feedback.demo_designer import session as demo_session
+from uncertain_feedback.demo_designer.session import Session
+from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -18,6 +21,7 @@ from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
 class FakeCost:
     description = "cost"
     code = "def cost(): pass"
+    params: dict[str, float] = {}
 
     def __call__(self, q_trajs):
         return np.zeros(q_trajs.shape[0])
@@ -48,7 +52,7 @@ class FakePlanner:
         self.costs = costs
 
 
-def make_session(monkeypatch, tmp_path) -> tuple[DemoSession, SimulatedUser]:
+def make_session(monkeypatch, tmp_path) -> tuple[Session, SimulatedUser]:
     config_path = tmp_path / "mpc.yaml"
     config_path.write_text(
         """
@@ -60,6 +64,7 @@ max_angle_delta: 0.01
 pose: pose.npy
 text_time: 5
 preference_learning: false
+trajectory_fraction: 1.0
 uq:
   diffusion_samples: 2
   n_clusters: 1
@@ -78,43 +83,50 @@ corrections:
         bounds=(HiddenBound("elbow_flexion", "lower_bound", low=0.5),),
     )
     fk = SmplLeftArmFK()
-    session = DemoSession.__new__(DemoSession)
-    session.cfg = load_mpc_config(config_path)
-    session.fk = fk
-    session.context = MpcCostContext(
+    rig = DemoRig.__new__(DemoRig)
+    rig.cfg = load_mpc_config(config_path)
+    rig.fk = fk
+    rig.context = MpcCostContext(
         fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
     )
-    session.body_pos = np.zeros((22, 3))
-    session.spine3_pos = fk.tpose_spine3_pos
-    session.spine3_aa = np.zeros(3)
-    session.gen = object()
-    session.initial_hml_pose = np.zeros(263)
-    session.persona_name = user.name
-    session.get_persona = MethodType(lambda self, name: user, session)
-    session._extra_costs = MethodType(
-        lambda self, selected: CompositeTrajectoryCost([]), session
+    rig.body_pos = np.zeros((22, 3))
+    rig.spine3_pos = fk.tpose_spine3_pos
+    rig.spine3_aa = np.zeros(3)
+    rig._extra_costs = MethodType(
+        lambda self, selected: CompositeTrajectoryCost([]), rig
     )
-    session.package_trajectory = MethodType(
-        lambda self, traj, selected: {"n_frames": len(traj)}, session
+    rig._manual_planner = MethodType(
+        lambda self, start, goal, extra: FakePlanner(extra_costs=extra), rig
     )
-    monkeypatch.setattr(core, "LeftArmMPCCartesian", FakePlanner)
-    monkeypatch.setattr(core, "violation_metrics", lambda *args: {})
-    monkeypatch.setattr(core, "goal_reach", lambda *args: {})
+    rig._cfg_with_goal = MethodType(lambda self, goal: self.cfg, rig)
+    rig.package_trajectory = MethodType(
+        lambda self, traj, selected: {"n_frames": len(traj)}, rig
+    )
+    session_dir = tmp_path / "demo_designer_artifacts" / "test_session"
+    session = Session(
+        rig=rig,
+        persona_name=user.name,
+        user=user,
+        dir=session_dir,
+        corpus=TrajectoryCorpus.create(session_dir / "trajectory_corpus", rig.context),
+    )
+    rig.session = session
+    session.run_oracle = MethodType(lambda self, from_trigger: {}, session)
+    monkeypatch.setattr(demo_session, "violation_metrics", lambda *args: {})
+    monkeypatch.setattr(demo_session, "goal_reach", lambda *args: {})
     return session, user
 
 
-def test_manual_trajectory_pauses_for_cluster_workflow(monkeypatch, tmp_path) -> None:
-    session, user = make_session(monkeypatch, tmp_path)
-    monkeypatch.chdir(tmp_path)
+def test_trajectory_pauses_and_logs_discomfort_segment(monkeypatch, tmp_path) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        core,
+        demo_session,
         "compute_violations",
         lambda selected, context, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
     )
 
-    payload = session.start_manual_trajectory(
-        np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], user.name
-    )
+    trajectory = session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    payload = session._trajectory_payload()
 
     assert payload["status"] == "paused"
     assert payload["trigger"] == {
@@ -123,94 +135,108 @@ def test_manual_trajectory_pauses_for_cluster_workflow(monkeypatch, tmp_path) ->
         "violation": 0.03,
     }
     assert payload["trajectory"]["n_frames"] == 2
-    assert session.samples is None
-    assert session.manual_trajectory.mpc.pushed is None
+    assert trajectory.samples is None
+    assert trajectory.mpc.pushed is None
+    assert session.corpus.entries()[0] == {
+        "index": 0,
+        "kind": "executed_segment",
+        "round": 0,
+        "goal": [0.4, 0.5, 0.6],
+        "n_frames": 2,
+        "trigger_step": 1,
+        "trigger_violation": 0.03,
+        "feedback_text": "keep it comfortable",
+        "comfortable_until": 1,
+        "traj_file": "traj_000.npy",
+        "features_file": "traj_000_features.csv",
+    }
 
 
-def test_exit_manual_trajectory_clears_trajectory_state(monkeypatch, tmp_path) -> None:
-    session, user = make_session(monkeypatch, tmp_path)
-    monkeypatch.chdir(tmp_path)
+def test_exit_trajectory_keeps_session_context(monkeypatch, tmp_path) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        core,
+        demo_session,
         "compute_violations",
         lambda selected, context, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
     )
-    payload = session.start_manual_trajectory(
-        np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], user.name
-    )
-    artifact_dir = payload["artifact_dir"]
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    artifact_dir = str(session.trajectory.artifact_dir)
+    session.round_records = [{"index": 0}]
+    session._round_costs = [FakeCost()]
+    session.unified_cost = FakeCost()
 
-    result = session.exit_manual_trajectory()
+    result = session.exit_trajectory()
 
     assert result == {"ok": True, "artifact_dir": artifact_dir}
-    assert session.manual_trajectory is None
-    assert session.base_traj is None
-    assert session.goal is None
-    assert session.trigger_step is None
-    assert session.q_feedback is None
-    assert session.q_history == []
-    assert session.oracle_traj is None
-    assert session.rounds == []
-    assert session.samples is None
+    assert session.trajectory is None
+    assert session.round_records == [{"index": 0}]
+    assert len(session._round_costs) == 1
+    assert session.unified_cost is not None
+
+
+def test_new_trajectory_installs_session_costs_from_frame_zero(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        demo_session,
+        "compute_violations",
+        lambda selected, context, q: np.array([0.0]),
+    )
+    learned = FakeCost()
+    session._round_costs = [learned]
+
+    trajectory = session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+
+    assert trajectory.mpc.kwargs["extra_costs"].terms() == (learned,)
+    assert session.trajectory_count == 1
+    saved = json.loads((session.dir / "session.json").read_text(encoding="utf-8"))
+    assert saved["trajectory_count"] == 1
 
 
 def test_apply_round_resumes_same_planner_and_pauses_again(
     monkeypatch, tmp_path
 ) -> None:
-    session, user = make_session(monkeypatch, tmp_path)
-    monkeypatch.chdir(tmp_path)
+    session, _ = make_session(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        core,
+        demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array(
-            [0.03 if q[0, 0, 0] in (1, 3) else 0.0]
-        ),
+        lambda selected, context, q: np.array([0.03 if q[0, 0, 0] in (1, 3) else 0.0]),
     )
-    session.start_manual_trajectory(
-        np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], user.name
-    )
-    planner = session.manual_trajectory.mpc
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    trajectory = session.trajectory
+    planner = trajectory.mpc
     correction = np.stack([np.full((3, 3), 0.5), np.ones((3, 3))])
-    session.scaled_correction = correction
-    session._last_cost = FakeCost()
-    session._round_costs = []
-    session._round_generations = []
-    session.rounds = []
-    session.round_records = []
-    session.unified_cost = None
+    trajectory.scaled_correction = correction
+    trajectory._last_cost = FakeCost()
 
     def fake_commit(self):
-        self._round_costs.append(self._last_cost)
+        self._round_costs.append(self.trajectory._last_cost)
         self.round_records.append({"index": 0})
         return {"rounds": self.round_records, "unified": None}
 
     session.commit_round = MethodType(fake_commit, session)
-    session._clear_pending_feedback = MethodType(lambda self: None, session)
 
     payload = session.apply_round_and_continue()
 
-    assert session.manual_trajectory.mpc is planner
+    assert session.trajectory.mpc is planner
     np.testing.assert_array_equal(planner.pushed, correction)
     assert payload["status"] == "paused"
     assert payload["trigger"]["step"] == 3
     assert payload["trajectory"]["n_frames"] == 4
+    assert [entry["n_frames"] for entry in session.corpus.entries()] == [2, 2]
 
 
 def test_ignore_comfort_violation_resumes_until_a_new_violation(
     monkeypatch, tmp_path
 ) -> None:
-    session, user = make_session(monkeypatch, tmp_path)
-    monkeypatch.chdir(tmp_path)
+    session, _ = make_session(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        core,
+        demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array(
-            [0.03 if q[0, 0, 0] in (1, 3) else 0.0]
-        ),
+        lambda selected, context, q: np.array([0.03 if q[0, 0, 0] in (1, 3) else 0.0]),
     )
-    session.start_manual_trajectory(
-        np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], user.name
-    )
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
 
     payload = session.ignore_comfort_violation()
 
@@ -239,12 +265,16 @@ def test_remove_round_reindexes_remaining_feedback(tmp_path) -> None:
             image_paths=(),
         )
 
-    session = DemoSession.__new__(DemoSession)
+    session = Session.__new__(Session)
+    session.rig = SimpleNamespace()
+    session.persona_name = "restricted"
+    session.started = "now"
+    session.trajectory_count = 0
+    session.dir = tmp_path / "session"
     session.rounds = [round_(0), round_(1), round_(2)]
     session.round_records = [{"index": 0}, {"index": 1}, {"index": 2}]
     session._round_costs = [FakeCost(), FakeCost(), FakeCost()]
-    session._round_generations = [object(), object(), object()]
-    session.manual_trajectory = None
+    session.trajectory = None
     session.unified_cost = FakeCost()
 
     payload = session.remove_round(1)
@@ -255,3 +285,5 @@ def test_remove_round_reindexes_remaining_feedback(tmp_path) -> None:
         "feedback 2",
     ]
     assert payload["unified"] is None
+    saved = json.loads((session.dir / "session.json").read_text(encoding="utf-8"))
+    assert [round_["index"] for round_ in saved["rounds"]] == [0, 1]

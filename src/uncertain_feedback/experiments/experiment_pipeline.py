@@ -71,6 +71,40 @@ class CostGenerationResult:
     images: dict[str, Path]
     eval_state: EvalState
     generated_cost: GeneratedPythonCost | None
+    description: str = ""
+    explanation: str = ""
+    interpretation: str = ""
+    grounding: str = ""
+
+
+def _rationale_fields(
+    cost_dir: Path, cost: GeneratedPythonCost | None
+) -> dict[str, str]:
+    """Read the generation evidence chain the combiner needs from ``rationale.json``.
+
+    ``interpretation``/``grounding`` are the parsed stage-1/stage-2 objects
+    ``save_rationale`` wrote, re-dumped as JSON text; all fields are empty when no
+    rationale was produced (e.g. a failed generation).
+    """
+    description = cost.description if cost is not None else ""
+    fields = {
+        "description": description,
+        "explanation": "",
+        "interpretation": "",
+        "grounding": "",
+    }
+    path = cost_dir / "rationale.json"
+    if not path.exists():
+        return fields
+    data = json.loads(path.read_text(encoding="utf-8"))
+    final = data.get("final") or {}
+    fields["description"] = description or str(final.get("description") or "")
+    fields["explanation"] = str(final.get("explanation") or "")
+    for key, stage in (("interpretation", "interpret"), ("grounding", "ground")):
+        value = data.get(stage)
+        if value:
+            fields[key] = json.dumps(value, indent=2, sort_keys=True)
+    return fields
 
 
 @dataclass
@@ -416,6 +450,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
     install: bool = False,
     save_candidate_videos: bool = False,
+    corpus_dir: Path | None = None,
     log_prefix: str = "[experiment]",
 ) -> CostGenerationResult:
     """Build one prompt context and generate one cost for one cluster/backend."""
@@ -515,6 +550,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         ),
         eval_state=eval_state,
         save_candidate_videos=save_candidate_videos,
+        corpus_dir=corpus_dir,
     )
     cost_t0 = time.perf_counter()
     _log(
@@ -541,6 +577,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         images=images,
         eval_state=eval_state,
         generated_cost=generated_cost,
+        **_rationale_fields(cost_dir, generated_cost),
     )
 
 

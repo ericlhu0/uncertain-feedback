@@ -756,6 +756,16 @@ base/generated/oracle rollouts are evaluated for every goal, and
 forbidden region; for coupled personas this is the direct visual check that the
 learned pose-dependent anchors follow the hidden diagonal boundary.
 
+`trajectory_corpus/` holds one entry per goal — the goal's full executed
+rollout (`traj_<i>.npy`) plus a per-frame joint-feature `traj_<i>_features.csv`
+— recorded in `manifest.json`. Each manifest entry carries `goal`, `n_frames`,
+`trigger_step`/`trigger_violation` (`null` when the goal never triggered a
+correction), `feedback_text`, and `comfortable_until` (the trigger step, or
+`n_frames` if none): frames `[0, comfortable_until)` were executed without a
+discomfort report. Codex-based generators read this corpus to reason about which
+configurations were reached comfortably, so goals that never trigger a
+correction still contribute negative evidence.
+
 
 ## Demo designer web tool
 
@@ -768,6 +778,7 @@ an experiment config.
 uv run python src/uncertain_feedback/demo_designer/server.py \
   [--mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml] \
   [--personas-file demo_designer_personas.json] \
+  [--trajectory-configs-file demo_designer_trajectory_configs.json] \
   [--host 127.0.0.1] [--port 6780]
 ```
 
@@ -775,12 +786,47 @@ Then open `http://127.0.0.1:6780`. The config supplies the pose, MPC settings,
 UQ defaults, `mdm_frames`, per-persona goal presets, and the `llm_cost` backend
 used by the cost-generation stage. With the default config, cost generation
 starts on `llm (single-pass)`; the backend dropdown can still select `turns` or
-`agent`. Stages (each stage's controls unlock once the
-previous one ran):
+`agent`.
+
+**Sessions.** All work happens inside a *session* — one simulated user plus the
+context that accumulates while correcting them: an on-disk trajectory corpus,
+committed correction rounds, and one unified cost. `POST /api/session/start`
+with `{"persona": <name>}` begins one (creating
+`demo_designer_artifacts/<timestamp>_session_<persona>/`
+with `trajectory_corpus/` and `session.json`); trajectories are then spawned
+from the session and carry its learned costs installed from frame 0, so
+corrections compound across trajectories within the same session. The session's
+codex cost generators read its trajectory corpus (every executed segment,
+comfortable or not — see *Grounding cost generation in past comfort* above).
+`POST /api/manual_trajectory/start` now accepts only `arm_aa` and `goal`; the
+persona is fixed by the active session.
+Sessions persist to `session.json` after every mutation and survive a server
+restart: `GET /api/sessions` lists them and `POST /api/session/resume` with
+`{"dir": <session dir>}` reloads one, recompiling every round cost and the
+unified cost from stored code + params + the pickled eval state. A resumed session starts
+with no live trajectory (MPC stepping state is not persisted) but full context.
+`DELETE /api/corpus/<index>` drops one corpus entry. (There is no
+`/api/base_rollout`; base rollouts happen only as the first step of starting a
+trajectory.)
+
+In the browser header, click the session summary to open its dropdown. The
+dropdown starts a new session for a selected persona and lists saved sessions
+with *Resume* and *Delete* actions (`DELETE /api/sessions/<name>`). While no
+session is active, the persona dropdown remains enabled and *Start trajectory*
+is disabled. An active session locks that persona and shows its start time plus
+trajectory, corpus, round, and unified-cost counts. Resuming restores its
+persisted rounds, unified cost, and corpus through `POST /api/session/resume`.
+Starting or resuming replaces the active session, while deleting the active
+session clears the displayed trajectory and accumulated context.
+
+Stages (each stage's controls unlock once the previous one ran):
 
 1. **Scenario** — edit the start arm pose (per-joint axis-angle sliders limited
    to the selected persona's joint boxes, with a live SMPL body preview), the
-   spine3-relative Cartesian goal, and the simulated user. *Start trajectory*
+   spine3-relative Cartesian goal, and the simulated user. Initial poses and
+   goals can each be named, saved, and selected independently; they persist in
+   `demo_designer_trajectory_configs.json` by default, and saving an existing
+   name updates it. *Start trajectory*
    starts one stateful `arm_mpc_cartesian` execution and keeps it open across
    feedback turns. Demo Designer ignores `text_time`; the trajectory advances
    until the selected persona crosses its discomfort threshold and pauses. An
@@ -798,11 +844,13 @@ previous one ran):
    current discomfort event without adding feedback; the trajectory can pause
    again after it returns to comfort and crosses a bound later. The accumulated
    executed trajectory is saved under
-   `demo_designer_artifacts/<timestamp>_trajectory/`. The live planner session
-   is held in server memory and is lost when the server restarts. *Exit trajectory*
-   abandons that live planner and its pending feedback rounds, retains the
-   already-written trajectory artifacts, and unlocks the scenario controls so
-   another persona or trajectory can be started.
+   `demo_designer_artifacts/<timestamp>_session_<persona>/<timestamp>_trajectory/`.
+   The live planner (its MPC stepping state) is held in server memory and is lost
+   when the server restarts, but the session's rounds, unified cost, and corpus
+   persist and can be resumed. *Exit trajectory* abandons the live planner,
+   retains the already-written trajectory artifacts and the session's rounds/costs,
+   and unlocks the scenario controls so another trajectory can be started in the
+   same session (with the learned costs still installed).
 2. **Language correction** — edit the MDM prompt (prefilled with the persona's
    feedback line), sample count, and cluster count; *Generate* draws diffusion
    samples from the feedback-trigger pose (shown as a purple ghost body in
@@ -825,7 +873,8 @@ previous one ran):
    overlaid on the corresponding feature graphs in blue. A *why this cost* disclosure
    shows the interpretation evidence, grounded sources, explanation, and ranking table;
    the same disclosure is retained on each committed round card. Artifacts go to
-   `demo_designer_artifacts/<timestamp>_<backend>/`. The complete browser payload
+   `demo_designer_artifacts/<timestamp>_session_<persona>/<timestamp>_<backend>/`.
+   The complete browser payload
    is also saved as `demo_designer_payload.json`; refreshing the browser restores
    the generated trajectories, overlays, code, and pending Apply action without
    rerunning cost generation. This refresh recovery uses the live server session;
@@ -845,8 +894,14 @@ previous one ran):
    probe pose dependence, give feedback at several goals that span the
    conditioning feature and check the unified penalty field against the
    diagonal oracle limit in the phase plot. Combine artifacts go to
-   `demo_designer_artifacts/<timestamp>_combine/`; the round state lives in
-   server memory and is lost on restart.
+   `demo_designer_artifacts/<timestamp>_session_<persona>/<timestamp>_combine/`;
+   round state is written to the session's `session.json` and is restored when
+   the session is resumed after a restart.
+5. **Trajectory corpus** — lists every session manifest entry with its kind,
+   round, goal, comfortable frame range, and optional trigger/violation. *Delete
+   entry* calls `DELETE /api/corpus/<index>` and immediately re-renders the
+   renumbered manifest. This edits only corpus evidence; committed round and
+   unified-cost controls remain in the preceding session-context panel.
 
 The center panel shows front/side/top SMPL body views with base or accumulated
 multi-turn execution (red), optional
@@ -857,7 +912,9 @@ trajectories are translucent neutral SMPL meshes at the scrubbed frame; wrist tr
 bounds — with a scrubber/play control (arrow keys step, space plays) and
 per-trajectory violation strips aligned under the scrubber. A console panel at
 the bottom streams the server's stdout live, so long stages (MPC rollouts, MDM
-sampling, cost generation) show their progress. The right column plots each
+sampling, cost generation) show their progress. OpenAI-backed cost generation
+also streams the model's opt-in reasoning summary here; raw private reasoning
+is not exposed by the API. The right column plots each
 joint feature over time with the persona's oracle limits shaded in red and
 the generated-cost limits shaded in blue. Both limit overlays have
 independent, default-on toggles. When the persona has a `coupled`
@@ -876,8 +933,10 @@ works for any cost shape and any backend (`llm`/`turns`/`agent`). (The per-featu
 time graphs still shade the declared constant generated bound in blue when the
 backend emits one — that overlay only covers simple single-feature bounds.)
 
-Personas are selectable, editable, and creatable/deletable in the UI (bounds
-editor supports `hidden` and `coupled` bounds over the shared joint features).
+Personas are selectable before starting a session, then locked for that
+session. The edit/new/delete controls remain available (the bounds editor
+supports `hidden` and `coupled` bounds over the shared joint features), and
+editing the active persona immediately re-detects its live trajectory trigger.
 Persona bounds are also editable **directly on the graphs**: drag the red
 bound lines on the per-feature time graphs (handles on the right edge) or the
 two handles on a phase plot's diagonal limit line; each graph has compact

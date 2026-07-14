@@ -1,10 +1,10 @@
-from types import MethodType
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from uncertain_feedback.demo_designer import core
-from uncertain_feedback.demo_designer.core import DemoSession
+from uncertain_feedback.demo_designer import session as demo_session
+from uncertain_feedback.demo_designer.session import Session
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import (
     _LevelPickResult,
@@ -85,44 +85,46 @@ class _DeterministicClusterer:
         return np.arange(len(positions), dtype=np.intp) % self.n_clusters
 
 
-def _demo_session() -> DemoSession:
-    session = DemoSession.__new__(DemoSession)
-    session.samples = np.broadcast_to(
+def _demo_session() -> Session:
+    trajectory = SimpleNamespace()
+    trajectory.samples = np.broadcast_to(
         np.arange(8, dtype=np.float64)[:, None, None, None], (8, 2, 22, 3)
     ).copy()
-    session.cluster_levels = []
-    session.goal = np.zeros(3)
-    session.persona_name = "test"
-    session.gen = _FakeGenerator()
-    session.fk = object()
-    session.context = object()
-    session.spine3_aa = np.zeros(3)
-    session.q_history = []
-    session.labels = None
-    session.cluster_means = {}
-    session.cluster_corrections = {}
-    session.cluster_fulls = {}
-    session.chosen_label = None
-    session.scaled_correction = None
-    session.scale = 1.0
+    trajectory.cluster_levels = []
+    trajectory.goal = np.zeros(3)
+    trajectory.q_history = []
+    trajectory.labels = None
+    trajectory.cluster_means = {}
+    trajectory.cluster_corrections = {}
+    trajectory.cluster_fulls = {}
+    trajectory.chosen_label = None
+    trajectory.scaled_correction = None
+    trajectory.scale = 1.0
     user = SimulatedUser("test", "", "", bounds=())
-    session.get_persona = MethodType(lambda self, _name: user, session)
-    session._cfg_with_goal = MethodType(lambda self, _goal: object(), session)
-    session.package_trajectory = MethodType(
-        lambda self, traj, _user: {"n_frames": len(traj)}, session
+    rig = SimpleNamespace(
+        gen=_FakeGenerator(),
+        fk=object(),
+        context=object(),
+        spine3_aa=np.zeros(3),
+        _cfg_with_goal=lambda goal: object(),
+        package_trajectory=lambda traj, selected: {"n_frames": len(traj)},
     )
+    session = Session.__new__(Session)
+    session.rig = rig
+    session.user = user
+    session.trajectory = trajectory
     return session
 
 
 def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
-    monkeypatch.setattr(core, "XyzPositionClusterer", _DeterministicClusterer)
+    monkeypatch.setattr(demo_session, "XyzPositionClusterer", _DeterministicClusterer)
     monkeypatch.setattr(
-        core,
+        demo_session,
         "oracle_cluster_scores",
         lambda _user, _context, means, _scale: {label: float(label) for label in means},
     )
-    monkeypatch.setattr(core, "violation_metrics", lambda *_args: {})
-    monkeypatch.setattr(core, "goal_reach", lambda *_args: {"reached": True})
+    monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
+    monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
     session = _demo_session()
 
     root = session.recluster(2, 0.9)
@@ -145,7 +147,7 @@ def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
     assert parent["depth"] == 1
     assert parent["selected_label"] == 0
     assert parent["scale"] == 0.9
-    assert session.scaled_correction is not None
+    assert session.trajectory.scaled_correction is not None
     root_again = session.back_cluster()
     assert root_again["depth"] == 0
     assert root_again["selected_label"] == 0
@@ -153,14 +155,14 @@ def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
 
 
 def test_demo_designer_reclusters_only_current_subset(monkeypatch) -> None:
-    monkeypatch.setattr(core, "XyzPositionClusterer", _DeterministicClusterer)
+    monkeypatch.setattr(demo_session, "XyzPositionClusterer", _DeterministicClusterer)
     monkeypatch.setattr(
-        core,
+        demo_session,
         "oracle_cluster_scores",
         lambda _user, _context, means, _scale: {label: float(label) for label in means},
     )
-    monkeypatch.setattr(core, "violation_metrics", lambda *_args: {})
-    monkeypatch.setattr(core, "goal_reach", lambda *_args: {"reached": True})
+    monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
+    monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
     session = _demo_session()
     session.recluster(2, 1.0)
     session.pick_cluster(1)

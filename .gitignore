@@ -13,6 +13,8 @@ experiment_artifacts/
 agent_handoffs/
 transfer_artifacts/
 paper/
+demo_designer_artifacts/
+demo_designer_trajectory_configs.json
 
 .DS_Store
 .python-version

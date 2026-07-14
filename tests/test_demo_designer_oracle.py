@@ -1,16 +1,18 @@
 import json
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import numpy as np
 
-from uncertain_feedback.demo_designer import core
 from uncertain_feedback.demo_designer import server as demo_server
-from uncertain_feedback.demo_designer.core import (
-    DemoSession,
+from uncertain_feedback.demo_designer import session as demo_session
+from uncertain_feedback.demo_designer.core import DemoRig
+from uncertain_feedback.demo_designer.session import (
+    Session,
     _rationale_from_artifacts,
 )
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
-from uncertain_feedback.simulated_users import HiddenCostTerm
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost, CostRound
+from uncertain_feedback.simulated_users import HiddenCostTerm, SimulatedUser
 
 
 def test_rationale_from_artifacts_round_trip(tmp_path) -> None:
@@ -38,31 +40,49 @@ def test_artifact_route_serves_only_artifact_root(monkeypatch, tmp_path) -> None
     assert client.get("/api/artifact/%2e%2e/outside.json").status_code == 404
 
 
+def test_manual_trajectory_requires_session(monkeypatch) -> None:
+    monkeypatch.setattr(demo_server, "rig", SimpleNamespace(session=None))
+    client = demo_server.app.test_client()
+
+    response = client.post(
+        "/api/manual_trajectory/start",
+        json={"arm_aa": np.zeros((3, 3)).tolist(), "goal": [0.1, 0.2, 0.3]},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": "No active session. Start or resume a session first."
+    }
+
+
 def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch) -> None:
-    session = DemoSession.__new__(DemoSession)
-    session.context = object()
-    session.body_pos = np.zeros((22, 3))
-    session.spine3_pos = np.zeros(3)
-    session.spine3_aa = np.zeros(3)
-    session.persona_name = "persona"
-    session.start_arm_aa = np.full((3, 3), 9.0)
-    session.goal = np.array([0.1, 0.2, 0.3])
-    session.q_feedback = np.full((3, 3), 2.0)
-    session.q_history = [
-        np.full((3, 3), 0.0),
-        np.full((3, 3), 1.0),
-        session.q_feedback,
-    ]
-    session.oracle_traj = None
-    session.oracle_source = None
-    session.get_persona = MethodType(lambda self, name: object(), session)
-    session._cfg_with_goal = MethodType(lambda self, goal: object(), session)
-    session._extra_costs = MethodType(
-        lambda self, user: CompositeTrajectoryCost([]), session
+    user = SimulatedUser("persona", "", "", bounds=())
+    rig = SimpleNamespace(
+        context=object(),
+        body_pos=np.zeros((22, 3)),
+        spine3_pos=np.zeros(3),
+        spine3_aa=np.zeros(3),
+        _cfg_with_goal=lambda goal: object(),
+        _extra_costs=lambda selected: CompositeTrajectoryCost([]),
+        package_trajectory=lambda traj, selected: {"values": traj[:, 0, 0].tolist()},
     )
-    session.package_trajectory = MethodType(
-        lambda self, traj, user: {"values": traj[:, 0, 0].tolist()}, session
+    q_feedback = np.full((3, 3), 2.0)
+    trajectory = SimpleNamespace(
+        start_arm_aa=np.full((3, 3), 9.0),
+        goal=np.array([0.1, 0.2, 0.3]),
+        q_feedback=q_feedback,
+        q_history=[
+            np.full((3, 3), 0.0),
+            np.full((3, 3), 1.0),
+            q_feedback,
+        ],
+        oracle_traj=None,
+        oracle_source=None,
     )
+    session = Session.__new__(Session)
+    session.rig = rig
+    session.user = user
+    session.trajectory = trajectory
     calls = []
 
     def fake_rollout(*args, **kwargs):
@@ -72,15 +92,15 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch) -> None
         result[:, 0, 0] = [start, start + 1]
         return result
 
-    monkeypatch.setattr(core, "rollout_to_goal", fake_rollout)
-    monkeypatch.setattr(core, "violation_metrics", lambda *args: {})
-    monkeypatch.setattr(core, "goal_reach", lambda *args: {})
+    monkeypatch.setattr(demo_session, "rollout_to_goal", fake_rollout)
+    monkeypatch.setattr(demo_session, "violation_metrics", lambda *args: {})
+    monkeypatch.setattr(demo_session, "goal_reach", lambda *args: {})
 
     initial = session.run_oracle(from_trigger=False)
     trigger = session.run_oracle(from_trigger=True)
 
-    np.testing.assert_array_equal(calls[0][0][1], session.start_arm_aa)
-    np.testing.assert_array_equal(calls[1][0][1], session.q_feedback)
+    np.testing.assert_array_equal(calls[0][0][1], trajectory.start_arm_aa)
+    np.testing.assert_array_equal(calls[1][0][1], trajectory.q_feedback)
     assert isinstance(calls[0][0][4].terms()[-1], HiddenCostTerm)
     assert initial["source"] == "initial"
     assert initial["trajectory"]["values"] == [9.0, 10.0]
@@ -88,105 +108,88 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch) -> None
     assert trigger["trajectory"]["values"] == [0.0, 1.0, 2.0, 3.0]
 
 
-def test_oracle_rollout_resumes_from_feedback_pose(monkeypatch) -> None:
-    session = DemoSession.__new__(DemoSession)
-    session.unified_cost = None
-    session.context = object()
-    session.body_pos = np.zeros((22, 3))
-    session.spine3_pos = np.zeros(3)
-    session.spine3_aa = np.zeros(3)
-    session.get_persona = MethodType(lambda self, name: object(), session)
-    session._cfg_with_goal = MethodType(lambda self, goal: object(), session)
-    session._extra_costs = MethodType(
-        lambda self, user: CompositeTrajectoryCost([]), session
-    )
-    session.package_trajectory = MethodType(
-        lambda self, traj, user: {"values": traj[:, 0, 0].tolist()}, session
-    )
-
-    base = np.zeros((3, 3, 3))
-    base[:, 0, 0] = [0.0, 1.0, 2.0]
-    continuation = np.zeros((2, 3, 3))
-    continuation[:, 0, 0] = [1.0, 3.0]
-    calls = []
-
-    def fake_rollout(*args, **kwargs):
-        calls.append((args, kwargs))
-        return base if len(calls) == 1 else continuation
-
-    def fake_set_trigger(self, user, traj) -> None:
-        self.trigger_step = 1
-        self.q_feedback = traj[1]
-        self.q_history = [traj[0], traj[1]]
-
-    session._set_trigger = MethodType(fake_set_trigger, session)
-    monkeypatch.setattr(core, "rollout_to_goal", fake_rollout)
-    monkeypatch.setattr(core, "violation_metrics", lambda *args: {})
-    monkeypatch.setattr(core, "goal_reach", lambda *args: {})
-
-    result = session.run_base(
-        np.zeros((3, 3)).tolist(),
-        [0.1, 0.2, 0.3],
-        "persona",
-        show_oracle=True,
-    )
-
-    np.testing.assert_array_equal(calls[1][0][1], base[1])
-    assert isinstance(calls[1][0][4].terms()[-1], HiddenCostTerm)
-    assert result["oracle"]["trajectory"]["values"] == [0.0, 1.0, 3.0]
-
-
-def test_combine_rounds_rolls_unified_cost_from_start(monkeypatch, tmp_path) -> None:
+def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
+    monkeypatch, tmp_path
+) -> None:
     class CombinedCost:
         description = "combined"
         code = "def cost(): pass"
+        params: dict[str, float] = {}
 
         def __call__(self, q_trajs):
             return np.zeros(q_trajs.shape[0])
 
     combined = CombinedCost()
+    constructor_args = {}
 
     class FakeCombinator:
         def __init__(self, **kwargs) -> None:
-            del kwargs
+            constructor_args.update(kwargs)
 
         def generate(self, install):
-            del install
+            assert install is False
             return combined
 
-    session = DemoSession.__new__(DemoSession)
-    session.rounds = [
-        SimpleNamespace(feedback_text="first"),
-        SimpleNamespace(feedback_text="second"),
+    eval_state = SimpleNamespace(
+        make_generated_context=lambda: "persisted context",
+        make_rollout_fn=lambda: "persisted rollout",
+    )
+
+    class FakeEvalState:
+        @classmethod
+        def load(cls, path):
+            assert path == tmp_path / "second.pkl"
+            return eval_state
+
+    rounds = [
+        SimpleNamespace(
+            feedback_text="first",
+            state_path=tmp_path / "first.pkl",
+            summaries={"round": 1},
+            image_paths=(),
+        ),
+        SimpleNamespace(
+            feedback_text="second",
+            state_path=tmp_path / "second.pkl",
+            summaries={"round": 2},
+            image_paths=(tmp_path / "second.png",),
+        ),
     ]
+    planner = SimpleNamespace(set_extra_costs=lambda costs: None)
+    trajectory = SimpleNamespace(
+        goal=np.array([0.1, 0.2, 0.3]),
+        start_arm_aa=np.ones((3, 3)),
+        mpc=planner,
+        base_traj=np.zeros((1, 3, 3)),
+        cluster_fulls={},
+        cluster_corrections={},
+    )
+    rig = SimpleNamespace(
+        cfg=SimpleNamespace(
+            llm_cost=SimpleNamespace(
+                use_images=False,
+                model=None,
+                strict=True,
+                codex_cmd="codex",
+            )
+        ),
+        context=object(),
+        body_pos=np.zeros((22, 3)),
+        spine3_pos=np.zeros(3),
+        spine3_aa=np.zeros(3),
+        _cfg_with_goal=lambda goal: object(),
+        _extra_costs=lambda user: CompositeTrajectoryCost([]),
+        package_trajectory=lambda traj, user: {"values": traj[:, 0, 0].tolist()},
+    )
+    session = Session.__new__(Session)
+    session.rig = rig
+    session.user = object()
+    session.rounds = rounds
     session.round_records = []
-    session.goal = np.array([0.1, 0.2, 0.3])
-    session.start_arm_aa = np.ones((3, 3))
-    session.persona_name = "persona"
-    session.context = object()
-    session.body_pos = np.zeros((22, 3))
-    session.spine3_pos = np.zeros(3)
-    session.spine3_aa = np.zeros(3)
-    session.cfg = SimpleNamespace(
-        llm_cost=SimpleNamespace(
-            use_images=False,
-            model=None,
-            strict=True,
-            codex_cmd="codex",
-        )
-    )
-    eval_state = SimpleNamespace(make_rollout_fn=lambda: None)
-    session._latest_round_generation = SimpleNamespace(
-        generated_context=object(), summaries={}, images={}, eval_state=eval_state
-    )
-    session.get_persona = MethodType(lambda self, name: object(), session)
-    session._cfg_with_goal = MethodType(lambda self, goal: object(), session)
-    session._extra_costs = MethodType(
-        lambda self, user: CompositeTrajectoryCost([]), session
-    )
-    session.package_trajectory = MethodType(
-        lambda self, traj, user: {"values": traj[:, 0, 0].tolist()}, session
-    )
+    session.trajectory = trajectory
+    session.dir = tmp_path
+    session.corpus = SimpleNamespace(dir=tmp_path / "trajectory_corpus")
+    session._save = MethodType(lambda self: None, session)
     session.generated_cost_field = MethodType(lambda self, cost: {}, session)
     rollout = np.zeros((2, 3, 3))
     calls = []
@@ -195,14 +198,152 @@ def test_combine_rounds_rolls_unified_cost_from_start(monkeypatch, tmp_path) -> 
         calls.append((args, kwargs))
         return rollout
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(core, "CombineCostGenerator", FakeCombinator)
-    monkeypatch.setattr(core, "rollout_to_goal", fake_rollout)
-    monkeypatch.setattr(core, "violation_metrics", lambda *args: {})
-    monkeypatch.setattr(core, "goal_reach", lambda *args: {})
+    monkeypatch.setattr(demo_session, "CombineCostGenerator", FakeCombinator)
+    monkeypatch.setattr(demo_session, "EvalState", FakeEvalState)
+    monkeypatch.setattr(demo_session, "rollout_to_goal", fake_rollout)
+    monkeypatch.setattr(demo_session, "violation_metrics", lambda *args: {})
+    monkeypatch.setattr(demo_session, "goal_reach", lambda *args: {})
 
     result = session.combine_rounds()
 
-    np.testing.assert_array_equal(calls[0][0][1], session.start_arm_aa)
+    assert constructor_args["context"] == "persisted context"
+    assert constructor_args["rollout_fn"] == "persisted rollout"
+    assert constructor_args["summaries"] == {"round": 2}
+    assert constructor_args["images"] == {"second.png": tmp_path / "second.png"}
+    np.testing.assert_array_equal(calls[0][0][1], trajectory.start_arm_aa)
     assert calls[0][1]["progress_label"] == "unified-from-start"
     assert result["trajectory"]["values"] == [0.0, 0.0]
+
+
+def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) -> None:
+    code = """def cost(q_trajs, context, params):
+    return q_trajs[:, 0, 0, 0] * 0.0 + params[\"weight\"]
+"""
+    session_dir = tmp_path / "20260713_120000_session_persona"
+    corpus_dir = session_dir / "trajectory_corpus"
+    corpus_dir.mkdir(parents=True)
+    (corpus_dir / "manifest.json").write_text("[]", encoding="utf-8")
+    cost_round = CostRound(
+        index=0,
+        goal=(0.1, 0.2, 0.3),
+        feedback_text="feedback",
+        trigger_step=2,
+        round_dir=session_dir / "round",
+        state_path=session_dir / "round" / "state.pkl",
+        cost_code=code,
+        params={"weight": 2.0},
+        summaries={},
+        image_paths=(),
+        description="round cost",
+        explanation="why",
+        interpretation="preference",
+        grounding="threshold",
+    )
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "persona": "persona",
+                "started": "2026-07-13 12:00:00",
+                "trajectory_count": 2,
+                "rounds": [cost_round.to_json()],
+                "unified": {
+                    "code": code,
+                    "params": {"weight": 3.0},
+                    "description": "unified cost",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    user = SimulatedUser("persona", "", "", bounds=())
+    rig = SimpleNamespace(context=object(), get_persona=lambda name: user)
+    generated_context = object()
+
+    class FakeEvalState:
+        @classmethod
+        def load(cls, path):
+            assert path == cost_round.state_path
+            return SimpleNamespace(make_generated_context=lambda: generated_context)
+
+    monkeypatch.setattr(demo_session, "EvalState", FakeEvalState)
+
+    loaded = Session.load(rig, session_dir)
+
+    assert loaded.trajectory is None
+    assert loaded.trajectory_count == 2
+    assert loaded.rounds[0].grounding == "threshold"
+    q_trajs = np.zeros((2, 1, 3, 3))
+    np.testing.assert_array_equal(loaded._round_costs[0](q_trajs), [2.0, 2.0])
+    np.testing.assert_array_equal(loaded.unified_cost(q_trajs), [3.0, 3.0])
+
+
+def test_list_sessions_is_newest_first_with_context_counts(
+    monkeypatch, tmp_path
+) -> None:
+    root = tmp_path / "demo_designer_artifacts"
+    for name, round_count, corpus_count in [
+        ("20260713_120000_session_old", 1, 2),
+        ("20260713_130000_session_new", 3, 4),
+    ]:
+        path = root / name
+        corpus_dir = path / "trajectory_corpus"
+        corpus_dir.mkdir(parents=True)
+        (path / "session.json").write_text(
+            json.dumps(
+                {
+                    "persona": "persona",
+                    "started": name[:15],
+                    "trajectory_count": 2,
+                    "rounds": [{}] * round_count,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (corpus_dir / "manifest.json").write_text(
+            json.dumps([{}] * corpus_count), encoding="utf-8"
+        )
+    elsewhere = tmp_path / "changed_working_directory"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    rig = DemoRig.__new__(DemoRig)
+    rig.artifact_root = root
+
+    sessions = rig.list_sessions()
+
+    assert [Path(item["dir"]).name for item in sessions] == [
+        "20260713_130000_session_new",
+        "20260713_120000_session_old",
+    ]
+    assert sessions[0]["round_count"] == 3
+    assert sessions[0]["corpus_count"] == 4
+    assert sessions[0]["name"] == "20260713_130000_session_new"
+
+
+def test_delete_session_removes_directory_and_clears_active(tmp_path) -> None:
+    root = tmp_path / "demo_designer_artifacts"
+    session_dir = root / "20260713_130000_session_persona"
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.json").write_text("{}", encoding="utf-8")
+    rig = DemoRig.__new__(DemoRig)
+    rig.artifact_root = root
+    rig.session = SimpleNamespace(dir=session_dir)
+
+    result = rig.delete_session(session_dir.name)
+
+    assert not session_dir.exists()
+    assert rig.session is None
+    assert result == {"sessions": [], "active_deleted": True}
+
+
+def test_delete_session_rejects_paths_outside_artifact_root(tmp_path) -> None:
+    root = tmp_path / "demo_designer_artifacts"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "session.json").write_text("{}", encoding="utf-8")
+    rig = DemoRig.__new__(DemoRig)
+    rig.artifact_root = root
+    rig.session = None
+
+    with np.testing.assert_raises_regex(ValueError, "Unknown session"):
+        rig.delete_session("../outside")

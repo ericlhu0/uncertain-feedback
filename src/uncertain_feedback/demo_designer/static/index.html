@@ -9,6 +9,17 @@
 <body>
 <header>
   <h1>Demo Designer</h1>
+  <div id="session-bar">
+    <button id="session-summary" type="button" aria-haspopup="true"
+            aria-expanded="false" aria-controls="session-dropdown">No active session</button>
+    <div id="session-dropdown">
+      <div class="session-new-row">
+        <select id="session-new-persona" aria-label="Simulated user for new session"></select>
+        <button id="session-new-start" class="primary">Start new session</button>
+      </div>
+      <div id="session-picker"></div>
+    </div>
+  </div>
   <label for="persona-select">Simulated user</label>
   <select id="persona-select"></select>
   <button id="persona-edit">Edit</button>
@@ -21,12 +32,28 @@
   <div id="controls">
     <div class="panel">
       <h2>1 &middot; Scenario</h2>
+      <div class="row config-select-row">
+        <label for="initial-pose-config">Initial pose</label>
+        <select id="initial-pose-config"></select>
+      </div>
+      <div class="row config-save-row">
+        <input type="text" id="initial-pose-config-name" placeholder="Name this pose">
+        <button id="save-initial-pose-config">Save pose</button>
+      </div>
       <div class="joint-grid" id="arm-editor"></div>
+      <div class="row config-select-row" style="margin-top:8px">
+        <label for="goal-config">Goal config</label>
+        <select id="goal-config"></select>
+      </div>
       <div class="row" style="margin-top:8px">
         <label>Goal (m)</label>
         <input type="number" id="goal-x" step="0.02">
         <input type="number" id="goal-y" step="0.02">
         <input type="number" id="goal-z" step="0.02">
+      </div>
+      <div class="row config-save-row">
+        <input type="text" id="goal-config-name" placeholder="Name this goal">
+        <button id="save-goal-config">Save goal</button>
       </div>
       <div class="hint">Goal is the spine3-relative wrist target. Start wrist: <span id="wrist-rel">?</span></div>
       <div class="row">
@@ -86,7 +113,7 @@
     </div>
 
     <div class="panel">
-      <h2>4 &middot; Multi-round feedback</h2>
+      <h2>4 &middot; Session costs &amp; feedback</h2>
       <div class="row">
         <button id="apply-round" class="primary" disabled>Apply feedback + continue trajectory</button>
       </div>
@@ -98,6 +125,12 @@
       <div class="hint">In multi-turn mode, Apply feedback + continue installs the chosen correction and cost, then advances the same trajectory to its next trigger. Remove unwanted feedback from its round card before combining; removal changes future planning and combination, but does not rewind already executed frames.</div>
       <div id="round-list"></div>
       <div id="unified-output"></div>
+    </div>
+
+    <div class="panel">
+      <h2>5 &middot; Trajectory corpus</h2>
+      <div class="hint">Executed session history used by codex cost generation. Comfortable frames precede the first discomfort report.</div>
+      <div id="corpus-list"></div>
     </div>
   </div>
 
@@ -125,8 +158,8 @@
   <div id="graphs"></div>
 </div>
 
-<div id="modal-backdrop">
-  <div id="persona-modal">
+<div id="modal-backdrop" class="modal-backdrop">
+  <div id="persona-modal" class="modal-card">
     <h2 id="modal-title">Persona</h2>
     <div class="row"><label>Name</label><input type="text" id="p-name"></div>
     <div class="row"><label>Feedback</label><input type="text" id="p-feedback"></div>

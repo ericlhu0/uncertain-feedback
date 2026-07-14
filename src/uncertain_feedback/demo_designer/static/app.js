@@ -7,6 +7,8 @@ import * as THREE from "three";
 let INIT = null;
 let personas = [];
 let currentPersona = null;
+let session = null;
+let trajectoryConfigs = { initial_poses: [], goals: [] };
 
 // key -> {data: packaged trajectory, color, label, visible}
 const trajs = {};
@@ -51,6 +53,7 @@ let playing = false;
 let lastTick = 0;
 
 const TRAJ_STYLES = {
+  clean_base: { color: "#6b7280", label: "baseline (box limits, no feedback)" },
   base: { color: "#e05252", label: "base rollout" },
   oracle: { color: "#9c5f17", label: "oracle-cost rollout" },
   full: { color: "#0e7a63", label: "full corrected path" },
@@ -308,6 +311,72 @@ function schedulePreview() {
 }
 
 // ---------------------------------------------------------------------------
+// Named initial-pose and goal configs
+// ---------------------------------------------------------------------------
+
+function refreshTrajectoryConfigSelects() {
+  const populate = (id, configs, placeholder) => {
+    const select = $(id);
+    const selected = select.value;
+    select.innerHTML = `<option value="">${placeholder}</option>`;
+    for (const config of configs) {
+      const option = document.createElement("option");
+      option.value = config.name;
+      option.textContent = config.name;
+      select.appendChild(option);
+    }
+    select.value = configs.some((config) => config.name === selected) ? selected : "";
+  };
+  populate("initial-pose-config", trajectoryConfigs.initial_poses, "Configured default / current");
+  populate("goal-config", trajectoryConfigs.goals, "Persona default / current");
+}
+
+function selectInitialPoseConfig(name) {
+  if (!name) {
+    $("initial-pose-config-name").value = "";
+    setArmEditorValues(INIT.start_arm_aa);
+    return;
+  }
+  const config = trajectoryConfigs.initial_poses.find((item) => item.name === name);
+  $("initial-pose-config-name").value = config.name;
+  setArmEditorValues(config.arm_aa);
+}
+
+function selectGoalConfig(name) {
+  if (!name) {
+    $("goal-config-name").value = "";
+    const goals = INIT.persona_goals[currentPersona];
+    const goal = goals && goals.cartesian.length ? goals.cartesian[0] : INIT.default_goal;
+    [$("goal-x").value, $("goal-y").value, $("goal-z").value] = goal.map((v) => v.toFixed(2));
+  } else {
+    const config = trajectoryConfigs.goals.find((item) => item.name === name);
+    $("goal-config-name").value = config.name;
+    [$("goal-x").value, $("goal-y").value, $("goal-z").value] =
+      config.goal.map((v) => Number(v).toFixed(3));
+  }
+  renderAll();
+}
+
+async function saveTrajectoryConfig(kind) {
+  const isPose = kind === "initial_poses";
+  const nameInput = $(isPose ? "initial-pose-config-name" : "goal-config-name");
+  const name = nameInput.value.trim();
+  if (!name) {
+    setStatus("config name required", "error");
+    return;
+  }
+  const payload = isPose ? { name, arm_aa: armAA } : { name, goal: getGoal() };
+  const data = await api(
+    `/api/trajectory-configs/${kind}`,
+    payload,
+    `saving ${isPose ? "initial pose" : "goal"}`,
+  );
+  trajectoryConfigs = data.trajectory_configs;
+  refreshTrajectoryConfigSelects();
+  $(isPose ? "initial-pose-config" : "goal-config").value = name;
+}
+
+// ---------------------------------------------------------------------------
 // Personas
 // ---------------------------------------------------------------------------
 
@@ -333,6 +402,8 @@ function onPersonaChange(name) {
   const goals = INIT.persona_goals[name];
   const goal = goals && goals.cartesian.length ? goals.cartesian[0] : INIT.default_goal;
   [$("goal-x").value, $("goal-y").value, $("goal-z").value] = goal.map((v) => v.toFixed(2));
+  $("goal-config").value = "";
+  $("goal-config-name").value = "";
   const currentArmAA = armAA;
   buildArmEditor();
   setArmEditorValues(currentArmAA.map((row, j) =>
@@ -443,14 +514,15 @@ async function savePersona() {
   };
   const data = await api("/api/personas", payload, "saving persona");
   personas = data.personas;
-  currentPersona = name;
+  currentPersona = session ? session.persona : name;
   refreshPersonaSelect();
   if (data.retriggered) {
     baseTrigger = data.trigger_step;
     applyTriggerHint(data.trigger_step);
   }
-  onPersonaChange(name);
+  onPersonaChange(currentPersona);
   $("modal-backdrop").classList.remove("open");
+  renderSession();
   if (editingBuiltin) setStatus("built-in persona edited in memory only (until restart)");
 }
 
@@ -459,15 +531,236 @@ async function savePersona() {
 // ---------------------------------------------------------------------------
 
 function setScenarioLocked(locked) {
-  for (const id of ["persona-select", "persona-edit", "persona-new", "persona-delete",
-    "goal-x", "goal-y", "goal-z", "reset-pose"]) {
+  for (const id of ["goal-x", "goal-y", "goal-z", "reset-pose",
+    "initial-pose-config", "initial-pose-config-name", "save-initial-pose-config",
+    "goal-config", "goal-config-name", "save-goal-config"]) {
     $(id).disabled = locked;
   }
   for (const input of document.querySelectorAll("#arm-editor input")) input.disabled = locked;
+  $("persona-select").disabled = Boolean(session);
 }
 
-async function runBase() {
-  await startManualTrajectory();
+function renderCorpus() {
+  const list = $("corpus-list");
+  list.innerHTML = "";
+  if (!session) {
+    list.innerHTML = '<div class="hint">Start or resume a session to view its corpus.</div>';
+    return;
+  }
+  if (!session.corpus.length) {
+    list.innerHTML = '<div class="hint">No executed trajectory segments yet.</div>';
+    return;
+  }
+  for (const entry of session.corpus) {
+    const div = document.createElement("div");
+    div.className = "corpus-card";
+    const goal = entry.goal.map((v) => Number(v).toFixed(2)).join(", ");
+    const trigger = entry.trigger_step === null
+      ? "no trigger"
+      : `trigger @ ${entry.trigger_step} (${Number(entry.trigger_violation).toFixed(3)})`;
+    const details = document.createElement("div");
+    details.textContent = `#${entry.index} · ${entry.kind} · round ${entry.round + 1} · ` +
+      `goal [${goal}] · comfortable 0–${entry.comfortable_until} of ${entry.n_frames} frames · ${trigger}`;
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "Delete entry";
+    remove.onclick = () => deleteCorpusEntry(entry.index);
+    div.appendChild(details);
+    div.appendChild(remove);
+    list.appendChild(div);
+  }
+}
+
+function renderSession() {
+  const summary = $("session-summary");
+  if (session) {
+    summary.innerHTML = `<span><b>${escapeHtml(session.persona)}</b> · ${escapeHtml(session.started)}</span>` +
+      `<span>${session.trajectory_count} trajectories · ${session.corpus.length} corpus entries · ` +
+      `${rounds.length} rounds · unified: ${unified ? "yes" : "no"}</span>`;
+  } else {
+    summary.textContent = "No active session";
+  }
+  $("persona-select").disabled = Boolean(session);
+  const paused = Boolean(session && session.trajectory && session.trajectory.status === "paused");
+  $("run-base").disabled = !session || paused;
+  $("run-base").title = session ? "" : "Start or resume a session first";
+  renderCorpus();
+}
+
+function closeSessionDropdown() {
+  $("session-dropdown").classList.remove("open");
+  $("session-summary").setAttribute("aria-expanded", "false");
+}
+
+function renderSessionPicker(sessions) {
+  const picker = $("session-picker");
+  picker.innerHTML = "";
+  if (!sessions.length) {
+    picker.innerHTML = '<div class="hint">No saved sessions found.</div>';
+    return;
+  }
+  for (const item of sessions) {
+    const card = document.createElement("div");
+    card.className = "session-picker-card";
+    const details = document.createElement("div");
+    details.textContent = `${item.persona} · ${item.started} · ${item.trajectory_count} trajectories · ` +
+      `${item.corpus_count} corpus entries · ${item.round_count} rounds`;
+    const actions = document.createElement("div");
+    actions.className = "session-picker-actions";
+    const resume = document.createElement("button");
+    resume.className = "primary";
+    resume.textContent = "Resume";
+    resume.onclick = () => resumeSession(item.dir);
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "Delete";
+    remove.onclick = () => deleteSession(item);
+    actions.appendChild(resume);
+    actions.appendChild(remove);
+    card.appendChild(details);
+    card.appendChild(actions);
+    picker.appendChild(card);
+  }
+}
+
+async function openSessionDropdown() {
+  const dropdown = $("session-dropdown");
+  const opening = !dropdown.classList.contains("open");
+  if (!opening) {
+    closeSessionDropdown();
+    return;
+  }
+  const personaPicker = $("session-new-persona");
+  personaPicker.innerHTML = $("persona-select").innerHTML;
+  personaPicker.value = currentPersona;
+  dropdown.classList.add("open");
+  $("session-summary").setAttribute("aria-expanded", "true");
+  $("session-picker").innerHTML = '<div class="hint">Loading saved sessions…</div>';
+  renderSessionPicker(await api("/api/sessions", undefined, "loading sessions"));
+}
+
+function syncSessionContext(data) {
+  if (!session) return;
+  if (Object.hasOwn(data, "trajectory_count")) {
+    session.trajectory_count = data.trajectory_count;
+  }
+  if (Object.hasOwn(data, "corpus")) session.corpus = data.corpus;
+  if (Object.hasOwn(data, "rounds")) {
+    rounds = data.rounds;
+    session.rounds = data.rounds;
+  }
+  if (Object.hasOwn(data, "unified")) {
+    unified = data.unified;
+    session.unified = data.unified;
+  }
+  renderSession();
+}
+
+function clearTrajectoryUi() {
+  multiTurnActive = false;
+  baseTrigger = null;
+  clusters = [];
+  selectedCluster = null;
+  selectedClusterSegments = null;
+  resetClusterNavigation();
+  generatedBounds = [];
+  costField = null;
+  unifiedCostField = null;
+  clearTraj(...Object.keys(trajs));
+  showStart = true;
+  showMdmStart = false;
+  setScenarioLocked(false);
+  $("exit-trajectory").disabled = true;
+  for (const id of ["run-trigger-oracle", "ignore-violation", "generate", "recluster",
+    "generate-cost", "commit-round", "apply-round"]) {
+    $(id).disabled = true;
+  }
+  $("trajectory-session").className = "trajectory-session";
+  $("trajectory-session").textContent = "";
+  $("base-metrics").textContent = "";
+  $("oracle-metrics").textContent = "";
+  $("correction-metrics").textContent = "";
+  $("cost-output").innerHTML = "";
+  renderClusterList();
+}
+
+function hydrateTrajectory(data) {
+  multiTurnActive = true;
+  setTraj("base", data.trajectory);
+  if (data.oracle) {
+    setTraj("oracle", data.oracle.trajectory);
+    renderOracleMetrics(data.oracle);
+  }
+  if (data.clean_base) setTraj("clean_base", data.clean_base);
+  baseTrigger = data.trigger ? data.trigger.step : null;
+  renderTrajectorySession(data);
+  setScenarioLocked(data.status === "paused");
+  $("exit-trajectory").disabled = false;
+  $("generate").disabled = data.status !== "paused";
+  $("run-trigger-oracle").disabled = data.status !== "paused";
+  $("ignore-violation").disabled = data.status !== "paused" ||
+    data.trigger.reason !== "discomfort";
+  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
+    `\nexecuted ${data.step}/${data.step_limit} steps`;
+  if (data.pending_cost) {
+    renderCostGeneration(data.pending_cost);
+    $("commit-round").disabled = multiTurnActive;
+    $("apply-round").disabled = !multiTurnActive;
+  }
+}
+
+function activateSession(data) {
+  session = data;
+  rounds = data.rounds || [];
+  unified = data.unified || null;
+  currentPersona = data.persona;
+  refreshPersonaSelect();
+  onPersonaChange(currentPersona);
+  clearTrajectoryUi();
+  if (data.trajectory) hydrateTrajectory(data.trajectory);
+  renderRounds();
+  renderUnifiedOutput();
+  renderSession();
+  refreshLegend(); refreshTimeline(); renderAll();
+}
+
+async function newSession(persona) {
+  const data = await api(
+    "/api/session/start",
+    { persona: persona || currentPersona },
+    "starting session",
+  );
+  closeSessionDropdown();
+  activateSession(data);
+}
+
+async function resumeSession(dir) {
+  const data = await api("/api/session/resume", { dir }, "resuming session");
+  closeSessionDropdown();
+  activateSession(data);
+}
+
+async function deleteSession(item) {
+  if (!window.confirm(`Delete session ${item.persona} from ${item.started}?`)) return;
+  const data = await apiDelete(
+    `/api/sessions/${encodeURIComponent(item.name)}`,
+    "deleting session",
+  );
+  if (data.active_deleted) {
+    session = null;
+    rounds = [];
+    unified = null;
+    clearTrajectoryUi();
+    renderRounds();
+    renderUnifiedOutput();
+    renderSession();
+  }
+  renderSessionPicker(data.sessions);
+}
+
+async function deleteCorpusEntry(index) {
+  const data = await apiDelete(`/api/corpus/${index}`, "deleting corpus entry");
+  syncSessionContext(data);
 }
 
 function renderTrajectorySession(data) {
@@ -491,16 +784,16 @@ async function startManualTrajectory() {
   const data = await api("/api/manual_trajectory/start", {
     arm_aa: armAA,
     goal: getGoal(),
-    persona: currentPersona,
   }, "advancing trajectory to the next feedback trigger");
+  session.trajectory = data;
+  syncSessionContext(data);
   multiTurnActive = true;
-  rounds = data.rounds;
-  unified = data.unified;
   unifiedCostField = null;
   clearTraj("base", "oracle", "correction", "full", "generated", "generated_start");
   clearTraj("unified");
   setTraj("base", data.trajectory);
   setTraj("oracle", data.oracle.trajectory);
+  if (data.clean_base) setTraj("clean_base", data.clean_base);
   baseTrigger = data.trigger ? data.trigger.step : null;
   showStart = false;
   clusters = [];
@@ -533,10 +826,9 @@ async function startManualTrajectory() {
 
 async function exitManualTrajectory() {
   const data = await api("/api/manual_trajectory/exit", {}, "exiting trajectory");
+  session.trajectory = null;
   multiTurnActive = false;
   baseTrigger = null;
-  rounds = [];
-  unified = null;
   unifiedCostField = null;
   clusters = [];
   selectedCluster = null;
@@ -548,8 +840,6 @@ async function exitManualTrajectory() {
   showStart = true;
   showMdmStart = false;
   setScenarioLocked(false);
-  $("persona-delete").disabled = getPersona().builtin;
-  $("run-base").disabled = false;
   $("exit-trajectory").disabled = true;
   for (const id of ["run-trigger-oracle", "ignore-violation", "generate", "recluster",
     "generate-cost", "commit-round", "apply-round"]) {
@@ -564,6 +854,7 @@ async function exitManualTrajectory() {
   renderClusterList();
   renderRounds();
   renderUnifiedOutput();
+  renderSession();
   setStatus(`trajectory exited · artifacts retained at ${data.artifact_dir}`);
   refreshLegend(); refreshTimeline(); renderAll();
 }
@@ -585,6 +876,8 @@ async function runTriggerOracle() {
 async function ignoreComfortViolation() {
   const data = await api("/api/manual_trajectory/ignore_violation", {},
     "ignoring the current comfort violation and advancing the trajectory");
+  session.trajectory = data;
+  syncSessionContext(data);
   setTraj("base", data.trajectory);
   baseTrigger = data.trigger ? data.trigger.step : null;
   clearTraj("correction", "full", "generated", "generated_start");
@@ -827,8 +1120,8 @@ function renderUnifiedOutput(extraHtml) {
 
 async function commitRound() {
   const data = await api("/api/commit_round", {}, "committing round");
-  rounds = data.rounds;
-  unified = data.unified;
+  syncSessionContext(data);
+  if (session.trajectory) session.trajectory.pending_cost = null;
   // Round 1's cost IS the unified cost, so its field carries over directly.
   if (rounds.length === 1) unifiedCostField = costField;
   if (!unified) {
@@ -845,8 +1138,8 @@ async function commitRound() {
 async function applyRoundAndContinue() {
   const data = await api("/api/apply_round", {},
     "applying feedback and advancing the same trajectory to its next trigger");
-  rounds = data.rounds;
-  unified = data.unified;
+  session.trajectory = data;
+  syncSessionContext(data);
   if (!unified) {
     unifiedCostField = null;
     clearTraj("unified");
@@ -884,8 +1177,7 @@ async function applyRoundAndContinue() {
 
 async function removeRound(index) {
   const data = await apiDelete(`/api/rounds/${index}`, "removing feedback");
-  rounds = data.rounds;
-  unified = data.unified;
+  syncSessionContext(data);
   unifiedCostField = null;
   clearTraj("unified");
   renderRounds();
@@ -898,6 +1190,8 @@ async function combineRounds() {
     "combining rounds with codex — this can take a long time; watch the console");
   rounds = data.rounds;
   unified = { description: data.description, code: data.code };
+  session.rounds = rounds;
+  session.unified = unified;
   unifiedCostField = data.cost_field || null;
   setTraj("unified", data.trajectory);
   let extra = "<br>" + fmtMetrics(data.metrics, data.goal_reach).replace("\n", "<br>") +
@@ -908,6 +1202,7 @@ async function combineRounds() {
   }
   renderRounds();
   renderUnifiedOutput(extra);
+  renderSession();
   renderAll();
 }
 
@@ -915,12 +1210,15 @@ async function resetRounds() {
   await api("/api/reset_rounds", {}, "resetting rounds");
   rounds = [];
   unified = null;
+  session.rounds = [];
+  session.unified = null;
   unifiedCostField = null;
   clearTraj("unified");
   $("commit-round").disabled = true;
   $("apply-round").disabled = true;
   renderRounds();
   renderUnifiedOutput();
+  renderSession();
   refreshLegend(); refreshTimeline(); renderAll();
 }
 
@@ -1936,47 +2234,21 @@ function renderAll() {
 async function main() {
   INIT = await api("/api/init", undefined, "loading");
   personas = INIT.personas;
-  currentPersona = INIT.current_persona;
+  trajectoryConfigs = INIT.trajectory_configs;
+  currentPersona = INIT.session ? INIT.session.persona : INIT.default_persona;
 
   buildArmEditor();
   buildGraphs();
   refreshPersonaSelect();
+  refreshTrajectoryConfigSelects();
   setArmEditorValues(INIT.start_arm_aa);
   onPersonaChange(currentPersona);
-  setTraj("oracle", INIT.oracle.trajectory);
-  renderOracleMetrics(INIT.oracle);
 
   $("n-samples").value = INIT.uq.diffusion_samples;
   $("n-clusters").value = INIT.uq.n_clusters;
   $("scale").value = INIT.uq.scale;
   $("scale-num").value = INIT.uq.scale;
   $("cost-backend").value = INIT.cost_backend;
-
-  if (INIT.manual_trajectory) {
-    const data = INIT.manual_trajectory;
-    multiTurnActive = true;
-    setTraj("base", data.trajectory);
-    if (data.oracle) {
-      setTraj("oracle", data.oracle.trajectory);
-      renderOracleMetrics(data.oracle);
-    }
-    baseTrigger = data.trigger ? data.trigger.step : null;
-    renderTrajectorySession(data);
-    setScenarioLocked(data.status === "paused");
-    $("run-base").disabled = data.status === "paused";
-    $("exit-trajectory").disabled = false;
-    $("generate").disabled = data.status !== "paused";
-    $("run-trigger-oracle").disabled = data.status !== "paused";
-    $("ignore-violation").disabled = data.status !== "paused" ||
-      data.trigger.reason !== "discomfort";
-    $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
-      `\nexecuted ${data.step}/${data.step_limit} steps`;
-  }
-  if (INIT.pending_cost) {
-    renderCostGeneration(INIT.pending_cost);
-    $("commit-round").disabled = multiTurnActive;
-    $("apply-round").disabled = !multiTurnActive;
-  }
 
   $("persona-select").onchange = (e) => onPersonaChange(e.target.value);
   $("persona-edit").onclick = () => openPersonaModal(getPersona());
@@ -1991,9 +2263,27 @@ async function main() {
   $("modal-cancel").onclick = () => $("modal-backdrop").classList.remove("open");
   $("modal-save").onclick = savePersona;
   $("add-bound").onclick = () => $("bound-rows").appendChild(boundRow({}));
+  $("session-summary").onclick = (event) => {
+    event.stopPropagation();
+    openSessionDropdown();
+  };
+  $("session-dropdown").onclick = (event) => event.stopPropagation();
+  $("session-new-start").onclick = () => newSession($("session-new-persona").value);
+  document.addEventListener("click", closeSessionDropdown);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeSessionDropdown();
+  });
 
-  $("reset-pose").onclick = () => setArmEditorValues(INIT.start_arm_aa);
-  $("run-base").onclick = runBase;
+  $("initial-pose-config").onchange = (event) => selectInitialPoseConfig(event.target.value);
+  $("goal-config").onchange = (event) => selectGoalConfig(event.target.value);
+  $("save-initial-pose-config").onclick = () => saveTrajectoryConfig("initial_poses");
+  $("save-goal-config").onclick = () => saveTrajectoryConfig("goals");
+  $("reset-pose").onclick = () => {
+    $("initial-pose-config").value = "";
+    $("initial-pose-config-name").value = "";
+    setArmEditorValues(INIT.start_arm_aa);
+  };
+  $("run-base").onclick = startManualTrajectory;
   $("exit-trajectory").onclick = exitManualTrajectory;
   $("run-trigger-oracle").onclick = runTriggerOracle;
   $("ignore-violation").onclick = ignoreComfortViolation;
@@ -2004,14 +2294,21 @@ async function main() {
   $("generate-cost").onclick = generateCost;
   $("n-clusters").onchange = renderClusterList;
 
-  rounds = INIT.rounds || [];
-  unified = INIT.unified || null;
   $("commit-round").onclick = commitRound;
   $("apply-round").onclick = applyRoundAndContinue;
   $("combine-rounds").onclick = combineRounds;
   $("reset-rounds").onclick = resetRounds;
-  renderRounds();
-  renderUnifiedOutput();
+  if (INIT.session) {
+    activateSession(INIT.session);
+  } else {
+    session = null;
+    rounds = [];
+    unified = null;
+    clearTrajectoryUi();
+    renderRounds();
+    renderUnifiedOutput();
+    renderSession();
+  }
 
   $("scale").oninput = () => { $("scale-num").value = $("scale").value; };
   $("scale").onchange = onScaleChange;

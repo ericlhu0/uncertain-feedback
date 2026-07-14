@@ -20,7 +20,7 @@ corrections:
 uq:
   diffusion_samples: 500
   n_clusters: 6
-  scale: 0.25
+  scale: 0.5
   user_cluster: true
 
 cartesian:

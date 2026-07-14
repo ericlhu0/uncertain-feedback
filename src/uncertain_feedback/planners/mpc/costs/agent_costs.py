@@ -34,7 +34,11 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
 )
-from uncertain_feedback.planners.mpc.costs.prompts import build_staged_task_body
+from uncertain_feedback.planners.mpc.costs.prompts import (
+    build_staged_task_body,
+    corpus_grounding_note,
+    corpus_task_section,
+)
 
 _RESPONSE_FILE = "response.json"
 _STATE_FILE = "state.pkl"
@@ -78,11 +82,27 @@ class AgentCostGenerator(CostGenerator):
         *args: Any,
         codex_cmd: str = "codex exec",
         timeout_seconds: float | None = None,
+        corpus_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.codex_cmd = codex_cmd
         self.timeout_seconds = timeout_seconds
+        self.corpus_dir = corpus_dir
+
+    def _resolved_corpus_dir(self) -> Path | None:
+        if self.corpus_dir is None:
+            return None
+        resolved = self.corpus_dir.resolve()
+        return resolved if (resolved / "manifest.json").exists() else None
+
+    def _corpus_section(self) -> str:
+        corpus_dir = self._resolved_corpus_dir()
+        return "" if corpus_dir is None else corpus_task_section(corpus_dir)
+
+    def _corpus_note(self) -> str | None:
+        corpus_dir = self._resolved_corpus_dir()
+        return None if corpus_dir is None else corpus_grounding_note(corpus_dir)
 
     def generate(self, install: bool = False) -> GeneratedPythonCost | None:
         try:
@@ -91,6 +111,7 @@ class AgentCostGenerator(CostGenerator):
                 self.instruction,
                 self.summaries,
                 self.images if self.use_images else {},
+                corpus_note=self._corpus_note(),
             )
             eval_state = self.eval_state
             iterate = self.use_images and eval_state is not None
@@ -183,17 +204,28 @@ class AgentCostGenerator(CostGenerator):
                 "determined it cannot be made to match with the available cost "
                 "API.\n\n"
             )
+        corpus_section = self._corpus_section()
+        corpus_check_line = (
+            "- `## Corpus check` (before `## Stage 2 response`) — the numpy/pandas "
+            "check of your candidate thresholds against the comfortable frames in the "
+            "executed-trajectory corpus, with the per-entry worst-case margin.\n"
+            if corpus_section
+            else ""
+        )
         header += (
             "## Required stage log\n\n"
             f"Maintain `{_STAGE_LOG_FILE}` while you work. It must show the response "
             "you produced for each stage prompt with exactly these headings:\n"
             "- `## Stage 1 response` — the interpretation JSON you wrote after "
             "reading the Stage 1 prompt and visual context.\n"
+            f"{corpus_check_line}"
             "- `## Stage 2 response` — the numeric grounding/specification JSON you "
             "wrote from the Stage 2 prompt.\n"
             "- `## Stage 3 response` — the final cost JSON you wrote to "
             f"`{_RESPONSE_FILE}`.\n\n"
         )
+        if corpus_section:
+            header += f"{corpus_section}\n\n"
         if iterate:
             header += (
                 "## Iterate using the rollout comparison\n\n"

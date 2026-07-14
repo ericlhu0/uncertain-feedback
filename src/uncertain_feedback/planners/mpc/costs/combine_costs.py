@@ -39,6 +39,10 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
     trajectory_index: int = 0
     trigger_reason: str = "discomfort"
     trigger_violation: float | None = None
+    description: str = ""
+    explanation: str = ""
+    interpretation: str = ""  # stage-1 response (plain-language preference)
+    grounding: str = ""  # stage-2 response (numeric spec)
 
     def to_json(self) -> dict[str, Any]:
         """Return a JSON-safe record with absolute artifact paths."""
@@ -56,6 +60,10 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
             "trajectory_index": self.trajectory_index,
             "trigger_reason": self.trigger_reason,
             "trigger_violation": self.trigger_violation,
+            "description": self.description,
+            "explanation": self.explanation,
+            "interpretation": self.interpretation,
+            "grounding": self.grounding,
         }
 
     @classmethod
@@ -83,6 +91,10 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
                 if data.get("trigger_violation") is not None
                 else None
             ),
+            description=str(data.get("description", "")),
+            explanation=str(data.get("explanation", "")),
+            interpretation=str(data.get("interpretation", "")),
+            grounding=str(data.get("grounding", "")),
         )
 
 
@@ -103,7 +115,8 @@ class CombineCostGenerator(AgentCostGenerator):
         try:
             self.begin()
             prompt_text, image_paths = build_combine_task_body(
-                [round_.to_json() for round_ in self.rounds]
+                [round_.to_json() for round_ in self.rounds],
+                corpus_note=self._corpus_note(),
             )
             (self.run_dir / "TASK.md").write_text(
                 self._task_md(
@@ -179,6 +192,15 @@ class CombineCostGenerator(AgentCostGenerator):
                 f"--angles-out angles_round_{round_.index}.png"
             )
         rendered_commands = "\n".join(f"```\n{command}\n```" for command in commands)
+        corpus_section = self._corpus_section()
+        synthesis_note = (
+            " In `## Evidence synthesis`, also record the numpy/pandas check of your "
+            "candidate thresholds against the comfortable frames in the "
+            "executed-trajectory corpus, with the per-entry worst-case margin."
+            if corpus_section
+            else ""
+        )
+        corpus_block = f"{corpus_section}\n\n" if corpus_section else ""
         return (
             "# Multi-round cost-combination task\n\n"
             "Write the final unified cost JSON to `response.json`. Open every image "
@@ -189,8 +211,8 @@ class CombineCostGenerator(AgentCostGenerator):
             "`## Final unified cost` sections. Maintain `ITERATION_LOG.md`; for each "
             "candidate, run every command below, open every comparison and angles "
             "image, and record each round's score, goal-reach result, mismatch, and "
-            "resulting revision. The one unified cost must score well on every round.\n\n"
-            f"{rendered_commands}\n\n---\n\n{prompt_text}\n"
+            f"resulting revision. The one unified cost must score well on every round.{synthesis_note}\n\n"
+            f"{rendered_commands}\n\n{corpus_block}---\n\n{prompt_text}\n"
         )
 
     def install(self, cost: GeneratedPythonCost) -> None:

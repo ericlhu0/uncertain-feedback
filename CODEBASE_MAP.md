@@ -1,7 +1,7 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-13
-**Branch:** simulated-users-standard
+**Last updated:** 2026-07-14
+**Branch:** pose-dependent-users
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
 
@@ -72,7 +72,8 @@ uncertain-feedback/
 │   │   ├── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
 │   │   ├── transfer_experiment.py    # Adds held-out transfer-goal eval around experiment_pipeline
 │   │   ├── run_transfer_experiment.py # CLI entry point for simulated-user transfer experiments
-│   │   ├── multi_round_experiment.py # Multi-goal feedback history + cost combination loop
+│   │   ├── trajectory_corpus.py      # TrajectoryCorpus: per-session on-disk log of executed trajectories (npy + per-frame feature csv + manifest.json)
+│   │   ├── multi_round_experiment.py # Multi-goal feedback history + cost combination loop (logs every goal's executed rollout to trajectory_corpus/ and threads corpus_dir into both codex generators)
 │   │   ├── run_multi_round_experiment.py # CLI entry point for multi-round experiments
 │   │   └── render_cost_comparison.py # CLI the agent backend runs to render rollout-vs-correction overlay
 │   ├── motion_generators/
@@ -120,9 +121,10 @@ uncertain-feedback/
 │   │       └── hml_decode.py         # HML decode utilities for the editor
 │   ├── demo_designer/
 │   │   ├── smpl_mesh.py              # Neutral SMPL vertex generation + binary trajectory mesh cache
-│   │   ├── core.py                   # DemoSession: paused manual multi-turn trajectory + refresh-restored pending costs/rationales + editable rounds
+│   │   ├── core.py                   # DemoRig: process-lifetime state (config, personas+CRUD, named start/goal configs, motion gen, pose/FK/mesh/context) + begin/list/resume session
+│   │   ├── session.py                # Session (one persona: corpus + rounds + unified cost, session.json persistence/resume) and Trajectory (live MPC stepping + per-trajectory correction scratch)
 │   │   ├── server.py                 # Flask web UI + read-only /api/artifact/<path> access rooted at demo artifacts
-│   │   └── static/                   # Three.js body views, persona/feature graphs, and generated-cost rationale disclosures
+│   │   └── static/                   # Session lifecycle bar/resume picker/corpus controls + Three.js body views, persona/feature graphs, and generated-cost rationale disclosures
 │   ├── llm/
 │   │   ├── base_model.py             # BaseModel ABC (get_full_output)
 │   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
@@ -300,7 +302,7 @@ When `llm_cost.enabled: true` in the YAML:
 1. `build_motion_summaries()` — text summaries of recent MPC steps and MDM trajectory
 2. `render_prompt_images()` — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
 3. Staged prompt builders (in `costs/prompts/__init__.py`) assemble `interpret` (instruction + images + compact summary), `ground` (interpretation + full summaries), and `author` (numeric spec + `runtime_api.txt`/`output_contract.txt`) prompts from `costs/prompts/stages/*.txt`
-4. LLM (OpenAI, configurable model) returns final author JSON: `{description, code, params, explanation, recipient_explanation}`
+4. LLM (OpenAI, configurable model) streams its opt-in reasoning summary to stdout, then returns final author JSON: `{description, code, params, explanation, recipient_explanation}`
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet
 7. `GeneratedCostContext` provides the runtime sandbox: `fk`, `spine3_pos/aa`, `current_q`, `mdm_traj`, `recent_q`, and FK helper methods
@@ -315,7 +317,8 @@ When `llm_cost.enabled: true` in the YAML:
 - `llm` (`llm_costs.py`) — single-pass staged calls: interpret → ground → author; only the author output is parsed/compiled. Stage prompt/response pairs are aggregated in `stage_log.md`; the authored cost is ranked for `rationale.json`.
 - `turns` (`turns_costs.py`) — interprets once, then runs a stateful ground+author conversation; keeps the best cost by ranking consistency (`rank_candidate_cost`, falling back to the L2 rollout score when the context has no comparison trajectories). `stage_log.md` includes the interpretation plus each refine turn's prompt snapshot and response, and the winning turn's ranking is copied into `rationale.json`.
 - `agent` (`agent_costs.py`) — delegates the staged method to the `codex` CLI, which emits the same `response.json` and must write `stage_log.md` with Stage 1 / Stage 2 / Stage 3 responses; those sections are parsed leniently for `rationale.json` and the final cost is ranked locally.
-- `CombineCostGenerator` (`combine_costs.py`) is constructed directly by the multi-round experiment, not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`.
+- `CombineCostGenerator` (`combine_costs.py`) is constructed directly by the multi-round experiment, not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`. Each `CostRound` also carries the round's generation evidence chain — `description`, `explanation`, `interpretation` (stage-1 response), `grounding` (stage-2 response), all defaulted to `""` — populated from the round's `rationale.json` (via `CostGenerationResult`/`_rationale_fields` in `experiment_pipeline.py`) and rendered under a "Why this cost was generated:" block in the combine prompt (`build_combine_task_body`, empty fields skipped).
+- Both codex generators accept an optional `corpus_dir: Path | None` (threaded from `generate_cost_for_cluster` → `create_cost_generator`, agent branch only). When it points at a `TrajectoryCorpus` (`manifest.json` present), `_corpus_section()` documents the on-disk corpus in `TASK.md` and `_corpus_note()` injects a required grounding step into the Stage 2 (agent) / combine (combine) prompt — codex must load the per-frame feature CSVs and move each candidate bound past the poses reached comfortably (before `comfortable_until`), then log the numpy/pandas margin check (`## Corpus check` for `agent`, in `## Evidence synthesis` for combine). `None` leaves every prompt byte-identical, so `llm`/`turns` and all non-corpus callers are unchanged.
 
 ### Cost evaluation & visual feedback
 
@@ -461,7 +464,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
 | `uv run python src/.../experiments/run_multi_round_experiment.py --mpc-config <yaml> [--persona <name>]` | Multi-round cost experiment; `cartesian.goals` is the ordered round sequence and successful feedback contexts are unified into one replacement cost |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
-| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>]` | Browser tool for one stateful trajectory paused across manual UQ/cost feedback turns; pending-cost and committed-round payloads include `rationale`, rendered as *why this cost*, while `/api/artifact/<path>` serves their `rationale.json`/`stage_log.md` files from the demo artifact root; active trajectories can be exited and committed feedback removed (see README) |
+| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>] [--trajectory-configs-file <json>]` | Browser tool; named initial-pose and goal libraries persist through `/api/trajectory-configs/<kind>`; clicking its header summary opens a dropdown to start/resume/delete sessions (one locked persona), the corpus panel browses/deletes executed evidence, and session-owned rounds/unified costs carry into successive trajectories; sessions persist to `session.json` and are resumable after restart (`/api/session/start`, `/api/sessions`, `/api/session/resume`, `DELETE /api/sessions/<name>`, `DELETE /api/corpus/<i>`); pending-cost and committed-round payloads include `rationale`, rendered as *why this cost*, while `/api/artifact/<path>` serves their `rationale.json`/`stage_log.md` files from the demo artifact root (see README) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |

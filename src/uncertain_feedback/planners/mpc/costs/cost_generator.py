@@ -67,6 +67,7 @@ def _make_llm_model(model_name: str) -> Any:
             if model_name == _DEFAULT_LLM_MODEL
             else None
         ),
+        stream_reasoning_summary=True,
     )
 
 
@@ -657,6 +658,7 @@ def create_cost_generator(
     rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
     eval_state: Any | None = None,
     save_candidate_videos: bool = False,
+    corpus_dir: Path | None = None,
 ) -> CostGenerator:
     """Build the cost generator selected by ``cfg.backend``.
 
@@ -696,7 +698,9 @@ def create_cost_generator(
     if backend == "turns":
         return TurnsCostGenerator(max_turns=cfg.max_turns, **common)
     if backend == "agent":
-        return AgentCostGenerator(codex_cmd=cfg.codex_cmd, **common)
+        return AgentCostGenerator(
+            codex_cmd=cfg.codex_cmd, corpus_dir=corpus_dir, **common
+        )
     raise GeneratedCostValidationError(
         f"unknown cost-generator backend {backend!r}; "
         "expected one of 'llm', 'turns', 'agent'"

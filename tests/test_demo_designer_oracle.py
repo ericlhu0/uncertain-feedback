@@ -9,6 +9,7 @@ from uncertain_feedback.demo_designer import session as demo_session
 from uncertain_feedback.demo_designer.core import DemoRig
 from uncertain_feedback.demo_designer.session import (
     Session,
+    _generated_bounds_from_artifacts,
     _rationale_from_artifacts,
 )
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost, CostRound
@@ -21,6 +22,95 @@ def test_rationale_from_artifacts_round_trip(tmp_path) -> None:
 
     assert _rationale_from_artifacts(tmp_path) == payload
     assert _rationale_from_artifacts(tmp_path / "missing") is None
+
+
+def test_generated_bounds_use_structured_rationale_grounding(tmp_path) -> None:
+    rationale = {
+        "ground": {
+            "terms": [
+                {
+                    "feature": "elbow_flexion",
+                    "bound_type": "upper_bound",
+                    "values": {
+                        "cond_feature": "shoulder_elevation",
+                        "points": [[1.2, 1.75], [1.38, 1.7], [1.42, 1.65]],
+                    },
+                }
+            ]
+        }
+    }
+    (tmp_path / "rationale.json").write_text(json.dumps(rationale), encoding="utf-8")
+
+    assert _generated_bounds_from_artifacts(tmp_path) == [
+        {
+            "feature": "elbow_flexion",
+            "bound_type": "upper_bound",
+            "coupled": True,
+            "cond_feature": "shoulder_elevation",
+            "points": [[1.2, 1.75], [1.38, 1.7], [1.42, 1.65]],
+        }
+    ]
+
+
+def test_generated_bounds_skip_invalid_structured_terms(tmp_path) -> None:
+    rationale = {
+        "ground": {
+            "terms": [
+                {
+                    "feature": "elbow_flexion",
+                    "bound_type": "upper_bound",
+                    "values": {
+                        "cond_feature": "shoulder_elevation",
+                        "points": [[1.4, 1.7], [1.2, 1.6]],
+                    },
+                },
+                {
+                    "feature": "not_a_feature",
+                    "bound_type": "lower_bound",
+                    "values": {"threshold": 1.0},
+                },
+            ]
+        }
+    }
+    (tmp_path / "rationale.json").write_text(json.dumps(rationale), encoding="utf-8")
+
+    assert _generated_bounds_from_artifacts(tmp_path) == []
+
+
+def test_generated_cost_field_identifies_single_named_feature(
+    monkeypatch, tmp_path
+) -> None:
+    class SingleFeatureCost:
+        code = """def cost(q_trajs, context, params):
+    elbow = context.elbow_flexion_angles(q_trajs[:, 1:])
+    return np.sum(elbow ** 2, axis=1)
+"""
+
+        def __call__(self, q_trajs):
+            return np.arange(q_trajs.shape[0], dtype=np.float64)
+
+    session = Session(
+        rig=SimpleNamespace(context=object()),
+        persona_name="persona",
+        user=SimpleNamespace(),
+        dir=tmp_path,
+        corpus=SimpleNamespace(),
+    )
+    session.trajectory = SimpleNamespace(
+        base_traj=np.zeros((2, 3, 3)),
+        cluster_fulls={},
+        cluster_corrections={},
+    )
+    monkeypatch.setattr(
+        demo_session,
+        "feature_series",
+        lambda context, poses: {"elbow_flexion": np.linspace(0.0, 1.0, poses.shape[0])},
+    )
+
+    field = Session.generated_cost_field(session, SingleFeatureCost())
+
+    assert field["active_features"] == ["elbow_flexion"]
+    assert len(field["features"]["elbow_flexion"]) == len(field["penalty"])
 
 
 def test_artifact_route_serves_only_artifact_root(monkeypatch, tmp_path) -> None:

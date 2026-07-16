@@ -6,7 +6,7 @@ import numpy as np
 
 from uncertain_feedback.demo_designer.core import DemoRig
 from uncertain_feedback.demo_designer import session as demo_session
-from uncertain_feedback.demo_designer.session import Session
+from uncertain_feedback.demo_designer.session import ClusterLevel, Session
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
@@ -29,6 +29,7 @@ class FakeCost:
 
 class FakePlanner:
     mdm_ready_to_terminate = True
+    mdm_tracking_complete = True
 
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
@@ -248,6 +249,84 @@ def test_ignore_comfort_violation_resumes_until_a_new_violation(
     }
     assert payload["trajectory"]["n_frames"] == 4
     assert payload["rounds"] == []
+
+
+def test_commit_round_persists_all_recursive_cluster_labels(tmp_path) -> None:
+    session = Session.__new__(Session)
+    session.persona_name = "restricted"
+    session.started = "now"
+    session.dir = tmp_path / "session"
+    session.rounds = []
+    session.round_records = []
+    session._round_costs = []
+    session.unified_cost = None
+    session.trajectory_count = 1
+    trajectory = SimpleNamespace(
+        goal=np.array([0.4, 0.5, 0.6]),
+        trigger_step=1,
+        trigger_reason="discomfort",
+        trigger_violation=0.03,
+    )
+    session.trajectory = trajectory
+    trajectory.cluster_levels = [
+        ClusterLevel(
+            np.array([], dtype=np.intp), np.array([], dtype=np.intp), 2, 3, 1.0
+        ),
+        ClusterLevel(
+            np.array([], dtype=np.intp), np.array([], dtype=np.intp), 0, 3, 1.0
+        ),
+        ClusterLevel(
+            np.array([], dtype=np.intp), np.array([], dtype=np.intp), 1, 2, 1.0
+        ),
+    ]
+    cost_dir = tmp_path / "cost"
+    cost_dir.mkdir()
+
+    class FakeEvalState:
+        def save(self, path: Path) -> None:
+            path.write_bytes(b"state")
+
+    trajectory._last_generation = SimpleNamespace(
+        eval_state=FakeEvalState(),
+        summaries={},
+        images={},
+        description="description",
+        explanation="",
+        interpretation="",
+        grounding="",
+    )
+    trajectory._last_cost = FakeCost()
+    trajectory._last_cost_dir = cost_dir
+    trajectory._last_instruction = "feedback"
+
+    session.commit_round()
+
+    assert session.rounds[0].cluster_labels == (2, 0, 1)
+    assert session.round_records[0]["cluster_labels"] == [2, 0, 1]
+    saved = json.loads((session.dir / "session.json").read_text(encoding="utf-8"))
+    assert saved["rounds"][0]["cluster_labels"] == [2, 0, 1]
+
+
+def test_cost_round_loads_legacy_records_without_cluster_labels(tmp_path) -> None:
+    round_ = CostRound(
+        index=0,
+        goal=(0.1, 0.2, 0.3),
+        feedback_text="feedback",
+        trigger_step=1,
+        round_dir=Path(tmp_path),
+        state_path=Path(tmp_path) / "state.pkl",
+        cost_code="code",
+        params={},
+        summaries={},
+        image_paths=(),
+        cluster_labels=(2, 1, 0),
+    )
+
+    data = round_.to_json()
+    assert data["cluster_labels"] == [2, 1, 0]
+    assert CostRound.from_json(data).cluster_labels == (2, 1, 0)
+    data.pop("cluster_labels")
+    assert CostRound.from_json(data).cluster_labels == ()
 
 
 def test_remove_round_reindexes_remaining_feedback(tmp_path) -> None:

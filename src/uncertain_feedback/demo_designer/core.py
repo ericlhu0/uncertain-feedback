@@ -418,6 +418,7 @@ class DemoRig:
             "uq": {
                 "diffusion_samples": self.cfg.uq.diffusion_samples,
                 "n_clusters": self.cfg.uq.n_clusters,
+                "clusterer": self.cfg.uq.clusterer,
                 "scale": self.cfg.uq.scale,
             },
             "cost_backend": self.cfg.llm_cost.backend,

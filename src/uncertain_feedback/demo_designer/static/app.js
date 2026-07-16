@@ -14,6 +14,7 @@ let trajectoryConfigs = { initial_poses: [], goals: [] };
 const trajs = {};
 let clusters = [];          // [{label, count, oracle_score, trajectory}]
 let selectedCluster = null;
+let undesirableClusters = new Set();
 let selectedClusterSegments = null;
 let clusterDepth = 0;
 let clusterPath = [];
@@ -24,7 +25,7 @@ let showMdmStart = false;
 let showOracleBounds = true;
 let showGeneratedBounds = true;
 let generatedBounds = [];
-let costField = null;       // {features:{name:[..]}, penalty:[..]} — compiled cost sampled over a pose cloud
+let costField = null;       // {features:{name:[..]}, penalty:[..], active_features:[..]} — compiled cost sampled over a pose cloud
 let startPreview = null;    // {arm_positions, mesh_vertices} for the edited pose
 const meshData = new Map(); // mesh id -> {frames, vertices, data: Float32Array}
 const meshLoads = new Map();
@@ -208,6 +209,25 @@ function coupledThresholdSeries(b, data) {
   const cond = data.features[b.cond_feature];
   if (!cond) return null;
   return cond.map((c) => b.intercept + b.slope * c);
+}
+
+function matchingGeneratedCoupledBounds(b) {
+  return generatedBounds.filter((candidate) => candidate.coupled &&
+    candidate.feature === b.feature && candidate.cond_feature === b.cond_feature);
+}
+
+function generatedCoupledThreshold(b, x) {
+  const points = b.points;
+  if (x <= points[0][0]) return points[0][1];
+  if (x >= points[points.length - 1][0]) return points[points.length - 1][1];
+  for (let i = 1; i < points.length; i++) {
+    if (x <= points[i][0]) {
+      const [x0, y0] = points[i - 1];
+      const [x1, y1] = points[i];
+      return y0 + ((x - x0) / (x1 - x0)) * (y1 - y0);
+    }
+  }
+  return points[points.length - 1][1];
 }
 
 function visibleTrajs() {
@@ -661,6 +681,7 @@ function clearTrajectoryUi() {
   baseTrigger = null;
   clusters = [];
   selectedCluster = null;
+  undesirableClusters = new Set();
   selectedClusterSegments = null;
   resetClusterNavigation();
   generatedBounds = [];
@@ -798,6 +819,7 @@ async function startManualTrajectory() {
   showStart = false;
   clusters = [];
   selectedCluster = null;
+  undesirableClusters = new Set();
   selectedClusterSegments = null;
   resetClusterNavigation();
   generatedBounds = [];
@@ -832,6 +854,7 @@ async function exitManualTrajectory() {
   unifiedCostField = null;
   clusters = [];
   selectedCluster = null;
+  undesirableClusters = new Set();
   selectedClusterSegments = null;
   resetClusterNavigation();
   generatedBounds = [];
@@ -883,6 +906,7 @@ async function ignoreComfortViolation() {
   clearTraj("correction", "full", "generated", "generated_start");
   clusters = [];
   selectedCluster = null;
+  undesirableClusters = new Set();
   selectedClusterSegments = null;
   resetClusterNavigation();
   generatedBounds = [];
@@ -910,6 +934,7 @@ async function ignoreComfortViolation() {
 function applyClusterPayload(data) {
   clusters = data.clusters;
   selectedCluster = data.selected_label ?? null;
+  undesirableClusters = new Set(data.undesirable_labels ?? []);
   clusterDepth = data.depth;
   clusterPath = data.path;
   canGoBack = data.can_go_back;
@@ -938,6 +963,7 @@ async function generate() {
     n_samples: +$("n-samples").value,
     n_clusters: +$("n-clusters").value,
     scale: getScale(),
+    clusterer: $("clusterer-select").value,
   }, "generating MDM samples + assembling cluster paths (this can take minutes)");
   $("recluster").disabled = false;
   applyClusterPayload(data);
@@ -946,6 +972,7 @@ async function generate() {
 async function recluster() {
   const data = await api("/api/recluster", {
     n_clusters: +$("n-clusters").value, scale: getScale(),
+    clusterer: $("clusterer-select").value,
   }, "re-clustering + assembling cluster paths");
   applyClusterPayload(data);
 }
@@ -956,6 +983,7 @@ async function refineCluster() {
     label: selectedCluster,
     n_clusters: +$("n-clusters").value,
     scale: getScale(),
+    clusterer: $("clusterer-select").value,
   }, "refining selected cluster + assembling child paths");
   applyClusterPayload(data);
 }
@@ -969,12 +997,21 @@ async function backCluster() {
 async function pickCluster(label) {
   await api("/api/pick_cluster", { label }, "selecting cluster");
   selectedCluster = label;
+  undesirableClusters.delete(label);
   const c = clusters.find((x) => x.label === label);
   selectedClusterSegments = c.full_segments;
   setTraj("full", c.full);
   $("correction-metrics").textContent =
     "full path: " + fmtMetrics(c.full_metrics, c.full_goal_reach);
   $("generate-cost").disabled = false;
+  renderClusterList();
+}
+
+async function markCluster(label) {
+  const undesirable = !undesirableClusters.has(label);
+  const data = await api("/api/mark_cluster", { label, undesirable },
+    undesirable ? "marking cluster wrong" : "unmarking cluster");
+  undesirableClusters = new Set(data.undesirable_labels);
   renderClusterList();
 }
 
@@ -1036,6 +1073,7 @@ function rationaleHtml(r, artifactDir) {
       a === "chosen_correction" ? -1 : b === "chosen_correction" ? 1 : a.localeCompare(b));
     lines.push(`<div><b>ranking:</b> accuracy ${Number(ranking.rank_accuracy).toFixed(2)}` +
       ` · margin ${Number(ranking.normalized_margin).toFixed(2)}` +
+      ` · improves original ${ranking.improves_original_plan === true ? "yes" : ranking.improves_original_plan === false ? "no" : "n/a"}` +
       ` · inert ${ranking.inert ? "yes" : "no"}</div>`);
     lines.push(`<table class="rationale-ranking"><tbody>${rows.map(([name, cost]) => {
       const content = `${escapeHtml(name)}</td><td>${escapeHtml(Number(cost).toPrecision(5))}`;
@@ -1148,6 +1186,7 @@ async function applyRoundAndContinue() {
   baseTrigger = data.trigger ? data.trigger.step : null;
   clusters = [];
   selectedCluster = null;
+  undesirableClusters = new Set();
   selectedClusterSegments = null;
   resetClusterNavigation();
   generatedBounds = [];
@@ -1231,7 +1270,9 @@ function renderClusterList() {
   list.innerHTML = "";
   for (const c of clusters) {
     const card = document.createElement("div");
-    card.className = "cluster-card" + (c.label === selectedCluster ? " selected" : "");
+    card.className = "cluster-card" +
+      (c.label === selectedCluster ? " selected" : "") +
+      (undesirableClusters.has(c.label) ? " undesirable" : "");
     const sw = document.createElement("div");
     sw.className = "cluster-swatch";
     sw.style.background = CLUSTER_COLORS[c.label % CLUSTER_COLORS.length];
@@ -1242,13 +1283,21 @@ function renderClusterList() {
       `oracle ${c.oracle_score.toFixed(3)} · full-path viol ${c.full_metrics.mean_violation.toFixed(3)}`;
     card.appendChild(sw);
     card.appendChild(info);
+    const mark = document.createElement("button");
+    mark.className = "cluster-mark";
+    mark.textContent = undesirableClusters.has(c.label) ? "unmark" : "mark wrong";
+    mark.disabled = c.label === selectedCluster;
+    mark.onclick = (event) => {
+      event.stopPropagation();
+      markCluster(c.label);
+    };
+    card.appendChild(mark);
     card.onclick = () => pickCluster(c.label);
     list.appendChild(card);
   }
   const selected = clusters.find((c) => c.label === selectedCluster);
   const nClusters = +$("n-clusters").value;
-  $("cluster-refine").disabled = !selected || nClusters < 2 ||
-    selected.count < nClusters;
+  $("cluster-refine").disabled = !selected || nClusters < 2;
   $("cluster-back").disabled = !canGoBack;
   const path = clusterPath.length
     ? "root > " + clusterPath.map((label) => `cluster ${label}`).join(" > ")
@@ -1806,9 +1855,23 @@ function renderGraphs() {
     const costBounds = showGeneratedBounds
       ? generatedBounds.filter((b) => b.feature === name && !b.coupled)
       : [];
+    const oneFeatureFields = [
+      showGeneratedBounds ? costField : null,
+      showUnifiedBounds ? unifiedCostField : null,
+    ].filter((field) => field?.active_features?.length === 1 &&
+      field.active_features[0] === name && field.features?.[name]);
     for (const b of [...oracleBounds, ...costBounds]) {
       if (b.low !== null && b.low !== undefined) { ymin = Math.min(ymin, b.low); ymax = Math.max(ymax, b.low); }
       if (b.high !== null && b.high !== undefined) { ymin = Math.min(ymin, b.high); ymax = Math.max(ymax, b.high); }
+    }
+    for (const field of oneFeatureFields) {
+      const pmax = Math.max(0, ...field.penalty);
+      const eps = pmax * 0.02;
+      for (let i = 0; i < field.penalty.length; i++) {
+        if (field.penalty[i] <= eps || !Number.isFinite(field.features[name][i])) continue;
+        ymin = Math.min(ymin, field.features[name][i]);
+        ymax = Math.max(ymax, field.features[name][i]);
+      }
     }
     if (!seriesList.length) { ymin = Math.min(ymin, -0.2); ymax = Math.max(ymax, Math.PI); }
     if (!isFinite(ymin)) { ymin = 0; ymax = Math.PI; }
@@ -1860,6 +1923,30 @@ function renderGraphs() {
       }
       ctx.setLineDash([]);
     };
+    const drawOneFeatureField = (field, rgb) => {
+      if (!field || field.active_features?.length !== 1 ||
+          field.active_features[0] !== name || !field.penalty.length) return;
+      const feature = field.features[name];
+      const penalty = field.penalty;
+      if (!feature) return;
+      let pmax = 0;
+      for (const p of penalty) if (Number.isFinite(p) && p > pmax) pmax = p;
+      if (pmax <= 0) return;
+      const bins = new Array(Math.max(1, Math.floor(ph))).fill(0);
+      for (let i = 0; i < penalty.length; i++) {
+        if (!Number.isFinite(feature[i]) || !Number.isFinite(penalty[i])) continue;
+        const bin = Math.floor(((ymax - feature[i]) / (ymax - ymin)) * bins.length);
+        if (bin >= 0 && bin < bins.length) bins[bin] = Math.max(bins[bin], penalty[i]);
+      }
+      const eps = pmax * 0.02;
+      for (let i = 0; i < bins.length; i++) {
+        if (bins[i] <= eps) continue;
+        ctx.fillStyle = `rgba(${rgb},${0.05 + 0.2 * Math.min(1, bins[i] / pmax)})`;
+        ctx.fillRect(ml, mt + i, pw, 1);
+      }
+    };
+    if (showGeneratedBounds) drawOneFeatureField(costField, "53,103,214");
+    if (showUnifiedBounds) drawOneFeatureField(unifiedCostField, "0,131,143");
     drawBounds(oracleBounds, "rgba(214,69,65,0.13)", "rgba(180,40,40,0.8)");
     drawBounds(costBounds, "rgba(53,103,214,0.10)", GENERATED_LIMIT_COLOR);
 
@@ -2057,6 +2144,9 @@ function renderCoupledGraphs() {
     const ml = 48, mr = 10, mt = 8, mb = 30;
     const pw = w - ml - mr, ph = h - mt - mb;
     const thr = (x) => b.intercept + b.slope * x;
+    const parsedCostBounds = showGeneratedBounds
+      ? matchingGeneratedCoupledBounds(b)
+      : [];
 
     const series = coupledSeriesList(b);
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
@@ -2068,6 +2158,12 @@ function renderCoupledGraphs() {
     const yBox = featureBoxRange(b.feature);
     if (xBox) { xmin = Math.min(xmin, xBox[0]); xmax = Math.max(xmax, xBox[1]); }
     if (yBox) { ymin = Math.min(ymin, yBox[0]); ymax = Math.max(ymax, yBox[1]); }
+    for (const costBound of parsedCostBounds) {
+      for (const [x, y] of costBound.points) {
+        xmin = Math.min(xmin, x); xmax = Math.max(xmax, x);
+        ymin = Math.min(ymin, y); ymax = Math.max(ymax, y);
+      }
+    }
     if (!isFinite(xmin)) { xmin = -0.2; xmax = 2.6; ymin = -0.2; ymax = 2.6; }
     const xs = Math.max(0.3, xmax - xmin), ys = Math.max(0.3, ymax - ymin);
     xmin -= xs * 0.1; xmax += xs * 0.1; ymin -= ys * 0.1; ymax += ys * 0.1;
@@ -2102,6 +2198,28 @@ function renderCoupledGraphs() {
     ctx.beginPath(); ctx.moveTo(lx0, ly0); ctx.lineTo(lx1, ly1); ctx.stroke();
     ctx.setLineDash([]);
 
+    for (const costBound of parsedCostBounds) {
+      const path = [
+        [xmin, generatedCoupledThreshold(costBound, xmin)],
+        ...costBound.points.filter(([x]) => x > xmin && x < xmax),
+        [xmax, generatedCoupledThreshold(costBound, xmax)],
+      ];
+      const costFar = costBound.bound_type === "upper_bound" ? mt - ph : mt + 2 * ph;
+      ctx.fillStyle = "rgba(53,103,214,0.12)";
+      ctx.beginPath();
+      path.forEach(([x, y], i) => {
+        if (i === 0) ctx.moveTo(X(x), Y(y)); else ctx.lineTo(X(x), Y(y));
+      });
+      ctx.lineTo(X(xmax), costFar); ctx.lineTo(X(xmin), costFar); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = GENERATED_LIMIT_COLOR;
+      ctx.lineWidth = 2; ctx.setLineDash([6, 3]);
+      ctx.beginPath();
+      path.forEach(([x, y], i) => {
+        if (i === 0) ctx.moveTo(X(x), Y(y)); else ctx.lineTo(X(x), Y(y));
+      });
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+
     // drag handles for editing the limit line
     ctx.fillStyle = "rgba(180,40,40,0.95)";
     ctx.strokeStyle = "#fff";
@@ -2110,10 +2228,8 @@ function renderCoupledGraphs() {
       ctx.beginPath(); ctx.arc(X(hx), Y(thr(hx)), 6, 0, 7); ctx.fill(); ctx.stroke();
     }
 
-    // generated/unified-cost penalty fields: the ACTUAL compiled cost evaluated
-    // over a cloud of plausible poses, read straight from the cost — no
-    // declared-bound parsing — so it works for any cost shape/backend and its
-    // penalized region can be compared directly against the red oracle limit.
+    // Sampled fields show the compiled cost alongside any exact parsed boundary,
+    // including shapes that cannot be represented by grounded bound terms.
     const drawField = (field, rgb) => {
       if (!field || !field.penalty.length) return;
       const cond = field.features[b.cond_feature];
@@ -2246,6 +2362,7 @@ async function main() {
 
   $("n-samples").value = INIT.uq.diffusion_samples;
   $("n-clusters").value = INIT.uq.n_clusters;
+  $("clusterer-select").value = INIT.uq.clusterer;
   $("scale").value = INIT.uq.scale;
   $("scale-num").value = INIT.uq.scale;
   $("cost-backend").value = INIT.cost_backend;

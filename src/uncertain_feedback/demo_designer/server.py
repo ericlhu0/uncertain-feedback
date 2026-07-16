@@ -234,6 +234,7 @@ def generate():
             int(data["n_samples"]),
             int(data["n_clusters"]),
             float(data["scale"]),
+            str(data["clusterer"]),
         )
 
     return _run_heavy(do)
@@ -245,7 +246,9 @@ def recluster():
 
     def do():
         session, _ = _require_trajectory()
-        return session.recluster(int(data["n_clusters"]), float(data["scale"]))
+        return session.recluster(
+            int(data["n_clusters"]), float(data["scale"]), str(data["clusterer"])
+        )
 
     return _run_heavy(do)
 
@@ -261,6 +264,17 @@ def pick_cluster():
     return _run(do)
 
 
+@app.route("/api/mark_cluster", methods=["POST"])
+def mark_cluster():
+    data = request.get_json(force=True)
+
+    def do():
+        session, _ = _require_trajectory()
+        return session.mark_cluster(int(data["label"]), bool(data["undesirable"]))
+
+    return _run(do)
+
+
 @app.route("/api/refine_cluster", methods=["POST"])
 def refine_cluster():
     data = request.get_json(force=True)
@@ -271,6 +285,7 @@ def refine_cluster():
             int(data["label"]),
             int(data["n_clusters"]),
             float(data["scale"]),
+            str(data["clusterer"]),
         )
 
     return _run_heavy(do)

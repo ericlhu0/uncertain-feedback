@@ -5,6 +5,9 @@ import pytest
 
 from uncertain_feedback.demo_designer import session as demo_session
 from uncertain_feedback.demo_designer.session import Session
+from uncertain_feedback.experiments.experiment_pipeline import (
+    _rejected_candidate_trajs,
+)
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import (
     _LevelPickResult,
@@ -68,6 +71,31 @@ def test_recursive_navigation_back_restores_parent_selection_and_scale() -> None
     assert result.scale == 0.7
 
 
+def test_recursive_navigation_splits_small_subset_into_singletons() -> None:
+    samples = np.arange(4, dtype=np.float64)[:, None]
+    labels = np.array([0, 0, 1, 1], dtype=np.intp)
+    actions = iter(
+        [
+            _LevelPickResult("refine", 0, {0: 1.0, 1: 1.0}),
+            _LevelPickResult("confirm", 1, {0: 1.0, 1: 1.0}),
+        ]
+    )
+
+    def recluster(_subset: np.ndarray) -> np.ndarray:
+        raise AssertionError("small subsets should bypass the clusterer")
+
+    result = _navigate_cluster_levels(
+        samples,
+        labels,
+        lambda _level: next(actions),
+        recluster,
+        1.0,
+        n_clusters=3,
+    )
+
+    np.testing.assert_array_equal(result.sample_indices, [1])
+
+
 class _FakeGenerator:
     def smpl_positions_to_left_arm_trajectory(
         self, positions: np.ndarray, spine3_aa: np.ndarray | None = None
@@ -83,6 +111,18 @@ class _DeterministicClusterer:
 
     def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
         return np.arange(len(positions), dtype=np.intp) % self.n_clusters
+
+    def medoid_indices(self, labels: np.ndarray) -> dict[int, int]:
+        return {
+            int(label): int(np.flatnonzero(labels == label)[0])
+            for label in np.unique(labels)
+        }
+
+
+def _fake_make_clusterer(
+    name: str, n_clusters: int, fk: object = None
+) -> _DeterministicClusterer:
+    return _DeterministicClusterer(n_clusters, fk)
 
 
 def _demo_session() -> Session:
@@ -117,7 +157,7 @@ def _demo_session() -> Session:
 
 
 def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
-    monkeypatch.setattr(demo_session, "XyzPositionClusterer", _DeterministicClusterer)
+    monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
     monkeypatch.setattr(
         demo_session,
         "oracle_cluster_scores",
@@ -140,8 +180,12 @@ def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
     grandchild = session.refine_cluster(0, 2, 0.5)
     assert grandchild["depth"] == 2
     assert grandchild["active_sample_count"] == 2
-    with pytest.raises(ValueError, match="enough selected samples"):
-        session.refine_cluster(0, 2, 1.0)
+    leaf = session.refine_cluster(0, 2, 1.0)
+    assert leaf["depth"] == 3
+    assert leaf["active_sample_count"] == 1
+    assert [cluster["count"] for cluster in leaf["clusters"]] == [1]
+    assert leaf["clusters"][0]["can_refine"] is True
+    session.back_cluster()
 
     parent = session.back_cluster()
     assert parent["depth"] == 1
@@ -155,7 +199,7 @@ def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
 
 
 def test_demo_designer_reclusters_only_current_subset(monkeypatch) -> None:
-    monkeypatch.setattr(demo_session, "XyzPositionClusterer", _DeterministicClusterer)
+    monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
     monkeypatch.setattr(
         demo_session,
         "oracle_cluster_scores",
@@ -173,3 +217,95 @@ def test_demo_designer_reclusters_only_current_subset(monkeypatch) -> None:
     assert payload["depth"] == 1
     assert payload["active_sample_count"] == 4
     assert payload["selected_label"] is None
+
+
+def test_explicit_rejected_candidate_split() -> None:
+    candidates = {
+        3: np.full((1, 1), 3.0),
+        1: np.full((1, 1), 1.0),
+        2: np.full((1, 1), 2.0),
+    }
+
+    rejected = _rejected_candidate_trajs(candidates, 2, frozenset({3, 1}))
+
+    assert [float(trajectory[0, 0]) for trajectory in rejected] == [1.0, 3.0]
+    assert _rejected_candidate_trajs(candidates, 2, frozenset()) == ()
+    with pytest.raises(ValueError, match="cannot be undesirable"):
+        _rejected_candidate_trajs(candidates, 2, frozenset({2}))
+
+
+def test_demo_designer_marks_restore_across_cluster_levels(monkeypatch) -> None:
+    monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
+    monkeypatch.setattr(
+        demo_session,
+        "oracle_cluster_scores",
+        lambda _user, _context, means, _scale: {label: float(label) for label in means},
+    )
+    monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
+    monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
+    session = _demo_session()
+
+    root = session.recluster(2, 1.0)
+    assert root["undesirable_labels"] == []
+    assert session.mark_cluster(1, True)["undesirable_labels"] == [1]
+    session.pick_cluster(1)
+    assert session.trajectory.cluster_levels[-1].undesirable_labels == set()
+    with pytest.raises(ValueError, match="selected cluster"):
+        session.mark_cluster(1, True)
+
+    session.pick_cluster(0)
+    session.mark_cluster(1, True)
+    child = session.refine_cluster(0, 2, 1.0)
+    assert child["undesirable_labels"] == []
+    session.mark_cluster(1, True)
+    parent = session.back_cluster()
+    assert parent["undesirable_labels"] == [1]
+
+
+def test_demo_designer_threads_scaled_clusters_to_cost_generation(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
+    monkeypatch.setattr(
+        demo_session,
+        "oracle_cluster_scores",
+        lambda _user, _context, means, _scale: {label: float(label) for label in means},
+    )
+    monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
+    monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
+    captured: dict[str, object] = {}
+
+    def fake_generate_cost_for_cluster(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(generated_cost=None)
+
+    monkeypatch.setattr(
+        demo_session, "generate_cost_for_cluster", fake_generate_cost_for_cluster
+    )
+    session = _demo_session()
+    session.dir = tmp_path
+    session.corpus = SimpleNamespace(dir=tmp_path)
+    session.rig._extra_costs = lambda _user: object()
+    session.rig.body_pos = None
+    session.rig.spine3_pos = None
+    session.trajectory.base_traj = np.zeros((1, 3, 3))
+    session.trajectory.start_arm_aa = np.zeros((3, 3))
+    session.trajectory.q_feedback = None
+    session.trajectory.prompt = "move comfortably"
+    session.trajectory.samples[:, 1] += 10.0
+    session.recluster(2, 0.4)
+    session.pick_cluster(0)
+    session.mark_cluster(1, True)
+
+    with pytest.raises(ValueError, match="produced no cost"):
+        session.generate_cost("llm")
+
+    assert captured["undesirable_labels"] == frozenset({1})
+    candidate_trajs = captured["candidate_trajs"]
+    assert isinstance(candidate_trajs, dict)
+    for label, correction in session.trajectory.cluster_corrections.items():
+        np.testing.assert_allclose(candidate_trajs[label], correction)
+        assert not np.array_equal(
+            candidate_trajs[label], session.trajectory.cluster_means[label]
+        )
+    np.testing.assert_allclose(captured["cluster_traj"], candidate_trajs[0])

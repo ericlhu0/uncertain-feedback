@@ -429,6 +429,22 @@ def generate_uq_correction(
     )
 
 
+def _rejected_candidate_trajs(
+    candidate_trajs: dict[int, np.ndarray],
+    selected_label: int,
+    undesirable_labels: frozenset[int],
+) -> tuple[np.ndarray, ...]:
+    if selected_label in undesirable_labels:
+        raise ValueError(
+            f"Selected cluster label {selected_label} cannot be undesirable."
+        )
+    return tuple(
+        trajectory
+        for label, trajectory in sorted(candidate_trajs.items())
+        if label in undesirable_labels
+    )
+
+
 def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-locals
     mpc: SmplLeftArmMPC | None,
     cfg: MpcRunConfig,
@@ -446,6 +462,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     backend: str | None = None,
     candidate_trajs: dict[int, np.ndarray] | None = None,
     highlight_label: int | None = None,
+    undesirable_labels: frozenset[int] = frozenset(),
     history_window: int | None = None,
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
     install: bool = False,
@@ -486,6 +503,24 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         spine3_pos,
         spine3_aa,
     )
+    rejected_trajs: tuple[np.ndarray, ...] = ()
+    prompt_candidate_trajs = candidate_trajs
+    if candidate_trajs:
+        selected_label = (
+            highlight_label
+            if highlight_label is not None
+            else next(iter(candidate_trajs))
+        )
+        rejected_trajs = _rejected_candidate_trajs(
+            candidate_trajs,
+            selected_label,
+            undesirable_labels,
+        )
+        prompt_candidate_trajs = {
+            label: trajectory
+            for label, trajectory in candidate_trajs.items()
+            if label == selected_label or label in undesirable_labels
+        }
     generated_context = build_generated_cost_context(
         context,
         current_q,
@@ -495,6 +530,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         body_pos=body_pos,
         reference_traj=reference_traj,
         full_correction_traj=full_correction_traj,
+        rejected_trajs=rejected_trajs,
     )
     summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
     _log(f"cost-generation context ready in {_elapsed(phase_t0)}", prefix=log_prefix)
@@ -506,7 +542,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         images = render_prompt_images(
             generated_context,
             cost_dir / "images",
-            candidate_trajs,
+            prompt_candidate_trajs,
             highlight_label,
             reference_traj=reference_traj,
             goal_pos=goal_pos,
@@ -529,6 +565,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         spine3_aa=spine3_aa,
         reference_traj=reference_traj,
         full_correction_traj=full_correction_traj,
+        rejected_trajs=rejected_trajs,
     )
     generator: CostGenerator = create_cost_generator(
         cfg_backend.llm_cost,

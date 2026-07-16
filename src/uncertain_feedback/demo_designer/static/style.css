@@ -137,6 +137,8 @@ button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
   cursor: pointer;
 }
 .cluster-card.selected { border-color: #222; background: #f0f6ff; }
+.cluster-card.undesirable { border-color: #b42318; background: #fff1f0; }
+.cluster-mark { margin-left: auto; white-space: nowrap; }
 .cluster-swatch { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; }
 .cluster-info { font-size: 11px; line-height: 1.4; }
 

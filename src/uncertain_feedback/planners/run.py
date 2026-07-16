@@ -846,12 +846,10 @@ def run_repeated_correction_session(
             rejected_trajs: tuple[np.ndarray, ...] = ()
             uqr = getattr(mpc, "last_uq_result", None)
             if uqr is not None:
-                candidate_trajs = uqr.cluster_means
+                candidate_trajs = {
+                    uqr.chosen_label: uqr.cluster_means[uqr.chosen_label]
+                }
                 highlight_label = uqr.chosen_label
-                rejected_trajs = tuple(
-                    value for label, value in sorted(uqr.cluster_means.items())
-                    if label != uqr.chosen_label
-                )
             reference_traj = old_suffix
             if reference_traj is None:
                 reference_traj = _rollout_reference_trajectory(

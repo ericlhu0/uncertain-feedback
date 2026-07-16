@@ -38,12 +38,14 @@ from uncertain_feedback.planners.mpc.costs import (
     CombineCostGenerator,
     CompositeTrajectoryCost,
     CostRound,
+    generated_cost_feature_dependencies,
     replace_generated_costs,
 )
 from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
 from uncertain_feedback.planners.mpc.costs.generated import GeneratedPythonCost
 from uncertain_feedback.planners.run import _assemble_full_correction_traj
 from uncertain_feedback.simulated_users.base import (
+    FEATURE_NAMES,
     HiddenCostTerm,
     SimulatedUser,
     compute_violations,
@@ -52,9 +54,7 @@ from uncertain_feedback.simulated_users.base import (
     violation_metrics,
 )
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
-from uncertain_feedback.uncertainty.clustering.xyz_clusterer import (
-    XyzPositionClusterer,
-)
+from uncertain_feedback.uncertainty.clustering import make_clusterer
 
 if TYPE_CHECKING:
     from uncertain_feedback.demo_designer.core import DemoRig
@@ -70,54 +70,115 @@ def _json_object(text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
-        data = json.loads(text[start : end + 1])
+        if start < 0 or end <= start:
+            return {}
+        try:
+            data = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return {}
     return data if isinstance(data, dict) else {}
 
 
-def _generated_bounds_from_artifacts(cost_dir: Path) -> list[dict[str, Any]]:
+def _ground_specification_from_artifacts(cost_dir: Path) -> dict[str, Any]:
+    rationale = cost_dir / "rationale.json"
+    if rationale.exists():
+        payload = _json_object(rationale.read_text(encoding="utf-8"))
+        ground = payload.get("ground")
+        if isinstance(ground, dict):
+            return ground
+
     ground_response = cost_dir / "ground_response.txt"
     if ground_response.exists():
-        payload = _json_object(ground_response.read_text(encoding="utf-8"))
-    else:
-        stage_log = cost_dir / "stage_log.md"
-        if not stage_log.exists():
-            return []
-        text = stage_log.read_text(encoding="utf-8")
-        marker = "## Stage 2 response"
-        start = text.find(marker)
-        if start < 0:
-            return []
-        start += len(marker)
-        end = text.find("\n## ", start)
-        payload = _json_object(text[start:] if end < 0 else text[start:end])
+        return _json_object(ground_response.read_text(encoding="utf-8"))
+
+    stage_log = cost_dir / "stage_log.md"
+    if not stage_log.exists():
+        return {}
+    text = stage_log.read_text(encoding="utf-8")
+    marker = "## Stage 2 response"
+    start = text.find(marker)
+    if start < 0:
+        return {}
+    start += len(marker)
+    end = text.find("\n## ", start)
+    return _json_object(text[start:] if end < 0 else text[start:end])
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if np.isfinite(result) else None
+
+
+def _generated_bounds_from_artifacts(cost_dir: Path) -> list[dict[str, Any]]:
+    payload = _ground_specification_from_artifacts(cost_dir)
+    terms = payload.get("terms")
+    if not isinstance(terms, list):
+        return []
 
     bounds: list[dict[str, Any]] = []
-    for term in payload.get("terms", []):
+    for term in terms:
+        if not isinstance(term, dict):
+            continue
+        feature = term.get("feature")
         values = term.get("values", {})
         bound_type = term.get("bound_type")
-        if bound_type not in ("lower_bound", "upper_bound", "band"):
+        if (
+            feature not in FEATURE_NAMES
+            or bound_type not in ("lower_bound", "upper_bound", "band")
+            or not isinstance(values, dict)
+        ):
             continue
-        # Pose-dependent (coupled) bound: threshold slides with another feature.
-        if bound_type != "band" and "cond_feature" in values and values.get("points"):
+        cond_feature = values.get("cond_feature")
+        raw_points = values.get("points")
+        if (
+            bound_type != "band"
+            and cond_feature in FEATURE_NAMES
+            and cond_feature != feature
+            and isinstance(raw_points, list)
+        ):
+            points: list[list[float]] = []
+            for point in raw_points:
+                if not isinstance(point, (list, tuple)) or len(point) != 2:
+                    points = []
+                    break
+                cond = _finite_float(point[0])
+                threshold = _finite_float(point[1])
+                if cond is None or threshold is None:
+                    points = []
+                    break
+                points.append([cond, threshold])
+            if len(points) < 2 or any(
+                right[0] <= left[0] for left, right in zip(points, points[1:])
+            ):
+                continue
             bounds.append(
                 {
-                    "feature": term.get("feature"),
+                    "feature": feature,
                     "bound_type": bound_type,
                     "coupled": True,
-                    "cond_feature": values.get("cond_feature"),
-                    "points": [[float(c), float(t)] for c, t in values["points"]],
+                    "cond_feature": cond_feature,
+                    "points": points,
                 }
             )
             continue
         if bound_type == "lower_bound":
-            low, high = values.get("threshold"), None
+            low, high = _finite_float(values.get("threshold")), None
         elif bound_type == "upper_bound":
-            low, high = None, values.get("threshold")
+            low, high = None, _finite_float(values.get("threshold"))
         else:
-            low, high = values.get("low"), values.get("high")
+            low = _finite_float(values.get("low"))
+            high = _finite_float(values.get("high"))
+        if (bound_type == "lower_bound" and low is None) or (
+            bound_type == "upper_bound" and high is None
+        ):
+            continue
+        if bound_type == "band" and (low is None or high is None or low > high):
+            continue
         bounds.append(
             {
-                "feature": term.get("feature"),
+                "feature": feature,
                 "bound_type": bound_type,
                 "low": low,
                 "high": high,
@@ -147,6 +208,8 @@ class ClusterLevel:
     selected_label: int | None
     n_clusters: int
     scale: float
+    medoid_indices: dict[int, int] = field(default_factory=dict)
+    undesirable_labels: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -544,7 +607,12 @@ class Session:
     # --- MDM / clustering -------------------------------------------------
 
     def generate(
-        self, prompt: str, n_samples: int, n_clusters: int, scale: float
+        self,
+        prompt: str,
+        n_samples: int,
+        n_clusters: int,
+        scale: float,
+        clusterer: str = "kmeans_end_pose",
     ) -> dict[str, Any]:
         traj = self.trajectory
         rig = self.rig
@@ -563,9 +631,11 @@ class Session:
         _log(f"MDM generation done in {time.perf_counter() - t0:.1f}s")
         traj.prompt = prompt
         traj.cluster_levels = []
-        return self.recluster(n_clusters, scale)
+        return self.recluster(n_clusters, scale, clusterer)
 
-    def recluster(self, n_clusters: int, scale: float) -> dict[str, Any]:
+    def recluster(
+        self, n_clusters: int, scale: float, clusterer: str = "kmeans_end_pose"
+    ) -> dict[str, Any]:
         """Cluster the current sample subset and assemble each option."""
         traj = self.trajectory
         rig = self.rig
@@ -578,15 +648,20 @@ class Session:
             if traj.cluster_levels
             else np.arange(traj.samples.shape[0], dtype=np.intp)
         )
-        labels = XyzPositionClusterer(n_clusters, fk=rig.fk).cluster_positions(
-            traj.samples[sample_indices]
-        )
+        if sample_indices.size < n_clusters:
+            labels = np.arange(sample_indices.size, dtype=np.intp)
+            medoid_indices = {int(i): int(i) for i in labels}
+        else:
+            c = make_clusterer(clusterer, n_clusters, fk=rig.fk)
+            labels = np.asarray(c.cluster_positions(traj.samples[sample_indices]), dtype=np.intp)
+            medoid_indices = c.medoid_indices(labels)
         level = ClusterLevel(
             sample_indices=sample_indices,
-            labels=np.asarray(labels, dtype=np.intp),
+            labels=labels,
             selected_label=None,
             n_clusters=n_clusters,
             scale=scale,
+            medoid_indices=medoid_indices,
         )
         if traj.cluster_levels:
             traj.cluster_levels[-1] = level
@@ -610,7 +685,7 @@ class Session:
         traj.labels = level.labels
         traj.cluster_means = {
             label: rig.gen.smpl_positions_to_left_arm_trajectory(
-                level_samples[level.labels == label].mean(axis=0),
+                level_samples[level.medoid_indices[label]],
                 spine3_aa=rig.spine3_aa,
             )
             for label in sorted(int(v) for v in np.unique(level.labels))
@@ -638,7 +713,7 @@ class Session:
                 {
                     "label": label,
                     "count": count,
-                    "can_refine": level.n_clusters >= 2 and count >= level.n_clusters,
+                    "can_refine": level.n_clusters >= 2,
                     "oracle_score": oracle[label],
                     "correction": rig.package_trajectory(scaled, user),
                     "full": rig.package_trajectory(full, user),
@@ -662,6 +737,7 @@ class Session:
         return {
             "clusters": clusters,
             "selected_label": traj.chosen_label,
+            "undesirable_labels": sorted(level.undesirable_labels),
             "depth": len(traj.cluster_levels) - 1,
             "path": path,
             "can_go_back": len(traj.cluster_levels) > 1,
@@ -675,13 +751,37 @@ class Session:
             raise ValueError(f"Unknown cluster label {label}.")
         if not traj.cluster_levels:
             raise ValueError("Cluster samples first.")
-        traj.cluster_levels[-1].selected_label = label
+        level = traj.cluster_levels[-1]
+        level.undesirable_labels.discard(label)
+        level.selected_label = label
         traj.chosen_label = label
         traj.scaled_correction = traj.cluster_corrections[label]
         return {"ok": True}
 
+    def mark_cluster(self, label: int, undesirable: bool) -> dict[str, Any]:
+        traj = self.trajectory
+        if traj is None or label not in traj.cluster_corrections:
+            raise ValueError(f"Unknown cluster label {label}.")
+        if not traj.cluster_levels:
+            raise ValueError("Cluster samples first.")
+        level = traj.cluster_levels[-1]
+        if undesirable and label == level.selected_label:
+            raise ValueError("The selected cluster cannot be marked undesirable.")
+        if undesirable:
+            level.undesirable_labels.add(label)
+        else:
+            level.undesirable_labels.discard(label)
+        return {
+            "ok": True,
+            "undesirable_labels": sorted(level.undesirable_labels),
+        }
+
     def refine_cluster(
-        self, label: int, n_clusters: int, scale: float
+        self,
+        label: int,
+        n_clusters: int,
+        scale: float,
+        clusterer: str = "kmeans_end_pose",
     ) -> dict[str, Any]:
         """Cluster only the raw samples belonging to the selected option."""
         traj = self.trajectory
@@ -692,21 +792,26 @@ class Session:
         if label not in traj.cluster_corrections:
             raise ValueError(f"Unknown cluster label {label}.")
         selected_indices = level.sample_indices[level.labels == label]
-        if n_clusters < 2 or selected_indices.size < n_clusters:
-            raise ValueError(
-                "Refinement needs at least two clusters and enough selected samples."
-            )
+        if n_clusters < 2:
+            raise ValueError("Refinement needs at least two clusters.")
         level.selected_label = label
-        labels = XyzPositionClusterer(n_clusters, fk=rig.fk).cluster_positions(
-            traj.samples[selected_indices]
-        )
+        if selected_indices.size < n_clusters:
+            labels = np.arange(selected_indices.size, dtype=np.intp)
+            medoid_indices = {int(label): int(label) for label in labels}
+        else:
+            c = make_clusterer(clusterer, n_clusters, fk=rig.fk)
+            labels = np.asarray(
+                c.cluster_positions(traj.samples[selected_indices]), dtype=np.intp
+            )
+            medoid_indices = c.medoid_indices(labels)
         traj.cluster_levels.append(
             ClusterLevel(
                 sample_indices=selected_indices,
-                labels=np.asarray(labels, dtype=np.intp),
+                labels=labels,
                 selected_label=None,
                 n_clusters=n_clusters,
                 scale=scale,
+                medoid_indices=medoid_indices,
             )
         )
         return self._activate_cluster_level()
@@ -742,13 +847,19 @@ class Session:
             poses = poses[rng.choice(poses.shape[0], 1500, replace=False)]
         feats = feature_series(self.rig.context, poses)
         batch = np.repeat(poses[:, None, :, :], 2, axis=1)
+        active_features = generated_cost_feature_dependencies(cost.code)
         try:
             penalty = np.asarray(cost(batch), dtype=np.float64)
         except Exception:  # pragma: no cover - viz must not sink an expensive cost
-            return {"features": {}, "penalty": []}
+            return {
+                "features": {},
+                "penalty": [],
+                "active_features": list(active_features),
+            }
         return {
             "features": {k: v.tolist() for k, v in feats.items()},
             "penalty": penalty.tolist(),
+            "active_features": list(active_features),
         }
 
     def generate_cost(self, backend: str) -> dict[str, Any]:
@@ -782,8 +893,13 @@ class Session:
             body_pos=rig.body_pos,
             spine3_pos=rig.spine3_pos,
             spine3_aa=rig.spine3_aa,
-            candidate_trajs=traj.cluster_means,
+            candidate_trajs=traj.cluster_corrections,
             highlight_label=traj.chosen_label,
+            undesirable_labels=frozenset(
+                traj.cluster_levels[-1].undesirable_labels
+                if traj.cluster_levels
+                else ()
+            ),
             backend=backend,
             install=False,
             log_prefix=_LOG_PREFIX,
@@ -870,6 +986,7 @@ class Session:
             "trigger_step": round_.trigger_step,
             "trigger_reason": round_.trigger_reason,
             "trigger_violation": round_.trigger_violation,
+            "cluster_labels": list(round_.cluster_labels),
             "description": round_.description,
             "rationale": _rationale_from_artifacts(round_.round_dir),
             "artifact_dir": str(round_.round_dir),
@@ -889,6 +1006,11 @@ class Session:
         generation = traj._last_generation
         state_path = traj._last_cost_dir / "state.pkl"
         generation.eval_state.save(state_path)
+        cluster_labels = tuple(
+            int(level.selected_label)
+            for level in traj.cluster_levels
+            if level.selected_label is not None
+        )
         cost_round = CostRound(
             index=len(self.rounds),
             goal=(float(traj.goal[0]), float(traj.goal[1]), float(traj.goal[2])),
@@ -901,6 +1023,7 @@ class Session:
             summaries=generation.summaries,
             image_paths=tuple(path.resolve() for path in generation.images.values()),
             trajectory_index=self.trajectory_count - 1,
+            cluster_labels=cluster_labels,
             trigger_reason=traj.trigger_reason or "discomfort",
             trigger_violation=traj.trigger_violation,
             description=generation.description,
@@ -918,7 +1041,10 @@ class Session:
         traj._last_instruction = None
         traj._last_cost_payload = None
         self._save()
-        _log(f"committed round {cost_round.index} (goal={list(cost_round.goal)})")
+        _log(
+            f"committed round {cost_round.index} "
+            f"(goal={list(cost_round.goal)}, cluster_labels={list(cluster_labels)})"
+        )
         return {"rounds": self.round_records, "unified": self._unified_record()}
 
     def apply_round_and_continue(self) -> dict[str, Any]:

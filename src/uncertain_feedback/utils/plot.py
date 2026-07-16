@@ -902,11 +902,10 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         The orange current pose (the shared start every candidate departs from) and the
         gold goal star are always drawn.
 
-        ``include_others`` adds every OTHER cluster as its own grey-gradient full arm
-        (sampled frames + wrist path + end marker), so the LLM can see how the rest of
-        each candidate arm moves, not just its wrist. ``include_reference`` adds the
-        original-goal reference as a green-gradient full arm plus a green dashed wrist
-        path. Splitting these layers onto separate images keeps each one readable.
+        ``include_others`` adds only the terminal full-arm pose and wrist marker for
+        every OTHER cluster. ``include_reference`` adds the original-goal reference as
+        a green-gradient full arm plus a green dashed wrist path. Splitting these layers
+        onto separate images keeps each one readable.
 
         Each image computes its own equal-square axis limits from only the layers it
         draws, so it is individually legible (the highlighted cluster may therefore sit
@@ -923,7 +922,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                                T-pose when ``None``.
             reference_traj:    ``(T, 3, 3)`` original-goal arm trajectory, or ``None``.
             goal_pos:          ``(3,)`` spine3-relative wrist goal, or ``None``.
-            include_others:    Draw the other clusters' full arms (default ``True``).
+            include_others:    Draw the other clusters' terminal full-arm poses
+                               (default ``True``).
             include_reference: Draw the original-goal reference's full arm (default
                                ``True``); ignored when ``reference_traj`` is ``None``.
         """
@@ -948,15 +948,16 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             if include_others
             else []
         )
-        drawn_labels = [highlight_label, *other_labels]
-        positions_by_label = {
-            label: self.fk.fk_batch(
-                np.asarray(mdm_trajs[label], dtype=np.float64), spine3_pos, spine3_aa
-            )
-            for label in drawn_labels
-        }
         hi_traj = np.asarray(mdm_trajs[highlight_label], dtype=np.float64)
-        hi_positions = positions_by_label[highlight_label]
+        hi_positions = self.fk.fk_batch(hi_traj, spine3_pos, spine3_aa)
+        other_end_positions = {
+            label: self.fk.fk(
+                np.asarray(mdm_trajs[label][-1], dtype=np.float64),
+                spine3_pos,
+                spine3_aa,
+            )
+            for label in other_labels
+        }
         current_positions = self.fk.fk(current_q, spine3_pos, spine3_aa)
 
         if body_pos is not None:
@@ -967,7 +968,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         cur_full = self.fk.full_body_positions(current_q, spine3_pos, spine3_aa)
 
         # Per-image equal-square axis limits from only the layers this image draws.
-        extra_pts = [positions_by_label[label].reshape(-1, 3) for label in drawn_labels]
+        extra_pts = [hi_positions.reshape(-1, 3)]
+        extra_pts.extend(other_end_positions.values())
         if ref_positions is not None:
             extra_pts.append(ref_positions[:, wrist_chain_idx])
         if goal_world is not None:
@@ -1010,17 +1012,20 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             _draw_bones_2d(ax, ref_body, ArmVisualizer.BODY_BONES, view.hi, view.vi,
                            ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
 
-            # Other clusters: full grey-gradient arms + wrist path + end marker.
+            # Other clusters: terminal grey arm pose + wrist end marker only.
             for label in other_labels:
-                positions = positions_by_label[label]
-                _sampled_arm_frames(
-                    ax, np.asarray(mdm_trajs[label], dtype=np.float64),
-                    other_cmap, view, alpha=0.4,
+                positions = other_end_positions[label]
+                terminal_full = self.fk.full_body_positions(
+                    np.asarray(mdm_trajs[label][-1], dtype=np.float64),
+                    spine3_pos,
+                    spine3_aa,
                 )
-                other_wrist = positions[:, wrist_chain_idx]
-                ax.plot(other_wrist[:, view.hi], other_wrist[:, view.vi],
-                        color="darkgrey", alpha=0.6, linewidth=1.0)
-                ax.scatter(other_wrist[-1, view.hi], other_wrist[-1, view.vi],
+                _draw_bones_2d(
+                    ax, terminal_full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
+                    other_cmap(0.75), alpha=0.65, lw=1.4,
+                )
+                other_wrist = positions[wrist_chain_idx]
+                ax.scatter(other_wrist[view.hi], other_wrist[view.vi],
                            marker="x", color="dimgrey", s=40, alpha=0.8, zorder=4)
 
             # Original-goal reference: green full arm + green dashed wrist path.
@@ -1054,10 +1059,11 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
         ]
         if other_labels:
-            legend_handles += [
-                plt.Line2D([0], [0], color="darkgrey", linewidth=1.5, label="other candidates"),
-                plt.Line2D([0], [0], marker="x", color="dimgrey", linestyle="", markersize=7, label="other ends"),
-            ]
+            legend_handles.append(
+                plt.Line2D([0], [0], color="darkgrey", linewidth=1.5,
+                           marker="x", markeredgecolor="dimgrey",
+                           label="other candidate end poses")
+            )
         if ref_positions is not None:
             legend_handles.append(
                 plt.Line2D([0], [0], color="green", linewidth=1.5, linestyle="--",

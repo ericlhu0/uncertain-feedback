@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-14
+**Last updated:** 2026-07-15
 **Branch:** pose-dependent-users
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -95,9 +95,11 @@ uncertain-feedback/
 │   │       ├── visualize_sitting_pose.py
 │   │       └── motion-diffusion-model/   # Git submodule (GuyTevet/MDM)
 │   ├── uncertainty/
-│   │   ├── clustering/               # Trajectory clustering methods (subclass to add)
-│   │   │   ├── base.py               # TrajectoryClusterer (template: _to_features + _fit_predict)
-│   │   │   └── xyz_clusterer.py      # XyzPositionClusterer (KMeans on FK positions)
+│   │   ├── clustering/               # Trajectory clustering methods (CLUSTERER_BUILDERS registry + make_clusterer)
+│   │   │   ├── base.py               # TrajectoryClusterer (template: _positions_to_features/_to_features + _fit_predict), medoid_indices, agglomerative_labels
+│   │   │   ├── xyz_clusterer.py      # XyzPositionClusterer (KMeans on end-pose features), AggloEndPoseClusterer
+│   │   │   ├── path_pca_clusterer.py # PathPcaClusterer (arclength-resampled arm path + PCA, agglomerative)
+│   │   │   └── t2m_clusterer.py      # T2mEmbeddingClusterer (T2M motion-encoder embeddings, agglomerative; needs downloaded evaluator weights)
 │   │   └── cluster_picker.py         # Recursive matplotlib cluster picker with refine/back navigation
 │   ├── simulated_users/
 │   │   ├── base.py                   # SimulatedUser, HiddenBound/CoupledBound, violations, cluster choice, oracle cost term
@@ -122,7 +124,7 @@ uncertain-feedback/
 │   ├── demo_designer/
 │   │   ├── smpl_mesh.py              # Neutral SMPL vertex generation + binary trajectory mesh cache
 │   │   ├── core.py                   # DemoRig: process-lifetime state (config, personas+CRUD, named start/goal configs, motion gen, pose/FK/mesh/context) + begin/list/resume session
-│   │   ├── session.py                # Session (one persona: corpus + rounds + unified cost, session.json persistence/resume) and Trajectory (live MPC stepping + per-trajectory correction scratch)
+│   │   ├── session.py                # Session (one persona: corpus + rounds + unified cost, session.json persistence/resume; rounds record root-to-leaf cluster_labels) and Trajectory (live MPC stepping + per-trajectory correction scratch, including per-level explicit undesirable-cluster marks)
 │   │   ├── server.py                 # Flask web UI + read-only /api/artifact/<path> access rooted at demo artifacts
 │   │   └── static/                   # Session lifecycle bar/resume picker/corpus controls + Three.js body views, persona/feature graphs, and generated-cost rationale disclosures
 │   ├── llm/
@@ -212,6 +214,9 @@ MdmMotionGenerator.generate_left_arm_trajectory()   [mdm_api.py]
     │       ▼
     │   XyzPositionClusterer.cluster()                [clustering/xyz_clusterer.py]
     │       KMeans on FK positions at frame ~100
+    │       (Demo Designer instead builds the clusterer via make_clusterer
+    │        from uq.clusterer / its UI dropdown, and represents each cluster
+    │        by its medoid sample rather than the mean)
     │       │
     │       ▼
     │   pick_cluster() / pick_cluster_positions()     [cluster_picker.py]
@@ -255,6 +260,13 @@ ArmVisualizer.update_step()                          [utils/plot.py]
   - `fk_batch(arm_aa, ...) → (N, 5, 3)` batched
   - `arm_aa_from_positions(positions, spine3_aa) → (3, 3)` inverse: XYZ → local axis-angles
   - `full_body_positions(arm_aa, ...) → (22, 3)` for visualization
+- **`anatomical_elbow_wrist_slots(...)`** (module function) — anatomically-constrained
+  elbow + wrist slot rotations for the left arm, shared by the three reconstruction sites
+  (`arm_aa_from_positions`, `hml_smpl_conversion.positions_to_smpl_body_pose`,
+  `demo_designer/smpl_mesh._generate`). The elbow slot carries the recovered shoulder
+  internal/external rotation (twist about the upper arm onto the observed flexion-plane
+  normal); the wrist slot is a pure forearm hinge with locked (neutral) pronation,
+  referenced to the stable elbow frame. Positions are preserved exactly. See audit §3a.
 
 ---
 
@@ -299,7 +311,7 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 
 When `llm_cost.enabled: true` in the YAML:
 
-1. `build_motion_summaries()` — text summaries of recent MPC steps and MDM trajectory
+1. `build_motion_summaries()` — text summaries of recent MPC steps and the MDM trajectory, plus rollout-labeled chosen-vs-marked-wrong terminal joint-feature comparisons when explicitly rejected UQ candidates are available
 2. `render_prompt_images()` — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
 3. Staged prompt builders (in `costs/prompts/__init__.py`) assemble `interpret` (instruction + images + compact summary), `ground` (interpretation + full summaries), and `author` (numeric spec + `runtime_api.txt`/`output_contract.txt`) prompts from `costs/prompts/stages/*.txt`
 4. LLM (OpenAI, configurable model) streams its opt-in reasoning summary to stdout, then returns final author JSON: `{description, code, params, explanation, recipient_explanation}`
@@ -317,18 +329,18 @@ When `llm_cost.enabled: true` in the YAML:
 - `llm` (`llm_costs.py`) — single-pass staged calls: interpret → ground → author; only the author output is parsed/compiled. Stage prompt/response pairs are aggregated in `stage_log.md`; the authored cost is ranked for `rationale.json`.
 - `turns` (`turns_costs.py`) — interprets once, then runs a stateful ground+author conversation; keeps the best cost by ranking consistency (`rank_candidate_cost`, falling back to the L2 rollout score when the context has no comparison trajectories). `stage_log.md` includes the interpretation plus each refine turn's prompt snapshot and response, and the winning turn's ranking is copied into `rationale.json`.
 - `agent` (`agent_costs.py`) — delegates the staged method to the `codex` CLI, which emits the same `response.json` and must write `stage_log.md` with Stage 1 / Stage 2 / Stage 3 responses; those sections are parsed leniently for `rationale.json` and the final cost is ranked locally.
-- `CombineCostGenerator` (`combine_costs.py`) is constructed directly by the multi-round experiment, not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`. Each `CostRound` also carries the round's generation evidence chain — `description`, `explanation`, `interpretation` (stage-1 response), `grounding` (stage-2 response), all defaulted to `""` — populated from the round's `rationale.json` (via `CostGenerationResult`/`_rationale_fields` in `experiment_pipeline.py`) and rendered under a "Why this cost was generated:" block in the combine prompt (`build_combine_task_body`, empty fields skipped).
+- `CombineCostGenerator` (`combine_costs.py`) is constructed directly by the multi-round experiment, not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its user-visible Codex agent output is teed live to stdout (and therefore the Demo Designer console) while remaining in `codex.log`. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`. Each `CostRound` also carries the round's root-to-leaf `cluster_labels` path and generation evidence chain — `description`, `explanation`, `interpretation` (stage-1 response), `grounding` (stage-2 response), all defaulted to `""` — populated from the round's `rationale.json` (via `CostGenerationResult`/`_rationale_fields` in `experiment_pipeline.py`) and rendered under a "Why this cost was generated:" block in the combine prompt (`build_combine_task_body`, empty fields skipped).
 - Both codex generators accept an optional `corpus_dir: Path | None` (threaded from `generate_cost_for_cluster` → `create_cost_generator`, agent branch only). When it points at a `TrajectoryCorpus` (`manifest.json` present), `_corpus_section()` documents the on-disk corpus in `TASK.md` and `_corpus_note()` injects a required grounding step into the Stage 2 (agent) / combine (combine) prompt — codex must load the per-frame feature CSVs and move each candidate bound past the poses reached comfortably (before `comfortable_until`), then log the numpy/pandas margin check (`## Corpus check` for `agent`, in `## Evidence synthesis` for combine). `None` leaves every prompt byte-identical, so `llm`/`turns` and all non-corpus callers are unchanged.
 
 ### Cost evaluation & visual feedback
 
-- `rank_candidate_cost()` (`cost_generator.py`) evaluates a candidate cost by **ranking consistency**: the cost is applied directly to the trajectories whose preference order the user revealed — the chosen correction (`mdm_traj`) must cost less than the original plan (`reference_traj`, strict) and no more than the rejected UQ cluster means (`context.rejected_trajs`, weak). All trajectories are first resampled to equidistant joint-space-arclength points (`resample_equidistant`) so only the path matters, not timing (MDM output is systematically slower than a fresh rollout — timing is a pipeline artifact, not intent), then compared after z-normalization. Returns a `CostRanking` (rank accuracy + normalized margin + inert flag; `sort_key` orders candidates), or `None` when the context has no comparison trajectories — then `turns` falls back to the L2 rollout score. `rejected_trajs` is collected in `run.py` from `last_uq_result.cluster_means` (non-chosen labels) and threaded through `build_generated_cost_context` / `EvalState`.
+- `rank_candidate_cost()` (`cost_generator.py`) evaluates a candidate cost by **ranking consistency**: the cost is applied directly to the trajectories whose preference order the user revealed — the chosen correction (`mdm_traj`) must cost strictly less than the original plan (`reference_traj`) and every UQ cluster the Demo Designer user explicitly marked wrong (`context.rejected_trajs`). Unmarked non-chosen clusters are dropped from summaries, images, and ranking; automated/simulated-user paths pass no negatives and rank only against the reference plan. All comparison trajectories are first resampled to equidistant joint-space-arclength points (`resample_equidistant`) so only the path matters, not timing (MDM output is systematically slower than a fresh rollout — timing is a pipeline artifact, not intent), then compared after z-normalization. Returns a `CostRanking` (rank accuracy + normalized margin + inert flag + explicit original-plan-improvement flag; `sort_key` orders candidates), or `None` when the context has no comparison trajectories — then `turns` falls back to the L2 rollout score. Every generator backend rejects rather than installs a cost whose chosen-correction score is not strictly lower than its original-plan score. The Demo Designer threads its per-level `undesirable_labels` into `generate_cost_for_cluster`; `build_motion_summaries` exposes rollout-labeled `candidate_comparison` entries containing chosen, current, original-plan, and per-marked-wrong-cluster terminal values and deltas.
 - `evaluate_candidate_cost()` rolls the goal-seeking MPC with a candidate cost installed (`_make_cost_eval_rollout` in `run.py`) and returns the mean FK-position L2 distance to the MDM correction (`_score_rollout`; both trajectories resampled equidistant-in-arclength, so the score is path-only). Lower is better; `inf` when the planner has no Cartesian goal. Drives the `backend_comparison.json` ranking and the `turns` fallback.
 - **Goal-reachability check** (`goal_reach_report()`): because ranking/`_score_rollout` grade only against the correction preferences, a cost can score well while stopping the arm short of the goal. `goal_reach_report(context, rollout)` reproduces the MPC's own `ArmMPCCartesian.goal_reached` criterion (FK the final rollout frame, spine3-relative wrist vs `context.cartesian_goal` within `context.cartesian_threshold`), returning `{reached, distance, threshold}` (or `None` for non-Cartesian planners). The goal + threshold are threaded onto `GeneratedCostContext` via `build_generated_cost_context` / `EvalState`. This is gated on `goal_conflict` (`parse_goal_conflict()` reads the stage-1 flag): only when stage one judged the goal reachable does missing it count against a candidate. In the `turns` backend selection is keyed on `(reach_rank, *ranking.sort_key)` so a goal-reaching candidate beats a non-reaching one and ranking consistency orders candidates within that, and each turn's feedback tells the model whether the goal was reached; in the `agent` backend `render_cost_comparison.py` prints a `goal reached:` line and `TASK.md` instructs codex to keep revising until the goal is reached (unless it conflicts).
 - `CostGenerator.begin()` writes `reference_with_correction.mp4` into every generated-cost artifact directory using `context.full_correction_traj` when present, falling back to `context.mdm_traj`.
 - `evaluate_and_render()` does the **same single rollout** and additionally renders `ArmVisualizer.render_cost_feedback_overlay()` — a rollout (red) vs target-corrected-path (green) overlay — returning `(score, image_path)`. When an `angle_path` is passed it also renders `ArmVisualizer.render_joint_angle_comparison()` — a joint-angle-over-time graph (one subplot per anatomical joint feature; green target vs red rollout, per-frame series from `build_joint_angle_series()`) — so the model sees the temporal shape of the motion, not just endpoints. The green target is `context.full_correction_traj` when present (the **entire** intended path: pre-correction history → MDM correction → comfort-only continuation to the goal, assembled once in `run.py:_assemble_full_correction_traj` and threaded through `build_generated_cost_context` / `EvalState`), falling back to the MDM correction segment (`mdm_traj`) alone. The score (`_score_rollout`) still measures distance to the MDM correction segment only. It can also persist the exact rollout array and MP4 used for that feedback image. When `use_images` is on:
   - `turns` feeds `turn_<i>/comparison.png` + `turn_<i>/angles.png` + score back through the conversation each turn; backend experiments with `--save-video` also write `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
-  - `agent` self-iterates: `EvalState` (`costs/cost_feedback.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Codex runs `experiments/render_cost_comparison.py` (writing both `comparison.png` and `angles.png`) to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
+  - `agent` self-iterates: `EvalState` (`costs/cost_feedback.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Before serialization, the full `MpcRunConfig` is reduced to frozen `EvalMpcConfig`, which retains only operational rollout fields (planner, Cartesian goals/threshold, step/sampling parameters, goal threshold, and seed); `user`, `persona_goals`, and all other config metadata are absent. `EvalState.load()` converts legacy full-config pickles, and combine staging always load/re-saves each round state so old sessions are sanitized too. Codex runs `experiments/render_cost_comparison.py` (writing both `comparison.png` and `angles.png`) to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
 
 ---
 
@@ -358,7 +370,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
 | `user`                 | str      | Simulated-user persona name (default `unrestricted`); loaded by `build_run` into `RunSetup.user` for every run |
 | `corrections.*`        | CorrectionConfig | `trigger_threshold` (default 0.02 rad). Restricted users trigger on a new above-threshold episode after returning to comfort; legacy `transfer.trigger_threshold` is accepted as a fallback. |
-| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
+| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose \| agglo_path_pca \| agglo_t2m; Demo Designer dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`, reasoning effort `xhigh`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
@@ -464,7 +476,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
 | `uv run python src/.../experiments/run_multi_round_experiment.py --mpc-config <yaml> [--persona <name>]` | Multi-round cost experiment; `cartesian.goals` is the ordered round sequence and successful feedback contexts are unified into one replacement cost |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
-| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>] [--trajectory-configs-file <json>]` | Browser tool; named initial-pose and goal libraries persist through `/api/trajectory-configs/<kind>`; clicking its header summary opens a dropdown to start/resume/delete sessions (one locked persona), the corpus panel browses/deletes executed evidence, and session-owned rounds/unified costs carry into successive trajectories; sessions persist to `session.json` and are resumable after restart (`/api/session/start`, `/api/sessions`, `/api/session/resume`, `DELETE /api/sessions/<name>`, `DELETE /api/corpus/<i>`); pending-cost and committed-round payloads include `rationale`, rendered as *why this cost*, while `/api/artifact/<path>` serves their `rationale.json`/`stage_log.md` files from the demo artifact root (see README) |
+| `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>] [--trajectory-configs-file <json>]` | Browser tool; named initial-pose and goal libraries persist through `/api/trajectory-configs/<kind>`; clicking its header summary opens a dropdown to start/resume/delete sessions (one locked persona), the corpus panel browses/deletes executed evidence, and session-owned rounds/unified costs carry into successive trajectories; sessions persist to `session.json` and are resumable after restart (`/api/session/start`, `/api/sessions`, `/api/session/resume`, `DELETE /api/sessions/<name>`, `DELETE /api/corpus/<i>`); cluster selection exposes `/api/pick_cluster` and the explicit-negative `/api/mark_cluster`; pending-cost and committed-round payloads include `rationale`, rendered as *why this cost*, while `/api/artifact/<path>` serves their `rationale.json`/`stage_log.md` files from the demo artifact root (see README) |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |
@@ -485,7 +497,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
   `conda run` subprocess (`kimodo/_kimodo_inference_worker.py`), mirroring the SAM/MHR
   worker pattern. Needs gated HF access to `meta-llama/Meta-Llama-3-8B-Instruct`.
 - **OpenAI** — used for LLM cost generation (`llm/openai_model.py`)
-- **sklearn** — KMeans clustering in `clustering/base.py`
+- **sklearn** — KMeans + AgglomerativeClustering in `clustering/base.py`, PCA in `clustering/path_pca_clusterer.py`
 - **smplx** — SMPL model loading
 - **detectron2** — human pose estimation in data collection worker
 
@@ -511,10 +523,9 @@ The hidden bounds are the evaluation ground truth in headless experiments
   stroke flexor synergy (required elbow bend grows with shoulder elevation).
 - `JointBoxLimit` — anatomical per-axis box on one controlled slot's raw
   axis-angle (not a feature bound). `DEFAULT_ARM_JOINT_LIMITS` in `personas.py`
-  is shared by **every** persona (including `unrestricted`): a tight box on the
-  `left_shoulder` slot (which drives the clavicle under the repo FK convention)
-  around the seated `demo_pose.pt` neutral, plus generous boxes on the
-  upper-arm and forearm slots. Summed into `compute_violations` and
+  is shared by **every** persona (including `unrestricted`): generous boxes on
+  the upper-arm and forearm slots; the clavicle-driving `left_shoulder` slot is
+  currently unrestricted. Summed into `compute_violations` and
   `HiddenCostTerm` via `SimulatedUser.limit_violation_series`; the
   feedback-gating checks still test `user.bounds` only, so `unrestricted`
   remains a no-feedback persona.
@@ -535,7 +546,13 @@ The hidden bounds are the evaluation ground truth in headless experiments
   experiments to score scaled raw UQ cluster options before cost generation).
 - Features come from the same `GeneratedCostContext` joint-feature helpers the
   cost generator uses (via `feature_series()`), so hidden bounds and generated
-  bounds are directly comparable.
+  bounds are directly comparable. Demo Designer parses validated constant and
+  pose-dependent grounded terms from `rationale.json` (falling back to the Stage 2
+  artifact) and draws their exact threshold or piecewise interpolation boundary.
+  It also records which named helpers each compiled generated cost reads: two-feature
+  costs render as sampled penalty fields on phase plots, while costs reading exactly
+  one named feature also render their sampled penalty region on that feature's time
+  graph even without a declared bound.
 - Personas (`personas.py`): `unrestricted` (default; no bounds),
   `adhesive_capsulitis`, `elbow_contracture`, `painful_arc` (elevation avoid band),
   `stroke_flexor_synergy` (active-effort coupled proxy),
@@ -577,6 +594,22 @@ The hidden bounds are the evaluation ground truth in headless experiments
 > computations — composed slot rotations applied to T-pose bone axes — with
 > outputs identical to the previous FK-position geometry (~5× faster on MPC
 > rollout batches since no FK positions are computed).
+
+> **Anatomical left-arm reparameterization (2026-07-14):**
+> The three left-arm reconstruction sites now route the elbow/wrist slots through
+> `kinematics.anatomical_elbow_wrist_slots` instead of per-slot shortest-arc
+> `align_vectors`. The elbow slot carries the **recovered shoulder
+> internal/external rotation** (twist about the upper arm onto the observed
+> flexion-plane normal `u × f`); the wrist slot is a **pure forearm hinge** with
+> pronation locked to the elbow-relative neutral, moving the reconstruction's
+> singularity off the T-pose antiparallel (which real clips hit) and onto the
+> unreachable 180° elbow flexion. Positions are preserved exactly; direction
+> features (`elbow_flexion`, shoulder flexion/abduction/elevation) are unchanged.
+> On the reference clip this dropped the displayed hand-frame drift from 136°→~43°
+> (matching the true 41° forearm-direction change), wrist rate-limiter caps 6→0,
+> and `left_wrist` `JointBoxLimit` violations 2→0. The recovered
+> `shoulder_internal_external_rotation` now reports real twist relative to the
+> T-pose flexion plane (nothing bounds it). Full details in audit §3a.
 
 > **Shoulder-elevation feature (2026-07-07):**
 > `GeneratedCostContext.shoulder_elevation_angles` — upper-arm angle from

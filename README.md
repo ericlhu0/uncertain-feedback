@@ -357,9 +357,26 @@ mdm_frames: 50
 uq:
   diffusion_samples: 128
   n_clusters: 3
+  clusterer: kmeans_end_pose  # kmeans_end_pose | agglo_end_pose | agglo_path_pca | agglo_t2m
   auto_cluster: null
   scale: 1.0  # default motion-magnitude scale for the chosen cluster
 ```
+
+`uq.clusterer` selects the clustering method (used by Demo Designer; the MPC
+planners keep their injected clusterer):
+
+- `kmeans_end_pose` — KMeans on spine3-relative arm-chain positions at a
+  single late frame (default).
+- `agglo_end_pose` — same end-pose features, average-linkage agglomerative.
+- `agglo_path_pca` — full-trajectory features (arm-chain path resampled to 15
+  equidistant-arclength waypoints, PCA to 95% variance), agglomerative.
+- `agglo_t2m` — 512-dim T2M motion-encoder embeddings (the FID/R-precision
+  evaluator), agglomerative. Requires a one-time weights download:
+
+  ```bash
+  cd src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model
+  bash prepare/download_t2m_evaluators.sh  # needs gdown
+  ```
 
 In the interactive picker, each cluster panel has a **magnitude** slider
 (range 0.0–2.0) that scales that trajectory's motion up or down while
@@ -368,9 +385,10 @@ space about the start pose: `1.0` = unchanged, `0.0` = hold start). `uq.scale`
 sets the slider's initial value and is used directly as the scale in headless
 runs. Select a panel and click **Refine selected** to cluster only that
 panel's raw trajectories into `uq.n_clusters` child options; refinement can be
-repeated while the selected subset has enough samples. **Back** restores the
-parent options and selection, and **Confirm** accepts the selected mean at the
-current depth.
+repeated recursively. When a selected option has fewer trajectories than
+`uq.n_clusters`, each trajectory becomes its own child option. **Back** restores
+the parent options and selection, and **Confirm** accepts the selected mean at
+the current depth.
 
 Run with an interactive cluster picker:
 ```bash
@@ -543,7 +561,10 @@ Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation use
 `gpt-5.6-luna` with `xhigh` reasoning effort.
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
-  images + compact summary → plain-language preference), **ground** (preference + full
+  images + compact summary, including rollout-labeled chosen-vs-marked-wrong terminal
+  joint-feature comparisons when the person explicitly rejects UQ alternatives →
+  plain-language preference),
+  **ground** (preference + full
   numeric summaries → concrete features and bounds — a bound is a constant threshold by
   default, or pose-dependent, its threshold sliding with a second feature via anchor
   points, only when the feedback ties one joint's range to another's position), **author**
@@ -553,13 +574,21 @@ Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation use
   `stage_log.md`. Every successful backend also writes `rationale.json`, which links
   the instruction, interpretation and modality-specific evidence, grounded numeric
   terms and their sources, final explanations, and the winning cost's empirical
-  chosen/original/rejected trajectory ranking when comparison trajectories exist.
+  chosen/original/marked-wrong trajectory ranking when comparison trajectories exist.
 - `turns` — a multi-turn conversation that rolls out each candidate, scores it, and feeds
   the score plus rendered comparisons back to refine the grounding and authoring while
   keeping the initial interpretation fixed.
 - `agent` — delegates the same staged method and optional rollout iteration to the
   external `codex` CLI. The agent is required to write `stage_log.md` with its Stage 1,
-  Stage 2, and Stage 3 responses; that log is also appended to `codex.log`.
+  Stage 2, and Stage 3 responses; that log is also appended to `codex.log`. Each run is
+  wrapped in a fail-closed Bubblewrap filesystem namespace. It can read only its staged
+  task inputs, a minimal rollout runtime, and the project virtual environment; the real
+  repository, simulator personas, and previous artifact runs are not mounted. Linux
+  hosts using this backend must provide the `bwrap` executable. Staged `state.pkl`
+  files contain only the operational MPC fields needed to reproduce a rollout
+  (planner, goal, sampling/step settings, thresholds, and seed), never the full run
+  config or its `user`/`persona_goals` metadata. Legacy round states are sanitized
+  while being staged for combination.
 
 The backend experiment is the orthogonal axis: it holds the correction fixed (the
 **chosen** UQ cluster) and generates a cost with each backend (`llm` / `turns` /
@@ -582,7 +611,9 @@ Pass the neutral base config (`arm_mpc_cartesian_mdm_llm.yaml`), not a
 backend-specific one — the experiment sets `llm_cost.backend` itself for each
 backend. All other `llm_cost` settings (`model`, `max_turns`, `use_images`, and
 `codex_cmd` for the `agent` backend) come from that config, so
-make sure its `codex_cmd` works on this host. Use `--backends llm turns` to
+make sure its `codex_cmd` works on this host and that Bubblewrap is installed. The
+configured Codex sandbox may be `danger-full-access` because Codex itself runs inside
+the outer restricted namespace. Use `--backends llm turns` to
 compare a subset, `--rollout-steps N` and
 `--save-video` to render an MP4 per backend. With image feedback enabled,
 `--save-video` also saves the rollout videos for every intermediate `turns` and
@@ -764,7 +795,11 @@ correction), `feedback_text`, and `comfortable_until` (the trigger step, or
 `n_frames` if none): frames `[0, comfortable_until)` were executed without a
 discomfort report. Codex-based generators read this corpus to reason about which
 configurations were reached comfortably, so goals that never trigger a
-correction still contribute negative evidence.
+correction still contribute negative evidence. Before an agent run, the relevant
+trajectory and feature files are copied into its task workspace and the oracle-derived
+`feedback_text` and `trigger_violation` fields are removed from the staged manifest.
+The original manifest remains unchanged for the demo UI and session history; only
+explicit round instructions enter the agent prompt.
 
 
 ## Demo designer web tool
@@ -822,7 +857,7 @@ session clears the displayed trajectory and accumulated context.
 Stages (each stage's controls unlock once the previous one ran):
 
 1. **Scenario** — edit the start arm pose (per-joint axis-angle sliders limited
-   to the selected persona's joint boxes, with a live SMPL body preview), the
+   where the selected persona has a joint box, with a live SMPL body preview), the
    spine3-relative Cartesian goal, and the simulated user. Initial poses and
    goals can each be named, saved, and selected independently; they persist in
    `demo_designer_trajectory_configs.json` by default, and saving an existing
@@ -856,16 +891,26 @@ Stages (each stage's controls unlock once the previous one ran):
    samples from the feedback-trigger pose (shown as a purple ghost body in
    the SMPL body views; falls back to the start pose when the base never
    violates) and clusters them (*Re-cluster* reuses cached samples at the
-   currently displayed refinement level). Every
+   currently displayed refinement level). The *Clusterer* dropdown selects the
+   clustering method (see `uq.clusterer` above; initial value from the config)
+   and applies on the next Generate/Re-cluster/Refine. Each cluster is
+   represented by its medoid — an actual MDM sample — rather than the
+   elementwise mean. Every
    cluster option is automatically integrated into the full corrected
    trajectory — executed history → scaled correction → comfort-only goal
    continuation — so cards show what actually happens if that option is taken:
    sample count, oracle score, full-path violation, and goal reach. Click a
-   card to select it; *Refine selected* clusters only that card's samples and
-   can be used recursively, while *Back* restores the prior options and
-   selection. The breadcrumb reports the current depth and subset size. Drag
-   *Magnitude* to rescale (re-clusters the current subset and re-assembles at
-   the new scale).
+   card to select it. Use *Mark wrong* on any explicitly undesirable alternatives;
+   only those marked cards are used as negative contrast for cost generation, while
+   unmarked non-chosen cards carry no preference signal. Selecting a marked card
+   clears its mark. *Refine selected* clusters only that card's samples and
+   can be used recursively; if the card has fewer samples than the requested
+   cluster count, each sample becomes its own child cluster. *Back* restores the
+   prior options and selection. The breadcrumb reports the current depth and
+   subset size. Drag *Magnitude* to rescale (re-clusters the current subset and
+   re-assembles at the new scale). Outside Demo Designer there is no mark-wrong interaction:
+   automated and simulated-user paths pass no negative clusters, so generated
+   costs contrast the chosen correction only with the original reference plan.
 3. **Cost generation** — runs the selected cost-generation backend (`llm`,
    `turns`, or `agent`) on the selected correction, rolls the MPC out with the
    generated cost installed from the original edited start pose, and shows the
@@ -879,6 +924,7 @@ Stages (each stage's controls unlock once the previous one ran):
    the generated trajectories, overlays, code, and pending Apply action without
    rerunning cost generation. This refresh recovery uses the live server session;
    restarting the server still clears the pending action.
+
 4. **Multi-round feedback** — interactive version of the multi-round
    experiment above. *Commit round* records the last generated cost as a
    feedback round (goal, feedback text, trigger pose, cost, pickled eval
@@ -913,8 +959,9 @@ bounds — with a scrubber/play control (arrow keys step, space plays) and
 per-trajectory violation strips aligned under the scrubber. A console panel at
 the bottom streams the server's stdout live, so long stages (MPC rollouts, MDM
 sampling, cost generation) show their progress. OpenAI-backed cost generation
-also streams the model's opt-in reasoning summary here; raw private reasoning
-is not exposed by the API. The right column plots each
+also streams the model's opt-in reasoning summary here, and the multi-round
+Codex combiner tees its user-visible agent log here while retaining the same
+output in `codex.log`; raw private reasoning is not exposed. The right column plots each
 joint feature over time with the persona's oracle limits shaded in red and
 the generated-cost limits shaded in blue. Both limit overlays have
 independent, default-on toggles. When the persona has a `coupled`
@@ -923,15 +970,17 @@ the column: the conditioning feature on the x-axis, the bounded feature on the
 y-axis, the pose-dependent limit as a diagonal line with its violating side
 shaded, and each trajectory traced through the plane with a dot at the scrubbed
 frame — so you can see the limit itself sliding as the two features co-vary.
-The generated cost is shown here (blue) as an evaluated **penalty field**, not a
-parsed bound: after a cost is generated, the compiled cost is sampled over a cloud
-of plausible poses (executed/candidate frames plus small joint-angle perturbations)
-and each penalized pose is drawn as a blue dot shaded by penalty magnitude — so its
-actual comfortable/penalized region can be compared directly against the diagonal
-oracle limit. Because it reads the compiled cost rather than a declared spec, it
-works for any cost shape and any backend (`llm`/`turns`/`agent`). (The per-feature
-time graphs still shade the declared constant generated bound in blue when the
-backend emits one — that overlay only covers simple single-feature bounds.)
+When the generator emits grounded `terms`, the generated cost's declared limit is
+drawn exactly in blue: constant bounds add a dashed threshold to the time graph,
+and pose-dependent bounds add a piecewise-linear boundary with held endpoint values
+and a shaded violating side to the phase graph. The parser reads the canonical
+`rationale.json` grounding first and falls back to the backend's Stage 2 artifact.
+The compiled cost is also sampled over a cloud of plausible poses
+(executed/candidate frames plus small joint-angle perturbations), with each penalized
+pose shaded by penalty magnitude. This sampled **penalty field** remains the check of
+what the executable cost actually does and works for cost shapes that cannot be
+expressed as a declared bound. When the compiled cost reads exactly one named joint
+feature, its sampled penalty region is also shaded across that feature's time graph.
 
 Personas are selectable before starting a session, then locked for that
 session. The edit/new/delete controls remain available (the bounds editor

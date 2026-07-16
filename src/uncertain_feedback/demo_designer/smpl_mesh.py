@@ -10,11 +10,12 @@ import torch
 from scipy.spatial.transform import Rotation
 from smplx import create
 
+from uncertain_feedback.planners.mpc.kinematics import anatomical_elbow_wrist_slots
+
 _BODY_MODELS_DIR = (
     Path(__file__).parents[1]
     / "motion_generators/mdm/motion-diffusion-model/body_models"
 )
-_ARM_CHAIN = (9, 13, 16, 18, 20)
 _LEG_BONES = ((1, 4), (4, 7), (7, 10), (2, 5), (5, 8), (8, 11))
 
 
@@ -153,15 +154,27 @@ class SmplMeshCache:
         n_frames = arm_positions.shape[0]
         body_pose = np.repeat(self._baseline[None], n_frames, axis=0)
         for f in range(n_frames):
-            parent_world = self._spine3_world
-            for i in range(1, 4):
-                joint, child = _ARM_CHAIN[i], _ARM_CHAIN[i + 1]
-                world, _ = Rotation.align_vectors(
-                    [arm_positions[f, i + 1] - arm_positions[f, i]],
-                    [self._rest[child] - self._rest[joint]],
-                )
-                body_pose[f, joint - 1] = (parent_world.inv() * world).as_rotvec()
-                parent_world = world
+            # Collar (13) via shortest arc onto the clavicle bone (unchanged).
+            collar_world, _ = Rotation.align_vectors(
+                [arm_positions[f, 2] - arm_positions[f, 1]],
+                [self._rest[16] - self._rest[13]],
+            )
+            body_pose[f, 12] = (self._spine3_world.inv() * collar_world).as_rotvec()
+            # Native SMPL orients the bone *leaving* a joint, so the anatomical
+            # elbow/wrist slots shift up one row: the recovered upper-arm
+            # orientation (with shoulder twist) drives the shoulder(16) row and
+            # the pure forearm hinge drives the elbow(18) row, so the
+            # hand-carrying frame at joint 18 is stable.  parent = collar world.
+            shoulder_row, elbow_row = anatomical_elbow_wrist_slots(
+                arm_positions[f, 2],
+                arm_positions[f, 3],
+                arm_positions[f, 4],
+                collar_world,
+                self._rest[18] - self._rest[16],
+                self._rest[20] - self._rest[18],
+            )
+            body_pose[f, 15] = shoulder_row
+            body_pose[f, 17] = elbow_row
         with torch.no_grad():
             output = self._model(
                 body_pose=torch.from_numpy(body_pose).reshape(n_frames, -1),

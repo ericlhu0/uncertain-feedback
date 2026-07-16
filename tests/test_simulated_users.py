@@ -106,11 +106,15 @@ def test_neural_mechanosensitivity_requires_flexion_during_abduction() -> None:
 
 def test_limit_cost_penalizes_out_of_box_rollouts() -> None:
     cost = UNRESTRICTED.limit_cost(weight=1.0)
-    shoulder = UNRESTRICTED.joint_limits[0]  # left_shoulder box
+    assert {limit.joint for limit in UNRESTRICTED.joint_limits} == {
+        "left_elbow",
+        "left_wrist",
+    }
+    elbow = UNRESTRICTED.joint_limits[0]
 
     inside = np.zeros((1, 2, 3, 3))
     outside = np.zeros((1, 2, 3, 3))
-    outside[:, :, 0, 1] = shoulder.high[1] + 0.3  # shoulder axis-1 past its cap
+    outside[:, :, 1, 1] = elbow.high[1] + 0.3
 
     assert cost(inside)[0] == 0.0
     assert np.isclose(cost(outside)[0], 0.3)

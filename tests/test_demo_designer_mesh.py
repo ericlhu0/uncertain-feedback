@@ -2,9 +2,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.demo_designer import server
 from uncertain_feedback.demo_designer import smpl_mesh
+from uncertain_feedback.planners.mpc.kinematics import anatomical_elbow_wrist_slots
 
 
 class _FakeSmpl:
@@ -54,6 +56,46 @@ def test_mesh_cache_generates_finite_deterministic_vertices(monkeypatch) -> None
     assert np.array_equal(cache.vertices(mesh_id), vertices)
     assert not np.array_equal(vertices[1], vertices[0])
     assert cache.faces.tolist() == [[0, 1, 2]]
+
+
+def test_hand_frame_continuous_through_forearm_sweep() -> None:
+    """The mesh's hand-carrying frame tracks the forearm without fabricated roll.
+
+    ``_generate`` maps the anatomical reparameterization onto native SMPL rows:
+    the recovered upper-arm orientation drives the shoulder(16) row and the pure
+    forearm hinge drives the elbow(18) row, so the hand rides on joint 18's
+    world frame.  Sweeping the forearm smoothly through the near-antiparallel
+    region must not induce a discontinuous roll on that frame.
+    """
+    # Native SMPL rest arm: upper arm +x with a small forearm bend.
+    rest16 = np.array([0.0, 0.0, 0.0])
+    rest18 = np.array([0.30, 0.0, 0.0])
+    rest20 = rest18 + 0.25 * np.array([np.cos(np.deg2rad(7.5)), 0.0, np.sin(np.deg2rad(7.5))])
+    collar_world = Rotation.identity()
+    shoulder, elbow = np.zeros(3), np.array([0.3, 0.0, 0.0])
+
+    prev_hand = None
+    prev_f = None
+    max_hand_step = 0.0
+    max_f_step = 0.0
+    for t in np.linspace(0.0, 1.0, 400):
+        ang = np.deg2rad(20 + 150 * t)
+        f = np.array([np.cos(ang), 0.0, np.sin(ang)])
+        wrist = elbow + 0.25 * f
+        shoulder_row, elbow_row = anatomical_elbow_wrist_slots(
+            shoulder, elbow, wrist, collar_world, rest18 - rest16, rest20 - rest18
+        )
+        shoulder_world = collar_world * Rotation.from_rotvec(shoulder_row)
+        hand_frame = shoulder_world * Rotation.from_rotvec(elbow_row)  # native joint-18
+        if prev_hand is not None:
+            step = (prev_hand.inv() * hand_frame).magnitude()
+            f_step = np.arccos(np.clip(prev_f @ f, -1.0, 1.0))
+            max_hand_step = max(max_hand_step, step)
+            max_f_step = max(max_f_step, f_step)
+        prev_hand = hand_frame
+        prev_f = f
+    assert np.degrees(max_hand_step) < 1.5
+    np.testing.assert_allclose(max_hand_step, max_f_step, atol=1e-9)
 
 
 def test_mesh_cache_rejects_stale_identifier(monkeypatch) -> None:

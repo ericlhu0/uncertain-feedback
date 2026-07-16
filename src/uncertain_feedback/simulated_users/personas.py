@@ -17,16 +17,10 @@ from uncertain_feedback.simulated_users.base import (
 )
 
 # Anatomical box limits shared by every persona (radians, per axis-angle
-# component of the controlled slots). The left_shoulder slot drives the
-# clavicle under the repo FK convention, so it gets a tight box around the
-# seated demo pose neutral of ~[-0.26, 0.05, -0.44] (demo_pose.pt and
-# demo_pose_v3.pt decode to nearly the same clavicle; real clavicle range of
-# motion is ~±20-30 deg); the upper-arm (left_elbow slot) and forearm
-# (left_wrist slot) rotations get generous ball/hinge-joint boxes.
+# component of the controlled slots). The upper-arm (left_elbow slot) and
+# forearm (left_wrist slot) rotations get generous ball/hinge-joint boxes.
+# The clavicle-driving left_shoulder slot is currently unrestricted.
 DEFAULT_ARM_JOINT_LIMITS = (
-    JointBoxLimit(
-        joint="left_shoulder", low=(-0.7, -0.4, -0.85), high=(0.15, 0.4, 0.05)
-    ),
     JointBoxLimit(joint="left_elbow", low=(-2.0, -2.0, -2.0), high=(2.0, 2.0, 2.0)),
     JointBoxLimit(joint="left_wrist", low=(-2.2, -2.2, -2.2), high=(2.2, 2.2, 2.2)),
 )

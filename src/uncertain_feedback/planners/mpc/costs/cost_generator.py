@@ -118,6 +118,15 @@ class CostRanking:
     costs: dict[str, float]
 
     @property
+    def improves_original_plan(self) -> bool | None:
+        """Whether the chosen correction costs strictly less than the original plan."""
+        chosen = self.costs.get("chosen_correction")
+        original = self.costs.get("original_plan")
+        if chosen is None or original is None:
+            return None
+        return chosen < original
+
+    @property
     def sort_key(self) -> tuple[float, float]:
         """Lower-is-better selection key: rank accuracy first, margin as tiebreak."""
         if self.inert:
@@ -130,6 +139,7 @@ class CostRanking:
             "rank_accuracy": self.rank_accuracy,
             "normalized_margin": self.normalized_margin,
             "inert": self.inert,
+            "improves_original_plan": self.improves_original_plan,
             "costs": self.costs,
         }
 
@@ -140,17 +150,17 @@ def rank_candidate_cost(
     """Evaluate a candidate cost by ranking consistency, not trajectory matching.
 
     The cost function itself is applied to the trajectories whose preference order
-    the user revealed: the chosen correction (``mdm_traj``) must cost less than the
-    original plan the user interrupted (``reference_traj``, strict) and no more
-    than the rejected UQ cluster means (weak — the user's pick may be a near-tie).
+    the user revealed: the chosen correction (``mdm_traj``) must cost strictly less
+    than the original plan the user interrupted (``reference_traj``) and every
+    cluster the user explicitly marked undesirable (``rejected_trajs``).
     Any cost that captures the intent satisfies this; recreating the correction
     trajectory is not required. All trajectories are resampled to equidistant
     joint-space points first (timing is a pipeline artifact, not intent) and
     compared after z-normalization (generated costs have arbitrary scale).
 
     Returns ``None`` when the context has no comparison trajectories (no reference
-    rollout and no rejected clusters), in which case callers fall back to the L2
-    rollout score.
+    rollout and no marked-undesirable clusters), in which case callers fall back to
+    the L2 rollout score.
     """
     chosen = np.asarray(context.mdm_traj, dtype=np.float64)
     if chosen.ndim != 3 or chosen.shape[0] == 0:
@@ -178,7 +188,7 @@ def rank_candidate_cost(
         margins.append(float(z["original_plan"] - z_chosen))
     for name in trajs:
         if name.startswith("rejected_cluster_"):
-            pairs.append(bool(z_chosen <= z[name]))
+            pairs.append(bool(z_chosen < z[name]))
             margins.append(float(z[name] - z_chosen))
     return CostRanking(
         rank_accuracy=float(np.mean(pairs)),
@@ -490,6 +500,20 @@ class CostGenerator(ABC):
             response.code, response.params, response.description
         )
         return response, cost
+
+    def require_original_plan_improvement(self, ranking: CostRanking | None) -> None:
+        """Reject a cost that does not prefer the correction to the interrupted plan."""
+        if ranking is None or ranking.improves_original_plan is None:
+            return
+        if ranking.improves_original_plan:
+            return
+        chosen = ranking.costs["chosen_correction"]
+        original = ranking.costs["original_plan"]
+        raise GeneratedCostValidationError(
+            "generated cost does not improve on the original plan: "
+            f"chosen_correction cost {chosen:.6g} must be strictly less than "
+            f"original_plan cost {original:.6g}"
+        )
 
     def begin(self) -> None:
         """Create the run dir and persist the prompt inputs."""

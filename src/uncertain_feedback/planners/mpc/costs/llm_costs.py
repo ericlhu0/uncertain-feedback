@@ -56,6 +56,7 @@ class LlmCostGenerator(CostGenerator):
                 ground_raw=specification,
                 ranking=ranking,
             )
+            self.require_original_plan_improvement(ranking)
             if install:
                 self.install(cost)
             self._on_success(cost, installed=install)

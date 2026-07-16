@@ -8,8 +8,9 @@ cost. The interpretation stays fixed — only grounding and authoring iterate.
 
 Candidates are selected by ranking consistency (:func:`rank_candidate_cost`): the
 cost is applied directly to the trajectories whose preference order the user
-revealed, so a cost that captures the intent wins without having to recreate the
-correction trajectory. When the context has no comparison trajectories the loop
+revealed, requiring the chosen correction to cost strictly less than the original
+plan and explicitly marked-wrong candidates. A cost that captures the intent wins
+without having to recreate the correction trajectory. When the context has no comparison trajectories the loop
 falls back to the L2 rollout score. Either way, a goal-reaching candidate beats a
 non-reaching one unless stage one judged the correction to conflict with the goal.
 """
@@ -90,6 +91,7 @@ class TurnsCostGenerator(CostGenerator):
                 ground_raw=None,
                 ranking=best_ranking,
             )
+            self.require_original_plan_improvement(best_ranking)
             if install:
                 self.install(best_cost)
             self._on_success(best_cost, installed=install)
@@ -266,7 +268,8 @@ def _feedback_score_block(ranking: CostRanking | None, score: float) -> str:
         "matters, not timing). Per-trajectory costs: "
         f"{json.dumps(ranking.costs)}. The user's chosen correction "
         "('chosen_correction') must cost less than the original plan they "
-        "interrupted ('original_plan') and no more than the rejected alternatives "
+        "interrupted ('original_plan') and strictly less than the marked-wrong "
+        "candidates "
         "('rejected_cluster_*'). Rank accuracy: "
         f"{ranking.rank_accuracy:.2f} (fraction of those orderings satisfied), "
         f"separation margin: {ranking.normalized_margin:.2f} (both higher is "

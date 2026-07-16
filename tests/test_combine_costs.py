@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import pickle
+import shlex
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -10,6 +14,7 @@ from uncertain_feedback.planners.mpc.costs import (
     CombineCostGenerator,
     CompositeTrajectoryCost,
     CostRound,
+    EvalState,
     GeneratedPythonCost,
     JointLimitCost,
     MpcCostContext,
@@ -40,6 +45,39 @@ def _context():
 
 def _round(tmp_path: Path, index: int) -> CostRound:
     round_dir = tmp_path / f"round_{index:02d}"
+    round_dir.mkdir()
+    fk = SmplLeftArmFK()
+    cost_context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    full_cfg = SimpleNamespace(
+        planner="arm_mpc_cartesian",
+        steps=3,
+        horizon=2,
+        n_mpc_samples=4,
+        max_angle_delta=0.01,
+        goal_threshold=0.05,
+        seed=0,
+        cartesian=SimpleNamespace(goals=[[0.1, 0.2, 0.3]], threshold=0.05),
+        user=f"secret_persona_{index}",
+        persona_goals={f"secret_persona_{index}": [[9.0, 9.0, 9.0]]},
+    )
+    state = EvalState(
+        cfg=full_cfg,
+        current_q=np.zeros((3, 3)),
+        correction_traj=np.zeros((2, 3, 3)),
+        q_history=[],
+        window=2,
+        cost_context=cost_context,
+        base_extra_costs=CompositeTrajectoryCost(),
+        body_pos=None,
+        spine3_pos=cost_context.spine3_pos,
+        spine3_aa=cost_context.spine3_aa,
+    )
+    state.cfg = full_cfg
+    with open(round_dir / "state.pkl", "wb") as file:
+        pickle.dump(state, file)
+    (round_dir / "image.png").write_bytes(b"image")
     return CostRound(
         index=index,
         goal=(0.1 + index, 0.2, 0.3),
@@ -154,3 +192,67 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
         "per_round"
     ] == {"0": 1.0, "1": 2.0}
     assert mpc._extra_costs.terms() == (base, combined)
+    task = (run_dir / "TASK.md").read_text(encoding="utf-8")
+    assert str(tmp_path) not in task
+    assert "/tmp/workspace/inputs/round_00/state.pkl" in task
+    staged_state_path = run_dir / "inputs" / "round_00" / "state.pkl"
+    staged_payload = staged_state_path.read_bytes()
+    assert b"secret_persona_0" not in staged_payload
+    assert b"persona_goals" not in staged_payload
+    assert not hasattr(EvalState.load(staged_state_path).cfg, "user")
+
+
+def test_combine_codex_streams_output_to_console_and_log(tmp_path, capsys) -> None:
+    run_dir = tmp_path / "combine"
+    run_dir.mkdir()
+    message = "combiner reasoning summary"
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        f"{shlex.quote(f'print({message!r}, flush=True)')}"
+    )
+    generator = CombineCostGenerator(
+        context=_context(),
+        instruction="feedback",
+        summaries={},
+        run_dir=run_dir,
+        codex_cmd=command,
+        rounds=[],
+    )
+
+    generator._run_codex()
+
+    assert f"[cost-gen][combine] codex output:\n{message}" in capsys.readouterr().out
+    assert message in (run_dir / "codex.log").read_text(encoding="utf-8")
+
+
+def test_agent_sandbox_hides_oracle_and_prior_runs(tmp_path) -> None:
+    secret_session_name = "hidden_persona_session"
+    run_dir = tmp_path / secret_session_name / "combine"
+    run_dir.mkdir(parents=True)
+    marker = run_dir / "visible.txt"
+    marker.write_text("visible", encoding="utf-8")
+    repo = Path(__file__).resolve().parents[1]
+    oracle = repo / "src" / "uncertain_feedback" / "simulated_users" / "personas.py"
+    prior_runs = repo / "demo_designer_artifacts"
+    script = (
+        "from pathlib import Path; "
+        "assert Path('/tmp/workspace/visible.txt').is_file(); "
+        f"assert not Path({str(oracle)!r}).exists(); "
+        f"assert not Path({str(prior_runs)!r}).exists(); "
+        f"assert {secret_session_name!r} not in "
+        "Path('/proc/self/mountinfo').read_text(); "
+        "print('isolated', flush=True)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c " f"{shlex.quote(script)}"
+    generator = CombineCostGenerator(
+        context=_context(),
+        instruction="feedback",
+        summaries={},
+        run_dir=run_dir,
+        codex_cmd=command,
+        rounds=[],
+    )
+
+    generator._run_codex()
+
+    assert "isolated" in (run_dir / "codex.log").read_text(encoding="utf-8")

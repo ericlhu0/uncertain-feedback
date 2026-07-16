@@ -43,4 +43,4 @@ llm_cost:
   # backend; they let run_backend_experiment.py flip to "turns"/"agent" without a
   # backend-specific config.
   max_turns: 3    # used by the "turns" backend
-  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"  # "agent" backend; no-sandbox required on this host (bwrap loopback blocked)
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"  # "agent" backend; outer bwrap isolation is applied automatically

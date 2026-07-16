@@ -178,7 +178,7 @@ class _FakeSequenceLlmModel:
         return json.dumps(
             {
                 "description": f"fake generated cost {self.calls}",
-                "params": {"weight": 1.0},
+                "params": {"weight": 1.0 if self.calls == 1 else -1.0},
                 "code": (
                     "def cost(q_trajs, context, params):\n"
                     "    future = q_trajs[:, 1:, 0, 0]\n"
@@ -1676,6 +1676,62 @@ def test_motion_summaries_include_reference_and_goal_when_present() -> None:
     assert summaries["cartesian_goal"] == [0.1, 0.2, 0.3]
 
 
+def test_motion_summaries_compare_chosen_to_named_rejected_rollouts() -> None:
+    chosen = np.zeros((3, 3, 3), dtype=np.float64)
+    original = chosen.copy()
+    original[-1, 0, 2] = -0.3
+    rejected_0 = chosen.copy()
+    rejected_0[-1, 0, 2] = 0.2
+    rejected_1 = chosen.copy()
+    rejected_1[-1, 0, 2] = 0.5
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=chosen,
+        q_history=[],
+        window=5,
+        reference_traj=original,
+        rejected_trajs=(rejected_0, rejected_1),
+    )
+
+    summaries = build_motion_summaries(context)
+
+    comparison = summaries["candidate_comparison"]
+    abduction = comparison["shoulder_abduction_adduction"]
+    rejected_ends = np.array(
+        [
+            context.shoulder_abduction_adduction_angles(rejected_0)[-1],
+            context.shoulder_abduction_adduction_angles(rejected_1)[-1],
+        ]
+    )
+    assert abduction["chosen_rollout"] == "mdm_traj"
+    assert abduction["current_rollout"] == "current"
+    assert abduction["current_value"] == pytest.approx(
+        context.shoulder_abduction_adduction_angles(context.current_q)
+    )
+    assert abduction["chosen_minus_current"] == pytest.approx(
+        abduction["chosen_end"] - abduction["current_value"]
+    )
+    assert abduction["original_plan_rollout"] == "reference"
+    assert abduction["original_plan_end"] == pytest.approx(
+        context.shoulder_abduction_adduction_angles(original)[-1]
+    )
+    assert abduction["chosen_minus_original_plan"] == pytest.approx(
+        abduction["chosen_end"] - abduction["original_plan_end"]
+    )
+    assert list(abduction["rejected_ends"]) == [
+        "rejected_cluster_0",
+        "rejected_cluster_1",
+    ]
+    np.testing.assert_allclose(list(abduction["rejected_ends"].values()), rejected_ends)
+    assert abduction["rejected_median"] == pytest.approx(np.median(rejected_ends))
+    assert abduction["rejected_std"] == pytest.approx(np.std(rejected_ends))
+    assert abduction["standardized_separation"] == pytest.approx(
+        (abduction["chosen_end"] - np.median(rejected_ends)) / np.std(rejected_ends)
+    )
+    assert comparison["elbow_flexion"]["standardized_separation"] is None
+
+
 def test_motion_summaries_omit_reference_without_reference_traj() -> None:
     context = build_generated_cost_context(
         _cost_context(SmplLeftArmFK()),
@@ -1749,7 +1805,9 @@ def test_prompt_images_render_overlay(tmp_path) -> None:
     assert path.exists() and path.stat().st_size > 0
 
 
-def test_prompt_images_render_others_with_multiple_clusters(tmp_path) -> None:
+def test_prompt_images_render_only_other_clusters_terminal_poses(
+    tmp_path, monkeypatch
+) -> None:
     context = build_generated_cost_context(
         _cost_context(SmplLeftArmFK()),
         current_q=np.zeros((3, 3), dtype=np.float64),
@@ -1757,11 +1815,24 @@ def test_prompt_images_render_others_with_multiple_clusters(tmp_path) -> None:
         q_history=[],
         window=5,
     )
+    rejected = np.stack(
+        [np.full((3, 3), value, dtype=np.float64) for value in (0.1, 0.2, 0.3, 0.4)]
+    )
 
     candidate_trajs = {
         0: np.zeros((4, 3, 3), dtype=np.float64),
-        1: np.full((4, 3, 3), 0.1, dtype=np.float64),
+        1: rejected,
     }
+    rendered_poses: list[np.ndarray] = []
+    original_full_body_positions = context.fk.full_body_positions
+
+    def record_full_body_positions(q, spine3_pos, spine3_aa):
+        rendered_poses.append(np.asarray(q, dtype=np.float64).copy())
+        return original_full_body_positions(q, spine3_pos, spine3_aa)
+
+    monkeypatch.setattr(
+        context.fk, "full_body_positions", record_full_body_positions
+    )
     images = render_prompt_images(
         context, tmp_path, candidate_trajs=candidate_trajs, highlight_label=0,
     )
@@ -1771,6 +1842,13 @@ def test_prompt_images_render_others_with_multiple_clusters(tmp_path) -> None:
     assert images["other_clusters_traj_img"].name == "others.png"
     for path in images.values():
         assert path.exists() and path.stat().st_size > 0
+    for intermediate_pose in rejected[:-1]:
+        assert not any(
+            np.array_equal(rendered, intermediate_pose) for rendered in rendered_poses
+        )
+    assert sum(
+        np.array_equal(rendered, rejected[-1]) for rendered in rendered_poses
+    ) == 3
 
 
 def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:

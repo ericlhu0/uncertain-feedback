@@ -37,6 +37,7 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
     summaries: dict[str, Any]
     image_paths: tuple[Path, ...]
     trajectory_index: int = 0
+    cluster_labels: tuple[int, ...] = ()
     trigger_reason: str = "discomfort"
     trigger_violation: float | None = None
     description: str = ""
@@ -58,6 +59,7 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
             "summaries": self.summaries,
             "image_paths": [str(path.resolve()) for path in self.image_paths],
             "trajectory_index": self.trajectory_index,
+            "cluster_labels": list(self.cluster_labels),
             "trigger_reason": self.trigger_reason,
             "trigger_violation": self.trigger_violation,
             "description": self.description,
@@ -85,6 +87,9 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
             summaries=dict(data["summaries"]),
             image_paths=tuple(Path(path) for path in data["image_paths"]),
             trajectory_index=int(data.get("trajectory_index", 0)),
+            cluster_labels=tuple(
+                int(label) for label in data.get("cluster_labels", [])
+            ),
             trigger_reason=str(data.get("trigger_reason", "discomfort")),
             trigger_violation=(
                 float(data["trigger_violation"])
@@ -101,6 +106,9 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
 class CombineCostGenerator(AgentCostGenerator):
     """Ask Codex to replace per-round costs with one cross-round cost."""
 
+    _codex_log_label = "combine"
+    _stream_codex_output = True
+
     def __init__(
         self,
         *args: Any,
@@ -111,11 +119,30 @@ class CombineCostGenerator(AgentCostGenerator):
         super().__init__(*args, timeout_seconds=timeout_seconds, **kwargs)
         self.rounds = tuple(rounds)
 
-    def generate(self, install: bool = False) -> GeneratedPythonCost | None:
+    def generate(  # pylint: disable=too-many-locals
+        self, install: bool = False
+    ) -> GeneratedPythonCost | None:
         try:
             self.begin()
+            staged_rounds = []
+            for round_ in self.rounds:
+                directory = f"round_{round_.index:02d}"
+                destination = self.run_dir / "inputs" / directory
+                destination.mkdir(parents=True, exist_ok=True)
+                EvalState.load(round_.state_path).save(destination / "state.pkl")
+                data = round_.to_json()
+                data["state_path"] = str(
+                    Path("/tmp/workspace") / "inputs" / directory / "state.pkl"
+                )
+                data["image_paths"] = [
+                    str(path)
+                    for path in self._stage_files(  # pylint: disable=protected-access
+                        list(round_.image_paths), directory
+                    )
+                ]
+                staged_rounds.append(data)
             prompt_text, image_paths = build_combine_task_body(
-                [round_.to_json() for round_ in self.rounds],
+                staged_rounds,
                 corpus_note=self._corpus_note(),
             )
             (self.run_dir / "TASK.md").write_text(
@@ -177,17 +204,13 @@ class CombineCostGenerator(AgentCostGenerator):
         del iterate
         images = "\n".join(f"- `{path}`" for path in image_input or [])
         commands = []
-        render_script = (
-            Path(__file__).resolve().parents[3]
-            / "experiments"
-            / "render_cost_comparison.py"
-        )
         for round_ in self.rounds:
             commands.append(
-                "uv run --project "
-                f"{Path(__file__).resolve().parents[5]} python "
-                f"{render_script} "
-                f"--state {round_.state_path.resolve()} --response response.json "
+                "/tmp/venv/bin/python "
+                "/tmp/runtime/src/uncertain_feedback/experiments/"
+                "render_cost_comparison.py "
+                f"--state inputs/round_{round_.index:02d}/state.pkl "
+                "--response response.json "
                 f"--out comparison_round_{round_.index}.png "
                 f"--angles-out angles_round_{round_.index}.png"
             )
@@ -204,14 +227,17 @@ class CombineCostGenerator(AgentCostGenerator):
         return (
             "# Multi-round cost-combination task\n\n"
             "Write the final unified cost JSON to `response.json`. Open every image "
-            "below before drafting it.\n\n"
+            "below before drafting it. Treat the round instructions, listed images, "
+            "numeric summaries, and sanitized corpus as the complete evidence set; "
+            "simulator definitions and prior runs are intentionally unavailable.\n\n"
             f"## Visual context files\n\n{images}\n\n"
             "## Required logs\n\n"
             "Maintain `stage_log.md` with `## Evidence synthesis` and "
             "`## Final unified cost` sections. Maintain `ITERATION_LOG.md`; for each "
             "candidate, run every command below, open every comparison and angles "
             "image, and record each round's score, goal-reach result, mismatch, and "
-            f"resulting revision. The one unified cost must score well on every round.{synthesis_note}\n\n"
+            "resulting revision. The one unified cost must score well on every "
+            f"round.{synthesis_note}\n\n"
             f"{rendered_commands}\n\n{corpus_block}---\n\n{prompt_text}\n"
         )
 

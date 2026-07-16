@@ -9,15 +9,38 @@ Use these joint features:
 - `shoulder_elevation`: 0 is down at the side, pi/2 is horizontal, pi is overhead.
 - `shoulder_internal_external_rotation`: positive is internal rotation; negative is external.
 
+Each per-round cost is a PROVISIONAL local explanation of one correction at one pose,
+not an established global preference. Decide what single preference is best supported
+across all rounds together. Weigh at least these hypotheses and pick the SIMPLEST one
+the evidence supports:
+- a single CONSTANT preference on one feature that holds at every pose;
+- a POSE-DEPENDENT coupled preference, where a bound on one feature shifts with another
+  feature's value;
+- several INDEPENDENT preferences on different features, one revealed per correction;
+- INSUFFICIENT evidence for any unified global preference (keep the tightest constant
+  bound every correction already agrees on, and leave the rest documented as
+  unresolved).
+
+Do not assume a pose-dependent coupling is the answer, and do not require one to be
+produced. A coupling is justified only when EITHER the recipient explicitly stated a
+relationship between two features (a non-null "relationship" in a round's
+interpretation), OR the per-round thresholds on one feature vary systematically with
+another feature across corrections given at meaningfully different poses. A correlation
+visible in a single round's trajectory is NOT sufficient. When a round carried
+"associated_changes" or "unresolved_explanations", treat them as evidence that may
+support a coupling only if they RECUR across rounds; otherwise leave them documented as
+unresolved rather than forcing them into the cost.
+
 The feedback wording may be identical in every round because simulated personas use a
 canned line. Infer pose variation from trigger poses, trajectories, numeric summaries,
 and images rather than repeated wording. Open every listed image before authoring.
 
-If thresholds on one feature vary systematically with another feature, encode one
-pose-dependent bound with `cond_feature` and `points`: use one anchor per round,
-evaluate it with `np.interp`, and hold the first/last threshold outside the anchor
-range. If the thresholds agree, use one constant bound, choosing the tightest value
-consistent with every correction. Each chosen correction endpoint must remain
-unpenalized so every round's goal can still be reached safely.
+If you conclude a pose-dependent bound, encode it with `cond_feature` and `points`,
+evaluate it with `np.interp`, take one anchor from each pose where a correction pins the
+bound, and hold the first/last threshold outside the anchor range. If you conclude a
+constant bound, choose the tightest value consistent with every correction. Each chosen
+correction endpoint must remain unpenalized so every round's goal can still be reached
+safely. Structure the corrections reveal that the cost API cannot express should stay
+documented as unresolved, not forced into a bound.
 
 {rounds}

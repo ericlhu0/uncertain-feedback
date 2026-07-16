@@ -11,6 +11,7 @@ imports from ``...costs.llm_costs`` keep working.
 
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,16 @@ _JOINT_NAMES = {
     "wrist": 4,
 }
 
+_NAMED_FEATURE_METHODS = {
+    "elbow_flexion_angles": "elbow_flexion",
+    "shoulder_flexion_extension_angles": "shoulder_flexion_extension",
+    "shoulder_abduction_adduction_angles": "shoulder_abduction_adduction",
+    "shoulder_elevation_angles": "shoulder_elevation",
+    "shoulder_internal_external_rotation_angles": (
+        "shoulder_internal_external_rotation"
+    ),
+}
+
 
 class GeneratedCostValidationError(ValueError):
     """Raised when generated cost code or parameters are unsafe/invalid."""
@@ -59,7 +70,10 @@ class LlmCostResponse:
 
 @dataclass(frozen=True)
 class GeneratedCostContext:
-    """Read-only runtime context exposed to generated cost code."""
+    """Read-only runtime context exposed to generated cost code.
+
+    ``rejected_trajs`` contains only candidates the person explicitly marked wrong.
+    """
 
     fk: SmplLeftArmFK
     spine3_pos: np.ndarray
@@ -292,6 +306,23 @@ class GeneratedPythonCost(TrajectoryCost):
         return costs
 
 
+def generated_cost_feature_dependencies(code: str) -> tuple[str, ...]:
+    """Return named joint features read directly from the runtime context."""
+    tree = ast.parse(code)
+    methods = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "context"
+    }
+    return tuple(
+        feature
+        for method, feature in _NAMED_FEATURE_METHODS.items()
+        if method in methods
+    )
+
+
 def replace_generated_costs(
     composite: CompositeTrajectoryCost,
     cost: GeneratedPythonCost | None,
@@ -426,7 +457,9 @@ def build_motion_summaries(
     original-goal rollout (the path the arm was taking before the correction,
     including its endpoint joint posture) is included. When ``cartesian_goal``
     (the spine3-relative wrist target) is given it is added under
-    ``"cartesian_goal"``. Both are omitted otherwise, leaving summaries unchanged.
+    ``"cartesian_goal"``. When explicitly marked-wrong candidate trajectories are
+    available, a rollout-labeled terminal joint-feature comparison is included under
+    ``"candidate_comparison"``.
     """
     mdm_positions = context.mdm_positions
     current_positions = context.current_positions
@@ -444,6 +477,8 @@ def build_motion_summaries(
         context,
         context.mdm_traj,
     )
+    if context.rejected_trajs:
+        summaries["candidate_comparison"] = _candidate_comparison_summary(context)
     if context.recent_q.size > 0:
         summaries["recent"] = _trajectory_summary(
             context.recent_q,
@@ -487,8 +522,9 @@ def render_prompt_images(
     and keyed by the prompt placeholder that requests it:
 
     - ``current_cluster_traj_img``: only the chosen cluster's arm (always rendered).
-    - ``other_clusters_traj_img``: the chosen cluster alongside every other candidate
-      cluster's arm (rendered only when ``candidate_trajs`` has more than one cluster).
+    - ``other_clusters_traj_img``: the chosen cluster's motion alongside every
+      marked-wrong candidate's terminal arm pose (rendered only when
+      ``candidate_trajs`` has more than one cluster).
     - ``reference_traj_img``: the chosen cluster alongside the original-goal reference
       arm (rendered only when ``reference_traj`` is given).
 
@@ -653,6 +689,58 @@ def _joint_feature_summary(
             context.shoulder_internal_external_rotation_angles(trajectory)
         ),
     }
+
+
+def _candidate_comparison_summary(
+    context: GeneratedCostContext,
+) -> dict[str, Any]:
+    chosen = _joint_feature_summary(context, context.mdm_traj)
+    current = _joint_feature_frame_summary(context, context.current_q)
+    original = (
+        _joint_feature_summary(context, context.reference_traj)
+        if context.reference_traj is not None and context.reference_traj.size > 0
+        else None
+    )
+    rejected = [
+        _joint_feature_summary(context, trajectory)
+        for trajectory in context.rejected_trajs
+    ]
+    comparison: dict[str, Any] = {}
+    for feature, chosen_stats in chosen.items():
+        rejected_ends = {
+            f"rejected_cluster_{index}": float(stats[feature]["end"])
+            for index, stats in enumerate(rejected)
+        }
+        values = np.asarray(list(rejected_ends.values()), dtype=np.float64)
+        rejected_median = float(np.median(values))
+        rejected_std = float(np.std(values))
+        chosen_end = float(chosen_stats["end"])
+        feature_comparison: dict[str, Any] = {
+            "chosen_rollout": "mdm_traj",
+            "chosen_end": chosen_end,
+            "current_rollout": "current",
+            "current_value": float(current[feature]),
+            "chosen_minus_current": chosen_end - float(current[feature]),
+            "rejected_ends": rejected_ends,
+            "rejected_median": rejected_median,
+            "rejected_std": rejected_std,
+            "standardized_separation": (
+                None
+                if rejected_std <= 1e-12
+                else float((chosen_end - rejected_median) / rejected_std)
+            ),
+        }
+        if original is not None:
+            original_end = float(original[feature]["end"])
+            feature_comparison.update(
+                {
+                    "original_plan_rollout": "reference",
+                    "original_plan_end": original_end,
+                    "chosen_minus_original_plan": chosen_end - original_end,
+                }
+            )
+        comparison[feature] = feature_comparison
+    return comparison
 
 
 def _joint_feature_frame_summary(

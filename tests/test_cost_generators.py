@@ -340,6 +340,44 @@ def _ranking_context() -> object:
     )
 
 
+def _original_tie_context() -> object:
+    """Context where the test cost rejects another candidate but ties the original."""
+    fk = SmplLeftArmFK()
+    mpc_context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    chosen_and_original = np.zeros((4, 3, 3), dtype=np.float64)
+    rejected = np.linspace(0.0, 0.4, 5)[:, None, None] * np.ones((5, 3, 3))
+    return build_generated_cost_context(
+        mpc_context,
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=chosen_and_original,
+        q_history=[],
+        window=5,
+        reference_traj=chosen_and_original,
+        rejected_trajs=(rejected,),
+    )
+
+
+def _rejected_tie_context() -> object:
+    """Context where the test cost prefers chosen to original but ties a negative."""
+    fk = SmplLeftArmFK()
+    mpc_context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    chosen_and_rejected = np.zeros((4, 3, 3), dtype=np.float64)
+    original = np.linspace(0.0, 0.8, 6)[:, None, None] * np.ones((6, 3, 3))
+    return build_generated_cost_context(
+        mpc_context,
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=chosen_and_rejected,
+        q_history=[],
+        window=5,
+        reference_traj=original,
+        rejected_trajs=(chosen_and_rejected,),
+    )
+
+
 def test_resample_equidistant_removes_timing() -> None:
     def traj_at(ts: np.ndarray) -> np.ndarray:
         out = np.zeros((len(ts), 3, 3))
@@ -366,12 +404,46 @@ def test_rank_candidate_cost_orders_revealed_preferences() -> None:
     assert ranking is not None and not ranking.inert
     assert ranking.rank_accuracy == 1.0
     assert ranking.normalized_margin > 0.0
+    assert ranking.improves_original_plan is True
     assert set(ranking.costs) == {
         "original_plan",
         "rejected_cluster_0",
         "chosen_correction",
     }
     assert ranking.sort_key < (1.0, 0.0)
+
+
+def test_rank_candidate_cost_requires_strict_marked_wrong_ordering() -> None:
+    context = _rejected_tie_context()
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)
+
+    ranking = rank_candidate_cost(context, cost)
+
+    assert ranking is not None and not ranking.inert
+    assert ranking.costs["chosen_correction"] == ranking.costs["rejected_cluster_0"]
+    assert ranking.rank_accuracy == 0.5
+
+
+def test_llm_generator_rejects_cost_that_ties_original_plan(tmp_path) -> None:
+    fake = _FakeLlmModel(_response())
+    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
+    kwargs["context"] = _original_tie_context()
+    kwargs["summaries"] = build_motion_summaries(kwargs["context"])
+
+    cost = create_cost_generator(**kwargs).generate(install=False)
+
+    assert cost is None
+    rationale = json.loads(
+        (kwargs["run_dir"] / "rationale.json").read_text(encoding="utf-8")
+    )
+    assert rationale["ranking"]["improves_original_plan"] is False
+    assert rationale["ranking"]["costs"]["chosen_correction"] == 0.0
+    assert rationale["ranking"]["costs"]["original_plan"] == 0.0
+    validation = json.loads(
+        (kwargs["run_dir"] / "validation.json").read_text(encoding="utf-8")
+    )
+    assert validation["ok"] is False
+    assert "must be strictly less" in validation["error"]
 
 
 def test_rank_candidate_cost_flags_inert_and_missing_context() -> None:
@@ -533,6 +605,43 @@ def test_agent_task_requires_stage_log(tmp_path) -> None:
     assert "## Stage 1 response" in task
     assert "## Stage 2 response" in task
     assert "## Stage 3 response" in task
+
+
+def test_agent_stages_corpus_without_feedback_text(tmp_path) -> None:
+    corpus_dir = tmp_path / "trajectory_corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "traj_000.npy").write_bytes(b"trajectory")
+    (corpus_dir / "traj_000_features.csv").write_text(
+        "frame,elbow_flexion\n0,1.0\n", encoding="utf-8"
+    )
+    original = {
+        "index": 0,
+        "feedback_text": "hidden canonical feedback",
+        "trigger_violation": 0.123,
+        "traj_file": "traj_000.npy",
+        "features_file": "traj_000_features.csv",
+    }
+    (corpus_dir / "manifest.json").write_text(json.dumps([original]), encoding="utf-8")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    generator = AgentCostGenerator(
+        context=_context(),
+        instruction="actual instruction",
+        summaries={},
+        run_dir=run_dir,
+        corpus_dir=corpus_dir,
+    )
+
+    staged_path = generator._stage_corpus()
+
+    staged = json.loads(
+        (run_dir / "inputs" / "corpus" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert staged_path == Path("/tmp/workspace/inputs/corpus")
+    assert "feedback_text" not in staged[0]
+    assert "trigger_violation" not in staged[0]
+    assert json.loads((corpus_dir / "manifest.json").read_text())[0] == original
+    assert "feedback_text" not in generator._corpus_section()
 
 
 def test_agent_generator_writes_rationale_from_stage_log(tmp_path, monkeypatch) -> None:

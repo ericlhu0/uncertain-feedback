@@ -49,10 +49,10 @@ IMAGE_PLACEHOLDERS: dict[str, str] = {
         "to read the chosen path's posture clearly."
     ),
     "other_clusters_traj_img": (
-        "An image showing the chosen path's full arm alongside the OTHER candidate "
-        "paths' full arms (grey, with grey end markers) is attached — use the grey arms "
-        "only to see which dimension separates the chosen path from the candidates it "
-        "was picked over."
+        "An image showing the chosen path's full arm motion alongside only the terminal "
+        "full-arm pose of each candidate the person explicitly marked as wrong (grey, "
+        "with grey wrist end markers) is attached — use the grey end poses only to see "
+        "which dimension separates the chosen path from those marked-wrong candidates."
     ),
     "reference_traj_img": (
         "An image showing the chosen path's full arm alongside the ORIGINAL-GOAL "

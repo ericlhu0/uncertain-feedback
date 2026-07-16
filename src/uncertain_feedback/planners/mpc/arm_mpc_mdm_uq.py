@@ -186,7 +186,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         """
         print(f"Generating {self._n_diffusion_samples} motion samples for: '{text}' …")
         generation_t0 = time.perf_counter()
-        use_position_uq = hasattr(self._clusterer, "cluster_positions")
+        use_position_uq = getattr(self._clusterer, "supports_positions", False)
         base_spine_aa = self._mdm_spine3_aa
         if use_position_uq:
             positions = gen.generate_left_arm_position_samples(

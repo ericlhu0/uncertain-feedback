@@ -23,6 +23,7 @@ PLANNER_CHOICES = {
 class UqConfig:
     diffusion_samples: int = 128
     n_clusters: int = 3
+    clusterer: str = "kmeans_end_pose"
     auto_cluster: int | None = None
     scale: float = 1.0
     # Delegate cluster selection to the configured simulated user (takes effect
@@ -77,8 +78,9 @@ class LlmCostConfig:
     backend: str = "llm"
     max_turns: int = 6  # used by the "turns" backend
     # Used by the "agent" backend. --skip-git-repo-check is required because the
-    # per-generation artifact run dir is not a git repo. Depending on your codex
-    # auth/host you may also need e.g. `-m <model>` and a sandbox flag.
+    # per-generation artifact run dir is not a git repo. AgentCostGenerator wraps
+    # this command in a fail-closed Bubblewrap filesystem namespace, so an inner
+    # danger-full-access flag does not expose the repository or simulator oracle.
     codex_cmd: str = "codex exec --skip-git-repo-check"
 
 
@@ -301,6 +303,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 uq_data.get("diffusion_samples", 128), "uq.diffusion_samples"
             ),
             n_clusters=_positive_int(uq_data.get("n_clusters", 3), "uq.n_clusters"),
+            clusterer=str(uq_data.get("clusterer", "kmeans_end_pose")),
             auto_cluster=(
                 None
                 if uq_data.get("auto_cluster") is None

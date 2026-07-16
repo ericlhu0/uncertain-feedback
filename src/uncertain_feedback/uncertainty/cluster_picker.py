@@ -548,9 +548,7 @@ def _pick_cluster_level(  # pylint: disable=too-many-locals,redefined-outer-name
                 arm_scat.set_color(color)
             for ax in axes_by_cluster[i]:
                 ax.set_facecolor("#FFF3E0" if i == idx else "white")
-        refine_btn.set_active(
-            n_clusters >= 2 and cluster_counts[idx] >= n_clusters
-        )
+        refine_btn.set_active(n_clusters >= 2)
         fig.canvas.draw_idle()
 
     def _on_click(event: "matplotlib.backend_bases.MouseEvent") -> None:
@@ -587,7 +585,7 @@ def _pick_cluster_level(  # pylint: disable=too-many-locals,redefined-outer-name
 
     def _on_refine(_event: object) -> None:
         idx = state["selected"]
-        if idx is None or n_clusters < 2 or cluster_counts[idx] < n_clusters:
+        if idx is None or n_clusters < 2:
             return
         _finish("refine")
 
@@ -642,6 +640,7 @@ def _navigate_cluster_levels(
     show_level: Callable[[_ClusterLevel], _LevelPickResult],
     recluster: Callable[[np.ndarray], np.ndarray] | None,
     init_scale: float,
+    n_clusters: int | None = None,
 ) -> ClusterPickResult:
     """Navigate recursive cluster levels while retaining global sample indices."""
     unique_labels = sorted(int(value) for value in np.unique(labels))
@@ -673,8 +672,10 @@ def _navigate_cluster_levels(
         if result.action == "refine":
             if recluster is None:
                 raise RuntimeError("Recursive clustering is not configured.")
-            child_labels = np.asarray(
-                recluster(samples[selected_indices]), dtype=np.intp
+            child_labels = (
+                np.arange(selected_indices.size, dtype=np.intp)
+                if n_clusters is not None and selected_indices.size < n_clusters
+                else np.asarray(recluster(samples[selected_indices]), dtype=np.intp)
             )
             child_unique = sorted(int(value) for value in np.unique(child_labels))
             child_scale = level.scales[level.selected_label]
@@ -736,7 +737,7 @@ def pick_cluster(
         )
 
     return _navigate_cluster_levels(
-        trajectories, labels, _show, recluster, init_scale
+        trajectories, labels, _show, recluster, init_scale, n_clusters
     )
 
 
@@ -913,9 +914,7 @@ def _pick_cluster_positions_level(  # pylint: disable=too-many-locals,redefined-
                 arm_scat.set_color(color)
             for ax in axes_by_cluster[i]:
                 ax.set_facecolor("#FFF3E0" if i == idx else "white")
-        refine_btn.set_active(
-            n_clusters >= 2 and cluster_counts[idx] >= n_clusters
-        )
+        refine_btn.set_active(n_clusters >= 2)
         fig.canvas.draw_idle()
 
     def _on_click(event: "matplotlib.backend_bases.MouseEvent") -> None:
@@ -952,7 +951,7 @@ def _pick_cluster_positions_level(  # pylint: disable=too-many-locals,redefined-
 
     def _on_refine(_event: object) -> None:
         idx = state["selected"]
-        if idx is None or n_clusters < 2 or cluster_counts[idx] < n_clusters:
+        if idx is None or n_clusters < 2:
             return
         _finish("refine")
 
@@ -1037,7 +1036,7 @@ def pick_cluster_positions(
         )
 
     return _navigate_cluster_levels(
-        positions, labels, _show, recluster, init_scale
+        positions, labels, _show, recluster, init_scale, n_clusters
     )
 
 

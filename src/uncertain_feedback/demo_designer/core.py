@@ -156,7 +156,11 @@ class DemoRig:
         self._load_custom_personas()
 
         self.gen = make_motion_generator(
-            self.cfg.motion_generator, None, self.cfg.num_denoising_steps
+            self.cfg.motion_generator,
+            None,
+            self.cfg.num_denoising_steps,
+            seed=self.cfg.seed,
+            lock_seed=self.cfg.motion_generator == "mdm",
         )
         if self.cfg.pose is None:
             raise ValueError("demo_designer requires a config with a pose file.")
@@ -350,7 +354,11 @@ class DemoRig:
         )
 
     def package_trajectory(
-        self, traj: np.ndarray, user: SimulatedUser
+        self,
+        traj: np.ndarray,
+        user: SimulatedUser,
+        current_mesh_only: bool = False,
+        pin_mesh: bool = False,
     ) -> dict[str, Any]:
         """Return the JSON payload the UI needs to draw one trajectory.
 
@@ -358,6 +366,10 @@ class DemoRig:
         client-side from ``features`` + the live persona bounds (so on-graph
         bound edits update instantly); only the joint-box part is baked in,
         since the raw joint angles are not in the payload.
+
+        ``current_mesh_only`` keeps live MPC updates linear in trajectory length;
+        terminal payloads still register every frame for scrubber playback.
+        ``pin_mesh`` keeps the mesh alive for the trajectory's whole life.
         """
         traj = np.asarray(traj, dtype=np.float64)
         arm_pos = self.fk.fk_batch(traj, self.spine3_pos, self.spine3_aa)
@@ -365,7 +377,9 @@ class DemoRig:
         return {
             "n_frames": int(traj.shape[0]),
             "arm_positions": arm_pos.tolist(),
-            "mesh_id": self.meshes.register(arm_pos),
+            "mesh_id": self.meshes.register(
+                arm_pos[-1:] if current_mesh_only else arm_pos, pin=pin_mesh
+            ),
             "features": {k: v.tolist() for k, v in feats.items()},
             "limit_violations": user.limit_violation_series(traj).tolist(),
         }
@@ -379,8 +393,10 @@ class DemoRig:
             "wrist_rel": (arm_pos[-1] - self.spine3_pos).tolist(),
         }
 
-    def mesh_vertices(self, mesh_id: str) -> np.ndarray:
-        return self.meshes.vertices(mesh_id)
+    def mesh_vertices(self, mesh_id: str, frame: int | None = None) -> np.ndarray:
+        if frame is None:
+            return self.meshes.vertices(mesh_id)
+        return self.meshes.vertices_at(mesh_id, frame)
 
     def init_payload(self) -> dict[str, Any]:
         arm_bones = {
@@ -486,6 +502,36 @@ class DemoRig:
 
         self.session = Session.load(self, Path(dir))
         _log(f"session resumed: dir={dir} persona={self.session.persona_name}")
+        return self.session
+
+    def fork_session(self, name: str) -> "Session":
+        """Copy a saved session into a fresh live one and resume the copy.
+
+        Forking (rather than resuming) keeps the recorded original pristine so
+        replay still reads it while manual inputs accumulate on the branch. Every
+        artifact path lives under the session dir, so a prefix rewrite in
+        ``session.json`` is enough to repoint the copied costs' state files.
+        """
+        from uncertain_feedback.demo_designer.session import Session
+
+        root = self.artifact_root.resolve()
+        src = (root / name).resolve()
+        if src.parent != root or not (src / "session.json").exists():
+            raise ValueError("Unknown session.")
+        persona = json.loads((src / "session.json").read_text(encoding="utf-8"))[
+            "persona"
+        ]
+        dst = self.artifact_root / (
+            f"{time.strftime('%Y%m%d_%H%M%S')}_session_{persona}"
+        )
+        shutil.copytree(src, dst)
+        manifest = dst / "session.json"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(str(src), str(dst.resolve())),
+            encoding="utf-8",
+        )
+        self.session = Session.load(self, dst)
+        _log(f"session forked: src={src} dir={dst} persona={persona}")
         return self.session
 
     def delete_session(self, name: str) -> dict[str, Any]:

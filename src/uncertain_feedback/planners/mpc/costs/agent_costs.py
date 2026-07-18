@@ -96,10 +96,9 @@ class AgentCostGenerator(CostGenerator):
         corpus_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, corpus_dir=corpus_dir, **kwargs)
         self.codex_cmd = codex_cmd
         self.timeout_seconds = timeout_seconds
-        self.corpus_dir = corpus_dir
         self._staged_corpus_dir: Path | None = None
 
     def _resolved_corpus_dir(self) -> Path | None:

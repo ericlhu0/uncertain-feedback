@@ -169,14 +169,19 @@ def build_interpret_prompt(
     return text, ordered_paths
 
 
-def build_ground_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
+def build_ground_prompt(
+    interpretation: str,
+    summaries: dict[str, Any],
+    corpus_note: str | None = None,
+) -> str:
     """Build the stage-two (ground) prompt: preference + full numbers -> numeric spec.
 
     Text only — no images, no runtime API, no code contract.
     """
-    return _GROUND_HEAD.replace("{interpretation}", interpretation).replace(
+    text = _GROUND_HEAD.replace("{interpretation}", interpretation).replace(
         "{summaries}", _dump(summaries)
     )
+    return text if corpus_note is None else "\n\n".join([text, corpus_note])
 
 
 def build_author_prompt(specification: str) -> str:
@@ -237,7 +242,11 @@ def build_staged_task_body(
     return body, image_paths
 
 
-def build_refine_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
+def build_refine_prompt(
+    interpretation: str,
+    summaries: dict[str, Any],
+    corpus_note: str | None = None,
+) -> str:
     """Build the seed prompt for the iterating ``turns`` backend.
 
     Grounds the fixed interpretation and implements it in one conversation, with the
@@ -248,6 +257,8 @@ def build_refine_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
     head = _REFINE_HEAD.replace("{interpretation}", interpretation).replace(
         "{summaries}", _dump(summaries)
     )
+    if corpus_note is not None:
+        head = "\n\n".join([head, corpus_note])
     return "\n\n".join([head, _RUNTIME_API, _OUTPUT_CONTRACT]).strip()
 
 

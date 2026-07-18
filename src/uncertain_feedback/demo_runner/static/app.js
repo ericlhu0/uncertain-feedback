@@ -29,8 +29,34 @@ let costField = null;       // {features:{name:[..]}, penalty:[..], active_featu
 let startPreview = null;    // {arm_positions, mesh_vertices} for the edited pose
 const meshData = new Map(); // mesh id -> {frames, vertices, data: Float32Array}
 const meshLoads = new Map();
+let liveBaseMeshIds = [];
 let baseTrigger = null;
 let multiTurnActive = false;
+
+// Both modes share the guided workflow. Demo mode hides setup and hidden-cost
+// machinery; dev mode reveals it inside the same stages. Replay steps through a
+// recorded session's beats and is orthogonal to the mode: demo+replay is the
+// presentation, dev+replay reads the same beats with the graphs and code visible.
+let demoMode = localStorage.getItem("demo_runner_mode") !== "dev";
+let costLogActive = false;
+let combineLogActive = false;
+let logCharIndex = 0;
+let logPoll = null;
+let workflowStage = 1;
+let displayedStage = 1;
+let replayActive = false;
+let replayName = null;
+let replayBeats = [];
+let replayIndex = 0;
+const replayCache = new Map(); // beat index -> served beat (keeps mesh ids stable)
+// Set while re-applying intermediate beats during a rebuild: the state math runs
+// but the (expensive) draw is skipped until the destination beat.
+let suppressRender = false;
+
+// The persona is read-only unless it is both editable in this mode and live.
+function boundsEditable() {
+  return !demoMode && !replayActive;
+}
 
 function resetClusterNavigation() {
   clusterDepth = 0;
@@ -42,6 +68,7 @@ function resetClusterNavigation() {
 // unified visuals survive base rollouts (only Reset rounds clears them).
 let rounds = [];
 let unified = null;         // {description, code} or null
+let pendingCost = null;
 let unifiedCostField = null;
 let showUnifiedBounds = true;
 
@@ -55,7 +82,7 @@ let lastTick = 0;
 
 const TRAJ_STYLES = {
   clean_base: { color: "#6b7280", label: "baseline (box limits, no feedback)" },
-  base: { color: "#e05252", label: "base rollout" },
+  base: { color: "#e05252", label: "rollout" },
   oracle: { color: "#9c5f17", label: "oracle-cost rollout" },
   full: { color: "#0e7a63", label: "full corrected path" },
   generated: { color: "#3567d6", label: "generated-cost corrected path" },
@@ -65,6 +92,7 @@ const TRAJ_STYLES = {
 const CLUSTER_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
   "#42d4f4", "#f032e6", "#9a6324", "#800000", "#469990"];
 const START_COLOR = "#e8a33d";
+const LIVE_FRAME_INTERVAL_MS = 150;
 const VIEWS = [
   { name: "Front (XY)", hi: 0, vi: 1 },
   { name: "Side (ZY)", hi: 2, vi: 1 },
@@ -136,6 +164,58 @@ async function apiDelete(path, busyMsg) {
 // ---------------------------------------------------------------------------
 
 const $ = (id) => document.getElementById(id);
+
+async function pollLogs() {
+  if (logPoll) return logPoll;
+  logPoll = (async () => {
+    try {
+      const resp = await fetch(`/api/logs?char_since=${logCharIndex}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.text) {
+        const consoleEl = $("console");
+        const consoleAtBottom =
+          consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 24;
+        consoleEl.textContent += data.text;
+        if (consoleEl.textContent.length > 200000) {
+          consoleEl.textContent = consoleEl.textContent.slice(-200000);
+        }
+        if (consoleAtBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
+
+        if (costLogActive) {
+          const thoughtLog = $("cost-thought-log");
+          thoughtLog.textContent += data.text;
+          if (thoughtLog.textContent.length > 200000) {
+            thoughtLog.textContent = thoughtLog.textContent.slice(-200000);
+          }
+          thoughtLog.scrollTop = thoughtLog.scrollHeight;
+        }
+        if (combineLogActive) {
+          const combineLog = $("combine-log");
+          if (combineLog) {
+            combineLog.textContent += data.text;
+            if (combineLog.textContent.length > 200000) {
+              combineLog.textContent = combineLog.textContent.slice(-200000);
+            }
+            combineLog.scrollTop = combineLog.scrollHeight;
+          }
+        }
+      }
+      logCharIndex = data.next_char;
+    } catch (err) { /* server busy or down; retry next poll */ }
+  })();
+  try {
+    await logPoll;
+  } finally {
+    logPoll = null;
+  }
+}
+
+function clearCostThoughtLog() {
+  costLogActive = false;
+  $("cost-thought-log-wrap").hidden = true;
+  $("cost-thought-log").textContent = "";
+}
 
 function getGoal() {
   return [+$("goal-x").value, +$("goal-y").value, +$("goal-z").value];
@@ -211,9 +291,17 @@ function coupledThresholdSeries(b, data) {
   return cond.map((c) => b.intercept + b.slope * c);
 }
 
-function matchingGeneratedCoupledBounds(b) {
-  return generatedBounds.filter((candidate) => candidate.coupled &&
-    candidate.feature === b.feature && candidate.cond_feature === b.cond_feature);
+// Bounds parsed from the pending cost plus every committed round, so committed
+// limits stay on the graphs after the pipeline moves past cost generation.
+function activeGeneratedBounds() {
+  const out = [...generatedBounds];
+  for (const r of rounds) out.push(...(r.generated_bounds || []));
+  return out;
+}
+
+function generatedCoupledBoundsFor(feature, condFeature) {
+  return activeGeneratedBounds().filter((candidate) => candidate.coupled &&
+    candidate.feature === feature && candidate.cond_feature === condFeature);
 }
 
 function generatedCoupledThreshold(b, x) {
@@ -242,7 +330,7 @@ function maxFrames() {
 }
 
 function setTraj(key, data) {
-  trajs[key] = { data, visible: true, ...TRAJ_STYLES[key] };
+  trajs[key] = { data, visible: key === "base", ...TRAJ_STYLES[key] };
   refreshLegend();
   refreshTimeline();
   renderAll();
@@ -560,6 +648,19 @@ function setScenarioLocked(locked) {
   $("persona-select").disabled = Boolean(session);
 }
 
+function setDecisionControls(data) {
+  const paused = data.status === "paused";
+  $("enter-correction").disabled = !paused;
+  const ignoreDisabled = !paused || data.trigger?.reason !== "discomfort";
+  $("ignore-violation").disabled = ignoreDisabled;
+}
+
+function enterCorrection() {
+  $("enter-correction").disabled = true;
+  $("ignore-violation").disabled = true;
+  setWorkflowStage(2);
+}
+
 function renderCorpus() {
   const list = $("corpus-list");
   list.innerHTML = "";
@@ -631,11 +732,15 @@ function renderSessionPicker(sessions) {
     resume.className = "primary";
     resume.textContent = "Resume";
     resume.onclick = () => resumeSession(item.dir);
+    const replay = document.createElement("button");
+    replay.textContent = "Replay";
+    replay.onclick = () => loadReplay(item.name);
     const remove = document.createElement("button");
     remove.className = "danger";
     remove.textContent = "Delete";
     remove.onclick = () => deleteSession(item);
     actions.appendChild(resume);
+    actions.appendChild(replay);
     actions.appendChild(remove);
     card.appendChild(details);
     card.appendChild(actions);
@@ -665,9 +770,6 @@ function syncSessionContext(data) {
     session.trajectory_count = data.trajectory_count;
   }
   if (Object.hasOwn(data, "corpus")) session.corpus = data.corpus;
-  if (Object.hasOwn(data, "combined_corpus_count")) {
-    session.combined_corpus_count = data.combined_corpus_count;
-  }
   if (Object.hasOwn(data, "rounds")) {
     rounds = data.rounds;
     session.rounds = data.rounds;
@@ -677,7 +779,6 @@ function syncSessionContext(data) {
     session.unified = data.unified;
   }
   renderSession();
-  renderRounds();
 }
 
 function clearTrajectoryUi() {
@@ -690,14 +791,17 @@ function clearTrajectoryUi() {
   resetClusterNavigation();
   generatedBounds = [];
   costField = null;
+  pendingCost = null;
   unifiedCostField = null;
   clearTraj(...Object.keys(trajs));
+  liveBaseMeshIds = [];
+  $("scenario-details").open = true;
   showStart = true;
   showMdmStart = false;
   setScenarioLocked(false);
   $("exit-trajectory").disabled = true;
-  for (const id of ["run-trigger-oracle", "ignore-violation", "generate", "recluster",
-    "generate-cost", "commit-round", "apply-round"]) {
+  for (const id of ["ignore-violation", "enter-correction", "generate", "recluster",
+    "correction-next", "generate-cost", "cost-next", "commit-round", "apply-round"]) {
     $(id).disabled = true;
   }
   $("trajectory-session").className = "trajectory-session";
@@ -706,11 +810,15 @@ function clearTrajectoryUi() {
   $("oracle-metrics").textContent = "";
   $("correction-metrics").textContent = "";
   $("cost-output").innerHTML = "";
+  clearCostThoughtLog();
+  renderActiveCosts();
   renderClusterList();
+  setWorkflowStage(1);
 }
 
 function hydrateTrajectory(data) {
   multiTurnActive = true;
+  $("scenario-details").open = false;
   setTraj("base", data.trajectory);
   if (data.oracle) {
     setTraj("oracle", data.oracle.trajectory);
@@ -719,12 +827,11 @@ function hydrateTrajectory(data) {
   if (data.clean_base) setTraj("clean_base", data.clean_base);
   baseTrigger = data.trigger ? data.trigger.step : null;
   renderTrajectorySession(data);
-  setScenarioLocked(data.status === "paused");
-  $("exit-trajectory").disabled = false;
+  setScenarioLocked(data.status !== "complete");
+  $("run-base").disabled = data.status !== "complete";
+  $("exit-trajectory").disabled = data.status === "running";
   $("generate").disabled = data.status !== "paused";
-  $("run-trigger-oracle").disabled = data.status !== "paused";
-  $("ignore-violation").disabled = data.status !== "paused" ||
-    data.trigger.reason !== "discomfort";
+  setDecisionControls(data);
   $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
     `\nexecuted ${data.step}/${data.step_limit} steps`;
   if (data.pending_cost) {
@@ -732,6 +839,7 @@ function hydrateTrajectory(data) {
     $("commit-round").disabled = multiTurnActive;
     $("apply-round").disabled = !multiTurnActive;
   }
+  setWorkflowStage(data.pending_cost ? 3 : 1);
 }
 
 function activateSession(data) {
@@ -747,6 +855,9 @@ function activateSession(data) {
   renderUnifiedOutput();
   renderSession();
   refreshLegend(); refreshTimeline(); renderAll();
+  if (data.trajectory?.status === "running" && !replayActive) {
+    void rollLiveTrajectory(data.trajectory);
+  }
 }
 
 async function newSession(persona) {
@@ -791,7 +902,9 @@ async function deleteCorpusEntry(index) {
 function renderTrajectorySession(data) {
   const out = $("trajectory-session");
   out.className = `trajectory-session ${data.status}`;
-  if (data.status === "paused") {
+  if (data.status === "running") {
+    out.textContent = `Rolling out MPC · frame ${data.step}/${data.step_limit}`;
+  } else if (data.status === "paused") {
     const violation = data.trigger.violation === null
       ? "n/a"
       : data.trigger.violation.toFixed(3);
@@ -806,17 +919,61 @@ function renderTrajectorySession(data) {
   }
 }
 
+function renderLiveTrajectoryFrame(data) {
+  session.trajectory = data;
+  syncSessionContext(data);
+  const meshId = data.trajectory.mesh_id;
+  if (liveBaseMeshIds.at(-1) !== meshId) {
+    liveBaseMeshIds.push(meshId);
+    if (liveBaseMeshIds.length > 64) liveBaseMeshIds.shift();
+  }
+  setTraj("base", data.trajectory);
+  baseTrigger = data.trigger ? data.trigger.step : null;
+  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
+    `\nexecuted ${data.step}/${data.step_limit} steps` +
+    (data.error ? `\nerror: ${data.error}` : "");
+  renderTrajectorySession(data);
+  setScenarioLocked(data.status !== "complete");
+  $("run-base").disabled = data.status !== "complete";
+  $("exit-trajectory").disabled = data.status === "running";
+  setDecisionControls(data);
+  $("generate").disabled = data.status !== "paused";
+  $("frame-slider").value = Math.max(0, data.trajectory.n_frames - 1);
+  refreshLegend();
+  refreshTimeline();
+  renderAll();
+}
+
+async function rollLiveTrajectory(data) {
+  renderLiveTrajectoryFrame(data);
+  while (data.status === "running") {
+    const frameStarted = performance.now();
+    setStatus(`rolling out MPC · frame ${data.step}/${data.step_limit}`, "busy");
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    data = await api("/api/live_trajectory/step", {});
+    renderLiveTrajectoryFrame(data);
+    const remaining = LIVE_FRAME_INTERVAL_MS - (performance.now() - frameStarted);
+    if (remaining > 0) {
+      await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+  }
+  setStatus(data.status === "paused" ? "paused for input" : "ready");
+  return data;
+}
+
 async function startManualTrajectory() {
-  const data = await api("/api/manual_trajectory/start", {
+  const data = await api("/api/live_trajectory/start", {
     arm_aa: armAA,
     goal: getGoal(),
-  }, "advancing trajectory to the next feedback trigger");
+  }, "preparing live trajectory");
+  $("scenario-details").open = false;
   session.trajectory = data;
   syncSessionContext(data);
   multiTurnActive = true;
   unifiedCostField = null;
   clearTraj("base", "oracle", "correction", "full", "generated", "generated_start");
   clearTraj("unified");
+  liveBaseMeshIds = [];
   setTraj("base", data.trajectory);
   setTraj("oracle", data.oracle.trajectory);
   if (data.clean_base) setTraj("clean_base", data.clean_base);
@@ -829,6 +986,7 @@ async function startManualTrajectory() {
   resetClusterNavigation();
   generatedBounds = [];
   costField = null;
+  pendingCost = null;
   renderClusterList();
   $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
     `\nexecuted ${data.step}/${data.step_limit} steps` +
@@ -838,9 +996,7 @@ async function startManualTrajectory() {
   setScenarioLocked(data.status === "paused");
   $("run-base").disabled = data.status === "paused";
   $("exit-trajectory").disabled = false;
-  $("run-trigger-oracle").disabled = data.status !== "paused";
-  $("ignore-violation").disabled = data.status !== "paused" ||
-    data.trigger.reason !== "discomfort";
+  setDecisionControls(data);
   $("generate").disabled = data.status !== "paused";
   $("recluster").disabled = true;
   $("generate-cost").disabled = true;
@@ -848,7 +1004,9 @@ async function startManualTrajectory() {
   $("apply-round").disabled = true;
   renderRounds();
   renderUnifiedOutput();
+  setWorkflowStage(1);
   refreshLegend(); refreshTimeline(); renderAll();
+  await rollLiveTrajectory(data);
 }
 
 async function exitManualTrajectory() {
@@ -864,13 +1022,15 @@ async function exitManualTrajectory() {
   resetClusterNavigation();
   generatedBounds = [];
   costField = null;
+  pendingCost = null;
   clearTraj(...Object.keys(trajs));
+  $("scenario-details").open = true;
   showStart = true;
   showMdmStart = false;
   setScenarioLocked(false);
   $("exit-trajectory").disabled = true;
-  for (const id of ["run-trigger-oracle", "ignore-violation", "generate", "recluster",
-    "generate-cost", "commit-round", "apply-round"]) {
+  for (const id of ["ignore-violation", "enter-correction", "generate", "recluster",
+    "correction-next", "generate-cost", "cost-next", "commit-round", "apply-round"]) {
     $(id).disabled = true;
   }
   $("trajectory-session").className = "trajectory-session";
@@ -879,10 +1039,12 @@ async function exitManualTrajectory() {
   $("oracle-metrics").textContent = "";
   $("correction-metrics").textContent = "";
   $("cost-output").innerHTML = "";
+  clearCostThoughtLog();
   renderClusterList();
   renderRounds();
   renderUnifiedOutput();
   renderSession();
+  setWorkflowStage(1);
   setStatus(`trajectory exited · artifacts retained at ${data.artifact_dir}`);
   refreshLegend(); refreshTimeline(); renderAll();
 }
@@ -891,14 +1053,6 @@ function renderOracleMetrics(oracle) {
   const source = oracle.source === "trigger" ? "current MDM trigger" : "initial pose";
   $("oracle-metrics").textContent =
     `oracle from ${source}: ${fmtMetrics(oracle.metrics, oracle.goal_reach)}`;
-}
-
-async function runTriggerOracle() {
-  const data = await api("/api/oracle_rollout", {},
-    "running oracle rollout from the current MDM trigger");
-  setTraj("oracle", data.trajectory);
-  renderOracleMetrics(data);
-  refreshLegend(); refreshTimeline(); renderAll();
 }
 
 async function ignoreComfortViolation() {
@@ -916,8 +1070,11 @@ async function ignoreComfortViolation() {
   resetClusterNavigation();
   generatedBounds = [];
   costField = null;
+  pendingCost = null;
   renderClusterList();
+  renderActiveCosts();
   $("cost-output").innerHTML = "";
+  clearCostThoughtLog();
   $("correction-metrics").textContent = "";
   $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
     `\nexecuted ${data.step}/${data.step_limit} steps` +
@@ -925,14 +1082,13 @@ async function ignoreComfortViolation() {
   renderTrajectorySession(data);
   setScenarioLocked(data.status === "paused");
   $("run-base").disabled = data.status === "paused";
-  $("run-trigger-oracle").disabled = data.status !== "paused";
-  $("ignore-violation").disabled = data.status !== "paused" ||
-    data.trigger.reason !== "discomfort";
+  setDecisionControls(data);
   $("generate").disabled = data.status !== "paused";
   $("recluster").disabled = true;
   $("generate-cost").disabled = true;
   $("commit-round").disabled = true;
   $("apply-round").disabled = true;
+  setWorkflowStage(1);
   refreshLegend(); refreshTimeline(); renderAll();
 }
 
@@ -943,11 +1099,17 @@ function applyClusterPayload(data) {
   clusterDepth = data.depth;
   clusterPath = data.path;
   canGoBack = data.can_go_back;
-  $("scale").value = data.scale;
-  $("scale-num").value = data.scale;
+  // A payload that landed while the slider kept moving carries the scale it was
+  // requested at, which is behind the cursor: writing it back would fight the drag.
+  if (pendingScale === null) {
+    $("scale").value = data.scale;
+    $("scale-num").value = data.scale;
+  }
   clearTraj("correction", "full", "generated", "generated_start");
   generatedBounds = [];
   costField = null;
+  pendingCost = null;
+  renderActiveCosts();
   const selected = clusters.find((c) => c.label === selectedCluster);
   selectedClusterSegments = selected ? selected.full_segments : null;
   if (selected) {
@@ -958,6 +1120,7 @@ function applyClusterPayload(data) {
     $("correction-metrics").textContent = "";
   }
   $("generate-cost").disabled = !selected;
+  setWorkflowStage(2);
   renderClusterList();
   refreshLegend(); refreshTimeline(); renderAll();
 }
@@ -972,6 +1135,30 @@ async function generate() {
   }, "generating MDM samples + assembling cluster paths (this can take minutes)");
   $("recluster").disabled = false;
   applyClusterPayload(data);
+}
+
+// Magnitude slider: re-assemble the current level at the new scale as the
+// handle moves. Only one request is in flight at a time and intermediate
+// positions are dropped rather than queued, so the redraw trails the cursor by
+// at most one round trip.
+let rescaleInFlight = false;
+let pendingScale = null;
+
+async function liveRescale() {
+  if (!clusters.length) return;
+  pendingScale = getScale();
+  if (rescaleInFlight) return;
+  rescaleInFlight = true;
+  try {
+    while (pendingScale !== null) {
+      const scale = pendingScale;
+      pendingScale = null;
+      applyClusterPayload(await api("/api/rescale", { scale }));
+    }
+  } finally {
+    rescaleInFlight = false;
+  }
+  renderAll();
 }
 
 async function recluster() {
@@ -1001,15 +1188,29 @@ async function backCluster() {
 
 async function pickCluster(label) {
   await api("/api/pick_cluster", { label }, "selecting cluster");
+  applyPick(label);
+}
+
+// Split from pickCluster so replay can re-apply a recorded pick without a call.
+function applyPick(label) {
   selectedCluster = label;
-  undesirableClusters.delete(label);
   const c = clusters.find((x) => x.label === label);
   selectedClusterSegments = c.full_segments;
   setTraj("full", c.full);
   $("correction-metrics").textContent =
     "full path: " + fmtMetrics(c.full_metrics, c.full_goal_reach);
   $("generate-cost").disabled = false;
+  setWorkflowStage(2);
   renderClusterList();
+}
+
+function continueFromCorrection() {
+  if (selectedCluster === null || undesirableClusters.has(selectedCluster)) return;
+  setWorkflowStage(3);
+}
+
+function continueFromCost() {
+  setWorkflowStage(4);
 }
 
 async function markCluster(label) {
@@ -1095,6 +1296,7 @@ function rationaleHtml(r, artifactDir) {
 }
 
 function renderCostGeneration(data) {
+  pendingCost = data;
   generatedBounds = data.generated_bounds || [];
   costField = data.cost_field || null;
   setTraj("generated", data.trajectory);
@@ -1102,24 +1304,41 @@ function renderCostGeneration(data) {
   const out = $("cost-output");
   out.innerHTML = "";
   const desc = document.createElement("div");
-  desc.innerHTML = `<b>${escapeHtml(data.description || "(no description)")}</b><br>` +
-    "corrected path: " + fmtMetrics(data.metrics, data.goal_reach).replace("\n", "<br>") +
-    "<br>from start: " + fmtMetrics(data.start_metrics, data.start_goal_reach).replace("\n", "<br>") +
-    `<br>artifacts: ${escapeHtml(data.artifact_dir)}` +
+  const finalRationale = data.rationale?.final || {};
+  const naturalLanguageDescription = finalRationale.recipient_explanation ||
+    finalRationale.explanation || data.description || "(no description)";
+  desc.innerHTML = `<b>${escapeHtml(naturalLanguageDescription)}</b>` +
     rationaleHtml(data.rationale, data.artifact_dir);
   const pre = document.createElement("pre");
+  pre.dataset.mode = "dev";
   pre.textContent = data.code;
   out.appendChild(desc);
   out.appendChild(pre);
+  renderActiveCosts();
+  renderUnifiedOutput();
+  $("cost-next").disabled = false;
+  setWorkflowStage(3);
 }
 
 async function generateCost() {
   const backend = $("cost-backend").value;
-  const data = await api("/api/generate_cost", { backend },
-    `generating ${backend} cost + evaluation rollout — this can take several minutes`);
-  renderCostGeneration(data);
-  $("commit-round").disabled = multiTurnActive;
-  $("apply-round").disabled = !multiTurnActive;
+  const thoughtLog = $("cost-thought-log");
+  $("cost-next").disabled = true;
+  $("cost-thought-log-wrap").hidden = false;
+  thoughtLog.textContent = "";
+  await pollLogs();
+  costLogActive = true;
+  try {
+    const data = await api("/api/generate_cost", { backend },
+      `generating ${backend} cost + evaluation rollout — this can take several minutes`);
+    renderCostGeneration(data);
+    $("commit-round").disabled = multiTurnActive;
+    $("apply-round").disabled = !multiTurnActive;
+  } finally {
+    await pollLogs();
+    await pollLogs();
+    costLogActive = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,29 +1358,78 @@ function renderRounds() {
       rationaleHtml(r.rationale, r.artifact_dir);
     const remove = document.createElement("button");
     remove.className = "danger round-remove";
+    remove.dataset.mode = "dev";
     remove.textContent = "Remove feedback";
     remove.onclick = () => removeRound(r.index);
     div.appendChild(details);
     div.appendChild(remove);
     list.appendChild(div);
   }
-  // Combining is meaningful with a new round OR a new executed segment: the
-  // combiner re-checks its bounds against every trajectory in the corpus.
-  const newSegments = session &&
-    (session.corpus || []).length > (session.combined_corpus_count || 0);
-  $("combine-rounds").disabled =
-    rounds.length === 0 || (rounds.length < 2 && !newSegments);
+  $("combine-rounds").disabled = rounds.length < 2;
   $("reset-rounds").disabled = rounds.length === 0 && !unified;
+  renderActiveCosts();
+}
+
+function activeCostSummary(cost) {
+  const finalRationale = cost.rationale?.final || {};
+  return finalRationale.recipient_explanation || finalRationale.explanation ||
+    cost.description || "No summary available";
+}
+
+function renderActiveCosts() {
+  const list = $("active-cost-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const costs = [];
+  if (pendingCost) {
+    costs.push({ label: "Pending generated cost", ...pendingCost });
+  }
+  if (unified) {
+    costs.push({
+      label: rounds.length > 1 ? "Active unified cost" : "Active cost",
+      ...unified,
+    });
+  } else {
+    for (const round of rounds) {
+      costs.push({ label: `Active cost · round ${round.index + 1}`, ...round });
+    }
+  }
+  if (!costs.length) {
+    list.innerHTML = '<div class="hint">No active cost functions.</div>';
+    return;
+  }
+  for (const cost of costs) {
+    const details = document.createElement("details");
+    details.className = "active-cost";
+    const summary = document.createElement("summary");
+    const label = document.createElement("span");
+    label.className = "active-cost-label";
+    label.textContent = cost.label;
+    const description = document.createElement("span");
+    description.className = "active-cost-summary";
+    description.textContent = activeCostSummary(cost);
+    summary.appendChild(label);
+    summary.appendChild(description);
+    const pre = document.createElement("pre");
+    pre.textContent = cost.code || "(cost code unavailable)";
+    details.appendChild(summary);
+    details.appendChild(pre);
+    list.appendChild(details);
+  }
 }
 
 function renderUnifiedOutput(extraHtml) {
   const out = $("unified-output");
   out.innerHTML = "";
-  if (!unified) return;
+  const cost = pendingCost || unified;
+  if (!cost) return;
   const desc = document.createElement("div");
-  desc.innerHTML = `<b>unified: ${unified.description || "(no description)"}</b>` + (extraHtml || "");
+  const label = pendingCost ? "new cost to apply" : "unified";
+  desc.innerHTML = `<b>${label}: ${cost.description || "(no description)"}</b>` +
+    (extraHtml || "");
   const pre = document.createElement("pre");
-  pre.textContent = unified.code;
+  pre.dataset.mode = "dev";
+  pre.textContent = cost.code;
   out.appendChild(desc);
   out.appendChild(pre);
 }
@@ -1170,6 +1438,9 @@ async function commitRound() {
   const data = await api("/api/commit_round", {}, "committing round");
   syncSessionContext(data);
   if (session.trajectory) session.trajectory.pending_cost = null;
+  pendingCost = null;
+  // The committed round's record now carries these bounds.
+  generatedBounds = [];
   // Round 1's cost IS the unified cost, so its field carries over directly.
   if (rounds.length === 1) unifiedCostField = costField;
   if (!unified) {
@@ -1180,12 +1451,13 @@ async function commitRound() {
   $("apply-round").disabled = true;
   renderRounds();
   renderUnifiedOutput();
+  setWorkflowStage(4);
   renderAll();
 }
 
 async function applyRoundAndContinue() {
-  const data = await api("/api/apply_round", {},
-    "applying feedback and advancing the same trajectory to its next trigger");
+  const data = await api("/api/live_trajectory/apply_round", {},
+    "applying feedback before resuming the trajectory");
   session.trajectory = data;
   syncSessionContext(data);
   if (!unified) {
@@ -1201,9 +1473,11 @@ async function applyRoundAndContinue() {
   resetClusterNavigation();
   generatedBounds = [];
   costField = null;
+  pendingCost = null;
   clearTraj("correction", "full", "generated", "generated_start");
   renderClusterList();
   $("cost-output").innerHTML = "";
+  clearCostThoughtLog();
   $("correction-metrics").textContent = "";
   $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
     `\nexecuted ${data.step}/${data.step_limit} steps` +
@@ -1211,17 +1485,18 @@ async function applyRoundAndContinue() {
   renderTrajectorySession(data);
   setScenarioLocked(data.status === "paused");
   $("run-base").disabled = data.status === "paused";
-  $("run-trigger-oracle").disabled = data.status !== "paused";
-  $("ignore-violation").disabled = data.status !== "paused" ||
-    data.trigger.reason !== "discomfort";
+  setDecisionControls(data);
   $("generate").disabled = data.status !== "paused";
   $("recluster").disabled = true;
   $("generate-cost").disabled = true;
+  $("cost-next").disabled = true;
   $("commit-round").disabled = true;
   $("apply-round").disabled = true;
   renderRounds();
   renderUnifiedOutput();
+  setWorkflowStage(1);
   refreshLegend(); refreshTimeline(); renderAll();
+  await rollLiveTrajectory(data);
 }
 
 async function removeRound(index) {
@@ -1239,6 +1514,7 @@ async function removeRound(index) {
 async function waitForCombine() {
   while (true) {
     await new Promise((r) => setTimeout(r, 1500));
+    await pollLogs();
     let s;
     try {
       const resp = await fetch("/api/combine_rounds/status");
@@ -1259,18 +1535,39 @@ async function waitForCombine() {
 }
 
 async function combineRounds() {
-  setStatus("combining rounds with codex — this can take a long time; watch the console …", "busy");
-  await api("/api/combine_rounds", {});
-  const data = await waitForCombine();
+  const combineLogWrap = $("combine-log-wrap");
+  const combineLog = $("combine-log");
+  if (combineLogWrap) {
+    combineLog.textContent = "";
+    combineLogWrap.hidden = false;
+  }
+  await pollLogs();
+  combineLogActive = true;
+  let data;
+  try {
+    setStatus("combining rounds with codex — this can take a long time; watch the console …", "busy");
+    await api("/api/combine_rounds", {});
+    data = await waitForCombine();
+  } finally {
+    await pollLogs();
+    await pollLogs();
+    combineLogActive = false;
+  }
   rounds = data.rounds;
   unified = { description: data.description, code: data.code };
   session.rounds = rounds;
   session.unified = unified;
-  session.combined_corpus_count = data.combined_corpus_count;
   unifiedCostField = data.cost_field || null;
-  setTraj("unified", data.trajectory);
-  let extra = "<br>" + fmtMetrics(data.metrics, data.goal_reach).replace("\n", "<br>") +
-    `<br>artifacts: ${data.artifact_dir}`;
+  // Combined between trajectories there is nothing to roll out on: the unified
+  // cost is stored and the next trajectory starts with it installed.
+  let extra = "";
+  if (data.trajectory) {
+    setTraj("unified", data.trajectory);
+    extra = "<br>" + fmtMetrics(data.metrics, data.goal_reach).replace("\n", "<br>");
+  } else {
+    clearTraj("unified");
+  }
+  extra += `<br>artifacts: ${data.artifact_dir}`;
   if (data.scores) {
     extra += `<br>scores: mean ${data.scores.mean.toFixed(3)} · per round ` +
       Object.entries(data.scores.per_round).map(([k, v]) => `#${k}=${v.toFixed(3)}`).join(" ");
@@ -1285,9 +1582,9 @@ async function resetRounds() {
   await api("/api/reset_rounds", {}, "resetting rounds");
   rounds = [];
   unified = null;
+  pendingCost = null;
   session.rounds = [];
   session.unified = null;
-  session.combined_corpus_count = 0;
   unifiedCostField = null;
   clearTraj("unified");
   $("commit-round").disabled = true;
@@ -1305,6 +1602,8 @@ async function resetRounds() {
 function renderClusterList() {
   const list = $("cluster-list");
   list.innerHTML = "";
+  $("correction-next").disabled =
+    selectedCluster === null || undesirableClusters.has(selectedCluster);
   for (const c of clusters) {
     const card = document.createElement("div");
     card.className = "cluster-card" +
@@ -1315,15 +1614,15 @@ function renderClusterList() {
     sw.style.background = CLUSTER_COLORS[c.label % CLUSTER_COLORS.length];
     const info = document.createElement("div");
     info.className = "cluster-info";
-    info.innerHTML = `<b>cluster ${c.label}</b> · ${c.count} samples · ` +
-      `${c.full_goal_reach.reached ? "reaches goal" : "misses goal"}<br>` +
-      `oracle ${c.oracle_score.toFixed(3)} · full-path viol ${c.full_metrics.mean_violation.toFixed(3)}`;
+    info.innerHTML = `<b>cluster ${c.label}</b> · ${c.count} samples` +
+      `${c.full_goal_reach.reached ? " · reaches goal" : ""}` +
+      `<div data-mode="dev">oracle ${c.oracle_score.toFixed(3)} · ` +
+      `full-path viol ${c.full_metrics.mean_violation.toFixed(3)}</div>`;
     card.appendChild(sw);
     card.appendChild(info);
     const mark = document.createElement("button");
     mark.className = "cluster-mark";
-    mark.textContent = undesirableClusters.has(c.label) ? "unmark" : "mark wrong";
-    mark.disabled = c.label === selectedCluster;
+    mark.textContent = undesirableClusters.has(c.label) ? "Restore" : "Uncomf";
     mark.onclick = (event) => {
       event.stopPropagation();
       markCluster(c.label);
@@ -1437,23 +1736,43 @@ function disposeScene(scene) {
   });
 }
 
-function requestMesh(data) {
+// Returns the meshData key for this request. `atFrame` fetches that frame
+// alone, which is what the magnitude slider wants: a full trajectory mesh is an
+// SMPL pass over every frame plus a multi-MB download, far too much to mint per
+// slider position when only the frame on screen is drawn.
+function requestMesh(data, atFrame = null) {
   const id = data && data.mesh_id;
-  if (!id || meshData.has(id) || meshLoads.has(id)) return;
-  const load = fetch(`/api/mesh/${encodeURIComponent(id)}`).then(async (response) => {
+  if (!id) return null;
+  const key = atFrame === null ? id : `${id}@${atFrame}`;
+  if (atFrame === null && rescaleInFlight) return key;
+  if (meshData.has(key) || meshLoads.has(key)) return key;
+  const url = atFrame === null
+    ? `/api/mesh/${encodeURIComponent(id)}`
+    : `/api/mesh/${encodeURIComponent(id)}?frame=${atFrame}`;
+  const load = fetch(url).then(async (response) => {
     if (!response.ok) throw new Error((await response.json()).error);
-    meshData.set(id, {
+    const entry = {
       frames: +response.headers.get("X-Mesh-Frames"),
       vertices: +response.headers.get("X-Mesh-Vertices"),
       data: new Float32Array(await response.arrayBuffer()),
-    });
-    meshLoads.delete(id);
+    };
+    meshLoads.delete(key);
+    if (atFrame !== null) {
+      // Slider fetches overlap and can land out of order: drop anything the
+      // slider has already moved past, then keep only the position it is on.
+      if (key !== previewKey) return;
+      for (const other of meshData.keys()) {
+        if (other.includes("@")) meshData.delete(other);
+      }
+    }
+    meshData.set(key, entry);
     renderAll();
   }).catch((error) => {
-    meshLoads.delete(id);
+    meshLoads.delete(key);
     setStatus(`mesh load failed: ${error}`, "error");
   });
-  meshLoads.set(id, load);
+  meshLoads.set(key, load);
+  return key;
 }
 
 function lineObject(points, color, opacity = 0.7) {
@@ -1476,13 +1795,43 @@ function meshObject(vertices, color, opacity) {
   }));
 }
 
-function trajectoryMesh(data, color, opacity = 0.32, atFrame = frame) {
-  requestMesh(data);
-  const cached = meshData.get(data.mesh_id);
+function meshFromKey(key, color, opacity, atFrame) {
+  const cached = meshData.get(key);
   if (!cached) return null;
   const fi = Math.min(atFrame, cached.frames - 1);
   const start = fi * cached.vertices * 3;
   return meshObject(cached.data.subarray(start, start + cached.vertices * 3), color, opacity);
+}
+
+function trajectoryMesh(data, color, opacity = 0.32, atFrame = frame) {
+  return meshFromKey(requestMesh(data), color, opacity, atFrame);
+}
+
+// The selected cluster is the body the magnitude slider reshapes, so it takes
+// the single-frame path while the slider moves and holds the last body it drew
+// until the new one lands — a rescale mints a fresh mesh id, so drawing only
+// what has arrived would blank the figure on every slider position.
+let lastClusterMesh = null;
+let previewKey = null;
+
+function clusterMesh(data, color, opacity) {
+  const atFrame = rescaleInFlight ? 0 : frame;
+  let key;
+  if (rescaleInFlight) {
+    previewKey = `${data.mesh_id}@${frame}`;
+    key = requestMesh(data, frame);
+  } else {
+    key = requestMesh(data);
+  }
+  const mesh = meshFromKey(key, color, opacity, atFrame);
+  if (mesh) {
+    lastClusterMesh = { key, atFrame };
+    return mesh;
+  }
+  if (lastClusterMesh) {
+    return meshFromKey(lastClusterMesh.key, color, opacity, lastClusterMesh.atFrame);
+  }
+  return null;
 }
 
 function renderSkeleton() {
@@ -1520,16 +1869,29 @@ function renderSkeleton() {
     ...pts.map((p) => p[axis]), ...framingVertices.map((p) => p[axis]),
   ) + 0.14);
   const center = min.map((v, i) => (v + max[i]) / 2);
+  let bodyMeshShown = false;
 
   if (selected) {
     const color = CLUSTER_COLORS[selected.label % CLUSTER_COLORS.length];
     scene.add(lineObject(selected.full.arm_positions.map((f) => f[WRIST]), color, 0.4));
-    const mesh = trajectoryMesh(selected.full, color, 0.26);
-    if (mesh) scene.add(mesh);
+    const mesh = clusterMesh(selected.full, color, 0.26);
+    if (mesh) {
+      scene.add(mesh);
+      bodyMeshShown = true;
+    }
   }
   for (const [key, t] of visibleTrajs()) {
-    const mesh = trajectoryMesh(t.data, t.color);
-    if (mesh) scene.add(mesh);
+    let mesh = trajectoryMesh(t.data, t.color);
+    if (!mesh && key === "base") {
+      const fallbackId = liveBaseMeshIds.findLast((id) => meshData.has(id));
+      if (fallbackId !== undefined) {
+        mesh = trajectoryMesh({ mesh_id: fallbackId }, t.color, 0.32, Infinity);
+      }
+    }
+    if (mesh) {
+      scene.add(mesh);
+      bodyMeshShown = true;
+    }
     const viol = computeViolations(t.data);
     for (let i = 1; i < t.data.n_frames; i++) {
       scene.add(lineObject(
@@ -1546,7 +1908,10 @@ function renderSkeleton() {
       marker.position.set(...t.data.arm_positions[baseTrigger][WRIST]); scene.add(marker);
     }
   }
-  if (startPreview && showStart) {
+  // The "nothing else to draw" fallback is for stages with no body of their own;
+  // a slider position whose mesh has not landed yet is not one of those, and
+  // swapping the correction body for the start pose there just reads as a glitch.
+  if (startPreview && (showStart || (!bodyMeshShown && !rescaleInFlight))) {
     scene.add(meshObject(new Float32Array(startPreview.mesh_vertices.flat()), START_COLOR, 0.72));
   }
   if (showMdmStart && trajs.base && trajs.base.data) {
@@ -1585,6 +1950,15 @@ function renderSkeleton() {
 function buildGraphs() {
   const holder = $("graphs");
   holder.innerHTML = "";
+  const activeCosts = document.createElement("div");
+  activeCosts.id = "active-costs-panel";
+  activeCosts.className = "panel";
+  activeCosts.innerHTML = '<h2>Cost functions</h2><div id="active-cost-list"></div>' +
+    '<div class="row">' +
+    '<button id="combine-rounds" class="primary" disabled>Combine rounds (codex)</button></div>' +
+    '<div id="combine-log-wrap" hidden><pre id="combine-log" aria-live="polite"></pre></div>';
+  holder.appendChild(activeCosts);
+  renderActiveCosts();
   // Pose-dependent (coupled) bounds get a feature-vs-feature phase plot,
   // rebuilt per persona; empty for personas without a coupled bound.
   const coupled = document.createElement("div");
@@ -1658,6 +2032,9 @@ let boundDrag = null;
 
 let personaSaveTimer = null;
 function schedulePersonaSave() {
+  // In dev+replay the bound controls are live, but the persona on screen is a
+  // recorded snapshot: saving it would write a past demo into the real library.
+  if (replayActive) return;
   clearTimeout(personaSaveTimer);
   personaSaveTimer = setTimeout(async () => {
     const p = getPersona();
@@ -1766,11 +2143,12 @@ function featureHit(name, canvas, e) {
 }
 
 function hoverFeature(name, canvas, e) {
-  if (boundDrag) return;
+  if (boundDrag || !boundsEditable()) return;
   canvas.style.cursor = featureHit(name, canvas, e) ? "ns-resize" : "";
 }
 
 function startFeatureDrag(name, canvas, e) {
+  if (!boundsEditable()) return;
   const hit = featureHit(name, canvas, e);
   if (!hit) return;
   const tx = graphTX[name];
@@ -1803,7 +2181,7 @@ function coupledHit(gi, canvas, e) {
   if (!tx) return null;
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  const b = currentCoupledBounds()[gi];
+  const b = coupledGraphSpecs()[gi]?.bound;
   if (!b) return null;
   const X = (v) => tx.ml + ((v - tx.xmin) / (tx.xmax - tx.xmin)) * tx.pw;
   const Y = (v) => tx.mt + (1 - (v - tx.ymin) / (tx.ymax - tx.ymin)) * tx.ph;
@@ -1815,11 +2193,12 @@ function coupledHit(gi, canvas, e) {
 }
 
 function hoverCoupled(gi, canvas, e) {
-  if (boundDrag) return;
+  if (boundDrag || !boundsEditable()) return;
   canvas.style.cursor = coupledHit(gi, canvas, e) ? "grab" : "";
 }
 
 function startCoupledDrag(gi, canvas, e) {
+  if (!boundsEditable()) return;
   const hit = coupledHit(gi, canvas, e);
   if (!hit) return;
   const tx = coupledTX[gi];
@@ -1890,7 +2269,7 @@ function renderGraphs() {
     }
     const oracleBounds = showOracleBounds ? personaConstantBounds(name) : [];
     const costBounds = showGeneratedBounds
-      ? generatedBounds.filter((b) => b.feature === name && !b.coupled)
+      ? activeGeneratedBounds().filter((b) => b.feature === name && !b.coupled)
       : [];
     const oneFeatureFields = [
       showGeneratedBounds ? costField : null,
@@ -2050,6 +2429,27 @@ function currentCoupledBounds() {
   return p.bounds.filter((b) => b.kind === "coupled");
 }
 
+// One phase plot per (feature, cond_feature) pair: every persona coupled bound
+// plus any generated coupled bound whose pair has no persona plot to land on.
+// `bound` is the editable persona bound, or null for generated-only plots.
+function coupledGraphSpecs() {
+  const specs = currentCoupledBounds().map((b) => ({
+    feature: b.feature, cond_feature: b.cond_feature, bound: b,
+  }));
+  for (const g of activeGeneratedBounds()) {
+    if (!g.coupled) continue;
+    if (!specs.some((s) => s.feature === g.feature && s.cond_feature === g.cond_feature)) {
+      specs.push({ feature: g.feature, cond_feature: g.cond_feature, bound: null });
+    }
+  }
+  return specs;
+}
+
+function coupledGraphsKeyOf(specs) {
+  return specs.map((s) => `${s.feature}|${s.cond_feature}|${s.bound ? "p" : "g"}`).join(";");
+}
+let coupledGraphsKey = null;
+
 function featureBoxRange(name) {
   const p = getPersona();
   const range = p && p.feature_box_ranges && p.feature_box_ranges[name];
@@ -2062,50 +2462,55 @@ function buildCoupledGraphs() {
   if (!holder) return;
   holder.innerHTML = "";
   const p = getPersona();
-  currentCoupledBounds().forEach((b, i) => {
+  const specs = coupledGraphSpecs();
+  coupledGraphsKey = coupledGraphsKeyOf(specs);
+  specs.forEach((spec, i) => {
+    const b = spec.bound;
     const panel = document.createElement("div");
     panel.className = "panel";
     const title = document.createElement("div");
     title.className = "graph-title";
-    title.textContent = `${b.feature} vs ${b.cond_feature} (pose-dependent limit)`;
-    const del = document.createElement("button");
-    del.textContent = "✕";
-    del.className = "coupled-del";
-    del.onclick = () => {
-      p.bounds.splice(p.bounds.indexOf(b), 1);
-      buildCoupledGraphs(); renderAll(); schedulePersonaSave();
-    };
-    title.appendChild(del);
+    title.textContent = `${spec.feature} vs ${spec.cond_feature} (pose-dependent limit)`;
     const canvas = document.createElement("canvas");
     canvas.className = "coupled-graph";
     canvas.id = `coupled-graph-${i}`;
     canvas.addEventListener("mousedown", (e) => startCoupledDrag(i, canvas, e));
     canvas.addEventListener("mousemove", (e) => hoverCoupled(i, canvas, e));
-    const row = document.createElement("div");
-    row.className = "gbound-row";
-    const type = document.createElement("select");
-    for (const t of ["upper_bound", "lower_bound"]) {
-      const opt = document.createElement("option");
-      opt.value = t; opt.textContent = t;
-      type.appendChild(opt);
-    }
-    type.value = b.bound_type;
-    type.onchange = () => { b.bound_type = type.value; renderAll(); schedulePersonaSave(); };
-    row.appendChild(type);
-    for (const key of ["intercept", "slope"]) {
-      const lab = document.createElement("span");
-      lab.textContent = key;
-      row.appendChild(lab);
-      const n = document.createElement("input");
-      n.type = "number"; n.step = 0.05;
-      n.value = (+b[key]).toFixed(2);
-      n.id = `cb-${i}-${key}`;
-      n.onchange = () => { b[key] = +n.value; renderAll(); schedulePersonaSave(); };
-      row.appendChild(n);
-    }
     panel.appendChild(title);
     panel.appendChild(canvas);
-    panel.appendChild(row);
+    if (b) {
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.className = "coupled-del";
+      del.onclick = () => {
+        p.bounds.splice(p.bounds.indexOf(b), 1);
+        buildCoupledGraphs(); renderAll(); schedulePersonaSave();
+      };
+      title.appendChild(del);
+      const row = document.createElement("div");
+      row.className = "gbound-row";
+      const type = document.createElement("select");
+      for (const t of ["upper_bound", "lower_bound"]) {
+        const opt = document.createElement("option");
+        opt.value = t; opt.textContent = t;
+        type.appendChild(opt);
+      }
+      type.value = b.bound_type;
+      type.onchange = () => { b.bound_type = type.value; renderAll(); schedulePersonaSave(); };
+      row.appendChild(type);
+      for (const key of ["intercept", "slope"]) {
+        const lab = document.createElement("span");
+        lab.textContent = key;
+        row.appendChild(lab);
+        const n = document.createElement("input");
+        n.type = "number"; n.step = 0.05;
+        n.value = (+b[key]).toFixed(2);
+        n.id = `cb-${i}-${key}`;
+        n.onchange = () => { b[key] = +n.value; renderAll(); schedulePersonaSave(); };
+        row.appendChild(n);
+      }
+      panel.appendChild(row);
+    }
     holder.appendChild(panel);
   });
   if (!p) return;
@@ -2171,7 +2576,10 @@ function coupledSeriesList(b) {
 }
 
 function renderCoupledGraphs() {
-  currentCoupledBounds().forEach((b, gi) => {
+  const specs = coupledGraphSpecs();
+  if (coupledGraphsKeyOf(specs) !== coupledGraphsKey) buildCoupledGraphs();
+  specs.forEach((spec, gi) => {
+    const b = spec.bound;
     const canvas = $(`coupled-graph-${gi}`);
     if (!canvas) return;
     const fit = fitCanvas(canvas);
@@ -2182,17 +2590,17 @@ function renderCoupledGraphs() {
     const pw = w - ml - mr, ph = h - mt - mb;
     const thr = (x) => b.intercept + b.slope * x;
     const parsedCostBounds = showGeneratedBounds
-      ? matchingGeneratedCoupledBounds(b)
+      ? generatedCoupledBoundsFor(spec.feature, spec.cond_feature)
       : [];
 
-    const series = coupledSeriesList(b);
+    const series = coupledSeriesList(spec);
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
     for (const { xs, ys } of series) {
       for (const v of xs) { xmin = Math.min(xmin, v); xmax = Math.max(xmax, v); }
       for (const v of ys) { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); }
     }
-    const xBox = featureBoxRange(b.cond_feature);
-    const yBox = featureBoxRange(b.feature);
+    const xBox = featureBoxRange(spec.cond_feature);
+    const yBox = featureBoxRange(spec.feature);
     if (xBox) { xmin = Math.min(xmin, xBox[0]); xmax = Math.max(xmax, xBox[1]); }
     if (yBox) { ymin = Math.min(ymin, yBox[0]); ymax = Math.max(ymax, yBox[1]); }
     for (const costBound of parsedCostBounds) {
@@ -2216,24 +2624,27 @@ function renderCoupledGraphs() {
 
     const X = (v) => ml + ((v - xmin) / (xmax - xmin)) * pw;
     const Y = (v) => mt + (1 - (v - ymin) / (ymax - ymin)) * ph;
-    const violates = (x, y) => b.bound_type === "upper_bound" ? y > thr(x) : y < thr(x);
+    const violates = (x, y) =>
+      b !== null && (b.bound_type === "upper_bound" ? y > thr(x) : y < thr(x));
 
     ctx.save();
     ctx.beginPath(); ctx.rect(ml, mt, pw, ph); ctx.clip();
 
-    // shaded violating half-plane (past the pose-dependent limit)
-    const lx0 = X(xmin), ly0 = Y(thr(xmin)), lx1 = X(xmax), ly1 = Y(thr(xmax));
-    const far = b.bound_type === "upper_bound" ? mt - ph : mt + 2 * ph;
-    ctx.fillStyle = "rgba(214,69,65,0.13)";
-    ctx.beginPath();
-    ctx.moveTo(lx0, ly0); ctx.lineTo(lx1, ly1);
-    ctx.lineTo(lx1, far); ctx.lineTo(lx0, far); ctx.closePath(); ctx.fill();
+    if (b) {
+      // shaded violating half-plane (past the pose-dependent limit)
+      const lx0 = X(xmin), ly0 = Y(thr(xmin)), lx1 = X(xmax), ly1 = Y(thr(xmax));
+      const far = b.bound_type === "upper_bound" ? mt - ph : mt + 2 * ph;
+      ctx.fillStyle = "rgba(214,69,65,0.13)";
+      ctx.beginPath();
+      ctx.moveTo(lx0, ly0); ctx.lineTo(lx1, ly1);
+      ctx.lineTo(lx1, far); ctx.lineTo(lx0, far); ctx.closePath(); ctx.fill();
 
-    // limit line
-    ctx.strokeStyle = "rgba(180,40,40,0.85)";
-    ctx.lineWidth = 1.5; ctx.setLineDash([5, 3]);
-    ctx.beginPath(); ctx.moveTo(lx0, ly0); ctx.lineTo(lx1, ly1); ctx.stroke();
-    ctx.setLineDash([]);
+      // limit line
+      ctx.strokeStyle = "rgba(180,40,40,0.85)";
+      ctx.lineWidth = 1.5; ctx.setLineDash([5, 3]);
+      ctx.beginPath(); ctx.moveTo(lx0, ly0); ctx.lineTo(lx1, ly1); ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     for (const costBound of parsedCostBounds) {
       const path = [
@@ -2249,28 +2660,30 @@ function renderCoupledGraphs() {
       });
       ctx.lineTo(X(xmax), costFar); ctx.lineTo(X(xmin), costFar); ctx.closePath(); ctx.fill();
       ctx.strokeStyle = GENERATED_LIMIT_COLOR;
-      ctx.lineWidth = 2; ctx.setLineDash([6, 3]);
+      ctx.lineWidth = 2;
       ctx.beginPath();
       path.forEach(([x, y], i) => {
         if (i === 0) ctx.moveTo(X(x), Y(y)); else ctx.lineTo(X(x), Y(y));
       });
-      ctx.stroke(); ctx.setLineDash([]);
+      ctx.stroke();
     }
 
     // drag handles for editing the limit line
-    ctx.fillStyle = "rgba(180,40,40,0.95)";
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1.5;
-    for (const hx of [coupledTX[gi].hx0, coupledTX[gi].hx1]) {
-      ctx.beginPath(); ctx.arc(X(hx), Y(thr(hx)), 6, 0, 7); ctx.fill(); ctx.stroke();
+    if (b) {
+      ctx.fillStyle = "rgba(180,40,40,0.95)";
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1.5;
+      for (const hx of [coupledTX[gi].hx0, coupledTX[gi].hx1]) {
+        ctx.beginPath(); ctx.arc(X(hx), Y(thr(hx)), 6, 0, 7); ctx.fill(); ctx.stroke();
+      }
     }
 
     // Sampled fields show the compiled cost alongside any exact parsed boundary,
     // including shapes that cannot be represented by grounded bound terms.
     const drawField = (field, rgb) => {
       if (!field || !field.penalty.length) return;
-      const cond = field.features[b.cond_feature];
-      const feat = field.features[b.feature];
+      const cond = field.features[spec.cond_feature];
+      const feat = field.features[spec.feature];
       const pen = field.penalty;
       let pmax = 0;
       for (const p of pen) if (p > pmax) pmax = p;
@@ -2282,8 +2695,12 @@ function renderCoupledGraphs() {
         ctx.beginPath(); ctx.arc(X(cond[i]), Y(feat[i]), 3, 0, 7); ctx.fill();
       }
     };
-    if (showGeneratedBounds) drawField(costField, "53,103,214");
-    if (showUnifiedBounds) drawField(unifiedCostField, "0,131,143");
+    // A parsed generated bound is drawn as an exact line above; the sampled dot
+    // cloud only fills in when no such line exists for this pair.
+    if (!parsedCostBounds.length) {
+      if (showGeneratedBounds) drawField(costField, "53,103,214");
+      if (showUnifiedBounds) drawField(unifiedCostField, "0,131,143");
+    }
 
     // trajectory paths, red on the violating side; dot at the scrubbed frame
     for (const { xs: sx, ys: sy, color, alpha } of series) {
@@ -2321,10 +2738,10 @@ function renderCoupledGraphs() {
       ctx.fillText(xv.toFixed(2), X(xv), mt + ph + 11);
     }
     ctx.fillStyle = "#667";
-    ctx.fillText(`${b.cond_feature} →`, ml + pw / 2, h - 3);
+    ctx.fillText(`${spec.cond_feature} →`, ml + pw / 2, h - 3);
     ctx.save();
     ctx.translate(9, mt + ph / 2); ctx.rotate(-Math.PI / 2);
-    ctx.fillText(`${b.feature} →`, 0, 0);
+    ctx.fillText(`${spec.feature} →`, 0, 0);
     ctx.restore();
     ctx.textAlign = "left";
   });
@@ -2341,6 +2758,15 @@ function renderStrips() {
   const { ctx, w, h } = fit;
   ctx.clearRect(0, 0, w, h);
   const entries = visibleTrajs();
+  const selected = showClusters
+    ? clusters.find((c) => c.label === selectedCluster)
+    : null;
+  if (selected) {
+    entries.push(["selected_cluster", {
+      data: selected.full,
+      color: CLUSTER_COLORS[selected.label % CLUSTER_COLORS.length],
+    }]);
+  }
   if (!entries.length) return;
   const T = maxFrames();
   const rh = Math.min(8, h / entries.length);
@@ -2355,7 +2781,7 @@ function renderStrips() {
       ctx.fillStyle = "#000";
       ctx.fillRect((baseTrigger / T) * w - 1, y, 2, rh - 1);
     }
-    if (key === "full" && selectedClusterSegments) {
+    if ((key === "full" || key === "selected_cluster") && selectedClusterSegments) {
       const mdmEnd = selectedClusterSegments.history + selectedClusterSegments.correction;
       const x = (mdmEnd / T) * w;
       ctx.fillStyle = "#000";
@@ -2374,10 +2800,186 @@ function renderStrips() {
 }
 
 function renderAll() {
+  if (suppressRender) return;
   renderSkeleton();
   renderGraphs();
   renderCoupledGraphs();
   renderStrips();
+}
+
+// ---------------------------------------------------------------------------
+// Mode
+// ---------------------------------------------------------------------------
+
+function renderWorkflowStage() {
+  for (const button of document.querySelectorAll("#workflow-stage-nav button")) {
+    const stage = Number(button.dataset.stage);
+    button.disabled = stage > workflowStage;
+    button.classList.toggle("completed", stage < workflowStage);
+    button.classList.toggle("viewed", stage === displayedStage);
+    if (stage === workflowStage) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+  }
+  for (const panel of document.querySelectorAll("[data-workflow-stage]")) {
+    panel.classList.toggle(
+      "workflow-stage-visible",
+      Number(panel.dataset.workflowStage) === displayedStage,
+    );
+  }
+}
+
+function setWorkflowStage(stage) {
+  workflowStage = stage;
+  displayedStage = stage;
+  renderWorkflowStage();
+}
+
+function reviewStage(stage) {
+  if (stage > workflowStage) return;
+  displayedStage = stage;
+  renderWorkflowStage();
+}
+
+function applyMode() {
+  document.body.classList.toggle("demo", demoMode);
+  $("mode-toggle").textContent = demoMode ? "Dev mode" : "Demo mode";
+  renderWorkflowStage();
+  // Hiding panels changes the column width, so the 3-view scissor rects are
+  // stale until the canvas is re-fit.
+  refreshLegend();
+  renderAll();
+}
+
+function toggleMode() {
+  demoMode = !demoMode;
+  localStorage.setItem("demo_runner_mode", demoMode ? "demo" : "dev");
+  applyMode();
+}
+
+// ---------------------------------------------------------------------------
+// Replay
+// ---------------------------------------------------------------------------
+
+// Replays a recorded session by re-feeding each stored payload through the live
+// render path. No MDM/LLM/MPC calls, and the live session is left untouched.
+async function loadReplay(name) {
+  const index = await api(`/api/replay/${name}`, undefined, "loading replay");
+  replayName = name;
+  replayBeats = index.beats;
+  replayActive = true;
+  replayIndex = 0;
+  replayCache.clear();
+  $("replay-bar").classList.add("active");
+  closeSessionDropdown();
+  await showBeat(0);
+}
+
+// Beats are fetched once and kept: re-applying a beat must reuse its mesh ids,
+// or a rebuild would re-mint them and churn the server's mesh cache.
+async function beatData(i) {
+  if (!replayCache.has(i)) {
+    replayCache.set(i, await api(`/api/replay/${replayName}/${i}`, undefined,
+      `replay beat ${i + 1}/${replayBeats.length}`));
+  }
+  return replayCache.get(i);
+}
+
+async function applyBeat(i) {
+  const beat = await beatData(i);
+
+  // Install the recorded persona: every violation and graph bound is derived
+  // from it client-side, so the demo must not shift under a later edit.
+  const at = personas.findIndex((p) => p.name === beat.persona.name);
+  if (at >= 0) personas[at] = beat.persona; else personas.push(beat.persona);
+  currentPersona = beat.persona.name;
+  buildCoupledGraphs();
+  renderBoundControls();
+
+  const data = beat.data;
+  if (beat.kind === "trajectory") {
+    clearTraj("correction", "full", "generated", "generated_start");
+    hydrateTrajectory(data);
+  } else if (beat.kind === "oracle") {
+    setTraj("oracle", data.trajectory);
+    renderOracleMetrics(data);
+  } else if (beat.kind === "clusters") {
+    $("prompt").value = data.prompt || "";
+    applyClusterPayload(data);
+  } else if (beat.kind === "pick") {
+    applyPick(data.label);
+  } else if (beat.kind === "cost") {
+    renderCostGeneration(data);
+  } else if (beat.kind === "round") {
+    rounds = data.rounds;
+    unified = data.unified;
+    renderRounds();
+    renderUnifiedOutput();
+    setWorkflowStage(4);
+  }
+  return beat;
+}
+
+// A beat holds only its own payload — a clusters beat carries no base rollout —
+// so state accumulates forward and a backward step has to rebuild from beat 0
+// rather than try to undo. Only the destination beat renders.
+async function showBeat(i) {
+  const target = Math.max(0, Math.min(replayBeats.length - 1, i));
+  const rebuilding = target <= replayIndex;
+  if (rebuilding) resetReplayState();
+  let beat;
+  try {
+    for (let k = rebuilding ? 0 : replayIndex + 1; k <= target; k++) {
+      suppressRender = k !== target;
+      beat = await applyBeat(k);
+    }
+  } finally {
+    suppressRender = false;
+  }
+  replayIndex = target;
+
+  disableLiveControls();
+  $("replay-label").textContent =
+    `${replayIndex + 1} / ${replayBeats.length} · ${beat.kind} · ${beat.time}`;
+  $("replay-prev").disabled = replayIndex === 0;
+  $("replay-next").disabled = replayIndex === replayBeats.length - 1;
+  refreshLegend(); refreshTimeline(); renderAll();
+}
+
+// Fork the recorded session into a fresh live one and hand control to the live
+// UI. The branch inherits the full accumulated context (corpus + committed
+// rounds + unified cost); the user continues by running new manual trajectories.
+// The original recording is untouched, so its replay still reads cleanly.
+async function forkReplay() {
+  const data = await api(`/api/replay/${replayName}/fork`, {},
+    "forking session for live editing");
+  replayActive = false;
+  replayName = null;
+  replayBeats = [];
+  replayIndex = 0;
+  replayCache.clear();
+  $("replay-bar").classList.remove("active");
+  activateSession(data);
+}
+
+// Everything a replayed beat can set, back to the state before beat 0.
+function resetReplayState() {
+  clearTrajectoryUi();
+  rounds = [];
+  unified = null;
+  renderRounds();
+  renderUnifiedOutput();
+  $("prompt").value = "";
+}
+
+// Recorded payloads re-enable buttons (hydrateTrajectory arms Generate when the
+// beat was paused), but there is no live session behind them.
+function disableLiveControls() {
+  for (const id of ["run-base", "exit-trajectory", "ignore-violation",
+    "enter-correction", "generate", "recluster", "cluster-refine", "cluster-back",
+    "correction-next", "generate-cost", "cost-next", "commit-round", "apply-round",
+    "combine-rounds", "reset-rounds"]) {
+    $(id).disabled = true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2439,19 +3041,33 @@ async function main() {
   };
   $("run-base").onclick = startManualTrajectory;
   $("exit-trajectory").onclick = exitManualTrajectory;
-  $("run-trigger-oracle").onclick = runTriggerOracle;
   $("ignore-violation").onclick = ignoreComfortViolation;
+  $("enter-correction").onclick = enterCorrection;
   $("generate").onclick = generate;
   $("recluster").onclick = recluster;
   $("cluster-refine").onclick = refineCluster;
   $("cluster-back").onclick = backCluster;
+  $("correction-next").onclick = continueFromCorrection;
   $("generate-cost").onclick = generateCost;
+  $("cost-next").onclick = continueFromCost;
   $("n-clusters").onchange = renderClusterList;
 
   $("commit-round").onclick = commitRound;
   $("apply-round").onclick = applyRoundAndContinue;
   $("combine-rounds").onclick = combineRounds;
   $("reset-rounds").onclick = resetRounds;
+
+  $("mode-toggle").onclick = toggleMode;
+  for (const button of document.querySelectorAll("#workflow-stage-nav button")) {
+    button.onclick = () => reviewStage(Number(button.dataset.stage));
+  }
+  $("replay-prev").onclick = () => showBeat(replayIndex - 1);
+  $("replay-next").onclick = () => showBeat(replayIndex + 1);
+  $("replay-fork").onclick = forkReplay;
+  // Reload rather than unwind: replay overwrites the in-memory persona entry
+  // with its snapshot, and a fresh /api/init is the honest way back.
+  $("replay-exit").onclick = () => location.reload();
+
   if (INIT.session) {
     activateSession(INIT.session);
   } else {
@@ -2464,15 +3080,8 @@ async function main() {
     renderSession();
   }
 
-  $("scale").oninput = () => { $("scale-num").value = $("scale").value; };
-  $("scale").onchange = onScaleChange;
-  $("scale-num").onchange = () => { $("scale").value = $("scale-num").value; onScaleChange(); };
-  async function onScaleChange() {
-    if (!clusters.length) return;
-    const prev = selectedCluster;
-    await recluster();
-    if (prev !== null) await pickCluster(prev);
-  }
+  $("scale").oninput = () => { $("scale-num").value = $("scale").value; liveRescale(); };
+  $("scale-num").onchange = () => { $("scale").value = $("scale-num").value; liveRescale(); };
 
   $("frame-slider").oninput = () => {
     frame = +$("frame-slider").value;
@@ -2498,29 +3107,12 @@ async function main() {
   [$("goal-x"), $("goal-y"), $("goal-z")].forEach((el) => { el.onchange = renderAll; });
 
   // server console: poll the stdout tee so long-running stages show progress
-  const consoleEl = $("console");
-  let logIndex = 0;
-  setInterval(async () => {
-    try {
-      const resp = await fetch(`/api/logs?since=${logIndex}`);
-      if (!resp.ok) return;
-      const data = await resp.json();
-      if (data.lines.length) {
-        const atBottom =
-          consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 24;
-        consoleEl.textContent += data.lines.join("\n") + "\n";
-        if (consoleEl.textContent.length > 200000) {
-          consoleEl.textContent = consoleEl.textContent.slice(-200000);
-        }
-        if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
-      }
-      logIndex = data.next;
-    } catch (err) { /* server busy or down; retry next poll */ }
-  }, 1200);
+  setInterval(pollLogs, 1200);
 
   window.addEventListener("resize", renderAll);
   refreshLegend();
   refreshTimeline();
+  applyMode();
   renderAll();
   requestAnimationFrame(tick);
 }

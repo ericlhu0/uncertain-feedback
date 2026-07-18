@@ -108,7 +108,9 @@ class TurnsCostGenerator(CostGenerator):
         # Only insist the rollout still reaches the goal when stage one judged the goal
         # reachable; if the correction conflicts with the goal, stopping short is fine.
         goal_conflict = parse_goal_conflict(interpretation)
-        prompt_text = build_refine_prompt(interpretation, self.summaries)
+        prompt_text = build_refine_prompt(
+            interpretation, self.summaries, self.corpus_grounding_note()
+        )
         (self.run_dir / "refine_prompt.txt").write_text(prompt_text, encoding="utf-8")
         messages: list[dict[str, Any]] = [{"role": "user", "text": prompt_text}]
 

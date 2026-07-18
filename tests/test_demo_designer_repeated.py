@@ -8,6 +8,7 @@ from uncertain_feedback.demo_designer.core import DemoRig
 from uncertain_feedback.demo_designer import session as demo_session
 from uncertain_feedback.demo_designer.session import ClusterLevel, Session
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
+from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -51,6 +52,19 @@ class FakePlanner:
 
     def set_extra_costs(self, costs):
         self.costs = costs
+
+
+def test_mdm_locked_seed_resets_before_each_generation() -> None:
+    generator = MdmMotionGenerator.__new__(MdmMotionGenerator)
+    generator._seed = 7
+    generator._lock_seed = True
+    calls: list[int] = []
+    generator._fixseed = calls.append
+
+    generator._reset_seed_if_locked()
+    generator._reset_seed_if_locked()
+
+    assert calls == [7, 7]
 
 
 def make_session(monkeypatch, tmp_path) -> tuple[Session, SimulatedUser]:
@@ -101,8 +115,14 @@ corrections:
     )
     rig._cfg_with_goal = MethodType(lambda self, goal: self.cfg, rig)
     rig.package_trajectory = MethodType(
-        lambda self, traj, selected: {"n_frames": len(traj)}, rig
+        lambda self, traj, selected, current_mesh_only=False, pin_mesh=False: {
+            "n_frames": len(traj),
+            "current_mesh_only": current_mesh_only,
+            "mesh_id": "mesh",
+        },
+        rig,
     )
+    rig.meshes = SimpleNamespace(unpin=lambda mesh_id: None)
     session_dir = tmp_path / "demo_designer_artifacts" / "test_session"
     session = Session(
         rig=rig,
@@ -151,6 +171,34 @@ def test_trajectory_pauses_and_logs_discomfort_segment(monkeypatch, tmp_path) ->
         "traj_file": "traj_000.npy",
         "features_file": "traj_000_features.csv",
     }
+
+
+def test_trajectory_can_advance_one_live_frame_at_a_time(monkeypatch, tmp_path) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        demo_session,
+        "compute_violations",
+        lambda selected, context, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
+    )
+
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False)
+
+    assert session._trajectory_payload()["status"] == "running"
+    assert session.corpus.entries() == []
+
+    running = session.advance_trajectory(current_mesh_only=True)
+
+    assert running["status"] == "running"
+    assert running["trajectory"]["n_frames"] == 2
+    assert running["trajectory"]["current_mesh_only"] is True
+    assert session.corpus.entries() == []
+
+    paused = session.advance_trajectory(current_mesh_only=True)
+
+    assert paused["status"] == "paused"
+    assert paused["trigger"]["reason"] == "discomfort"
+    assert paused["trajectory"]["current_mesh_only"] is False
+    assert session.corpus.entries()[0]["n_frames"] == 2
 
 
 def test_exit_trajectory_keeps_session_context(monkeypatch, tmp_path) -> None:
@@ -254,13 +302,17 @@ def test_ignore_comfort_violation_resumes_until_a_new_violation(
 def test_commit_round_persists_all_recursive_cluster_labels(tmp_path) -> None:
     session = Session.__new__(Session)
     session.persona_name = "restricted"
+    session.user = SimulatedUser("restricted", "", "", bounds=())
     session.started = "now"
     session.dir = tmp_path / "session"
     session.rounds = []
     session.round_records = []
     session._round_costs = []
     session.unified_cost = None
+    session.combined_corpus_count = 0
+    session.corpus = SimpleNamespace(entries=lambda: [])
     session.trajectory_count = 1
+    session.beats = []
     trajectory = SimpleNamespace(
         goal=np.array([0.4, 0.5, 0.6]),
         trigger_step=1,
@@ -298,13 +350,16 @@ def test_commit_round_persists_all_recursive_cluster_labels(tmp_path) -> None:
     trajectory._last_cost = FakeCost()
     trajectory._last_cost_dir = cost_dir
     trajectory._last_instruction = "feedback"
+    trajectory._last_cost_payload = {"description": "accepted cost"}
 
     session.commit_round()
 
     assert session.rounds[0].cluster_labels == (2, 0, 1)
     assert session.round_records[0]["cluster_labels"] == [2, 0, 1]
+    assert session.round_records[0]["code"] == session.rounds[0].cost_code
     saved = json.loads((session.dir / "session.json").read_text(encoding="utf-8"))
     assert saved["rounds"][0]["cluster_labels"] == [2, 0, 1]
+    assert [beat["kind"] for beat in session.beats] == ["cost", "round"]
 
 
 def test_cost_round_loads_legacy_records_without_cluster_labels(tmp_path) -> None:
@@ -355,6 +410,7 @@ def test_remove_round_reindexes_remaining_feedback(tmp_path) -> None:
     session._round_costs = [FakeCost(), FakeCost(), FakeCost()]
     session.trajectory = None
     session.unified_cost = FakeCost()
+    session.combined_corpus_count = 0
 
     payload = session.remove_round(1)
 

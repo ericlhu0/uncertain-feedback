@@ -124,7 +124,7 @@ uv run python -m train.train_mdm \
     --resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt \
     --diffusion_steps 50 \                    # must match the checkpoint (50 for humanml_enc_512_50steps)
     --mask_frames \                           # mask non-target frames during training
-    --use_ema \                               # EMA model averaging (recommended)
+    --use_ema \                               # EMA model averaging (see note below — inference loads the raw weights)
     --batch_size 1 \                          # use 1 for small datasets; increase if GPU memory allows
     --num_steps 1000 \                        # total gradient steps; 500–2000 is typical for fine-tuning
     --save_interval 100 \                     # checkpoint every N steps; ~10% of num_steps gives ~10 checkpoints
@@ -164,6 +164,12 @@ Key hyperparameter guidance:
 - `--save_interval`: set to ~10% of `--num_steps` to get ~10 checkpoints to pick from
 - `--diffusion_steps`: must match the pre-trained checkpoint (50 for `humanml_enc_512_50steps`)
 - `--overwrite`: add this flag to continue training into an already-existing `--save_dir`
+- `--use_ema`: keeps an extra `model_avg` (EMA, beta 0.9999) copy in each checkpoint. **The EMA
+  weights are ~95% the base model after 500 fine-tune steps** (still ~60% after 5000), so they must
+  never be used for inference on short fine-tunes — the fine-tuned behavior is drowned out and
+  generations revert to base-MDM whole-body motions. Inference always loads the raw `model` weights:
+  `mdm_configs/mdm_config.yaml` sets `use_ema: false`, overriding the training flag saved in the
+  checkpoint's `args.json`. Do not remove that override.
 
 5. Run motion generation with the new model
 
@@ -357,7 +363,7 @@ mdm_frames: 50
 uq:
   diffusion_samples: 128
   n_clusters: 3
-  clusterer: kmeans_end_pose  # kmeans_end_pose | agglo_end_pose | agglo_path_pca | agglo_t2m
+  clusterer: agglo_end_pose  # kmeans_end_pose | agglo_end_pose | agglo_path_pca | agglo_t2m
   auto_cluster: null
   scale: 1.0  # default motion-magnitude scale for the chosen cluster
 ```
@@ -366,8 +372,9 @@ uq:
 planners keep their injected clusterer):
 
 - `kmeans_end_pose` — KMeans on spine3-relative arm-chain positions at a
-  single late frame (default).
-- `agglo_end_pose` — same end-pose features, average-linkage agglomerative.
+  single late frame.
+- `agglo_end_pose` — same end-pose features, average-linkage agglomerative
+  (default).
 - `agglo_path_pca` — full-trajectory features (arm-chain path resampled to 15
   equidistant-arclength waypoints, PCA to 95% variance), agglomerative.
 - `agglo_t2m` — 512-dim T2M motion-encoder embeddings (the FID/R-precision
@@ -558,7 +565,10 @@ Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
 `llm_cost.backend` selects how the cost is generated:
 
 Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
-`gpt-5.6-luna` with `xhigh` reasoning effort.
+`gpt-5.6-luna` with `xhigh` reasoning effort. Reasoning effort follows the model
+(`gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`); any other model is sent without
+one. The demo-runner/demo-designer config (`arm_mpc_cartesian_mdm_llm_transfer.yaml`)
+pins `gpt-5.6-sol`.
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
   images + compact summary, including rollout-labeled chosen-vs-marked-wrong terminal
@@ -793,9 +803,11 @@ rollout (`traj_<i>.npy`) plus a per-frame joint-feature `traj_<i>_features.csv`
 `trigger_step`/`trigger_violation` (`null` when the goal never triggered a
 correction), `feedback_text`, and `comfortable_until` (the trigger step, or
 `n_frames` if none): frames `[0, comfortable_until)` were executed without a
-discomfort report. Codex-based generators read this corpus to reason about which
-configurations were reached comfortably, so goals that never trigger a
-correction still contribute negative evidence. Before an agent run, the relevant
+discomfort report. Every generated-cost backend uses this corpus to keep previously
+accepted poses unpenalized, so goals that never trigger a correction still contribute
+negative evidence. The `llm` and `turns` backends receive numeric per-entry feature
+ranges; after authoring, all backends are checked directly on every accepted pose and
+the cost is rejected if any receives positive cost. Before an agent run, the relevant
 trajectory and feature files are copied into its task workspace and the oracle-derived
 `feedback_text` and `trigger_violation` fields are removed from the staged manifest.
 The original manifest remains unchanged for the demo UI and session history; only
@@ -821,7 +833,8 @@ Then open `http://127.0.0.1:6780`. The config supplies the pose, MPC settings,
 UQ defaults, `mdm_frames`, per-persona goal presets, and the `llm_cost` backend
 used by the cost-generation stage. With the default config, cost generation
 starts on `llm (single-pass)`; the backend dropdown can still select `turns` or
-`agent`.
+`agent`. When `motion_generator: mdm`, the top-level `seed` is reset before each
+MDM generation request, so identical demo inputs reproduce the same samples.
 
 **Sessions.** All work happens inside a *session* — one simulated user plus the
 context that accumulates while correcting them: an on-disk trajectory corpus,
@@ -831,8 +844,8 @@ with `{"persona": <name>}` begins one (creating
 with `trajectory_corpus/` and `session.json`); trajectories are then spawned
 from the session and carry its learned costs installed from frame 0, so
 corrections compound across trajectories within the same session. The session's
-codex cost generators read its trajectory corpus (every executed segment,
-comfortable or not — see *Grounding cost generation in past comfort* above).
+cost generators read its trajectory corpus (every executed segment, comfortable or
+not — see *Grounding cost generation in past comfort* above).
 `POST /api/manual_trajectory/start` now accepts only `arm_aa` and `goal`; the
 persona is fixed by the active session.
 Sessions persist to `session.json` after every mutation and survive a server
@@ -902,8 +915,10 @@ Stages (each stage's controls unlock once the previous one ran):
    sample count, oracle score, full-path violation, and goal reach. Click a
    card to select it. Use *Mark wrong* on any explicitly undesirable alternatives;
    only those marked cards are used as negative contrast for cost generation, while
-   unmarked non-chosen cards carry no preference signal. Selecting a marked card
-   clears its mark. *Refine selected* clusters only that card's samples and
+   unmarked non-chosen cards carry no preference signal. Selection and exclusion
+   are independent: an excluded card can remain selected for inspection, but the
+   workflow cannot advance until it is restored or another included card is selected.
+   *Refine selected* clusters only that card's samples and
    can be used recursively; if the card has fewer samples than the requested
    cluster count, each sample becomes its own child cluster. *Back* restores the
    prior options and selection. The breadcrumb reports the current depth and
@@ -934,7 +949,10 @@ Stages (each stage's controls unlock once the previous one ran):
    *Remove feedback* action; removal immediately excludes that round from future
    planning/combinations and invalidates a previously unified result. It does
    not rewind frames already executed under that feedback. Clicking *Combine rounds*
-   automatically rolls the unified cost out from the initial pose. The unified cost's
+   automatically rolls the unified cost out from the initial pose. Combining also
+   works between trajectories (no active trajectory): there is no pose or goal to
+   demonstrate on, so the rollout, metrics, and goal status are omitted and the
+   unified cost is installed when the next trajectory starts. The unified cost's
    rollout (dark cyan), penalty field, code, and per-round scores are shown
    in the panel and survive base rollouts; *Reset* clears all rounds. To
    probe pose dependence, give feedback at several goals that span the
@@ -996,6 +1014,114 @@ automatically after ~0.6 s, and if a base rollout is loaded the server
 re-detects the feedback-trigger frame under the new bounds without re-running
 the MPC. Custom personas persist to `--personas-file`; edits to built-in
 personas last until the server restarts.
+
+
+## Demo runner web tool
+
+A presentation-oriented frontend over the *same* backend as the demo designer:
+it imports `DemoRig`/`Session` and reuses every route through
+`demo_designer.server.create_app`, so the pipeline behaves identically. It adds
+two things the designer lacks: a **demo/dev mode toggle** and **session
+replay**. Run it from the repo root (the artifact root is CWD-relative):
+
+```bash
+uv run python src/uncertain_feedback/demo_runner/server.py \
+  [--mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml] \
+  [--personas-file demo_designer_personas.json] \
+  [--trajectory-configs-file demo_designer_trajectory_configs.json] \
+  [--host 127.0.0.1] [--port 6781]
+```
+
+Then open `http://127.0.0.1:6781`. It defaults to port 6781 so it can run
+alongside the designer on 6780; both share `demo_designer_artifacts/`, so a
+session recorded in one is listed by the other. Do not drive two *live* sessions
+at once — each process has its own `DemoRig` and their `session.json` writes
+interleave. Record in one, replay in the other. As in the designer, MDM
+generation resets to the config's top-level `seed` for every request.
+
+**Demo vs dev mode.** The header button toggles between them and the choice
+persists in `localStorage` (demo is the default). Both modes use the same
+guided left control bar: Scenario is a persistent setup/status panel above the
+four stages Trajectory decision, Language correction, Cost generation, and
+Apply feedback. Its configuration section is collapsible and closes
+automatically when a trajectory starts, while Start/Exit and the live
+trajectory status remain visible. Starting or continuing a trajectory stops at Trajectory
+decision, where the operator either enters a correction or ignores the comfort
+violation and continues. Entering a correction unlocks Language correction.
+Selecting a cluster keeps that stage open for inspection and enables its
+bottom *Next* button; pressing *Next* advances to Cost generation. Generating a
+cost enables the Cost stage's bottom *Next* button; pressing it advances to
+Apply feedback. Applying feedback at another trigger returns
+to Trajectory decision. The current and completed stages remain clickable for
+review, while future stages stay disabled. While cost generation runs, its user-visible progress appears
+directly in the Cost stage in both modes; OpenAI-backed generation includes its
+opt-in reasoning-summary stream there. Raw private reasoning is not exposed.
+The right column begins with a persistent **Cost functions** section. Each
+pending or active cost is shown by its natural-language summary, which expands
+to reveal the generated Python. Individual round costs are listed separately
+until combination replaces them with one unified cost.
+
+The runner animates the stateful MPC execution live when a trajectory starts
+and when *Apply feedback + continue* resumes it with a generated cost. The
+browser requests one MPC step at a time, follows the newest frame in the body
+views and scrubber, and stops requesting steps as soon as the trajectory pauses
+at a discomfort trigger (or completes). These runner-only routes are
+`POST /api/live_trajectory/start`, `POST /api/live_trajectory/step`, and
+`POST /api/live_trajectory/apply_round`; the designer retains its synchronous
+routes.
+
+*Dev* mode exposes all setup and debugging controls inside that organization.
+*Demo* mode keeps the Scenario panel's saved start-pose and goal selectors,
+but hides everything used to author those choices: the persona selector/editor,
+initial-pose sliders, numeric goal fields, and save controls. It also hides
+on-graph bound dragging, the sample/count/clusterer fields, the cost backend
+picker and inline generated Python in the workflow panel, the trajectory corpus,
+and the server console. The expandable right-column cost section remains visible.
+Cluster refinement and explicit *Exclude* controls remain available in both
+modes. Hidden controls are hidden, not removed, so they still
+supply their configured values to the pipeline; in demo mode the graphs render
+but their bound handles are inert. Cluster cards reserve oracle/full-path
+violation diagnostics for dev mode and omit negative goal-status labels.
+
+**Session replay.** Every session records a beat stream as it runs (in both
+tools — the recorder lives in the shared `session.py`):
+
+```
+demo_designer_artifacts/<timestamp>_session_<persona>/replay/
+  index.json              # {persona, started, beats: [{kind, time, file}, ...]}
+  0000_trajectory.json    # {kind, time, file, persona: <snapshot>, data: <the UI payload>}
+  0001_clusters.json
+  ...
+```
+
+Each beat stores the exact payload the browser received, so replay re-feeds it
+through the normal render path — **no MDM, LLM, or MPC calls**. Cluster choices
+and generated costs remain provisional while they are explored. When a round is
+committed or applied, replay records only its accepted root-to-leaf cluster
+selection path and final generated cost; discarded picks, re-clusters,
+backtracking, and cost previews are omitted. Beat kinds are `trajectory`
+(rollout + trigger), `oracle`, `clusters`, `pick`, `cost`, and `round`. Open the
+session dropdown and press **Replay** on a saved session, then step with the
+prev/next buttons in the header; **Exit replay** reloads the page. Replay is
+orthogonal to the mode — demo+replay is the presentation, dev+replay reads the
+same beats with the graphs and code visible — and it never touches the live
+session, so one can stay parked while you replay another.
+
+**Fork &amp; continue live.** While replaying, press **Fork &amp; continue live**
+in the header to branch off. This copies the recorded session into a fresh
+`<timestamp>_session_<persona>` dir, resumes the copy as the active live session
+(full context — corpus, committed rounds, unified cost), and hands control back
+to the live UI so you can run new manual trajectories and corrections from that
+accumulated state. The original recording is left untouched, so its replay still
+reads cleanly. Like resume, a fork restores context but not the ephemeral MPC
+trajectory, so you continue by starting a new rollout.
+
+Two consequences worth knowing. Only sessions recorded after this feature exists
+can be replayed: MDM samples are stochastic and were never persisted, so the
+clusters you rejected cannot be regenerated after the fact — they survive only
+because the beat recorded them. And each beat carries its own persona snapshot,
+so a replay renders under the bounds that were in force when it was recorded;
+editing the persona later will not silently redraw a past demo.
 
 
 ## Thanks

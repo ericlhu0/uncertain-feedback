@@ -235,8 +235,10 @@ class CombineCostGenerator(AgentCostGenerator):
             "Maintain `stage_log.md` with `## Evidence synthesis` and "
             "`## Final unified cost` sections. Maintain `ITERATION_LOG.md`; for each "
             "candidate, run every command below, open every comparison and angles "
-            "image, and record each round's score, goal-reach result, mismatch, and "
-            "resulting revision. The one unified cost must score well on every "
+            "image, and record each round's score, goal-reach result, mismatch, "
+            "whether that round's previously executed trajectory stays feasible under "
+            "the candidate, and resulting revision. The one unified cost must score "
+            "well on every "
             f"round.{synthesis_note}\n\n"
             f"{rendered_commands}\n\n{corpus_block}---\n\n{prompt_text}\n"
         )

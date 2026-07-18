@@ -36,7 +36,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import yaml
@@ -91,7 +91,9 @@ def _resolve_num_frames(
     return resolved
 
 
-class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-attributes
+class MdmMotionGenerator(
+    MotionGenerator
+):  # pylint: disable=too-many-instance-attributes
     """Lazy-loading wrapper for the MDM model.
 
     The MDM model and HumanML3D dataset are loaded on the first call to
@@ -102,18 +104,23 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
         model_path: Path to the MDM weights ``.pt`` file.  Defaults to
                     :data:`uncertain_feedback.consts.MDM_MODEL_WEIGHTS_PATH`.
         seed:       Random seed passed to ``fixseed`` for reproducibility.
+        lock_seed:  Reset the seed before every generation so repeated calls
+                    with identical inputs produce identical samples.
     """
 
     def __init__(
         self,
         model_path: str | Path | None = None,
         seed: int = 10,
+        lock_seed: bool = False,
     ) -> None:
         super().__init__()
         self._model_path = (
             Path(model_path) if model_path is not None else MDM_MODEL_WEIGHTS_PATH
         ).resolve()
         self._seed = seed
+        self._lock_seed = lock_seed
+        self._fixseed: Callable[[int], None] | None = None
 
         # Populated lazily by _ensure_loaded().
         self._model: Any = None
@@ -188,6 +195,7 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
                 setattr(args, _k, _dv)
 
         fixseed(self._seed)
+        self._fixseed = fixseed
         dist_util.setup_dist(args.device)
 
         print("Loading MDM dataset…")
@@ -241,6 +249,11 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
         self._hml_std = np.asarray(t2m_ds.std).flatten()[:263]
 
         print("MdmMotionGenerator ready.")
+
+    def _reset_seed_if_locked(self) -> None:
+        if self._lock_seed:
+            assert self._fixseed is not None
+            self._fixseed(self._seed)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -399,6 +412,7 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
             ``(num_samples, n_frames, 3, 3)`` when ``num_samples > 1``.
         """
         self._ensure_loaded()
+        self._reset_seed_if_locked()
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         assert self._hml_mean is not None
@@ -593,6 +607,7 @@ class MdmMotionGenerator(MotionGenerator):  # pylint: disable=too-many-instance-
             ``(num_samples, n_frames, 22, 3)`` global SMPL joint positions.
         """
         self._ensure_loaded()
+        self._reset_seed_if_locked()
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         assert self._not_l_arm_mask is not None

@@ -52,6 +52,7 @@ class SmplMeshCache:
         self._next_id = 0
         self._poses: OrderedDict[str, np.ndarray] = OrderedDict()
         self._vertices: dict[str, np.ndarray] = {}
+        self._pinned: set[str] = set()
 
     def _fit_demo_pose(
         self, target_positions: np.ndarray
@@ -128,16 +129,29 @@ class SmplMeshCache:
     def faces(self) -> np.ndarray:
         return np.asarray(self._model.faces, dtype=np.int32)
 
-    def register(self, arm_positions: np.ndarray) -> str:
+    def register(self, arm_positions: np.ndarray, pin: bool = False) -> str:
+        """Register a pose sequence and return its id.
+
+        ``pin`` exempts the entry from eviction: reference rollouts live as long
+        as their trajectory, and one live MPC rollout registers a frame per step
+        -- far more than ``max_entries`` -- so an unpinned reference id is dead
+        by the time the user ticks it on.
+        """
         mesh_id = str(self._next_id)
         self._next_id += 1
         self._poses[mesh_id] = np.asarray(arm_positions, dtype=np.float64).reshape(
             -1, 5, 3
         )
-        while len(self._poses) > self._max_entries:
-            stale_id, _ = self._poses.popitem(last=False)
+        if pin:
+            self._pinned.add(mesh_id)
+        while len(self._poses) - len(self._pinned) > self._max_entries:
+            stale_id = next(k for k in self._poses if k not in self._pinned)
+            del self._poses[stale_id]
             self._vertices.pop(stale_id, None)
         return mesh_id
+
+    def unpin(self, mesh_id: str) -> None:
+        self._pinned.discard(mesh_id)
 
     def vertices(self, mesh_id: str) -> np.ndarray:
         if mesh_id not in self._poses:
@@ -146,6 +160,23 @@ class SmplMeshCache:
         if mesh_id not in self._vertices:
             self._vertices[mesh_id] = self._generate(self._poses[mesh_id])
         return self._vertices[mesh_id]
+
+    def vertices_at(self, mesh_id: str, frame: int) -> np.ndarray:
+        """Vertices for a single frame, shaped ``(1, n_verts, 3)``.
+
+        The magnitude slider mints a mesh per position but only ever draws the
+        frame on screen, so generating that frame alone keeps a drag off the
+        whole-trajectory path. Deliberately uncached: these are transient.
+        """
+        if mesh_id not in self._poses:
+            raise KeyError(f"Unknown or stale mesh id {mesh_id!r}.")
+        self._poses.move_to_end(mesh_id)
+        cached = self._vertices.get(mesh_id)
+        poses = self._poses[mesh_id]
+        index = min(max(frame, 0), poses.shape[0] - 1)
+        if cached is not None:
+            return cached[index : index + 1]
+        return self._generate(poses[index : index + 1])
 
     def preview(self, arm_positions: np.ndarray) -> np.ndarray:
         return self._generate(np.asarray(arm_positions).reshape(1, 5, 3))[0]

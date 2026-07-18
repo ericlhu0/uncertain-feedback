@@ -15,7 +15,7 @@ import argparse
 import sys
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
@@ -30,10 +30,6 @@ _DEFAULT_CONFIG = (
     Path(__file__).parents[1]
     / "planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml"
 )
-
-app = Flask(__name__, static_folder=str(_STATIC_DIR))
-# Dev tool: never serve stale app.js against a newer server API.
-app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 rig: DemoRig | None = None
 
@@ -58,15 +54,17 @@ def _require_trajectory() -> tuple["Session", "Trajectory"]:
 
 
 class _TeeBuffer:
-    """stdout tee that keeps completed lines for the browser console."""
+    """Stdout tee that keeps completed lines and streamable raw text."""
 
     def __init__(self, stream) -> None:
         self._stream = stream
         self._partial = ""
+        self.text = ""
         self.lines: list[str] = []
 
     def write(self, text: str) -> None:
         self._stream.write(text)
+        self.text += text
         self._partial += text
         while "\n" in self._partial:
             line, self._partial = self._partial.split("\n", 1)
@@ -95,275 +93,314 @@ def _run_heavy(fn):
         return _run(fn)
 
 
-@app.route("/")
-def index():
-    return send_from_directory(_STATIC_DIR, "index.html")
+def create_app(static_dir: Path) -> Flask:
+    """Build the Flask app for one frontend; routes are shared across tools."""
+    app = Flask(__name__, static_folder=str(static_dir))
+    # Dev tool: never serve stale app.js against a newer server API.
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
+    @app.route("/")
+    def index():
+        return send_from_directory(static_dir, "index.html")
 
-@app.route("/static/<path:filename>")
-def static_files(filename: str):
-    return send_from_directory(_STATIC_DIR, filename)
+    @app.route("/static/<path:filename>")
+    def static_files(filename: str):
+        return send_from_directory(static_dir, filename)
 
+    @app.route("/api/artifact/<path:relpath>")
+    def artifact_file(relpath: str):
+        return send_from_directory(_ARTIFACT_ROOT, relpath)
 
-@app.route("/api/artifact/<path:relpath>")
-def artifact_file(relpath: str):
-    return send_from_directory(_ARTIFACT_ROOT, relpath)
+    @app.route("/api/init")
+    def init():
+        return _run_heavy(rig.init_payload)
 
+    @app.route("/api/logs")
+    def logs():
+        since = int(request.args.get("since", 0))
+        lines = _log_buffer.lines
+        if since > len(lines):
+            since = 0
+        payload = {"lines": lines[since:], "next": len(lines)}
+        if "char_since" in request.args:
+            char_since = int(request.args["char_since"])
+            if char_since > len(_log_buffer.text):
+                char_since = 0
+            payload.update(
+                text=_log_buffer.text[char_since:],
+                next_char=len(_log_buffer.text),
+            )
+        return jsonify(payload)
 
-@app.route("/api/init")
-def init():
-    return _run_heavy(rig.init_payload)
+    @app.route("/api/personas", methods=["POST"])
+    def upsert_persona():
+        data = request.get_json(force=True)
 
+        def do():
+            result = rig.upsert_persona(data)
+            return {"personas": rig.personas_payload(), **result}
 
-@app.route("/api/logs")
-def logs():
-    since = int(request.args.get("since", 0))
-    lines = _log_buffer.lines
-    if since > len(lines):
-        since = 0
-    return jsonify({"lines": lines[since:], "next": len(lines)})
+        return _run(do)
 
+    @app.route("/api/personas/<name>", methods=["DELETE"])
+    def delete_persona(name: str):
+        def do():
+            rig.delete_persona(name)
+            return {"personas": rig.personas_payload()}
 
-@app.route("/api/personas", methods=["POST"])
-def upsert_persona():
-    data = request.get_json(force=True)
+        return _run(do)
 
-    def do():
-        result = rig.upsert_persona(data)
-        return {"personas": rig.personas_payload(), **result}
+    @app.route("/api/preview_pose", methods=["POST"])
+    def preview_pose():
+        data = request.get_json(force=True)
+        return _run(lambda: rig.preview_pose(data["arm_aa"]))
 
-    return _run(do)
+    @app.route("/api/trajectory-configs/<kind>", methods=["POST"])
+    def upsert_trajectory_config(kind: str):
+        data = request.get_json(force=True)
+        return _run(
+            lambda: {"trajectory_configs": rig.upsert_trajectory_config(kind, data)}
+        )
 
+    @app.route("/api/mesh/<mesh_id>")
+    def mesh(mesh_id: str):
+        try:
+            vertices = rig.mesh_vertices(mesh_id, request.args.get("frame", type=int))
+        except KeyError as exc:
+            return jsonify({"error": exc.args[0]}), 404
+        response = Response(vertices.tobytes(), mimetype="application/octet-stream")
+        response.headers["X-Mesh-Frames"] = str(vertices.shape[0])
+        response.headers["X-Mesh-Vertices"] = str(vertices.shape[1])
+        response.headers["X-Mesh-Dtype"] = "float32-le"
+        return response
 
-@app.route("/api/personas/<name>", methods=["DELETE"])
-def delete_persona(name: str):
-    def do():
-        rig.delete_persona(name)
-        return {"personas": rig.personas_payload()}
+    @app.route("/api/session/start", methods=["POST"])
+    def start_session():
+        data = request.get_json(force=True)
+        return _run_heavy(lambda: rig.begin_session(data["persona"]).payload())
 
-    return _run(do)
+    @app.route("/api/sessions")
+    def list_sessions():
+        return _run(rig.list_sessions)
 
+    @app.route("/api/sessions/<name>", methods=["DELETE"])
+    def delete_session(name: str):
+        return _run(lambda: rig.delete_session(name))
 
-@app.route("/api/preview_pose", methods=["POST"])
-def preview_pose():
-    data = request.get_json(force=True)
-    return _run(lambda: rig.preview_pose(data["arm_aa"]))
+    @app.route("/api/session/resume", methods=["POST"])
+    def resume_session():
+        data = request.get_json(force=True)
+        return _run_heavy(lambda: rig.resume_session(data["dir"]).payload())
 
+    @app.route("/api/manual_trajectory/start", methods=["POST"])
+    def start_manual_trajectory():
+        data = request.get_json(force=True)
 
-@app.route("/api/trajectory-configs/<kind>", methods=["POST"])
-def upsert_trajectory_config(kind: str):
-    data = request.get_json(force=True)
-    return _run(
-        lambda: {"trajectory_configs": rig.upsert_trajectory_config(kind, data)}
-    )
+        def do():
+            session = _require_session()
+            session.start_trajectory(data["arm_aa"], data["goal"])
+            return session._trajectory_payload()
 
+        return _run_heavy(do)
 
-@app.route("/api/mesh/<mesh_id>")
-def mesh(mesh_id: str):
-    try:
-        vertices = rig.mesh_vertices(mesh_id)
-    except KeyError as exc:
-        return jsonify({"error": exc.args[0]}), 404
-    response = Response(vertices.tobytes(), mimetype="application/octet-stream")
-    response.headers["X-Mesh-Frames"] = str(vertices.shape[0])
-    response.headers["X-Mesh-Vertices"] = str(vertices.shape[1])
-    response.headers["X-Mesh-Dtype"] = "float32-le"
-    return response
+    @app.route("/api/manual_trajectory/exit", methods=["POST"])
+    def exit_manual_trajectory():
+        def do():
+            session, _ = _require_trajectory()
+            return session.exit_trajectory()
 
+        return _run_heavy(do)
 
-@app.route("/api/session/start", methods=["POST"])
-def start_session():
-    data = request.get_json(force=True)
-    return _run_heavy(lambda: rig.begin_session(data["persona"]).payload())
+    @app.route("/api/oracle_rollout", methods=["POST"])
+    def oracle_rollout():
+        def do():
+            session, _ = _require_trajectory()
+            return session.run_oracle(from_trigger=True)
 
+        return _run_heavy(do)
 
-@app.route("/api/sessions")
-def list_sessions():
-    return _run(rig.list_sessions)
+    @app.route("/api/generate", methods=["POST"])
+    def generate():
+        data = request.get_json(force=True)
 
+        def do():
+            session, _ = _require_trajectory()
+            return session.generate(
+                data["prompt"],
+                int(data["n_samples"]),
+                int(data["n_clusters"]),
+                float(data["scale"]),
+                str(data["clusterer"]),
+            )
 
-@app.route("/api/sessions/<name>", methods=["DELETE"])
-def delete_session(name: str):
-    return _run(lambda: rig.delete_session(name))
+        return _run_heavy(do)
 
+    @app.route("/api/recluster", methods=["POST"])
+    def recluster():
+        data = request.get_json(force=True)
 
-@app.route("/api/session/resume", methods=["POST"])
-def resume_session():
-    data = request.get_json(force=True)
-    return _run_heavy(lambda: rig.resume_session(data["dir"]).payload())
+        def do():
+            session, _ = _require_trajectory()
+            return session.recluster(
+                int(data["n_clusters"]), float(data["scale"]), str(data["clusterer"])
+            )
 
+        return _run_heavy(do)
 
-@app.route("/api/manual_trajectory/start", methods=["POST"])
-def start_manual_trajectory():
-    data = request.get_json(force=True)
+    @app.route("/api/rescale", methods=["POST"])
+    def rescale():
+        data = request.get_json(force=True)
 
-    def do():
+        def do():
+            session, _ = _require_trajectory()
+            return session.rescale(float(data["scale"]))
+
+        return _run_heavy(do)
+
+    @app.route("/api/pick_cluster", methods=["POST"])
+    def pick_cluster():
+        data = request.get_json(force=True)
+
+        def do():
+            session, _ = _require_trajectory()
+            return session.pick_cluster(int(data["label"]))
+
+        return _run(do)
+
+    @app.route("/api/mark_cluster", methods=["POST"])
+    def mark_cluster():
+        data = request.get_json(force=True)
+
+        def do():
+            session, _ = _require_trajectory()
+            return session.mark_cluster(int(data["label"]), bool(data["undesirable"]))
+
+        return _run(do)
+
+    @app.route("/api/refine_cluster", methods=["POST"])
+    def refine_cluster():
+        data = request.get_json(force=True)
+
+        def do():
+            session, _ = _require_trajectory()
+            return session.refine_cluster(
+                int(data["label"]),
+                int(data["n_clusters"]),
+                float(data["scale"]),
+                str(data["clusterer"]),
+            )
+
+        return _run_heavy(do)
+
+    @app.route("/api/back_cluster", methods=["POST"])
+    def back_cluster():
+        def do():
+            session, _ = _require_trajectory()
+            return session.back_cluster()
+
+        return _run_heavy(do)
+
+    @app.route("/api/generate_cost", methods=["POST"])
+    def generate_cost():
+        data = request.get_json(force=True)
+
+        def do():
+            session, _ = _require_trajectory()
+            return session.generate_cost(data["backend"])
+
+        return _run_heavy(do)
+
+    @app.route("/api/commit_round", methods=["POST"])
+    def commit_round():
+        def do():
+            session, _ = _require_trajectory()
+            return session.commit_round()
+
+        return _run(do)
+
+    @app.route("/api/apply_round", methods=["POST"])
+    def apply_round():
+        def do():
+            session, _ = _require_trajectory()
+            return session.apply_round_and_continue()
+
+        return _run_heavy(do)
+
+    @app.route("/api/manual_trajectory/ignore_violation", methods=["POST"])
+    def ignore_comfort_violation():
+        def do():
+            session, _ = _require_trajectory()
+            return session.ignore_comfort_violation()
+
+        return _run_heavy(do)
+
+    @app.route("/api/rounds/<int:index>", methods=["DELETE"])
+    def remove_round(index: int):
+        return _run(lambda: _require_session().remove_round(index))
+
+    # Codex-driven combination runs for minutes; a synchronous request outlives
+    # the browser's connection ("Failed to fetch") even though the server finishes.
+    # Run it in the background and let the frontend poll for the result.
+    combine_job: dict[str, Any] = {"thread": None, "result": None, "error": None}
+
+    @app.route("/api/combine_rounds", methods=["POST"])
+    def combine_rounds():
+        thread = combine_job["thread"]
+        if thread is not None and thread.is_alive():
+            return jsonify({"status": "running"})
         session = _require_session()
-        session.start_trajectory(data["arm_aa"], data["goal"])
-        return session._trajectory_payload()
+        combine_job.update(result=None, error=None)
 
-    return _run_heavy(do)
+        def work() -> None:
+            try:
+                with _heavy_lock:
+                    combine_job["result"] = session.combine_rounds()
+            except Exception as exc:  # surfaced to the browser via /status
+                import traceback
 
+                traceback.print_exc()
+                combine_job["error"] = str(exc)
 
-@app.route("/api/manual_trajectory/exit", methods=["POST"])
-def exit_manual_trajectory():
-    def do():
-        session, _ = _require_trajectory()
-        return session.exit_trajectory()
+        thread = threading.Thread(target=work, daemon=True)
+        combine_job["thread"] = thread
+        thread.start()
+        return jsonify({"status": "started"})
 
-    return _run_heavy(do)
+    @app.route("/api/combine_rounds/status")
+    def combine_rounds_status():
+        thread = combine_job["thread"]
+        if thread is not None and thread.is_alive():
+            return jsonify({"status": "running"})
+        if combine_job["error"] is not None:
+            return jsonify({"status": "error", "error": combine_job["error"]})
+        if combine_job["result"] is not None:
+            return jsonify({"status": "done", "result": combine_job["result"]})
+        return jsonify({"status": "idle"})
 
+    @app.route("/api/reset_rounds", methods=["POST"])
+    def reset_rounds():
+        return _run(lambda: _require_session().reset_rounds())
 
-@app.route("/api/oracle_rollout", methods=["POST"])
-def oracle_rollout():
-    def do():
-        session, _ = _require_trajectory()
-        return session.run_oracle(from_trigger=True)
+    @app.route("/api/corpus/<int:index>", methods=["DELETE"])
+    def remove_corpus_entry(index: int):
+        return _run(lambda: _require_session().remove_corpus_entry(index))
 
-    return _run_heavy(do)
-
-
-@app.route("/api/generate", methods=["POST"])
-def generate():
-    data = request.get_json(force=True)
-
-    def do():
-        session, _ = _require_trajectory()
-        return session.generate(
-            data["prompt"],
-            int(data["n_samples"]),
-            int(data["n_clusters"]),
-            float(data["scale"]),
-            str(data["clusterer"]),
-        )
-
-    return _run_heavy(do)
+    return app
 
 
-@app.route("/api/recluster", methods=["POST"])
-def recluster():
-    data = request.get_json(force=True)
-
-    def do():
-        session, _ = _require_trajectory()
-        return session.recluster(
-            int(data["n_clusters"]), float(data["scale"]), str(data["clusterer"])
-        )
-
-    return _run_heavy(do)
+def boot(
+    mpc_config: Path, personas_file: Path, trajectory_configs_file: Path
+) -> None:
+    """Install the stdout tee and construct the process-wide rig."""
+    global rig
+    sys.stdout = _log_buffer
+    rig = DemoRig(mpc_config, personas_file, trajectory_configs_file)
 
 
-@app.route("/api/pick_cluster", methods=["POST"])
-def pick_cluster():
-    data = request.get_json(force=True)
-
-    def do():
-        session, _ = _require_trajectory()
-        return session.pick_cluster(int(data["label"]))
-
-    return _run(do)
-
-
-@app.route("/api/mark_cluster", methods=["POST"])
-def mark_cluster():
-    data = request.get_json(force=True)
-
-    def do():
-        session, _ = _require_trajectory()
-        return session.mark_cluster(int(data["label"]), bool(data["undesirable"]))
-
-    return _run(do)
-
-
-@app.route("/api/refine_cluster", methods=["POST"])
-def refine_cluster():
-    data = request.get_json(force=True)
-
-    def do():
-        session, _ = _require_trajectory()
-        return session.refine_cluster(
-            int(data["label"]),
-            int(data["n_clusters"]),
-            float(data["scale"]),
-            str(data["clusterer"]),
-        )
-
-    return _run_heavy(do)
-
-
-@app.route("/api/back_cluster", methods=["POST"])
-def back_cluster():
-    def do():
-        session, _ = _require_trajectory()
-        return session.back_cluster()
-
-    return _run_heavy(do)
-
-
-@app.route("/api/generate_cost", methods=["POST"])
-def generate_cost():
-    data = request.get_json(force=True)
-
-    def do():
-        session, _ = _require_trajectory()
-        return session.generate_cost(data["backend"])
-
-    return _run_heavy(do)
-
-
-@app.route("/api/commit_round", methods=["POST"])
-def commit_round():
-    def do():
-        session, _ = _require_trajectory()
-        return session.commit_round()
-
-    return _run(do)
-
-
-@app.route("/api/apply_round", methods=["POST"])
-def apply_round():
-    def do():
-        session, _ = _require_trajectory()
-        return session.apply_round_and_continue()
-
-    return _run_heavy(do)
-
-
-@app.route("/api/manual_trajectory/ignore_violation", methods=["POST"])
-def ignore_comfort_violation():
-    def do():
-        session, _ = _require_trajectory()
-        return session.ignore_comfort_violation()
-
-    return _run_heavy(do)
-
-
-@app.route("/api/rounds/<int:index>", methods=["DELETE"])
-def remove_round(index: int):
-    return _run(lambda: _require_session().remove_round(index))
-
-
-@app.route("/api/combine_rounds", methods=["POST"])
-def combine_rounds():
-    def do():
-        session, _ = _require_trajectory()
-        return session.combine_rounds()
-
-    return _run_heavy(do)
-
-
-@app.route("/api/reset_rounds", methods=["POST"])
-def reset_rounds():
-    return _run(lambda: _require_session().reset_rounds())
-
-
-@app.route("/api/corpus/<int:index>", methods=["DELETE"])
-def remove_corpus_entry(index: int):
-    return _run(lambda: _require_session().remove_corpus_entry(index))
+app = create_app(_STATIC_DIR)
 
 
 def main() -> None:
-    global rig
     parser = argparse.ArgumentParser(description="Demo-designer web server")
     parser.add_argument("--mpc-config", type=Path, default=_DEFAULT_CONFIG)
     parser.add_argument(
@@ -378,10 +415,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=6780)
     args = parser.parse_args()
 
-    sys.stdout = _log_buffer
-    rig = DemoRig(
-        args.mpc_config, args.personas_file, args.trajectory_configs_file
-    )
+    boot(args.mpc_config, args.personas_file, args.trajectory_configs_file)
     print(f"Serving demo designer at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 

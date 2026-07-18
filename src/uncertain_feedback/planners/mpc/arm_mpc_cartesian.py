@@ -65,7 +65,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         advance_threshold: float = 0.1,
-        max_playback_delta: float = 0.1,
+        max_playback_delta: float = 0.05,
         trajectory_fraction: float = LeftArmMPCMDM.TRAJECTORY_FRACTION,
         goal_threshold: float = 0.1,
         visualize: bool = False,

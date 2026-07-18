@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-15
+**Last updated:** 2026-07-17
 **Branch:** pose-dependent-users
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -124,9 +124,12 @@ uncertain-feedback/
 │   ├── demo_designer/
 │   │   ├── smpl_mesh.py              # Neutral SMPL vertex generation + binary trajectory mesh cache
 │   │   ├── core.py                   # DemoRig: process-lifetime state (config, personas+CRUD, named start/goal configs, motion gen, pose/FK/mesh/context) + begin/list/resume session
-│   │   ├── session.py                # Session (one persona: corpus + rounds + unified cost, session.json persistence/resume; rounds record root-to-leaf cluster_labels) and Trajectory (live MPC stepping + per-trajectory correction scratch, including per-level explicit undesirable-cluster marks)
-│   │   ├── server.py                 # Flask web UI + read-only /api/artifact/<path> access rooted at demo artifacts
+│   │   ├── session.py                # Session (one persona: corpus + rounds + unified cost, session.json persistence/resume; rounds record root-to-leaf cluster_labels) and Trajectory (live MPC stepping + per-trajectory correction scratch, including per-level explicit undesirable-cluster marks). Replay defers provisional cluster/cost events and records only the final accepted selection path consumed by demo_runner
+│   │   ├── server.py                 # create_app(static_dir) factory holding every route (reused by demo_runner) + boot() (stdout tee + rig) + read-only /api/artifact/<path> rooted at demo artifacts
 │   │   └── static/                   # Session lifecycle bar/resume picker/corpus controls + Three.js body views, persona/feature graphs, and generated-cost rationale disclosures
+│   ├── demo_runner/                  # Presentation frontend: same backend, demo/dev modes, session replay
+│   │   ├── server.py                 # create_app(own static) + boot() from demo_designer; runner-only one-step live MPC routes; /api/replay/<name>[/<i>] re-mints dead mesh ids from recorded arm_positions. Port 6781
+│   │   └── static/                   # FORK of demo_designer/static (fixes do NOT propagate): demo/dev + replay UI; cluster selection is independent of exclusion, with Next gated on an included selection
 │   ├── llm/
 │   │   ├── base_model.py             # BaseModel ABC (get_full_output)
 │   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
@@ -330,7 +333,7 @@ When `llm_cost.enabled: true` in the YAML:
 - `turns` (`turns_costs.py`) — interprets once, then runs a stateful ground+author conversation; keeps the best cost by ranking consistency (`rank_candidate_cost`, falling back to the L2 rollout score when the context has no comparison trajectories). `stage_log.md` includes the interpretation plus each refine turn's prompt snapshot and response, and the winning turn's ranking is copied into `rationale.json`.
 - `agent` (`agent_costs.py`) — delegates the staged method to the `codex` CLI, which emits the same `response.json` and must write `stage_log.md` with Stage 1 / Stage 2 / Stage 3 responses; those sections are parsed leniently for `rationale.json` and the final cost is ranked locally.
 - `CombineCostGenerator` (`combine_costs.py`) is constructed directly by the multi-round experiment, not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its user-visible Codex agent output is teed live to stdout (and therefore the Demo Designer console) while remaining in `codex.log`. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`. Each `CostRound` also carries the round's root-to-leaf `cluster_labels` path and generation evidence chain — `description`, `explanation`, `interpretation` (stage-1 response), `grounding` (stage-2 response), all defaulted to `""` — populated from the round's `rationale.json` (via `CostGenerationResult`/`_rationale_fields` in `experiment_pipeline.py`) and rendered under a "Why this cost was generated:" block in the combine prompt (`build_combine_task_body`, empty fields skipped).
-- Both codex generators accept an optional `corpus_dir: Path | None` (threaded from `generate_cost_for_cluster` → `create_cost_generator`, agent branch only). When it points at a `TrajectoryCorpus` (`manifest.json` present), `_corpus_section()` documents the on-disk corpus in `TASK.md` and `_corpus_note()` injects a required grounding step into the Stage 2 (agent) / combine (combine) prompt — codex must load the per-frame feature CSVs and move each candidate bound past the poses reached comfortably (before `comfortable_until`), then log the numpy/pandas margin check (`## Corpus check` for `agent`, in `## Evidence synthesis` for combine). `None` leaves every prompt byte-identical, so `llm`/`turns` and all non-corpus callers are unchanged.
+- Every generator accepts an optional `corpus_dir: Path | None` threaded from `generate_cost_for_cluster` through `create_cost_generator`. `llm` and `turns` receive per-entry accepted-pose feature ranges in their grounding prompt; agent/combine retain the staged per-frame corpus workflow. Shared `CostGenerator` validation evaluates each authored cost on stationary two-frame rollouts of every pose before `comfortable_until` and rejects the cost if any accepted pose receives positive cost. `None` leaves non-corpus callers unchanged.
 
 ### Cost evaluation & visual feedback
 
@@ -357,7 +360,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `steps`                | int      | Total MPC steps to run                               |
 | `horizon`              | int      | MPC look-ahead steps                                 |
 | `n_mpc_samples`        | int      | Candidate action sequences per step                  |
-| `seed`                 | int      | MPC action-sampling seed (default 0)                |
+| `seed`                 | int      | MPC action-sampling seed (default 0); also locks each MDM generation request in Demo Designer/Runner |
 | `max_angle_delta`      | float    | Sampling std dev (radians)                           |
 | `pose`                 | path?    | HML pose `.pt` file for initial body state           |
 | `goal_threshold`       | float    | L2 dist threshold to pop goal (default 0.01)         |
@@ -370,10 +373,10 @@ When `llm_cost.enabled: true` in the YAML:
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
 | `user`                 | str      | Simulated-user persona name (default `unrestricted`); loaded by `build_run` into `RunSetup.user` for every run |
 | `corrections.*`        | CorrectionConfig | `trigger_threshold` (default 0.02 rad). Restricted users trigger on a new above-threshold episode after returning to comfort; legacy `transfer.trigger_threshold` is accepted as a fallback. |
-| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose \| agglo_path_pca \| agglo_t2m; Demo Designer dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
+| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose [default] \| agglo_path_pca \| agglo_t2m; Demo Designer/Runner dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
 | `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
 | `costs.*`              | dict     | Named cost terms with their params                   |
-| `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`, reasoning effort `xhigh`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
+| `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets); legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
 | `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments (applied by `experiment_pipeline.apply_persona_goals`; falls back to top-level goals when absent). Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
 
@@ -477,6 +480,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../experiments/run_multi_round_experiment.py --mpc-config <yaml> [--persona <name>]` | Multi-round cost experiment; `cartesian.goals` is the ordered round sequence and successful feedback contexts are unified into one replacement cost |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
 | `uv run python src/.../demo_designer/server.py [--mpc-config <yaml>] [--trajectory-configs-file <json>]` | Browser tool; named initial-pose and goal libraries persist through `/api/trajectory-configs/<kind>`; clicking its header summary opens a dropdown to start/resume/delete sessions (one locked persona), the corpus panel browses/deletes executed evidence, and session-owned rounds/unified costs carry into successive trajectories; sessions persist to `session.json` and are resumable after restart (`/api/session/start`, `/api/sessions`, `/api/session/resume`, `DELETE /api/sessions/<name>`, `DELETE /api/corpus/<i>`); cluster selection exposes `/api/pick_cluster` and the explicit-negative `/api/mark_cluster`; pending-cost and committed-round payloads include `rationale`, rendered as *why this cost*, while `/api/artifact/<path>` serves their `rationale.json`/`stage_log.md` files from the demo artifact root (see README) |
+| `uv run python src/.../demo_runner/server.py [--port 6781]` | Presentation frontend over the same backend (run from the repo root; shares `demo_designer_artifacts/`). Both **demo** and **dev** use a collapsible Scenario configuration above the guided Trajectory decision → Language correction → Cost generation → Apply feedback stages; it auto-collapses on trajectory start while Start/Exit and live status remain visible. The right column begins with persistent pending/active cost summaries whose disclosures show the generated Python; a unified cost replaces individual round entries after combination. Runner-only `/api/live_trajectory/start`, `/step`, and `/apply_round` routes animate initial and post-cost MPC execution one frame at a time until discomfort or completion; tab 3 streams cost-generation progress and the opt-in OpenAI reasoning summary through `/api/logs` character cursors. Scenario always exposes saved start-pose/goal selection, the decision stage chooses correction or ignore/continue, cluster selection remains in Language correction until its explicit Next action, and completed cost generation similarly waits for an explicit Next action before Apply feedback; refinement and Exclude controls remain available in both modes, cluster oracle/violation diagnostics are dev-only, completed stages are reviewable, and repeated feedback returns to the decision. Dev exposes advanced controls inside this organization; demo hides scenario authoring, bound dragging, sampling knobs, cost backend/code in the workflow panel, corpus, and console. The Cost functions panel's Combine rounds (codex) action is visible in both modes. The choice persists in `localStorage`. Every session records a beat stream to `<session>/replay/` (`index.json` + one `NNNN_<kind>.json` per beat, each with the payload the UI received and a per-beat persona snapshot); `GET /api/replay/<name>` and `/api/replay/<name>/<i>` serve it, and Replay steps through it with no MDM/LLM/MPC calls while synchronizing the stage navigator |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |
@@ -533,7 +537,7 @@ The hidden bounds are the evaluation ground truth in headless experiments
   pose-dependent bounds are drawn in the conditioning-vs-bounded feature plane
   with the forbidden region shaded (computed by evaluating `bound.violation` on
   a grid, so the picture cannot drift from the code) and trajectories traced
-  through it; simple bounds as feature-over-time with the forbidden range shaded.
+  through it; demo bounds as feature-over-time with the forbidden range shaded.
 - `SimulatedUser` — persona: `name`, clinical `description`, `feedback_text`
   (what the user says when the robot violates a bound), `bounds`.
 - Hidden feature bounds are soft oracle penalties. Persona descriptions distinguish
@@ -643,6 +647,12 @@ via `SmplLeftArmFK`, implemented once on the base).
 |----------|-------------------------|----------------------|---------------------------------------------|
 | `mdm`    | `MdmMotionGenerator`    | HML263 `(263,)`      | in-process diffusion (MDM submodule)        |
 | `kimodo` | `KimodoMotionGenerator` | SMPL body_pose `(21,3)` | subprocess to isolated conda env (worker) |
+
+`MdmMotionGenerator` builds its inference args from the checkpoint's `args.json` overlaid with
+`mdm/mdm_configs/mdm_config.yaml` (the YAML wins). The YAML pins `use_ema: false`: fine-tune
+checkpoints save the training flag `use_ema: true`, but their EMA (`model_avg`, beta 0.9999)
+weights stay ≈95% base model after 500 steps, so loading them silently reverts generation to
+base-MDM behavior. Inference must always load the raw `model` weights.
 
 The kimodo backend reuses `hml_smpl_conversion`'s SMPL-side helpers
 (`smpl_body_pose_to_arm_aa/_collar_aa/_positions/_spine3_aa`) since kimodo's SMPL-X

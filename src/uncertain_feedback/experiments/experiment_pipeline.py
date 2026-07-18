@@ -530,6 +530,8 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         body_pos=body_pos,
         reference_traj=reference_traj,
         full_correction_traj=full_correction_traj,
+        cartesian_goal=goal_pos,
+        cartesian_threshold=cfg_backend.cartesian.threshold,
         rejected_trajs=rejected_trajs,
     )
     summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
@@ -565,6 +567,8 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         spine3_aa=spine3_aa,
         reference_traj=reference_traj,
         full_correction_traj=full_correction_traj,
+        cartesian_goal=goal_pos,
+        cartesian_threshold=cfg_backend.cartesian.threshold,
         rejected_trajs=rejected_trajs,
     )
     generator: CostGenerator = create_cost_generator(

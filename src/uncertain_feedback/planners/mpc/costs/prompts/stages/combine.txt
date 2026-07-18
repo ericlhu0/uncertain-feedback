@@ -40,7 +40,17 @@ evaluate it with `np.interp`, take one anchor from each pose where a correction 
 bound, and hold the first/last threshold outside the anchor range. If you conclude a
 constant bound, choose the tightest value consistent with every correction. Each chosen
 correction endpoint must remain unpenalized so every round's goal can still be reached
-safely. Structure the corrections reveal that the cost API cannot express should stay
-documented as unresolved, not forced into a bound.
+safely. The trajectories already executed in earlier rounds must also stay possible
+under the unified cost, verified against the ACTUAL poses those trajectories visited,
+frame by frame — summary ranges cannot validate a coupled bound. At every frame the
+recipient accepted, evaluate the candidate bound at that frame's joint-feature values;
+for a pose-dependent bound, first interpolate the threshold at that frame's
+conditioning-feature value, then check the bounded feature against it. Use the
+per-frame features of the executed-trajectory corpus when it is provided; without it,
+confirm in the per-round comparison rollouts that the motion the recipient already
+accepted is not blocked or steered away. If any previously visited pose is penalized,
+relax the offending bound and re-check every round. Structure the corrections
+reveal that the cost API cannot express should stay documented as unresolved, not
+forced into a bound.
 
 {rounds}

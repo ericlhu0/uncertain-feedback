@@ -1,5 +1,5 @@
 ADDITIONAL GROUNDING EVIDENCE — executed-trajectory corpus at `{corpus_dir}` (format described in TASK.md above). Before finalizing any threshold:
 - Load every entry's features CSV and check your candidate bound against all frames before `comfortable_until` — configurations the person actually reached WITHOUT complaint. A bound that penalizes any comfortable frame is wrong; move the threshold past those values.
 - Entries with `trigger_step: null` are entirely comfortable trajectories — the strongest negative evidence.
-- For a POSE-DEPENDENT bound, bin comfortable frames by the conditioning feature and place each anchor's threshold beyond the comfortable feature values observed in that bin.
+- For a POSE-DEPENDENT bound, bin comfortable frames by the conditioning feature and place each anchor's threshold beyond the comfortable feature values observed in that bin. Then verify frame by frame: for every comfortable frame, interpolate your threshold at that frame's conditioning value and compute its margin to the bounded feature — every comfortable frame must be unpenalized, not just each bin's extremes.
 - Extend each term's "source" field with the corpus evidence you used: which entries you checked and the worst-case comfortable-frame margin to your threshold (or state that no comfortable frames were near the bound).

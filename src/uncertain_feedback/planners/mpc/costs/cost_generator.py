@@ -48,7 +48,8 @@ _SYSTEM_PROMPT = (
     "Return only the requested JSON object."
 )
 _DEFAULT_LLM_MODEL = "gpt-5.6-luna"
-_DEFAULT_REASONING_EFFORT = "xhigh"
+# Reasoning effort per model; a model absent here is sent without one.
+_REASONING_EFFORT = {"gpt-5.6-luna": "xhigh", "gpt-5.6-sol": "low"}
 
 
 def _make_llm_model(model_name: str) -> Any:
@@ -60,13 +61,9 @@ def _make_llm_model(model_name: str) -> Any:
     return OpenAIModel(
         model=model_name,
         system_prompt=_SYSTEM_PROMPT,
-        temperature=0.2,
+        temperature=0.0,
         max_tokens=None,
-        reasoning_effort=(
-            _DEFAULT_REASONING_EFFORT
-            if model_name == _DEFAULT_LLM_MODEL
-            else None
-        ),
+        reasoning_effort=_REASONING_EFFORT.get(model_name),
         stream_reasoning_summary=True,
     )
 
@@ -389,6 +386,7 @@ class CostGenerator(ABC):
         ) = None,
         eval_state: Any | None = None,
         save_candidate_videos: bool = False,
+        corpus_dir: Path | None = None,
     ) -> None:
         self.context = context
         self.instruction = instruction
@@ -403,6 +401,10 @@ class CostGenerator(ABC):
         self.rollout_fn = rollout_fn
         self.eval_state = eval_state
         self.save_candidate_videos = save_candidate_videos
+        self.corpus_dir = corpus_dir
+        self._comfortable_corpus: tuple[np.ndarray, np.ndarray, np.ndarray] | None = (
+            None
+        )
 
     # -- shared helpers -----------------------------------------------------
 
@@ -462,8 +464,107 @@ class CostGenerator(ABC):
 
     def ground(self, llm: Any, interpretation: str) -> str:
         """Stage two: turn the preference into a concrete numeric spec (full summaries)."""
-        text = build_ground_prompt(interpretation, self.summaries)
+        text = build_ground_prompt(
+            interpretation, self.summaries, self.corpus_grounding_note()
+        )
         return self._run_stage(llm, "ground", text)
+
+    def comfortable_corpus(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return accepted poses and their corpus entry/frame identifiers."""
+        if self._comfortable_corpus is not None:
+            return self._comfortable_corpus
+        if self.corpus_dir is None:
+            return None
+        root = self.corpus_dir.resolve()
+        manifest = root / "manifest.json"
+        if not manifest.exists():
+            return None
+        poses: list[np.ndarray] = []
+        entry_ids: list[np.ndarray] = []
+        frame_ids: list[np.ndarray] = []
+        for entry in json.loads(manifest.read_text(encoding="utf-8")):
+            trajectory_path = (root / entry["traj_file"]).resolve()
+            if not trajectory_path.is_relative_to(root):
+                raise GeneratedCostValidationError(
+                    f"corpus trajectory leaves the corpus directory: {trajectory_path}"
+                )
+            trajectory = np.asarray(np.load(trajectory_path), dtype=np.float64)
+            cutoff = min(
+                int(entry.get("comfortable_until", trajectory.shape[0])),
+                int(trajectory.shape[0]),
+            )
+            if cutoff <= 0:
+                continue
+            poses.append(trajectory[:cutoff])
+            entry_ids.append(np.full(cutoff, int(entry["index"]), dtype=np.int64))
+            frame_ids.append(np.arange(cutoff, dtype=np.int64))
+        if not poses:
+            return None
+        self._comfortable_corpus = (
+            np.concatenate(poses),
+            np.concatenate(entry_ids),
+            np.concatenate(frame_ids),
+        )
+        return self._comfortable_corpus
+
+    def corpus_grounding_note(self) -> str | None:
+        """Summarize accepted-pose feature ranges for in-process LLM backends."""
+        corpus = self.comfortable_corpus()
+        if corpus is None:
+            return None
+        poses, entry_ids, _ = corpus
+        feature_methods = {
+            "elbow_flexion": self.context.elbow_flexion_angles,
+            "shoulder_flexion_extension": (
+                self.context.shoulder_flexion_extension_angles
+            ),
+            "shoulder_abduction_adduction": (
+                self.context.shoulder_abduction_adduction_angles
+            ),
+            "shoulder_elevation": self.context.shoulder_elevation_angles,
+            "shoulder_internal_external_rotation": (
+                self.context.shoulder_internal_external_rotation_angles
+            ),
+        }
+        lines = [
+            "ADDITIONAL GROUNDING EVIDENCE — previously accepted poses. Every pose "
+            "below was executed without a discomfort report. Any generated bound "
+            "must leave every one unpenalized; move thresholds beyond these ranges."
+        ]
+        for entry_id in np.unique(entry_ids):
+            selected = poses[entry_ids == entry_id]
+            ranges = {
+                name: {
+                    "min": float(np.min(method(selected))),
+                    "max": float(np.max(method(selected))),
+                }
+                for name, method in feature_methods.items()
+            }
+            lines.append(
+                f"- corpus entry {entry_id}: {json.dumps(ranges, sort_keys=True)}"
+            )
+        lines.append(
+            "The runtime will reject the authored cost if it assigns positive cost "
+            "to any of these accepted poses."
+        )
+        return "\n".join(lines)
+
+    def require_comfortable_corpus_unpenalized(self, cost: GeneratedPythonCost) -> None:
+        """Fail closed when a generated cost penalizes a previously accepted pose."""
+        corpus = self.comfortable_corpus()
+        if corpus is None:
+            return
+        poses, entry_ids, frame_ids = corpus
+        stationary_rollouts = np.repeat(poses[:, np.newaxis], repeats=2, axis=1)
+        values = cost(stationary_rollouts)
+        worst = int(np.argmax(values))
+        if values[worst] <= 1e-10:
+            return
+        raise GeneratedCostValidationError(
+            "generated cost penalizes a previously accepted pose: corpus entry "
+            f"{entry_ids[worst]}, frame {frame_ids[worst]}, cost {values[worst]:.6g}; "
+            "all frames before comfortable_until must have zero cost"
+        )
 
     def author(
         self, llm: Any, specification: str
@@ -499,6 +600,7 @@ class CostGenerator(ABC):
         cost = self.compile_cost(
             response.code, response.params, response.description
         )
+        self.require_comfortable_corpus_unpenalized(cost)
         return response, cost
 
     def require_original_plan_improvement(self, ranking: CostRanking | None) -> None:
@@ -715,6 +817,7 @@ def create_cost_generator(
         rollout_fn=rollout_fn,
         eval_state=eval_state,
         save_candidate_videos=save_candidate_videos,
+        corpus_dir=corpus_dir,
     )
     backend = cfg.backend
     if backend == "llm":
@@ -722,9 +825,7 @@ def create_cost_generator(
     if backend == "turns":
         return TurnsCostGenerator(max_turns=cfg.max_turns, **common)
     if backend == "agent":
-        return AgentCostGenerator(
-            codex_cmd=cfg.codex_cmd, corpus_dir=corpus_dir, **common
-        )
+        return AgentCostGenerator(codex_cmd=cfg.codex_cmd, **common)
     raise GeneratedCostValidationError(
         f"unknown cost-generator backend {backend!r}; "
         "expected one of 'llm', 'turns', 'agent'"

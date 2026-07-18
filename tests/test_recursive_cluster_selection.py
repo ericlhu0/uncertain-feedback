@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -125,7 +126,7 @@ def _fake_make_clusterer(
     return _DeterministicClusterer(n_clusters, fk)
 
 
-def _demo_session() -> Session:
+def _demo_session(tmp_path) -> Session:
     trajectory = SimpleNamespace()
     trajectory.samples = np.broadcast_to(
         np.arange(8, dtype=np.float64)[:, None, None, None], (8, 2, 22, 3)
@@ -140,6 +141,8 @@ def _demo_session() -> Session:
     trajectory.chosen_label = None
     trajectory.scaled_correction = None
     trajectory.scale = 1.0
+    trajectory.prompt = None
+    trajectory._last_cost_payload = None
     user = SimulatedUser("test", "", "", bounds=())
     rig = SimpleNamespace(
         gen=_FakeGenerator(),
@@ -153,10 +156,14 @@ def _demo_session() -> Session:
     session.rig = rig
     session.user = user
     session.trajectory = trajectory
+    session.dir = tmp_path
+    session.persona_name = user.name
+    session.started = ""
+    session.beats = []
     return session
 
 
-def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
+def test_demo_designer_refines_recursively_and_backs_up(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
     monkeypatch.setattr(
         demo_session,
@@ -165,7 +172,7 @@ def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
     )
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
-    session = _demo_session()
+    session = _demo_session(tmp_path)
 
     root = session.recluster(2, 0.9)
     assert root["depth"] == 0
@@ -198,7 +205,7 @@ def test_demo_designer_refines_recursively_and_backs_up(monkeypatch) -> None:
     assert root_again["scale"] == 0.9
 
 
-def test_demo_designer_reclusters_only_current_subset(monkeypatch) -> None:
+def test_demo_designer_reclusters_only_current_subset(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
     monkeypatch.setattr(
         demo_session,
@@ -207,7 +214,7 @@ def test_demo_designer_reclusters_only_current_subset(monkeypatch) -> None:
     )
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
-    session = _demo_session()
+    session = _demo_session(tmp_path)
     session.recluster(2, 1.0)
     session.pick_cluster(1)
     session.refine_cluster(1, 2, 1.0)
@@ -217,6 +224,46 @@ def test_demo_designer_reclusters_only_current_subset(monkeypatch) -> None:
     assert payload["depth"] == 1
     assert payload["active_sample_count"] == 4
     assert payload["selected_label"] is None
+
+
+def test_replay_records_only_the_final_cluster_selection_path(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
+    monkeypatch.setattr(
+        demo_session,
+        "oracle_cluster_scores",
+        lambda _user, _context, means, _scale: {label: float(label) for label in means},
+    )
+    monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
+    monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
+    session = _demo_session(tmp_path)
+
+    session.recluster(2, 1.0)
+    session.pick_cluster(1)
+    session.recluster(2, 0.5)
+    session.pick_cluster(0)
+    session.refine_cluster(0, 2, 0.75)
+    session.pick_cluster(1)
+
+    assert session.beats == []
+
+    session._record_final_feedback()
+
+    assert [beat["kind"] for beat in session.beats] == [
+        "clusters",
+        "pick",
+        "clusters",
+        "pick",
+    ]
+    replay_dir = tmp_path / "replay"
+    recorded = [
+        json.loads((replay_dir / beat["file"]).read_text(encoding="utf-8"))
+        for beat in session.beats
+    ]
+    assert recorded[0]["data"]["scale"] == 0.5
+    assert recorded[1]["data"] == {"label": 0}
+    assert recorded[3]["data"] == {"label": 1}
 
 
 def test_explicit_rejected_candidate_split() -> None:
@@ -234,7 +281,9 @@ def test_explicit_rejected_candidate_split() -> None:
         _rejected_candidate_trajs(candidates, 2, frozenset({2}))
 
 
-def test_demo_designer_marks_restore_across_cluster_levels(monkeypatch) -> None:
+def test_demo_designer_marks_restore_across_cluster_levels(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
     monkeypatch.setattr(
         demo_session,
@@ -243,15 +292,15 @@ def test_demo_designer_marks_restore_across_cluster_levels(monkeypatch) -> None:
     )
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
-    session = _demo_session()
+    session = _demo_session(tmp_path)
 
     root = session.recluster(2, 1.0)
     assert root["undesirable_labels"] == []
     assert session.mark_cluster(1, True)["undesirable_labels"] == [1]
     session.pick_cluster(1)
-    assert session.trajectory.cluster_levels[-1].undesirable_labels == set()
-    with pytest.raises(ValueError, match="selected cluster"):
-        session.mark_cluster(1, True)
+    assert session.trajectory.cluster_levels[-1].undesirable_labels == {1}
+    assert session.mark_cluster(1, True)["undesirable_labels"] == [1]
+    assert session.mark_cluster(1, False)["undesirable_labels"] == []
 
     session.pick_cluster(0)
     session.mark_cluster(1, True)
@@ -282,8 +331,7 @@ def test_demo_designer_threads_scaled_clusters_to_cost_generation(
     monkeypatch.setattr(
         demo_session, "generate_cost_for_cluster", fake_generate_cost_for_cluster
     )
-    session = _demo_session()
-    session.dir = tmp_path
+    session = _demo_session(tmp_path)
     session.corpus = SimpleNamespace(dir=tmp_path)
     session.rig._extra_costs = lambda _user: object()
     session.rig.body_pos = None

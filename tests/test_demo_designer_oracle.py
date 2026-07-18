@@ -145,7 +145,7 @@ def test_manual_trajectory_requires_session(monkeypatch) -> None:
     }
 
 
-def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch) -> None:
+def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch, tmp_path) -> None:
     user = SimulatedUser("persona", "", "", bounds=())
     rig = SimpleNamespace(
         context=object(),
@@ -154,8 +154,13 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch) -> None
         spine3_aa=np.zeros(3),
         _cfg_with_goal=lambda goal: object(),
         _extra_costs=lambda selected: CompositeTrajectoryCost([]),
-        package_trajectory=lambda traj, selected: {"values": traj[:, 0, 0].tolist()},
+        package_trajectory=lambda traj, selected, pin_mesh=False: {
+            "values": traj[:, 0, 0].tolist(),
+            "mesh_id": "mesh",
+        },
+        meshes=SimpleNamespace(unpin=lambda mesh_id: unpinned.append(mesh_id)),
     )
+    unpinned: list[str] = []
     q_feedback = np.full((3, 3), 2.0)
     trajectory = SimpleNamespace(
         start_arm_aa=np.full((3, 3), 9.0),
@@ -168,11 +173,16 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch) -> None
         ],
         oracle_traj=None,
         oracle_source=None,
+        oracle_package=None,
     )
     session = Session.__new__(Session)
     session.rig = rig
     session.user = user
     session.trajectory = trajectory
+    session.dir = tmp_path
+    session.persona_name = user.name
+    session.started = ""
+    session.beats = []
     calls = []
 
     def fake_rollout(*args, **kwargs):
@@ -278,7 +288,9 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
     session.round_records = []
     session.trajectory = trajectory
     session.dir = tmp_path
-    session.corpus = SimpleNamespace(dir=tmp_path / "trajectory_corpus")
+    session.corpus = SimpleNamespace(
+        dir=tmp_path / "trajectory_corpus", entries=lambda: []
+    )
     session._save = MethodType(lambda self: None, session)
     session.generated_cost_field = MethodType(lambda self, cost: {}, session)
     rollout = np.zeros((2, 3, 3))
@@ -303,6 +315,69 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
     np.testing.assert_array_equal(calls[0][0][1], trajectory.start_arm_aa)
     assert calls[0][1]["progress_label"] == "unified-from-start"
     assert result["trajectory"]["values"] == [0.0, 0.0]
+
+
+def test_combine_rounds_between_trajectories_skips_the_rollout(
+    monkeypatch, tmp_path
+) -> None:
+    class CombinedCost:
+        description = "combined"
+        code = "def cost(): pass"
+        params: dict[str, float] = {}
+
+    combined = CombinedCost()
+
+    class FakeCombinator:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def generate(self, install):
+            return combined
+
+    class FakeEvalState:
+        @classmethod
+        def load(cls, path):
+            return SimpleNamespace(
+                make_generated_context=lambda: "persisted context",
+                make_rollout_fn=lambda: "persisted rollout",
+            )
+
+    def fail_rollout(*args, **kwargs):
+        raise AssertionError("no trajectory: nothing to roll out on")
+
+    monkeypatch.setattr(demo_session, "CombineCostGenerator", FakeCombinator)
+    monkeypatch.setattr(demo_session, "EvalState", FakeEvalState)
+    monkeypatch.setattr(demo_session, "rollout_to_goal", fail_rollout)
+
+    session = Session.__new__(Session)
+    session.rig = SimpleNamespace(
+        cfg=SimpleNamespace(
+            llm_cost=SimpleNamespace(
+                use_images=False, model=None, strict=True, codex_cmd="codex"
+            )
+        )
+    )
+    session.rounds = [
+        SimpleNamespace(
+            feedback_text=text, state_path=tmp_path / "s.pkl", summaries={}, image_paths=()
+        )
+        for text in ("first", "second")
+    ]
+    session.round_records = []
+    session.trajectory = None
+    session.dir = tmp_path
+    session.corpus = SimpleNamespace(
+        dir=tmp_path / "trajectory_corpus", entries=lambda: []
+    )
+    session._save = MethodType(lambda self: None, session)
+    session.generated_cost_field = MethodType(lambda self, cost: {}, session)
+
+    result = session.combine_rounds()
+
+    assert session.unified_cost is combined
+    assert result["description"] == "combined"
+    assert "trajectory" not in result
+    assert "goal_reach" not in result
 
 
 def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) -> None:

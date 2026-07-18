@@ -7,7 +7,7 @@ max_angle_delta: 0.01
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 goal_threshold: 0.15
 advance_threshold: 0.15
-max_playback_delta: 0.1
+max_playback_delta: 0.05
 trajectory_fraction: 1
 mdm_frames: 50
 
@@ -134,7 +134,7 @@ preference_alpha: 0
 llm_cost:
   enabled: true
   backend: llm
-  model: gpt-5.6-luna
+  model: gpt-5.6-sol
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true

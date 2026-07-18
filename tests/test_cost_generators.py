@@ -113,6 +113,26 @@ def _factory_kwargs(tmp_path, fake, cfg):
     )
 
 
+def _write_corpus(tmp_path: Path, trajectory: np.ndarray) -> Path:
+    corpus_dir = tmp_path / "trajectory_corpus"
+    corpus_dir.mkdir()
+    np.save(corpus_dir / "traj_000.npy", trajectory)
+    (corpus_dir / "manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "index": 0,
+                    "n_frames": len(trajectory),
+                    "comfortable_until": len(trajectory),
+                    "traj_file": "traj_000.npy",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return corpus_dir
+
+
 def test_create_cost_generator_selects_backend(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
     cases = {
@@ -169,6 +189,45 @@ def test_llm_generator_runs_three_focused_stages(tmp_path) -> None:
     assert "## author" in stage_log
     assert "### Response" in stage_log
     assert (kwargs["run_dir"] / "cost.py").exists()
+
+
+def test_all_backends_reject_cost_that_penalizes_comfortable_corpus_pose(
+    tmp_path,
+) -> None:
+    trajectory = np.full((2, 3, 3), 0.5, dtype=np.float64)
+    corpus_dir = _write_corpus(tmp_path, trajectory)
+    fake = _FakeLlmModel(_response())
+
+    for backend in ("llm", "turns", "agent"):
+        kwargs = _factory_kwargs(
+            tmp_path, fake, LlmCostConfig(backend=backend, use_images=False)
+        )
+        kwargs["corpus_dir"] = corpus_dir
+        generator = create_cost_generator(**kwargs)
+
+        with pytest.raises(
+            GeneratedCostValidationError,
+            match="corpus entry 0, frame 0",
+        ):
+            generator.parse_cost(_response())
+
+
+def test_llm_grounding_prompt_includes_comfortable_corpus_ranges(tmp_path) -> None:
+    trajectory = np.zeros((2, 3, 3), dtype=np.float64)
+    trajectory[1, 2, 0] = 0.5
+    corpus_dir = _write_corpus(tmp_path, trajectory)
+    fake = _FakeLlmModel(_response())
+    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
+    kwargs["corpus_dir"] = corpus_dir
+
+    assert create_cost_generator(**kwargs).generate(install=False) is not None
+
+    ground_prompt = (kwargs["run_dir"] / "ground_prompt.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "previously accepted poses" in ground_prompt
+    assert "corpus entry 0" in ground_prompt
+    assert '"elbow_flexion"' in ground_prompt
 
 
 def test_llm_generator_writes_rationale(tmp_path, capsys) -> None:

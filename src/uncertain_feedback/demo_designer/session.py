@@ -8,6 +8,11 @@ scratch buffer; it cannot exist without its session, so the lifetimes are enforc
 by structure rather than runtime checks. Sessions persist to ``session.json`` and
 are resumable after a server restart (recompiling round/unified costs from stored
 code + params + the pickled eval state).
+
+Sessions also record a replay stream under ``<session>/replay/``: one file per
+beat, each holding the exact payload the browser received plus a persona
+snapshot. That is what lets the demo runner step through a past session without
+re-running MDM, whose samples are stochastic and never persisted.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from uncertain_feedback.demo_designer.core import _LOG_PREFIX, _log
+from uncertain_feedback.demo_designer.core import _LOG_PREFIX, _log, persona_to_json
 from uncertain_feedback.experiments.experiment_pipeline import (
     CostGenerationResult,
     generate_cost_for_cluster,
@@ -210,6 +215,7 @@ class ClusterLevel:
     scale: float
     medoid_indices: dict[int, int] = field(default_factory=dict)
     undesirable_labels: set[int] = field(default_factory=set)
+    replay_payload: dict[str, Any] | None = None
 
 
 @dataclass
@@ -243,7 +249,9 @@ class Trajectory:
     q_history: list[np.ndarray] = field(default_factory=list)
     oracle_traj: np.ndarray | None = None
     oracle_source: str | None = None
+    oracle_package: dict[str, Any] | None = None
     clean_traj: np.ndarray | None = None
+    clean_package: dict[str, Any] | None = None
     samples: np.ndarray | None = None  # (N, T, 22, 3)
     cluster_levels: list[ClusterLevel] = field(default_factory=list)
     prompt: str | None = None
@@ -274,12 +282,17 @@ class Trajectory:
         self._last_instruction = None
         self._last_cost_payload = None
 
-    def advance(self, session: "Session") -> None:
+    def advance(self, session: "Session", max_steps: int | None = None) -> None:
         """Step the planner to the next pause and log the executed segment."""
         rig = session.rig
         user = session.user
         self.paused = False
-        while self.step < rig.cfg.steps:
+        stop_step = (
+            rig.cfg.steps
+            if max_steps is None
+            else min(rig.cfg.steps, self.step + max_steps)
+        )
+        while self.step < stop_step:
             violation = None
             if self.trigger.automatic:
                 violation = float(
@@ -324,7 +337,7 @@ class Trajectory:
                 f"multi-turn trajectory complete: steps={self.step} "
                 f"reached_goal={self.reached_goal}"
             )
-        if self.trigger.automatic:
+        if self.trigger.automatic and (self.paused or self.complete):
             segment = self.base_traj[self.logged_frames :]
             if segment.shape[0]:
                 discomfort = self.paused and self.trigger_reason == "discomfort"
@@ -362,8 +375,68 @@ class Session:
         self.round_records: list[dict[str, Any]] = []
         self._round_costs: list[GeneratedPythonCost] = []
         self.unified_cost: GeneratedPythonCost | None = None
+        self.combined_corpus_count: int = 0
         self.trajectory: Trajectory | None = None
         self.trajectory_count: int = 0
+        self.beats: list[dict[str, Any]] = []
+
+    # --- replay recording --------------------------------------------------
+
+    def _record(self, kind: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Append one replay beat and return ``data`` unchanged.
+
+        The persona is snapshotted per beat, not per session: the client derives
+        every violation and graph bound from it, so a later persona edit would
+        otherwise silently redraw a past demo.
+        """
+        replay_dir = self.dir / "replay"
+        replay_dir.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "kind": kind,
+            "time": time.strftime("%H:%M:%S"),
+            "file": f"{len(self.beats):04d}_{kind}.json",
+        }
+        (replay_dir / entry["file"]).write_text(
+            json.dumps(
+                {
+                    **entry,
+                    "persona": persona_to_json(self.user, builtin=False),
+                    "data": data,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.beats.append(entry)
+        (replay_dir / "index.json").write_text(
+            json.dumps(
+                {
+                    "persona": self.persona_name,
+                    "started": self.started,
+                    "beats": self.beats,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return data
+
+    def _record_final_feedback(self) -> None:
+        """Record only the selection path and cost that were accepted."""
+        traj = self.trajectory
+        if traj is None:
+            return
+        for level in traj.cluster_levels:
+            if level.replay_payload is None or level.selected_label is None:
+                continue
+            payload = {
+                **level.replay_payload,
+                "selected_label": None,
+                "undesirable_labels": sorted(level.undesirable_labels),
+            }
+            self._record("clusters", payload)
+            self._record("pick", {"label": int(level.selected_label)})
+        if traj._last_cost_payload is not None:
+            self._record("cost", traj._last_cost_payload)
 
     # --- persistence -------------------------------------------------------
 
@@ -373,6 +446,7 @@ class Session:
             "persona": self.persona_name,
             "started": self.started,
             "trajectory_count": self.trajectory_count,
+            "combined_corpus_count": self.combined_corpus_count,
             "rounds": [round_.to_json() for round_ in self.rounds],
             "unified": (
                 None
@@ -407,6 +481,12 @@ class Session:
             started=data.get("started"),
         )
         session.trajectory_count = int(data.get("trajectory_count", 0))
+        session.combined_corpus_count = int(data.get("combined_corpus_count", 0))
+        replay_index = dir / "replay" / "index.json"
+        if replay_index.exists():
+            session.beats = json.loads(replay_index.read_text(encoding="utf-8"))[
+                "beats"
+            ]
         session.rounds = [CostRound.from_json(r) for r in data.get("rounds", [])]
         for round_ in session.rounds:
             context = EvalState.load(round_.state_path).make_generated_context()
@@ -471,7 +551,10 @@ class Session:
     # --- trajectory lifetime ----------------------------------------------
 
     def start_trajectory(
-        self, arm_aa: list[list[float]], goal: list[float]
+        self,
+        arm_aa: list[list[float]],
+        goal: list[float],
+        advance: bool = True,
     ) -> Trajectory:
         """Start one trajectory with the session costs installed from frame 0."""
         rig = self.rig
@@ -488,6 +571,7 @@ class Session:
             extra = replace_generated_costs(base_terms, self.unified_cost)
         else:
             extra = CompositeTrajectoryCost([*base_terms.terms(), *self._round_costs])
+        self._release_pinned_meshes()
         self.trajectory = Trajectory(
             mpc=rig._manual_planner(start_arm_aa, goal_arr, extra),
             trigger=CorrectionTrigger(
@@ -505,16 +589,35 @@ class Session:
         self.trajectory_count += 1
         self._save()
         _log(f"trajectory started: persona={self.persona_name} goal={goal}")
-        self.trajectory.advance(self)
+        if advance:
+            self.trajectory.advance(self)
         self.run_oracle(from_trigger=False)
         self.run_clean_baseline()
+        if advance:
+            self._record("trajectory", self._trajectory_payload())
         return self.trajectory
+
+    def advance_trajectory(
+        self, max_steps: int = 1, current_mesh_only: bool = False
+    ) -> dict[str, Any]:
+        """Advance a live trajectory incrementally for browser animation."""
+        traj = self.trajectory
+        if traj is None or traj.paused or traj.complete:
+            raise ValueError("The trajectory is not running.")
+        traj.advance(self, max_steps=max_steps)
+        payload = self._trajectory_payload(
+            current_mesh_only=current_mesh_only and not (traj.paused or traj.complete)
+        )
+        if traj.paused or traj.complete:
+            return self._record("trajectory", payload)
+        return payload
 
     def exit_trajectory(self) -> dict[str, Any]:
         """Discard the active trajectory; rounds, costs, and corpus stay."""
         if self.trajectory is None:
             raise ValueError("No trajectory is active.")
         artifact_dir = self.trajectory.artifact_dir
+        self._release_pinned_meshes()
         self.trajectory = None
         _log(f"trajectory exited (artifacts retained at {artifact_dir})")
         return {"ok": True, "artifact_dir": str(artifact_dir)}
@@ -556,7 +659,11 @@ class Session:
             )
         traj.oracle_traj = trajectory
         traj.oracle_source = source
-        return self._oracle_payload()
+        traj.oracle_package = self._pin_package(trajectory, traj.oracle_package)
+        payload = self._oracle_payload()
+        # The initial oracle is already embedded in the trajectory beat; only the
+        # explicit trigger rollout is a beat of its own.
+        return self._record("oracle", payload) if from_trigger else payload
 
     def _oracle_payload(self) -> dict[str, Any]:
         traj = self.trajectory
@@ -569,7 +676,7 @@ class Session:
         ):
             raise ValueError("Run an oracle rollout first.")
         return {
-            "trajectory": rig.package_trajectory(traj.oracle_traj, self.user),
+            "trajectory": traj.oracle_package,
             "metrics": violation_metrics(self.user, rig.context, traj.oracle_traj),
             "goal_reach": goal_reach(
                 rig.context,
@@ -603,6 +710,29 @@ class Session:
             progress_label="clean-base",
             log_prefix=_LOG_PREFIX,
         )
+        traj.clean_package = self._pin_package(traj.clean_traj, traj.clean_package)
+
+    def _pin_package(
+        self, trajectory: np.ndarray, previous: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Package a reference rollout once, with its mesh pinned.
+
+        Packaging per payload would re-register the mesh on every live step and
+        evict the id the browser is holding, so the reference rollouts are
+        packaged when they are computed and reused verbatim afterwards.
+        """
+        if previous is not None:
+            self.rig.meshes.unpin(previous["mesh_id"])
+        return self.rig.package_trajectory(trajectory, self.user, pin_mesh=True)
+
+    def _release_pinned_meshes(self) -> None:
+        """Drop the outgoing trajectory's pins so its meshes become evictable."""
+        traj = self.trajectory
+        if traj is None:
+            return
+        for package in (traj.oracle_package, traj.clean_package):
+            if package is not None:
+                self.rig.meshes.unpin(package["mesh_id"])
 
     # --- MDM / clustering -------------------------------------------------
 
@@ -612,7 +742,7 @@ class Session:
         n_samples: int,
         n_clusters: int,
         scale: float,
-        clusterer: str = "kmeans_end_pose",
+        clusterer: str = "agglo_end_pose",
     ) -> dict[str, Any]:
         traj = self.trajectory
         rig = self.rig
@@ -634,7 +764,7 @@ class Session:
         return self.recluster(n_clusters, scale, clusterer)
 
     def recluster(
-        self, n_clusters: int, scale: float, clusterer: str = "kmeans_end_pose"
+        self, n_clusters: int, scale: float, clusterer: str = "agglo_end_pose"
     ) -> dict[str, Any]:
         """Cluster the current sample subset and assemble each option."""
         traj = self.trajectory
@@ -653,7 +783,9 @@ class Session:
             medoid_indices = {int(i): int(i) for i in labels}
         else:
             c = make_clusterer(clusterer, n_clusters, fk=rig.fk)
-            labels = np.asarray(c.cluster_positions(traj.samples[sample_indices]), dtype=np.intp)
+            labels = np.asarray(
+                c.cluster_positions(traj.samples[sample_indices]), dtype=np.intp
+            )
             medoid_indices = c.medoid_indices(labels)
         level = ClusterLevel(
             sample_indices=sample_indices,
@@ -667,6 +799,19 @@ class Session:
             traj.cluster_levels[-1] = level
         else:
             traj.cluster_levels.append(level)
+        return self._activate_cluster_level()
+
+    def rescale(self, scale: float) -> dict[str, Any]:
+        """Re-assemble the current level's options at a new magnitude.
+
+        Skips clustering (the samples and their labels do not depend on scale)
+        so the UI can redraw while the magnitude slider moves; the selected
+        label is kept.
+        """
+        traj = self.trajectory
+        if traj is None or not traj.cluster_levels:
+            raise ValueError("Cluster samples first.")
+        traj.cluster_levels[-1].scale = scale
         return self._activate_cluster_level()
 
     def _activate_cluster_level(self) -> dict[str, Any]:
@@ -734,7 +879,7 @@ class Session:
             for parent in traj.cluster_levels[:-1]
             if parent.selected_label is not None
         ]
-        return {
+        payload = {
             "clusters": clusters,
             "selected_label": traj.chosen_label,
             "undesirable_labels": sorted(level.undesirable_labels),
@@ -743,7 +888,10 @@ class Session:
             "can_go_back": len(traj.cluster_levels) > 1,
             "active_sample_count": int(level.sample_indices.size),
             "scale": scale,
+            "prompt": traj.prompt,
         }
+        level.replay_payload = payload
+        return payload
 
     def pick_cluster(self, label: int) -> dict[str, Any]:
         traj = self.trajectory
@@ -752,7 +900,6 @@ class Session:
         if not traj.cluster_levels:
             raise ValueError("Cluster samples first.")
         level = traj.cluster_levels[-1]
-        level.undesirable_labels.discard(label)
         level.selected_label = label
         traj.chosen_label = label
         traj.scaled_correction = traj.cluster_corrections[label]
@@ -765,8 +912,6 @@ class Session:
         if not traj.cluster_levels:
             raise ValueError("Cluster samples first.")
         level = traj.cluster_levels[-1]
-        if undesirable and label == level.selected_label:
-            raise ValueError("The selected cluster cannot be marked undesirable.")
         if undesirable:
             level.undesirable_labels.add(label)
         else:
@@ -781,7 +926,7 @@ class Session:
         label: int,
         n_clusters: int,
         scale: float,
-        clusterer: str = "kmeans_end_pose",
+        clusterer: str = "agglo_end_pose",
     ) -> dict[str, Any]:
         """Cluster only the raw samples belonging to the selected option."""
         traj = self.trajectory
@@ -988,7 +1133,9 @@ class Session:
             "trigger_violation": round_.trigger_violation,
             "cluster_labels": list(round_.cluster_labels),
             "description": round_.description,
+            "code": round_.cost_code,
             "rationale": _rationale_from_artifacts(round_.round_dir),
+            "generated_bounds": _generated_bounds_from_artifacts(round_.round_dir),
             "artifact_dir": str(round_.round_dir),
         }
 
@@ -1035,6 +1182,9 @@ class Session:
         self._round_costs.append(traj._last_cost)
         self.round_records.append(self._round_record(cost_round))
         self.unified_cost = traj._last_cost if len(self.rounds) == 1 else None
+        if len(self.rounds) == 1:
+            self.combined_corpus_count = len(self.corpus.entries())
+        self._record_final_feedback()
         traj._last_generation = None
         traj._last_cost = None
         traj._last_cost_dir = None
@@ -1045,9 +1195,18 @@ class Session:
             f"committed round {cost_round.index} "
             f"(goal={list(cost_round.goal)}, cluster_labels={list(cluster_labels)})"
         )
-        return {"rounds": self.round_records, "unified": self._unified_record()}
+        return self._record(
+            "round",
+            {
+                "rounds": self.round_records,
+                "unified": self._unified_record(),
+                "combined_corpus_count": self.combined_corpus_count,
+            },
+        )
 
-    def apply_round_and_continue(self) -> dict[str, Any]:
+    def apply_round_and_continue(
+        self, advance: bool = True, current_mesh_only: bool = False
+    ) -> dict[str, Any]:
         """Commit the selected feedback, install it, and resume to the next pause."""
         traj = self.trajectory
         rig = self.rig
@@ -1068,8 +1227,10 @@ class Session:
         )
         traj.paused = False
         traj.clear_pending_feedback()
-        traj.advance(self)
-        return self._trajectory_payload()
+        if advance:
+            traj.advance(self)
+            return self._record("trajectory", self._trajectory_payload())
+        return self._trajectory_payload(current_mesh_only=current_mesh_only)
 
     def ignore_comfort_violation(self) -> dict[str, Any]:
         """Resume without feedback after ignoring the current discomfort event."""
@@ -1082,7 +1243,7 @@ class Session:
         traj.paused = False
         traj.clear_pending_feedback()
         traj.advance(self)
-        return self._trajectory_payload()
+        return self._record("trajectory", self._trajectory_payload())
 
     def remove_round(self, index: int) -> dict[str, Any]:
         rig = self.rig
@@ -1110,10 +1271,8 @@ class Session:
     def combine_rounds(self) -> dict[str, Any]:
         traj = self.trajectory
         rig = self.rig
-        if len(self.rounds) < 2:
-            raise ValueError("Commit at least two rounds before combining.")
-        if traj is None or traj.goal is None:
-            raise ValueError("Start a trajectory first.")
+        if not self.rounds:
+            raise ValueError("Commit at least one round before combining.")
         round_ = self.rounds[-1]
         state = EvalState.load(round_.state_path)
         combine_dir = self.dir / f"{time.strftime('%Y%m%d_%H%M%S')}_combine"
@@ -1140,7 +1299,27 @@ class Session:
             raise ValueError(f"Round combination failed (see {combine_dir}).")
         _log(f"combination done in {time.perf_counter() - t0:.1f}s")
         self.unified_cost = combined
+        self.combined_corpus_count = len(self.corpus.entries())
         self._save()
+        scores_path = combine_dir / "scores.json"
+        scores = (
+            json.loads(scores_path.read_text(encoding="utf-8"))
+            if scores_path.exists()
+            else None
+        )
+        payload = {
+            "cost_field": self.generated_cost_field(combined),
+            "description": combined.description,
+            "code": combined.code,
+            "scores": scores,
+            "artifact_dir": str(combine_dir),
+            "rounds": self.round_records,
+            "combined_corpus_count": self.combined_corpus_count,
+        }
+        # Combined between trajectories: there is no pose or goal to demonstrate
+        # the unified cost on, and start_trajectory installs it on the next one.
+        if traj is None or traj.goal is None:
+            return payload
         cfg_goal = rig._cfg_with_goal(traj.goal)
         installed = replace_generated_costs(rig._extra_costs(self.user), combined)
         traj.mpc.set_extra_costs(installed)
@@ -1159,23 +1338,12 @@ class Session:
             log_prefix=_LOG_PREFIX,
         )
         _log(f"unified-cost rollout done in {time.perf_counter() - t0:.1f}s")
-        scores_path = combine_dir / "scores.json"
-        scores = (
-            json.loads(scores_path.read_text(encoding="utf-8"))
-            if scores_path.exists()
-            else None
+        payload.update(
+            trajectory=rig.package_trajectory(rollout, self.user),
+            metrics=violation_metrics(self.user, rig.context, rollout),
+            goal_reach=goal_reach(rig.context, cfg_goal, rollout, traj.goal),
         )
-        return {
-            "trajectory": rig.package_trajectory(rollout, self.user),
-            "cost_field": self.generated_cost_field(combined),
-            "metrics": violation_metrics(self.user, rig.context, rollout),
-            "goal_reach": goal_reach(rig.context, cfg_goal, rollout, traj.goal),
-            "description": combined.description,
-            "code": combined.code,
-            "scores": scores,
-            "artifact_dir": str(combine_dir),
-            "rounds": self.round_records,
-        }
+        return payload
 
     def reset_rounds(self) -> dict[str, Any]:
         rig = self.rig
@@ -1183,6 +1351,7 @@ class Session:
         self.round_records = []
         self._round_costs = []
         self.unified_cost = None
+        self.combined_corpus_count = 0
         if self.trajectory is not None:
             self.trajectory.clear_pending_feedback()
             self.trajectory.mpc.set_extra_costs(rig._extra_costs(self.user))
@@ -1199,7 +1368,7 @@ class Session:
 
     # --- payloads ---------------------------------------------------------
 
-    def _trajectory_payload(self) -> dict[str, Any]:
+    def _trajectory_payload(self, current_mesh_only: bool = False) -> dict[str, Any]:
         traj = self.trajectory
         rig = self.rig
         if traj is None or traj.goal is None:
@@ -1215,18 +1384,18 @@ class Session:
             }
         )
         return {
-            "trajectory": rig.package_trajectory(trajectory, self.user),
-            "oracle": None if traj.oracle_traj is None else self._oracle_payload(),
-            "clean_base": (
-                None
-                if traj.clean_traj is None
-                else rig.package_trajectory(traj.clean_traj, self.user)
+            "trajectory": rig.package_trajectory(
+                trajectory, self.user, current_mesh_only=current_mesh_only
             ),
+            "oracle": None if traj.oracle_traj is None else self._oracle_payload(),
+            "clean_base": traj.clean_package,
             "metrics": violation_metrics(self.user, rig.context, trajectory),
             "goal_reach": goal_reach(
                 rig.context, rig._cfg_with_goal(traj.goal), trajectory, traj.goal
             ),
-            "status": "complete" if traj.complete else "paused",
+            "status": (
+                "complete" if traj.complete else "paused" if traj.paused else "running"
+            ),
             "trigger": trigger,
             "step": traj.step,
             "step_limit": rig.cfg.steps,
@@ -1235,6 +1404,7 @@ class Session:
             "artifact_dir": str(traj.artifact_dir),
             "trajectory_count": self.trajectory_count,
             "corpus": self.corpus.entries(),
+            "combined_corpus_count": self.combined_corpus_count,
             "rounds": self.round_records,
             "unified": self._unified_record(),
             "pending_cost": traj._last_cost_payload,
@@ -1247,6 +1417,7 @@ class Session:
             "started": self.started,
             "trajectory_count": self.trajectory_count,
             "corpus": self.corpus.entries(),
+            "combined_corpus_count": self.combined_corpus_count,
             "rounds": self.round_records,
             "unified": self._unified_record(),
             "trajectory": (

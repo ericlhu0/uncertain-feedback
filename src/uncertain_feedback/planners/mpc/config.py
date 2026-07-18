@@ -23,7 +23,7 @@ PLANNER_CHOICES = {
 class UqConfig:
     diffusion_samples: int = 128
     n_clusters: int = 3
-    clusterer: str = "kmeans_end_pose"
+    clusterer: str = "agglo_end_pose"
     auto_cluster: int | None = None
     scale: float = 1.0
     # Delegate cluster selection to the configured simulated user (takes effect
@@ -293,7 +293,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             data.get("advance_threshold", 0.1), "advance_threshold"
         ),
         max_playback_delta=_float(
-            data.get("max_playback_delta", 0.1), "max_playback_delta"
+            data.get("max_playback_delta", 0.05), "max_playback_delta"
         ),
         trajectory_fraction=_float(
             data.get("trajectory_fraction", 1.0), "trajectory_fraction"
@@ -303,7 +303,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 uq_data.get("diffusion_samples", 128), "uq.diffusion_samples"
             ),
             n_clusters=_positive_int(uq_data.get("n_clusters", 3), "uq.n_clusters"),
-            clusterer=str(uq_data.get("clusterer", "kmeans_end_pose")),
+            clusterer=str(uq_data.get("clusterer", "agglo_end_pose")),
             auto_cluster=(
                 None
                 if uq_data.get("auto_cluster") is None

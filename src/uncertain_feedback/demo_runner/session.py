@@ -1,4 +1,4 @@
-"""Session and trajectory objects for the demo-designer web tool.
+"""Session and trajectory objects for the demo-runner web tool.
 
 A :class:`Session` is one simulated user plus the context that accumulates while
 correcting them: an on-disk :class:`TrajectoryCorpus`, committed correction
@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from uncertain_feedback.demo_designer.core import _LOG_PREFIX, _log, persona_to_json
+from uncertain_feedback.demo_runner.core import _LOG_PREFIX, _log, persona_to_json
 from uncertain_feedback.experiments.experiment_pipeline import (
     CostGenerationResult,
     generate_cost_for_cluster,
@@ -62,7 +62,7 @@ from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 from uncertain_feedback.uncertainty.clustering import make_clusterer
 
 if TYPE_CHECKING:
-    from uncertain_feedback.demo_designer.core import DemoRig
+    from uncertain_feedback.demo_runner.core import DemoRig
 
 
 def _json_object(text: str) -> dict[str, Any]:
@@ -1108,7 +1108,7 @@ class Session:
             "artifact_dir": str(cost_dir),
         }
         traj._last_cost_payload = payload
-        (cost_dir / "demo_designer_payload.json").write_text(
+        (cost_dir / "demo_runner_payload.json").write_text(
             json.dumps(payload), encoding="utf-8"
         )
         return payload

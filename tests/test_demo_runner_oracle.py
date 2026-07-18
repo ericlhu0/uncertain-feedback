@@ -4,10 +4,10 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 
-from uncertain_feedback.demo_designer import server as demo_server
-from uncertain_feedback.demo_designer import session as demo_session
-from uncertain_feedback.demo_designer.core import DemoRig
-from uncertain_feedback.demo_designer.session import (
+from uncertain_feedback.demo_runner import server as demo_server
+from uncertain_feedback.demo_runner import session as demo_session
+from uncertain_feedback.demo_runner.core import DemoRig
+from uncertain_feedback.demo_runner.session import (
     Session,
     _generated_bounds_from_artifacts,
     _rationale_from_artifacts,
@@ -445,7 +445,7 @@ def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) 
 def test_list_sessions_is_newest_first_with_context_counts(
     monkeypatch, tmp_path
 ) -> None:
-    root = tmp_path / "demo_designer_artifacts"
+    root = tmp_path / "demo_runner_artifacts"
     for name, round_count, corpus_count in [
         ("20260713_120000_session_old", 1, 2),
         ("20260713_130000_session_new", 3, 4),
@@ -485,7 +485,7 @@ def test_list_sessions_is_newest_first_with_context_counts(
 
 
 def test_delete_session_removes_directory_and_clears_active(tmp_path) -> None:
-    root = tmp_path / "demo_designer_artifacts"
+    root = tmp_path / "demo_runner_artifacts"
     session_dir = root / "20260713_130000_session_persona"
     session_dir.mkdir(parents=True)
     (session_dir / "session.json").write_text("{}", encoding="utf-8")
@@ -501,7 +501,7 @@ def test_delete_session_removes_directory_and_clears_active(tmp_path) -> None:
 
 
 def test_delete_session_rejects_paths_outside_artifact_root(tmp_path) -> None:
-    root = tmp_path / "demo_designer_artifacts"
+    root = tmp_path / "demo_runner_artifacts"
     root.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()

@@ -1229,7 +1229,7 @@ function escapeHtml(value) {
 
 function artifactHref(artifactDir, filename) {
   let relative = String(artifactDir || "").replaceAll("\\", "/");
-  const marker = "demo_designer_artifacts/";
+  const marker = "demo_runner_artifacts/";
   const markerIndex = relative.lastIndexOf("/" + marker);
   if (markerIndex >= 0) relative = relative.slice(markerIndex + marker.length + 1);
   else if (relative.startsWith(marker)) relative = relative.slice(marker.length);

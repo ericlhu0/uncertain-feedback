@@ -1,9 +1,9 @@
-"""Rig state and session management for the demo-designer web tool.
+"""Rig state and session management for the demo-runner web tool.
 
 One :class:`DemoRig` per server process holds everything that outlives an
 individual session: the loaded config, the persona library (with CRUD), the
 motion generator, the initial pose / body / spine, forward kinematics, the mesh
-cache, and the shared :class:`MpcCostContext`. A :class:`~uncertain_feedback.demo_designer.session.Session`
+cache, and the shared :class:`MpcCostContext`. A :class:`~uncertain_feedback.demo_runner.session.Session`
 is spawned from the rig; it owns one simulated user plus the context accumulated
 while correcting them (trajectory corpus, correction rounds, unified cost) and
 each trajectory driven under that user.
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from uncertain_feedback.demo_designer.smpl_mesh import SmplMeshCache
+from uncertain_feedback.demo_runner.smpl_mesh import SmplMeshCache
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.planners.mpc import LeftArmMPCCartesian
@@ -55,9 +55,9 @@ from uncertain_feedback.simulated_users.personas import (
 )
 
 if TYPE_CHECKING:
-    from uncertain_feedback.demo_designer.session import Session
+    from uncertain_feedback.demo_runner.session import Session
 
-_LOG_PREFIX = "[demo_designer]"
+_LOG_PREFIX = "[demo_runner]"
 _DEFAULT_PROMPTS = {
     "triceps_long_head_contracture": "Bring my left elbow closer to my body.",
 }
@@ -143,7 +143,7 @@ class DemoRig:
         trajectory_configs_path: Path,
     ) -> None:
         self.cfg: MpcRunConfig = load_mpc_config(config_path)
-        self.artifact_root = Path("demo_designer_artifacts").resolve()
+        self.artifact_root = Path("demo_runner_artifacts").resolve()
         self.personas_path = personas_path.resolve()
         self.trajectory_configs_path = trajectory_configs_path.resolve()
         self.trajectory_configs: dict[str, list[dict[str, Any]]] = {
@@ -163,7 +163,7 @@ class DemoRig:
             lock_seed=self.cfg.motion_generator == "mdm",
         )
         if self.cfg.pose is None:
-            raise ValueError("demo_designer requires a config with a pose file.")
+            raise ValueError("demo_runner requires a config with a pose file.")
         self.initial_hml_pose = self.gen.load_pose(self.cfg.pose)
         arm_aa, body_pos, spine3_aa, collar_aa = self.gen.decode_pose(
             self.initial_hml_pose
@@ -449,7 +449,7 @@ class DemoRig:
     # --- session management -----------------------------------------------
 
     def begin_session(self, persona: str) -> "Session":
-        from uncertain_feedback.demo_designer.session import Session
+        from uncertain_feedback.demo_runner.session import Session
 
         user = self.get_persona(persona)
         session_dir = self.artifact_root / (
@@ -469,7 +469,7 @@ class DemoRig:
         return self.session
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        root = getattr(self, "artifact_root", Path("demo_designer_artifacts"))
+        root = getattr(self, "artifact_root", Path("demo_runner_artifacts"))
         sessions: list[dict[str, Any]] = []
         if not root.exists():
             return sessions
@@ -498,7 +498,7 @@ class DemoRig:
         return sessions
 
     def resume_session(self, dir: str) -> "Session":
-        from uncertain_feedback.demo_designer.session import Session
+        from uncertain_feedback.demo_runner.session import Session
 
         self.session = Session.load(self, Path(dir))
         _log(f"session resumed: dir={dir} persona={self.session.persona_name}")
@@ -512,7 +512,7 @@ class DemoRig:
         artifact path lives under the session dir, so a prefix rewrite in
         ``session.json`` is enough to repoint the copied costs' state files.
         """
-        from uncertain_feedback.demo_designer.session import Session
+        from uncertain_feedback.demo_runner.session import Session
 
         root = self.artifact_root.resolve()
         src = (root / name).resolve()

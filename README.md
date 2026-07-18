@@ -368,7 +368,7 @@ uq:
   scale: 1.0  # default motion-magnitude scale for the chosen cluster
 ```
 
-`uq.clusterer` selects the clustering method (used by Demo Designer; the MPC
+`uq.clusterer` selects the clustering method (used by the demo runner; the MPC
 planners keep their injected clusterer):
 
 - `kmeans_end_pose` — KMeans on spine3-relative arm-chain positions at a
@@ -567,7 +567,7 @@ Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
 Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
 `gpt-5.6-luna` with `xhigh` reasoning effort. Reasoning effort follows the model
 (`gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`); any other model is sent without
-one. The demo-runner/demo-designer config (`arm_mpc_cartesian_mdm_llm_transfer.yaml`)
+one. The demo-runner config (`arm_mpc_cartesian_mdm_llm_transfer.yaml`)
 pins `gpt-5.6-sol`.
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
@@ -814,33 +814,70 @@ The original manifest remains unchanged for the demo UI and session history; onl
 explicit round instructions enter the agent prompt.
 
 
-## Demo designer web tool
+## Demo runner web tool
 
-Browser tool for designing simulated-user demo scenarios interactively — the
-staged pipeline above (base rollout → MDM/UQ correction → cost generation), but
-with every knob tweakable and every trajectory inspectable before committing to
-an experiment config.
+Browser tool for designing and presenting simulated-user demo scenarios
+interactively — the staged pipeline above (base rollout → MDM/UQ correction →
+cost generation), but with every knob tweakable and every trajectory
+inspectable before committing to an experiment config, plus a **demo/dev mode
+toggle** and full **session replay**. Run it from the repo root (the artifact
+root is CWD-relative):
 
 ```bash
-uv run python src/uncertain_feedback/demo_designer/server.py \
+uv run python src/uncertain_feedback/demo_runner/server.py \
   [--mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml] \
-  [--personas-file demo_designer_personas.json] \
-  [--trajectory-configs-file demo_designer_trajectory_configs.json] \
-  [--host 127.0.0.1] [--port 6780]
+  [--personas-file demo_runner_personas.json] \
+  [--trajectory-configs-file demo_runner_trajectory_configs.json] \
+  [--host 127.0.0.1] [--port 6781]
 ```
 
-Then open `http://127.0.0.1:6780`. The config supplies the pose, MPC settings,
+Then open `http://127.0.0.1:6781`. The config supplies the pose, MPC settings,
 UQ defaults, `mdm_frames`, per-persona goal presets, and the `llm_cost` backend
 used by the cost-generation stage. With the default config, cost generation
 starts on `llm (single-pass)`; the backend dropdown can still select `turns` or
 `agent`. When `motion_generator: mdm`, the top-level `seed` is reset before each
 MDM generation request, so identical demo inputs reproduce the same samples.
 
+**Demo vs dev mode.** The header button toggles between them and the choice
+persists in `localStorage` (demo is the default). Both modes use the same
+guided left control bar: Scenario is a persistent setup/status panel above the
+four stages Trajectory decision, Language correction, Cost generation, and
+Apply feedback. Its configuration section is collapsible and closes
+automatically when a trajectory starts, while Start/Exit and the live
+trajectory status remain visible. Starting or continuing a trajectory stops at Trajectory
+decision, where the operator either enters a correction or ignores the comfort
+violation and continues. Entering a correction unlocks Language correction.
+Selecting a cluster keeps that stage open for inspection and enables its
+bottom *Next* button; pressing *Next* advances to Cost generation. Generating a
+cost enables the Cost stage's bottom *Next* button; pressing it advances to
+Apply feedback. Applying feedback at another trigger returns
+to Trajectory decision. The current and completed stages remain clickable for
+review, while future stages stay disabled. While cost generation runs, its user-visible progress appears
+directly in the Cost stage in both modes; OpenAI-backed generation includes its
+opt-in reasoning-summary stream there. Raw private reasoning is not exposed.
+The right column begins with a persistent **Cost functions** section. Each
+pending or active cost is shown by its natural-language summary, which expands
+to reveal the generated Python. Individual round costs are listed separately
+until combination replaces them with one unified cost.
+
+*Dev* mode exposes all setup and debugging controls inside that organization.
+*Demo* mode keeps the Scenario panel's saved start-pose and goal selectors,
+but hides everything used to author those choices: the persona selector/editor,
+initial-pose sliders, numeric goal fields, and save controls. It also hides
+on-graph bound dragging, the sample/count/clusterer fields, the cost backend
+picker and inline generated Python in the workflow panel, the trajectory corpus,
+and the server console. The expandable right-column cost section remains visible.
+Cluster refinement and explicit *Exclude* controls remain available in both
+modes. Hidden controls are hidden, not removed, so they still
+supply their configured values to the pipeline; in demo mode the graphs render
+but their bound handles are inert. Cluster cards reserve oracle/full-path
+violation diagnostics for dev mode and omit negative goal-status labels.
+
 **Sessions.** All work happens inside a *session* — one simulated user plus the
 context that accumulates while correcting them: an on-disk trajectory corpus,
 committed correction rounds, and one unified cost. `POST /api/session/start`
 with `{"persona": <name>}` begins one (creating
-`demo_designer_artifacts/<timestamp>_session_<persona>/`
+`demo_runner_artifacts/<timestamp>_session_<persona>/`
 with `trajectory_corpus/` and `session.json`); trajectories are then spawned
 from the session and carry its learned costs installed from frame 0, so
 corrections compound across trajectories within the same session. The session's
@@ -873,11 +910,14 @@ Stages (each stage's controls unlock once the previous one ran):
    where the selected persona has a joint box, with a live SMPL body preview), the
    spine3-relative Cartesian goal, and the simulated user. Initial poses and
    goals can each be named, saved, and selected independently; they persist in
-   `demo_designer_trajectory_configs.json` by default, and saving an existing
+   `demo_runner_trajectory_configs.json` by default, and saving an existing
    name updates it. *Start trajectory*
-   starts one stateful `arm_mpc_cartesian` execution and keeps it open across
-   feedback turns. Demo Designer ignores `text_time`; the trajectory advances
-   until the selected persona crosses its discomfort threshold and pauses. An
+   starts one stateful `arm_mpc_cartesian` execution and animates it live: the
+   browser requests one MPC step at a time (`POST /api/live_trajectory/start`,
+   then `POST /api/live_trajectory/step`), follows the newest frame in the body
+   views and scrubber, and stops requesting steps as soon as the selected
+   persona crosses its discomfort threshold and the trajectory pauses (or it
+   completes). `text_time` is ignored. An
    oracle-cost rollout from the configured initial pose is generated and
    displayed when the page loads, and starting an edited scenario regenerates
    it for that pose and goal. While the trajectory is paused, *Oracle from MDM trigger*
@@ -885,14 +925,15 @@ Stages (each stage's controls unlock once the previous one ran):
    already executed path. Run the normal language-correction stage,
    manually inspect/re-cluster/scale/select an MDM cluster, and run the normal
    cost-generation stage. *Apply feedback + continue trajectory* then installs exactly
-   that selected correction and cost and advances the same planner to the next
+   that selected correction and cost and resumes the same animated stepping
+   (`POST /api/live_trajectory/apply_round`) to the next
    trigger. This pause → choose → generate cost → continue cycle can repeat
    until the goal is reached or `steps` is exhausted; no cluster is selected
    automatically. *Ignore comfort violation + continue* dismisses only the
    current discomfort event without adding feedback; the trajectory can pause
    again after it returns to comfort and crosses a bound later. The accumulated
    executed trajectory is saved under
-   `demo_designer_artifacts/<timestamp>_session_<persona>/<timestamp>_trajectory/`.
+   `demo_runner_artifacts/<timestamp>_session_<persona>/<timestamp>_trajectory/`.
    The live planner (its MPC stepping state) is held in server memory and is lost
    when the server restarts, but the session's rounds, unified cost, and corpus
    persist and can be resumed. *Exit trajectory* abandons the live planner,
@@ -923,7 +964,7 @@ Stages (each stage's controls unlock once the previous one ran):
    cluster count, each sample becomes its own child cluster. *Back* restores the
    prior options and selection. The breadcrumb reports the current depth and
    subset size. Drag *Magnitude* to rescale (re-clusters the current subset and
-   re-assembles at the new scale). Outside Demo Designer there is no mark-wrong interaction:
+   re-assembles at the new scale). Outside this tool there is no mark-wrong interaction:
    automated and simulated-user paths pass no negative clusters, so generated
    costs contrast the chosen correction only with the original reference plan.
 3. **Cost generation** — runs the selected cost-generation backend (`llm`,
@@ -933,9 +974,9 @@ Stages (each stage's controls unlock once the previous one ran):
    overlaid on the corresponding feature graphs in blue. A *why this cost* disclosure
    shows the interpretation evidence, grounded sources, explanation, and ranking table;
    the same disclosure is retained on each committed round card. Artifacts go to
-   `demo_designer_artifacts/<timestamp>_session_<persona>/<timestamp>_<backend>/`.
+   `demo_runner_artifacts/<timestamp>_session_<persona>/<timestamp>_<backend>/`.
    The complete browser payload
-   is also saved as `demo_designer_payload.json`; refreshing the browser restores
+   is also saved as `demo_runner_payload.json`; refreshing the browser restores
    the generated trajectories, overlays, code, and pending Apply action without
    rerunning cost generation. This refresh recovery uses the live server session;
    restarting the server still clears the pending action.
@@ -958,7 +999,7 @@ Stages (each stage's controls unlock once the previous one ran):
    probe pose dependence, give feedback at several goals that span the
    conditioning feature and check the unified penalty field against the
    diagonal oracle limit in the phase plot. Combine artifacts go to
-   `demo_designer_artifacts/<timestamp>_session_<persona>/<timestamp>_combine/`;
+   `demo_runner_artifacts/<timestamp>_session_<persona>/<timestamp>_combine/`;
    round state is written to the session's `session.json` and is restored when
    the session is resumed after a restart.
 5. **Trajectory corpus** — lists every session manifest entry with its kind,
@@ -975,7 +1016,7 @@ all cluster trajectories remain plotted on the joint-angle graphs. Visible
 trajectories are translucent neutral SMPL meshes at the scrubbed frame; wrist traces turn bright red on frames that violate the hidden
 bounds — with a scrubber/play control (arrow keys step, space plays) and
 per-trajectory violation strips aligned under the scrubber. A console panel at
-the bottom streams the server's stdout live, so long stages (MPC rollouts, MDM
+the bottom (dev mode only) streams the server's stdout live, so long stages (MPC rollouts, MDM
 sampling, cost generation) show their progress. OpenAI-backed cost generation
 also streams the model's opt-in reasoning summary here, and the multi-round
 Codex combiner tees its user-visible agent log here while retaining the same
@@ -1015,79 +1056,11 @@ re-detects the feedback-trigger frame under the new bounds without re-running
 the MPC. Custom personas persist to `--personas-file`; edits to built-in
 personas last until the server restarts.
 
-
-## Demo runner web tool
-
-A presentation-oriented frontend over the *same* backend as the demo designer:
-it imports `DemoRig`/`Session` and reuses every route through
-`demo_designer.server.create_app`, so the pipeline behaves identically. It adds
-two things the designer lacks: a **demo/dev mode toggle** and **session
-replay**. Run it from the repo root (the artifact root is CWD-relative):
-
-```bash
-uv run python src/uncertain_feedback/demo_runner/server.py \
-  [--mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml] \
-  [--personas-file demo_designer_personas.json] \
-  [--trajectory-configs-file demo_designer_trajectory_configs.json] \
-  [--host 127.0.0.1] [--port 6781]
-```
-
-Then open `http://127.0.0.1:6781`. It defaults to port 6781 so it can run
-alongside the designer on 6780; both share `demo_designer_artifacts/`, so a
-session recorded in one is listed by the other. Do not drive two *live* sessions
-at once — each process has its own `DemoRig` and their `session.json` writes
-interleave. Record in one, replay in the other. As in the designer, MDM
-generation resets to the config's top-level `seed` for every request.
-
-**Demo vs dev mode.** The header button toggles between them and the choice
-persists in `localStorage` (demo is the default). Both modes use the same
-guided left control bar: Scenario is a persistent setup/status panel above the
-four stages Trajectory decision, Language correction, Cost generation, and
-Apply feedback. Its configuration section is collapsible and closes
-automatically when a trajectory starts, while Start/Exit and the live
-trajectory status remain visible. Starting or continuing a trajectory stops at Trajectory
-decision, where the operator either enters a correction or ignores the comfort
-violation and continues. Entering a correction unlocks Language correction.
-Selecting a cluster keeps that stage open for inspection and enables its
-bottom *Next* button; pressing *Next* advances to Cost generation. Generating a
-cost enables the Cost stage's bottom *Next* button; pressing it advances to
-Apply feedback. Applying feedback at another trigger returns
-to Trajectory decision. The current and completed stages remain clickable for
-review, while future stages stay disabled. While cost generation runs, its user-visible progress appears
-directly in the Cost stage in both modes; OpenAI-backed generation includes its
-opt-in reasoning-summary stream there. Raw private reasoning is not exposed.
-The right column begins with a persistent **Cost functions** section. Each
-pending or active cost is shown by its natural-language summary, which expands
-to reveal the generated Python. Individual round costs are listed separately
-until combination replaces them with one unified cost.
-
-The runner animates the stateful MPC execution live when a trajectory starts
-and when *Apply feedback + continue* resumes it with a generated cost. The
-browser requests one MPC step at a time, follows the newest frame in the body
-views and scrubber, and stops requesting steps as soon as the trajectory pauses
-at a discomfort trigger (or completes). These runner-only routes are
-`POST /api/live_trajectory/start`, `POST /api/live_trajectory/step`, and
-`POST /api/live_trajectory/apply_round`; the designer retains its synchronous
-routes.
-
-*Dev* mode exposes all setup and debugging controls inside that organization.
-*Demo* mode keeps the Scenario panel's saved start-pose and goal selectors,
-but hides everything used to author those choices: the persona selector/editor,
-initial-pose sliders, numeric goal fields, and save controls. It also hides
-on-graph bound dragging, the sample/count/clusterer fields, the cost backend
-picker and inline generated Python in the workflow panel, the trajectory corpus,
-and the server console. The expandable right-column cost section remains visible.
-Cluster refinement and explicit *Exclude* controls remain available in both
-modes. Hidden controls are hidden, not removed, so they still
-supply their configured values to the pipeline; in demo mode the graphs render
-but their bound handles are inert. Cluster cards reserve oracle/full-path
-violation diagnostics for dev mode and omit negative goal-status labels.
-
-**Session replay.** Every session records a beat stream as it runs (in both
-tools — the recorder lives in the shared `session.py`):
+**Session replay.** Every session records a beat stream as it runs (the
+recorder lives in `session.py`):
 
 ```
-demo_designer_artifacts/<timestamp>_session_<persona>/replay/
+demo_runner_artifacts/<timestamp>_session_<persona>/replay/
   index.json              # {persona, started, beats: [{kind, time, file}, ...]}
   0000_trajectory.json    # {kind, time, file, persona: <snapshot>, data: <the UI payload>}
   0001_clusters.json

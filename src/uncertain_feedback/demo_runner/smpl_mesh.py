@@ -1,4 +1,4 @@
-"""SMPL mesh generation and binary caching for the demo designer."""
+"""SMPL mesh generation and binary caching for the demo runner."""
 
 from __future__ import annotations
 

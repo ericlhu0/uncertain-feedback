@@ -4,9 +4,9 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 
-from uncertain_feedback.demo_designer.core import DemoRig
-from uncertain_feedback.demo_designer import session as demo_session
-from uncertain_feedback.demo_designer.session import ClusterLevel, Session
+from uncertain_feedback.demo_runner.core import DemoRig
+from uncertain_feedback.demo_runner import session as demo_session
+from uncertain_feedback.demo_runner.session import ClusterLevel, Session
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
 from uncertain_feedback.planners.mpc.config import load_mpc_config
@@ -123,7 +123,7 @@ corrections:
         rig,
     )
     rig.meshes = SimpleNamespace(unpin=lambda mesh_id: None)
-    session_dir = tmp_path / "demo_designer_artifacts" / "test_session"
+    session_dir = tmp_path / "demo_runner_artifacts" / "test_session"
     session = Session(
         rig=rig,
         persona_name=user.name,

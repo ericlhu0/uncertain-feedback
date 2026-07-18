@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from uncertain_feedback.demo_designer import server
-from uncertain_feedback.demo_designer.core import DemoRig
+from uncertain_feedback.demo_runner import server
+from uncertain_feedback.demo_runner.core import DemoRig
 
 
 def _rig(tmp_path) -> DemoRig:

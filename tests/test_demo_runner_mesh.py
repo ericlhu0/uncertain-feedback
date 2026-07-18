@@ -4,8 +4,8 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.demo_designer import server
-from uncertain_feedback.demo_designer import smpl_mesh
+from uncertain_feedback.demo_runner import server
+from uncertain_feedback.demo_runner import smpl_mesh
 from uncertain_feedback.planners.mpc.kinematics import anatomical_elbow_wrist_slots
 
 

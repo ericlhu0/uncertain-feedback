@@ -233,7 +233,7 @@ def test_agent_sandbox_hides_oracle_and_prior_runs(tmp_path) -> None:
     marker.write_text("visible", encoding="utf-8")
     repo = Path(__file__).resolve().parents[1]
     oracle = repo / "src" / "uncertain_feedback" / "simulated_users" / "personas.py"
-    prior_runs = repo / "demo_designer_artifacts"
+    prior_runs = repo / "demo_runner_artifacts"
     script = (
         "from pathlib import Path; "
         "assert Path('/tmp/workspace/visible.txt').is_file(); "

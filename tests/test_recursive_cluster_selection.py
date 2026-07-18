@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from uncertain_feedback.demo_designer import session as demo_session
-from uncertain_feedback.demo_designer.session import Session
+from uncertain_feedback.demo_runner import session as demo_session
+from uncertain_feedback.demo_runner.session import Session
 from uncertain_feedback.experiments.experiment_pipeline import (
     _rejected_candidate_trajs,
 )
@@ -163,7 +163,7 @@ def _demo_session(tmp_path) -> Session:
     return session
 
 
-def test_demo_designer_refines_recursively_and_backs_up(monkeypatch, tmp_path) -> None:
+def test_demo_runner_refines_recursively_and_backs_up(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
     monkeypatch.setattr(
         demo_session,
@@ -205,7 +205,7 @@ def test_demo_designer_refines_recursively_and_backs_up(monkeypatch, tmp_path) -
     assert root_again["scale"] == 0.9
 
 
-def test_demo_designer_reclusters_only_current_subset(monkeypatch, tmp_path) -> None:
+def test_demo_runner_reclusters_only_current_subset(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
     monkeypatch.setattr(
         demo_session,
@@ -281,7 +281,7 @@ def test_explicit_rejected_candidate_split() -> None:
         _rejected_candidate_trajs(candidates, 2, frozenset({2}))
 
 
-def test_demo_designer_marks_restore_across_cluster_levels(
+def test_demo_runner_marks_restore_across_cluster_levels(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
@@ -311,7 +311,7 @@ def test_demo_designer_marks_restore_across_cluster_levels(
     assert parent["undesirable_labels"] == [1]
 
 
-def test_demo_designer_threads_scaled_clusters_to_cost_generation(
+def test_demo_runner_threads_scaled_clusters_to_cost_generation(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)

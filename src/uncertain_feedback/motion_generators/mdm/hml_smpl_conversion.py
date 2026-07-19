@@ -64,6 +64,7 @@ import sys
 import time
 from os import cpu_count
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -340,7 +341,7 @@ def smpl_body_pose_to_spine3_aa(body_pose: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _import_recover_from_ric():
+def _import_recover_from_ric() -> Callable[..., Any]:
     """Import the MDM submodule's ``recover_from_ric`` with sys.path set up."""
     mdm_dir = Path(__file__).resolve().parent / "motion-diffusion-model"
     if str(mdm_dir) not in sys.path:

@@ -1,10 +1,13 @@
 """Tests for the llm / turns / agent cost generators."""
 
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -26,6 +29,7 @@ from uncertain_feedback.planners.mpc.costs import (
     resample_equidistant,
 )
 from uncertain_feedback.planners.mpc.costs.generated import (
+    GeneratedCostContext,
     GeneratedCostValidationError,
     GeneratedPythonCost,
     extract_json_object,
@@ -67,26 +71,28 @@ class _FakeLlmModel:
     def __init__(self, response: str, responses: list[str] | None = None) -> None:
         self.response = response
         self.responses = list(responses or [])
-        self.received_images = None
+        self.received_images: dict[str, Path] | None = None
         self.full_output_calls: list[tuple[str, object]] = []
         self.converse_calls = 0
-        self.last_messages = None
+        self.last_messages: list[dict[str, Any]] | None = None
 
     def _next_response(self) -> str:
         return self.responses.pop(0) if self.responses else self.response
 
-    def get_full_output(self, text_input: str, image_input=None) -> str:
+    def get_full_output(
+        self, text_input: str, image_input: dict[str, Path] | None = None
+    ) -> str:
         self.received_images = image_input
         self.full_output_calls.append((text_input, image_input))
         return self._next_response()
 
-    def converse(self, messages) -> str:
+    def converse(self, messages: list[dict[str, Any]]) -> str:
         self.converse_calls += 1
         self.last_messages = messages
         return self._next_response()
 
 
-def _context() -> object:
+def _context() -> GeneratedCostContext:
     fk = SmplLeftArmFK()
     mpc_context = MpcCostContext(
         fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
@@ -100,17 +106,17 @@ def _context() -> object:
     )
 
 
-def _factory_kwargs(tmp_path, fake, cfg):
+def _factory_kwargs(tmp_path: Path, fake: Any, cfg: LlmCostConfig) -> dict[str, Any]:
     context = _context()
-    return dict(
-        cfg=cfg,
-        context=context,
-        instruction="raise the elbow",
-        summaries=build_motion_summaries(context),
-        run_dir=artifact_run_dir(tmp_path, cfg.artifact_dir),
-        images={},
-        llm_model_factory=lambda _name: fake,
-    )
+    return {
+        "cfg": cfg,
+        "context": context,
+        "instruction": "raise the elbow",
+        "summaries": build_motion_summaries(context),
+        "run_dir": artifact_run_dir(tmp_path, cfg.artifact_dir),
+        "images": {},
+        "llm_model_factory": lambda _name: fake,
+    }
 
 
 def _write_corpus(tmp_path: Path, trajectory: np.ndarray) -> Path:
@@ -172,7 +178,9 @@ def test_llm_generator_runs_three_focused_stages(tmp_path) -> None:
     assert isinstance(cost, GeneratedPythonCost)
     # Three separate calls: interpret, ground, author.
     assert len(fake.full_output_calls) == 3
-    interpret, ground, author = fake.full_output_calls
+    interpret, ground, author = (  # pylint: disable=unbalanced-tuple-unpacking
+        fake.full_output_calls
+    )
     # Only the interpret stage sees images; ground and author are text-only.
     assert interpret[1] == ["current.png"]
     assert ground[1] is None and author[1] is None
@@ -371,7 +379,7 @@ def test_evaluate_candidate_cost_is_finite() -> None:
     # The L2 score compares paths, not timing: dwelling on each frame (same
     # path, 3x slower) scores identically.
     warped_score, _ = evaluate_candidate_cost(
-        context, cost, lambda _: np.repeat(rollout, 3, axis=0)
+        context, cost, lambda _: np.repeat(rollout, 3, axis=0)  # type: ignore[arg-type]
     )
     assert warped_score == pytest.approx(score, abs=1e-8)
     # No rollout available (e.g. planners without a Cartesian goal) -> inf.
@@ -458,8 +466,8 @@ def test_resample_equidistant_removes_timing() -> None:
 
 def test_rank_candidate_cost_orders_revealed_preferences() -> None:
     context = _ranking_context()
-    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)
-    ranking = rank_candidate_cost(context, cost)
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)  # type: ignore[arg-type]
+    ranking = rank_candidate_cost(context, cost)  # type: ignore[arg-type]
     assert ranking is not None and not ranking.inert
     assert ranking.rank_accuracy == 1.0
     assert ranking.normalized_margin > 0.0
@@ -474,9 +482,9 @@ def test_rank_candidate_cost_orders_revealed_preferences() -> None:
 
 def test_rank_candidate_cost_requires_strict_marked_wrong_ordering() -> None:
     context = _rejected_tie_context()
-    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)  # type: ignore[arg-type]
 
-    ranking = rank_candidate_cost(context, cost)
+    ranking = rank_candidate_cost(context, cost)  # type: ignore[arg-type]
 
     assert ranking is not None and not ranking.inert
     assert ranking.costs["chosen_correction"] == ranking.costs["rejected_cluster_0"]
@@ -511,8 +519,8 @@ def test_rank_candidate_cost_flags_inert_and_missing_context() -> None:
         "def cost(q_trajs, context, params):\n"
         "    return np.zeros(q_trajs.shape[0])\n"
     )
-    inert = GeneratedPythonCost(code=inert_code, params={}, context=context)
-    ranking = rank_candidate_cost(context, inert)
+    inert = GeneratedPythonCost(code=inert_code, params={}, context=context)  # type: ignore[arg-type]
+    ranking = rank_candidate_cost(context, inert)  # type: ignore[arg-type]
     assert ranking is not None and ranking.inert
     assert ranking.sort_key == (math.inf, math.inf)
     # No reference rollout and no rejected clusters -> no ranking signal.
@@ -545,7 +553,7 @@ def test_turns_generator_selects_by_ranking_when_available(tmp_path) -> None:
     assert rationale["ranking"] == payload["ranking"]
     assert rationale["ground"] is None
     # The feedback describes the ranking, not an L2 match to the correction.
-    texts = [m["text"] for m in fake.last_messages if m["role"] == "user"]
+    texts = [m["text"] for m in fake.last_messages if m["role"] == "user"]  # type: ignore[union-attr]
     assert any("chosen_correction" in t for t in texts)
 
 
@@ -555,14 +563,14 @@ def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:
     strict = create_cost_generator(
         **_factory_kwargs(tmp_path, fake, LlmCostConfig(backend="agent", strict=True))
     )
-    strict.codex_cmd = "definitely-not-a-real-binary-xyz"
+    strict.codex_cmd = "definitely-not-a-real-binary-xyz"  # type: ignore[attr-defined]
     with pytest.raises(GeneratedCostValidationError):
         strict.generate()
 
     lenient = create_cost_generator(
         **_factory_kwargs(tmp_path, fake, LlmCostConfig(backend="agent"))
     )
-    lenient.codex_cmd = "definitely-not-a-real-binary-xyz"
+    lenient.codex_cmd = "definitely-not-a-real-binary-xyz"  # type: ignore[attr-defined]
     assert lenient.generate() is None
 
 
@@ -607,7 +615,7 @@ def test_agent_codex_waits_for_natural_exit_when_outputs_exist(
         lambda *_args, **_kwargs: process,
     )
 
-    gen._run_codex()
+    gen._run_codex()  # type: ignore[attr-defined]
 
     assert process.wait_calls == 2
     assert not process.terminated
@@ -628,7 +636,8 @@ def test_agent_codex_hard_timeout_terminates_child(tmp_path, monkeypatch) -> Non
             self.terminated = False
             self.killed = False
 
-        def wait(self, timeout=None) -> int:
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
             return -15
 
         def terminate(self) -> None:
@@ -646,7 +655,7 @@ def test_agent_codex_hard_timeout_terminates_child(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(agent_costs_module, "_CODEX_TIMEOUT_SECONDS", 0.0)
 
     with pytest.raises(GeneratedCostValidationError, match="timed out"):
-        gen._run_codex()
+        gen._run_codex()  # type: ignore[attr-defined]
 
     assert process.terminated
     assert not process.killed
@@ -658,7 +667,7 @@ def test_agent_task_requires_stage_log(tmp_path) -> None:
         **_factory_kwargs(tmp_path, fake, LlmCostConfig(backend="agent"))
     )
 
-    task = gen._task_md("prompt body", iterate=False, image_input=None)
+    task = gen._task_md("prompt body", iterate=False, image_input=None)  # type: ignore[attr-defined]
 
     assert "stage_log.md" in task
     assert "## Stage 1 response" in task

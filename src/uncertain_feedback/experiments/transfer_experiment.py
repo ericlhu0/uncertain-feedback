@@ -24,7 +24,10 @@ from uncertain_feedback.experiments.experiment_pipeline import (
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost, MpcCostContext
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    MpcCostContext,
+)
 from uncertain_feedback.simulated_users import HiddenCostTerm, SimulatedUser
 
 
@@ -103,7 +106,10 @@ def run_transfer_experiment(  # pylint: disable=too-many-arguments,too-many-loca
     conditions: dict[str, CompositeTrajectoryCost] = {
         "base": result.base_extra_costs,
         "oracle": CompositeTrajectoryCost(
-            [*result.base_extra_costs.terms(), HiddenCostTerm(user=user, context=context)]
+            [
+                *result.base_extra_costs.terms(),
+                HiddenCostTerm(user=user, context=context),
+            ]
         ),
     }
     if result.generated_cost is not None:
@@ -111,7 +117,9 @@ def run_transfer_experiment(  # pylint: disable=too-many-arguments,too-many-loca
             [*result.base_extra_costs.terms(), result.generated_cost]
         )
     else:
-        _log(f"{user.name}: skipping generated transfer condition; no cost was produced")
+        _log(
+            f"{user.name}: skipping generated transfer condition; no cost was produced"
+        )
 
     results = summary.setdefault("results", {})
     for cond_name in conditions:

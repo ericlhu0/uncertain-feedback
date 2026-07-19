@@ -5,7 +5,7 @@ Run from the repo root -- the artifact root is resolved against the CWD.
 Usage::
 
     uv run python src/uncertain_feedback/demo_runner/server.py \\
-        [--mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml] \\
+        [--mpc-config <path to an arm_mpc_cartesian_mdm_llm_transfer.yaml>] \\
         [--personas-file demo_runner_personas.json] \\
         [--trajectory-configs-file demo_runner_trajectory_configs.json] \\
         [--host 127.0.0.1] [--port 6781]
@@ -18,10 +18,11 @@ import json
 import sys
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, TextIO
 
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
+from flask.typing import ResponseReturnValue
 
 from uncertain_feedback.demo_runner.core import DemoRig, persona_from_json
 
@@ -35,7 +36,8 @@ _DEFAULT_CONFIG = (
     / "planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml"
 )
 
-rig: DemoRig | None = None
+# Mutable process-wide handle, installed by boot(); not a constant.
+rig: DemoRig | None = None  # pylint: disable=invalid-name
 
 # Serializes the heavy pipeline endpoints so the log endpoint stays responsive
 # while an MPC rollout / MDM generation / cost generation runs in another
@@ -43,10 +45,17 @@ rig: DemoRig | None = None
 _heavy_lock = threading.Lock()
 
 
+def _require_rig() -> DemoRig:
+    if rig is None:
+        raise ValueError("Server not booted. Call boot() first.")
+    return rig
+
+
 def _require_session() -> "Session":
-    if rig.session is None:
+    session = _require_rig().session
+    if session is None:
         raise ValueError("No active session. Start or resume a session first.")
-    return rig.session
+    return session
 
 
 def _require_trajectory() -> tuple["Session", "Trajectory"]:
@@ -60,13 +69,14 @@ def _require_trajectory() -> tuple["Session", "Trajectory"]:
 class _TeeBuffer:
     """Stdout tee that keeps completed lines and streamable raw text."""
 
-    def __init__(self, stream) -> None:
+    def __init__(self, stream: TextIO) -> None:
         self._stream = stream
         self._partial = ""
         self.text = ""
         self.lines: list[str] = []
 
     def write(self, text: str) -> None:
+        """Forward to the wrapped stream and buffer completed lines."""
         self._stream.write(text)
         self.text += text
         self._partial += text
@@ -76,30 +86,34 @@ class _TeeBuffer:
                 self.lines.append(line)
 
     def flush(self) -> None:
+        """Flush the wrapped stream."""
         self._stream.flush()
 
 
 _log_buffer = _TeeBuffer(sys.stdout)
 
 
-def _run(fn):
+def _run(fn: Callable[[], Any]) -> ResponseReturnValue:
     try:
         return jsonify(fn())
-    except Exception as exc:  # surfaced to the browser as the error banner
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Request error boundary: every failure is surfaced as the error banner.
         import traceback
 
         traceback.print_exc()
         return jsonify({"error": str(exc)}), 400
 
 
-def _run_heavy(fn):
+def _run_heavy(fn: Callable[[], Any]) -> ResponseReturnValue:
     with _heavy_lock:
         return _run(fn)
 
 
 def create_app(static_dir: Path) -> Flask:
     """Build the Flask app: pipeline routes plus runner-only live/replay routes."""
-    app = Flask(__name__, static_folder=str(static_dir))
+    app = Flask(  # pylint: disable=redefined-outer-name
+        __name__, static_folder=str(static_dir)
+    )
     # Dev tool: never serve stale app.js against a newer server API.
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
@@ -117,7 +131,7 @@ def create_app(static_dir: Path) -> Flask:
 
     @app.route("/api/init")
     def init():
-        return _run_heavy(rig.init_payload)
+        return _run_heavy(_require_rig().init_payload)
 
     @app.route("/api/logs")
     def logs():
@@ -141,35 +155,41 @@ def create_app(static_dir: Path) -> Flask:
         data = request.get_json(force=True)
 
         def do():
-            result = rig.upsert_persona(data)
-            return {"personas": rig.personas_payload(), **result}
+            result = _require_rig().upsert_persona(data)
+            return {"personas": _require_rig().personas_payload(), **result}
 
         return _run(do)
 
     @app.route("/api/personas/<name>", methods=["DELETE"])
     def delete_persona(name: str):
         def do():
-            rig.delete_persona(name)
-            return {"personas": rig.personas_payload()}
+            _require_rig().delete_persona(name)
+            return {"personas": _require_rig().personas_payload()}
 
         return _run(do)
 
     @app.route("/api/preview_pose", methods=["POST"])
     def preview_pose():
         data = request.get_json(force=True)
-        return _run(lambda: rig.preview_pose(data["arm_aa"]))
+        return _run(lambda: _require_rig().preview_pose(data["arm_aa"]))
 
     @app.route("/api/trajectory-configs/<kind>", methods=["POST"])
     def upsert_trajectory_config(kind: str):
         data = request.get_json(force=True)
         return _run(
-            lambda: {"trajectory_configs": rig.upsert_trajectory_config(kind, data)}
+            lambda: {
+                "trajectory_configs": _require_rig().upsert_trajectory_config(
+                    kind, data
+                )
+            }
         )
 
     @app.route("/api/mesh/<mesh_id>")
     def mesh(mesh_id: str):
         try:
-            vertices = rig.mesh_vertices(mesh_id, request.args.get("frame", type=int))
+            vertices = _require_rig().mesh_vertices(
+                mesh_id, request.args.get("frame", type=int)
+            )
         except KeyError as exc:
             return jsonify({"error": exc.args[0]}), 404
         response = Response(vertices.tobytes(), mimetype="application/octet-stream")
@@ -181,20 +201,22 @@ def create_app(static_dir: Path) -> Flask:
     @app.route("/api/session/start", methods=["POST"])
     def start_session():
         data = request.get_json(force=True)
-        return _run_heavy(lambda: rig.begin_session(data["persona"]).payload())
+        return _run_heavy(
+            lambda: _require_rig().begin_session(data["persona"]).payload()
+        )
 
     @app.route("/api/sessions")
     def list_sessions():
-        return _run(rig.list_sessions)
+        return _run(_require_rig().list_sessions)
 
     @app.route("/api/sessions/<name>", methods=["DELETE"])
     def delete_session(name: str):
-        return _run(lambda: rig.delete_session(name))
+        return _run(lambda: _require_rig().delete_session(name))
 
     @app.route("/api/session/resume", methods=["POST"])
     def resume_session():
         data = request.get_json(force=True)
-        return _run_heavy(lambda: rig.resume_session(data["dir"]).payload())
+        return _run_heavy(lambda: _require_rig().resume_session(data["dir"]).payload())
 
     @app.route("/api/manual_trajectory/start", methods=["POST"])
     def start_manual_trajectory():
@@ -359,7 +381,8 @@ def create_app(static_dir: Path) -> Flask:
             try:
                 with _heavy_lock:
                     combine_job["result"] = session.combine_rounds()
-            except Exception as exc:  # surfaced to the browser via /status
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # Worker-thread error boundary; surfaced to the browser via /status.
                 import traceback
 
                 traceback.print_exc()
@@ -416,7 +439,7 @@ def create_app(static_dir: Path) -> Flask:
 
     @app.route("/api/replay/<name>/fork", methods=["POST"])
     def fork_replay(name: str):
-        return _run_heavy(lambda: rig.fork_session(name).payload())
+        return _run_heavy(lambda: _require_rig().fork_session(name).payload())
 
     @app.route("/api/replay/<name>")
     def replay_index(name: str):
@@ -427,14 +450,14 @@ def create_app(static_dir: Path) -> Flask:
     @app.route("/api/replay/<name>/<int:index>")
     def replay_beat(name: str, index: int):
         def do() -> dict[str, Any]:
-            beats = json.loads(
-                (_replay_dir(name) / "index.json").read_text("utf-8")
-            )["beats"]
+            beats = json.loads((_replay_dir(name) / "index.json").read_text("utf-8"))[
+                "beats"
+            ]
             beat = json.loads(
                 (_replay_dir(name) / beats[index]["file"]).read_text("utf-8")
             )
             _remint_meshes(beat["data"])
-            beat["persona"]["feature_box_ranges"] = rig._feature_box_ranges(
+            beat["persona"]["feature_box_ranges"] = _require_rig()._feature_box_ranges(
                 persona_from_json(beat["persona"])
             )
             return beat
@@ -453,7 +476,7 @@ def _remint_meshes(node: Any) -> None:
     """
     if isinstance(node, dict):
         if "mesh_id" in node and "arm_positions" in node:
-            node["mesh_id"] = rig.meshes.register(
+            node["mesh_id"] = _require_rig().meshes.register(
                 np.asarray(node["arm_positions"], dtype=np.float64)
             )
         for value in node.values():
@@ -467,11 +490,9 @@ def _replay_dir(name: str) -> Path:
     return _ARTIFACT_ROOT / name / "replay"
 
 
-def boot(
-    mpc_config: Path, personas_file: Path, trajectory_configs_file: Path
-) -> None:
+def boot(mpc_config: Path, personas_file: Path, trajectory_configs_file: Path) -> None:
     """Install the stdout tee and construct the process-wide rig."""
-    global rig
+    global rig  # pylint: disable=global-statement
     sys.stdout = _log_buffer
     rig = DemoRig(mpc_config, personas_file, trajectory_configs_file)
 
@@ -480,6 +501,7 @@ app = create_app(_STATIC_DIR)
 
 
 def main() -> None:
+    """Parse CLI arguments, boot the rig, and serve the demo-runner app."""
     parser = argparse.ArgumentParser(description="Demo-runner web server")
     parser.add_argument("--mpc-config", type=Path, default=_DEFAULT_CONFIG)
     parser.add_argument(

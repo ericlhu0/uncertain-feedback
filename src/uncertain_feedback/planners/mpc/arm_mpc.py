@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,11 +20,10 @@ from uncertain_feedback.planners.mpc.costs import (
     ElbowHeightCost,
 )
 from uncertain_feedback.planners.mpc.kinematics import (
-    SmplLeftArmFK,
     _N_JOINTS,
+    SmplLeftArmFK,
     _compose_rotvec,
 )
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
@@ -354,7 +354,10 @@ class SmplLeftArmMPC:
 
         if self._vis_config is not None:
             if self._vis is None:
-                from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+                from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+                    ArmVisualizer,
+                )
+
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
                     self._goals[-1],

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
 
 import matplotlib
 
@@ -92,8 +91,6 @@ def _hml263_to_local_positions(
 # ---------------------------------------------------------------------------
 # Skeleton drawing
 # ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +168,9 @@ def main() -> None:  # pylint: disable=too-many-locals
         ax_sk = fig.add_subplot(2, n_show, n_show + col + 1, projection="3d")
         ax_sk.set_facecolor(_BG)
         ArmVisualizer.draw_smpl_skeleton(
-            ax_sk, positions[t], title="HML263 pose (local frame)",
+            ax_sk,
+            positions[t],
+            title="HML263 pose (local frame)",
             highlight_joints=_LEFT_ARM_JOINTS,
         )
         ax_sk.set_title("HML263 pose (local frame)", color=_FG, fontsize=9, pad=4)

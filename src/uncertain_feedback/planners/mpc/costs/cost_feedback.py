@@ -53,7 +53,7 @@ class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
     @classmethod
     def from_config(cls, cfg: MpcRunConfig | EvalMpcConfig) -> EvalMpcConfig:
         """Copy only rollout-relevant fields from a full MPC config."""
-        if isinstance(cfg, cls):
+        if isinstance(cfg, EvalMpcConfig):
             return cfg
         return cls(
             planner=cfg.planner,
@@ -134,7 +134,7 @@ class EvalState:
         )
 
         def rollout(cost: GeneratedPythonCost) -> np.ndarray | None:
-            cfg = self.cfg
+            cfg = EvalMpcConfig.from_config(self.cfg)
             if cfg.planner not in ("arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"):
                 return None
             if not cfg.cartesian_goals:

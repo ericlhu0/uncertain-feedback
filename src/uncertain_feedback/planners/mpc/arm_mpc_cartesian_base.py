@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import Callable
 
 import numpy as np
 
+from uncertain_feedback.planners.mpc.costs.base import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import (
-    SmplLeftArmFK,
     _N_JOINTS,
+    SmplLeftArmFK,
 )
 
 
@@ -16,9 +18,18 @@ class _CartesianGoalsMixin:
     """Mixin providing shared Cartesian wrist-goal logic.
 
     Must be combined with a :class:`~uncertain_feedback.planners.mpc.arm_mpc.SmplLeftArmMPC`
-    subclass so that ``_prev_best``, ``_horizon``, ``_n_mpc_samples``,
-    ``_max_angle_delta``, ``_extra_costs``, and ``_rollout()`` are available.
+    subclass, which supplies the state and methods declared below.
     """
+
+    # Supplied by the SmplLeftArmMPC subclass; annotations only, so the mixin
+    # never shadows the real attributes at runtime.
+    _prev_best: np.ndarray | None
+    _horizon: int
+    _n_mpc_samples: int
+    _max_angle_delta: float
+    _extra_costs: CompositeTrajectoryCost
+    _sample_actions: Callable[[np.ndarray, tuple[int, int, int, int]], np.ndarray]
+    _rollout: Callable[[np.ndarray, np.ndarray], np.ndarray]
 
     def _init_cartesian(
         self,
@@ -91,7 +102,7 @@ class _CartesianGoalsMixin:
         )
         wrist_rel = positions[:, -1] - self._spine3_pos
         wrist_cost = ((wrist_rel - target) ** 2).sum(axis=-1)
-        return wrist_cost + self._extra_costs(q_trajs)  # type: ignore[attr-defined]
+        return wrist_cost + self._extra_costs(q_trajs)
 
     def _cartesian_solve(self, current_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Sample and return the best Cartesian action.
@@ -104,23 +115,19 @@ class _CartesianGoalsMixin:
         """
         current_q = np.asarray(current_q, dtype=np.float64)
 
-        prev_best = self._prev_best  # type: ignore[attr-defined]
+        prev_best = self._prev_best
         if prev_best is not None:
-            mean = np.concatenate(
-                [prev_best[1:], np.zeros((1, _N_JOINTS, 3))], axis=0
-            )
+            mean = np.concatenate([prev_best[1:], np.zeros((1, _N_JOINTS, 3))], axis=0)
         else:
-            mean = np.zeros(
-                (self._horizon, _N_JOINTS, 3), dtype=np.float64  # type: ignore[attr-defined]
-            )
+            mean = np.zeros((self._horizon, _N_JOINTS, 3), dtype=np.float64)
 
-        actions = self._sample_actions(  # type: ignore[attr-defined]
+        actions = self._sample_actions(
             mean,
-            (self._n_mpc_samples, self._horizon, _N_JOINTS, 3),  # type: ignore[attr-defined]
+            (self._n_mpc_samples, self._horizon, _N_JOINTS, 3),
         )
-        q_trajs = self._rollout(current_q, actions)  # type: ignore[attr-defined]
+        q_trajs = self._rollout(current_q, actions)
         costs = self._cartesian_cost(q_trajs)
         best_idx = np.argmin(costs)
         best_plan = actions[best_idx]
-        self._prev_best = best_plan  # type: ignore[attr-defined]
+        self._prev_best = best_plan
         return best_plan[0], best_plan

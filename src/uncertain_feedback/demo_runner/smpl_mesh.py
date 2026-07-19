@@ -38,12 +38,17 @@ class SmplMeshCache:
         )
         self._model.eval()
         with torch.no_grad():
-            self._rest = self._model(
-                body_pose=torch.zeros(1, 69),
-                global_orient=torch.zeros(1, 3),
-                betas=torch.zeros((1, 10), dtype=torch.float32),
-                transl=torch.zeros(1, 3),
-            ).joints[0, :24].numpy().astype(np.float64)
+            self._rest = (
+                self._model(
+                    body_pose=torch.zeros(1, 69),
+                    global_orient=torch.zeros(1, 3),
+                    betas=torch.zeros((1, 10), dtype=torch.float32),
+                    transl=torch.zeros(1, 3),
+                )
+                .joints[0, :24]
+                .numpy()
+                .astype(np.float64)
+            )
         self._global_orient, self._baseline, self._translation = self._fit_demo_pose(
             np.asarray(body_positions, dtype=np.float32)
         )
@@ -64,9 +69,7 @@ class SmplMeshCache:
         translation = torch.tensor(
             target_positions[0][None], dtype=torch.float32, requires_grad=True
         )
-        optimizer = torch.optim.Adam(
-            [global_orient, body_pose, translation], lr=0.05
-        )
+        optimizer = torch.optim.Adam([global_orient, body_pose, translation], lr=0.05)
         for _ in range(400):
             optimizer.zero_grad()
             output = self._model(
@@ -84,9 +87,11 @@ class SmplMeshCache:
         orient = global_orient.detach().numpy()[0].astype(np.float32)
         baseline = body_pose.detach().numpy()[0].reshape(23, 3).astype(np.float32)
         baseline[19] = 0.0
-        return orient, self._detwist_legs(baseline, orient), translation.detach().numpy()[
-            0
-        ].astype(np.float32)
+        return (
+            orient,
+            self._detwist_legs(baseline, orient),
+            translation.detach().numpy()[0].astype(np.float32),
+        )
 
     def _world_rotations(self) -> list[Rotation]:
         """Chained world rotations of the fitted pose (24 joints)."""
@@ -127,6 +132,7 @@ class SmplMeshCache:
 
     @property
     def faces(self) -> np.ndarray:
+        """The SMPL body model's triangle indices."""
         return np.asarray(self._model.faces, dtype=np.int32)
 
     def register(self, arm_positions: np.ndarray, pin: bool = False) -> str:
@@ -151,9 +157,11 @@ class SmplMeshCache:
         return mesh_id
 
     def unpin(self, mesh_id: str) -> None:
+        """Make a pinned entry evictable again."""
         self._pinned.discard(mesh_id)
 
     def vertices(self, mesh_id: str) -> np.ndarray:
+        """Mesh vertices for every frame of a registered pose sequence."""
         if mesh_id not in self._poses:
             raise KeyError(f"Unknown or stale mesh id {mesh_id!r}.")
         self._poses.move_to_end(mesh_id)
@@ -179,6 +187,7 @@ class SmplMeshCache:
         return self._generate(poses[index : index + 1])
 
     def preview(self, arm_positions: np.ndarray) -> np.ndarray:
+        """Mesh vertices for a single un-registered arm pose."""
         return self._generate(np.asarray(arm_positions).reshape(1, 5, 3))[0]
 
     def _generate(self, arm_positions: np.ndarray) -> np.ndarray:

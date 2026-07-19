@@ -1,3 +1,7 @@
+"""Tests for the OpenAI model wrapper."""
+
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 from types import SimpleNamespace

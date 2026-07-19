@@ -1,3 +1,7 @@
+"""Tests for recursive UQ cluster refinement and selection."""
+
+# pylint: disable=missing-function-docstring
+
 import json
 from types import SimpleNamespace
 
@@ -121,7 +125,7 @@ class _DeterministicClusterer:
 
 
 def _fake_make_clusterer(
-    name: str, n_clusters: int, fk: object = None
+    _name: str, n_clusters: int, fk: object = None
 ) -> _DeterministicClusterer:
     return _DeterministicClusterer(n_clusters, fk)
 
@@ -153,9 +157,9 @@ def _demo_session(tmp_path) -> Session:
         package_trajectory=lambda traj, selected: {"n_frames": len(traj)},
     )
     session = Session.__new__(Session)
-    session.rig = rig
+    session.rig = rig  # type: ignore[assignment]
     session.user = user
-    session.trajectory = trajectory
+    session.trajectory = trajectory  # type: ignore[assignment]
     session.dir = tmp_path
     session.persona_name = user.name
     session.started = ""
@@ -198,7 +202,7 @@ def test_demo_runner_refines_recursively_and_backs_up(monkeypatch, tmp_path) -> 
     assert parent["depth"] == 1
     assert parent["selected_label"] == 0
     assert parent["scale"] == 0.9
-    assert session.trajectory.scaled_correction is not None
+    assert session.trajectory.scaled_correction is not None  # type: ignore[union-attr]
     root_again = session.back_cluster()
     assert root_again["depth"] == 0
     assert root_again["selected_label"] == 0
@@ -276,14 +280,14 @@ def test_explicit_rejected_candidate_split() -> None:
     rejected = _rejected_candidate_trajs(candidates, 2, frozenset({3, 1}))
 
     assert [float(trajectory[0, 0]) for trajectory in rejected] == [1.0, 3.0]
-    assert _rejected_candidate_trajs(candidates, 2, frozenset()) == ()
+    assert (  # pylint: disable=use-implicit-booleaness-not-comparison
+        _rejected_candidate_trajs(candidates, 2, frozenset()) == ()
+    )
     with pytest.raises(ValueError, match="cannot be undesirable"):
         _rejected_candidate_trajs(candidates, 2, frozenset({2}))
 
 
-def test_demo_runner_marks_restore_across_cluster_levels(
-    monkeypatch, tmp_path
-) -> None:
+def test_demo_runner_marks_restore_across_cluster_levels(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(demo_session, "make_clusterer", _fake_make_clusterer)
     monkeypatch.setattr(
         demo_session,
@@ -298,7 +302,7 @@ def test_demo_runner_marks_restore_across_cluster_levels(
     assert root["undesirable_labels"] == []
     assert session.mark_cluster(1, True)["undesirable_labels"] == [1]
     session.pick_cluster(1)
-    assert session.trajectory.cluster_levels[-1].undesirable_labels == {1}
+    assert session.trajectory.cluster_levels[-1].undesirable_labels == {1}  # type: ignore[union-attr]
     assert session.mark_cluster(1, True)["undesirable_labels"] == [1]
     assert session.mark_cluster(1, False)["undesirable_labels"] == []
 
@@ -332,15 +336,15 @@ def test_demo_runner_threads_scaled_clusters_to_cost_generation(
         demo_session, "generate_cost_for_cluster", fake_generate_cost_for_cluster
     )
     session = _demo_session(tmp_path)
-    session.corpus = SimpleNamespace(dir=tmp_path)
-    session.rig._extra_costs = lambda _user: object()
-    session.rig.body_pos = None
-    session.rig.spine3_pos = None
-    session.trajectory.base_traj = np.zeros((1, 3, 3))
-    session.trajectory.start_arm_aa = np.zeros((3, 3))
-    session.trajectory.q_feedback = None
-    session.trajectory.prompt = "move comfortably"
-    session.trajectory.samples[:, 1] += 10.0
+    session.corpus = SimpleNamespace(dir=tmp_path)  # type: ignore[assignment]
+    session.rig._extra_costs = lambda _user: object()  # type: ignore[assignment, method-assign, return-value]
+    session.rig.body_pos = None  # type: ignore[assignment]
+    session.rig.spine3_pos = None  # type: ignore[assignment]
+    session.trajectory.base_traj = np.zeros((1, 3, 3))  # type: ignore[union-attr]
+    session.trajectory.start_arm_aa = np.zeros((3, 3))  # type: ignore[union-attr]
+    session.trajectory.q_feedback = None  # type: ignore[union-attr]
+    session.trajectory.prompt = "move comfortably"  # type: ignore[union-attr]
+    session.trajectory.samples[:, 1] += 10.0  # type: ignore[index, union-attr]
     session.recluster(2, 0.4)
     session.pick_cluster(0)
     session.mark_cluster(1, True)
@@ -351,9 +355,9 @@ def test_demo_runner_threads_scaled_clusters_to_cost_generation(
     assert captured["undesirable_labels"] == frozenset({1})
     candidate_trajs = captured["candidate_trajs"]
     assert isinstance(candidate_trajs, dict)
-    for label, correction in session.trajectory.cluster_corrections.items():
+    for label, correction in session.trajectory.cluster_corrections.items():  # type: ignore[union-attr]
         np.testing.assert_allclose(candidate_trajs[label], correction)
         assert not np.array_equal(
-            candidate_trajs[label], session.trajectory.cluster_means[label]
+            candidate_trajs[label], session.trajectory.cluster_means[label]  # type: ignore[union-attr]
         )
-    np.testing.assert_allclose(captured["cluster_traj"], candidate_trajs[0])
+    np.testing.assert_allclose(captured["cluster_traj"], candidate_trajs[0])  # type: ignore[call-overload]

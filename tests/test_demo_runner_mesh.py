@@ -1,18 +1,46 @@
+"""Tests for the demo-runner mesh cache and its binary /api/mesh endpoint."""
+
+# pylint: disable=missing-function-docstring
+
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.demo_runner import server
-from uncertain_feedback.demo_runner import smpl_mesh
+from uncertain_feedback.demo_runner import server, smpl_mesh
 from uncertain_feedback.planners.mpc.kinematics import anatomical_elbow_wrist_slots
 
 
 class _FakeSmpl:
     faces = np.array([[0, 1, 2]], dtype=np.int32)
     parents = torch.tensor(
-        [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 20, 21]
+        [
+            -1,
+            0,
+            0,
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            9,
+            9,
+            12,
+            13,
+            14,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+        ]
     )
 
     def eval(self) -> None:
@@ -23,10 +51,15 @@ class _FakeSmpl:
         n = body_pose.shape[0]
         vertices = torch.zeros((n, 4, 3), dtype=torch.float32)
         vertices[:, 0, 0] = body_pose[:, 15 * 3]
-        joints = torch.randn(
-            (24, 3), generator=torch.Generator().manual_seed(0), dtype=torch.float32
-        ).reshape(1, 24, 3).repeat(n, 1, 1)
+        joints = (
+            torch.randn(
+                (24, 3), generator=torch.Generator().manual_seed(0), dtype=torch.float32
+            )
+            .reshape(1, 24, 3)
+            .repeat(n, 1, 1)
+        )
         return SimpleNamespace(vertices=vertices, joints=joints)
+
 
 def _cache(monkeypatch, max_entries: int = 64) -> smpl_mesh.SmplMeshCache:
     monkeypatch.setattr(smpl_mesh, "create", lambda *args, **kwargs: _FakeSmpl())
@@ -70,7 +103,9 @@ def test_hand_frame_continuous_through_forearm_sweep() -> None:
     # Native SMPL rest arm: upper arm +x with a small forearm bend.
     rest16 = np.array([0.0, 0.0, 0.0])
     rest18 = np.array([0.30, 0.0, 0.0])
-    rest20 = rest18 + 0.25 * np.array([np.cos(np.deg2rad(7.5)), 0.0, np.sin(np.deg2rad(7.5))])
+    rest20 = rest18 + 0.25 * np.array(
+        [np.cos(np.deg2rad(7.5)), 0.0, np.sin(np.deg2rad(7.5))]
+    )
     collar_world = Rotation.identity()
     shoulder, elbow = np.zeros(3), np.array([0.3, 0.0, 0.0])
 
@@ -117,7 +152,7 @@ def test_mesh_endpoint_returns_float32_binary(monkeypatch) -> None:
     monkeypatch.setattr(
         server,
         "rig",
-        SimpleNamespace(mesh_vertices=lambda mesh_id: vertices),
+        SimpleNamespace(mesh_vertices=lambda mesh_id, frame: vertices),
     )
 
     response = server.app.test_client().get("/api/mesh/example")
@@ -129,7 +164,7 @@ def test_mesh_endpoint_returns_float32_binary(monkeypatch) -> None:
 
 
 def test_mesh_endpoint_reports_stale_identifier(monkeypatch) -> None:
-    def missing(mesh_id: str) -> np.ndarray:
+    def missing(mesh_id: str, frame: int | None) -> np.ndarray:
         raise KeyError(f"Unknown or stale mesh id {mesh_id!r}.")
 
     monkeypatch.setattr(server, "rig", SimpleNamespace(mesh_vertices=missing))

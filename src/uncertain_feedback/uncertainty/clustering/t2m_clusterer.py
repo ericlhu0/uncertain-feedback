@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 import numpy as np
 
@@ -16,14 +17,14 @@ from uncertain_feedback.uncertainty.clustering.base import (
 _MAX_MOTION_LENGTH = 196
 _UNIT_LENGTH = 4
 
-_encoder: tuple | None = None
+_T2mEncoder = tuple[Any, Any, str, np.ndarray, np.ndarray]
+_ENCODER_CACHE: dict[str, _T2mEncoder] = {}
 
 
-def _get_t2m_encoder():
+def _get_t2m_encoder() -> _T2mEncoder:
     """Load the T2M movement/motion encoders and their norm stats once per process."""
-    global _encoder
-    if _encoder is not None:
-        return _encoder
+    if "encoder" in _ENCODER_CACHE:
+        return _ENCODER_CACHE["encoder"]
 
     mdm_dir = MDM_ROOT / "motion-diffusion-model"
     ckpt = mdm_dir / "t2m" / "text_mot_match" / "model" / "finest.tar"
@@ -63,8 +64,8 @@ def _get_t2m_encoder():
 
     t2m_mean = np.load(mdm_dir / "dataset" / "t2m_mean.npy")
     t2m_std = np.load(mdm_dir / "dataset" / "t2m_std.npy")
-    _encoder = (movement_enc, motion_enc, device, t2m_mean, t2m_std)
-    return _encoder
+    _ENCODER_CACHE["encoder"] = (movement_enc, motion_enc, device, t2m_mean, t2m_std)
+    return _ENCODER_CACHE["encoder"]
 
 
 class T2mEmbeddingClusterer(TrajectoryClusterer):
@@ -77,9 +78,7 @@ class T2mEmbeddingClusterer(TrajectoryClusterer):
     """
 
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
-        raise NotImplementedError(
-            "T2mEmbeddingClusterer only supports positions."
-        )
+        raise NotImplementedError("T2mEmbeddingClusterer only supports positions.")
 
     def _positions_to_features(self, positions: np.ndarray) -> np.ndarray:
         movement_enc, motion_enc, device, t2m_mean, t2m_std = _get_t2m_encoder()

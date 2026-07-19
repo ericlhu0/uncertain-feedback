@@ -1,3 +1,7 @@
+"""Tests for folding per-round generated costs into one unified cost."""
+
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 import json
@@ -21,6 +25,7 @@ from uncertain_feedback.planners.mpc.costs import (
     build_generated_cost_context,
     replace_generated_costs,
 )
+from uncertain_feedback.planners.mpc.costs.generated import GeneratedCostContext
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 _CODE = (
@@ -29,7 +34,7 @@ _CODE = (
 )
 
 
-def _context():
+def _context() -> GeneratedCostContext:
     fk = SmplLeftArmFK()
     mpc_context = MpcCostContext(
         fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
@@ -63,7 +68,7 @@ def _round(tmp_path: Path, index: int) -> CostRound:
         persona_goals={f"secret_persona_{index}": [[9.0, 9.0, 9.0]]},
     )
     state = EvalState(
-        cfg=full_cfg,
+        cfg=full_cfg,  # type: ignore[arg-type]
         current_q=np.zeros((3, 3)),
         correction_traj=np.zeros((2, 3, 3)),
         q_history=[],
@@ -74,7 +79,7 @@ def _round(tmp_path: Path, index: int) -> CostRound:
         spine3_pos=cost_context.spine3_pos,
         spine3_aa=cost_context.spine3_aa,
     )
-    state.cfg = full_cfg
+    state.cfg = full_cfg  # type: ignore[assignment]
     with open(round_dir / "state.pkl", "wb") as file:
         pickle.dump(state, file)
     (round_dir / "image.png").write_bytes(b"image")

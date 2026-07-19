@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Literal, Sequence
 
 import numpy as np
 
@@ -30,10 +30,9 @@ class CorrectionTrigger:
     discomfort_armed: bool = True
 
     def evaluate(self, step: int, violation: float | None) -> TriggerReason | None:
+        """Decide whether this step should pause for feedback, and why."""
         uncomfortable = (
-            self.automatic
-            and violation is not None
-            and violation > self.threshold
+            self.automatic and violation is not None and violation > self.threshold
         )
         if self.first_correction_triggered:
             if not self.automatic or violation is None:
@@ -59,6 +58,8 @@ class CorrectionTrigger:
 
 @dataclass
 class CorrectionRoundResult:
+    """What one correction round produced: the trigger, the correction, and its cost."""
+
     round_index: int
     trajectory_index: int
     trigger_step: int
@@ -73,6 +74,8 @@ class CorrectionRoundResult:
 
 @dataclass
 class CorrectionTrajectoryResult:
+    """One trajectory's rollout plus every correction round taken during it."""
+
     loop_result: LoopResult
     rounds: list[CorrectionRoundResult]
     unified_cost: GeneratedPythonCost | None
@@ -83,9 +86,7 @@ CorrectionHandler = Callable[
     [int, np.ndarray, list[np.ndarray], TriggerReason, float | None, int],
     CorrectionRoundResult,
 ]
-FinishHandler = Callable[
-    [Sequence[CorrectionRoundResult]], GeneratedPythonCost | None
-]
+FinishHandler = Callable[[Sequence[CorrectionRoundResult]], GeneratedPythonCost | None]
 
 
 @dataclass
@@ -114,6 +115,7 @@ class CorrectionSession:
         progress: bool = False,
         progress_desc: str = "MPC",
     ) -> CorrectionTrajectoryResult:
+        """Roll out ``n_steps``, pausing for a round whenever the trigger fires."""
         from uncertain_feedback.planners.run import run_planning_loop
 
         automatic = bool(self.user.bounds and self.user.feedback_text)
@@ -123,15 +125,11 @@ class CorrectionSession:
             automatic=automatic,
         )
 
-        def on_pre_step(
-            step: int, q: np.ndarray, q_history: list[np.ndarray]
-        ) -> None:
+        def on_pre_step(step: int, q: np.ndarray, q_history: list[np.ndarray]) -> None:
             violation = None
             if automatic:
                 violation = float(
-                    compute_violations(
-                        self.user, self.cost_context, q[np.newaxis]
-                    )[0]
+                    compute_violations(self.user, self.cost_context, q[np.newaxis])[0]
                 )
             reason = trigger.evaluate(step, violation)
             if reason is None:

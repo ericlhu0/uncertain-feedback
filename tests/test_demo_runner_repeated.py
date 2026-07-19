@@ -1,11 +1,15 @@
+"""Tests for repeated correction rounds within one demo-runner session."""
+
+# pylint: disable=missing-function-docstring
+
 import json
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import numpy as np
 
-from uncertain_feedback.demo_runner.core import DemoRig
 from uncertain_feedback.demo_runner import session as demo_session
+from uncertain_feedback.demo_runner.core import DemoRig
 from uncertain_feedback.demo_runner.session import ClusterLevel, Session
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
@@ -20,6 +24,8 @@ from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
 
 
 class FakeCost:
+    """Generated-cost stand-in that scores every trajectory as zero."""
+
     description = "cost"
     code = "def cost(): pass"
     params: dict[str, float] = {}
@@ -29,6 +35,8 @@ class FakeCost:
 
 
 class FakePlanner:
+    """Planner stand-in that records pushed trajectories and steps deterministically."""
+
     mdm_ready_to_terminate = True
     mdm_tracking_complete = True
 
@@ -36,6 +44,7 @@ class FakePlanner:
         self.kwargs = kwargs
         self.pushed = None
         self.costs = None
+        self.mdm_goal = None
 
     def step(self, q):
         return np.asarray(q) + 1.0
@@ -107,14 +116,14 @@ corrections:
     rig.body_pos = np.zeros((22, 3))
     rig.spine3_pos = fk.tpose_spine3_pos
     rig.spine3_aa = np.zeros(3)
-    rig._extra_costs = MethodType(
+    rig._extra_costs = MethodType(  # type: ignore[method-assign]
         lambda self, selected: CompositeTrajectoryCost([]), rig
     )
-    rig._manual_planner = MethodType(
+    rig._manual_planner = MethodType(  # type: ignore[method-assign]
         lambda self, start, goal, extra: FakePlanner(extra_costs=extra), rig
     )
-    rig._cfg_with_goal = MethodType(lambda self, goal: self.cfg, rig)
-    rig.package_trajectory = MethodType(
+    rig._cfg_with_goal = MethodType(lambda self, goal: self.cfg, rig)  # type: ignore[method-assign]
+    rig.package_trajectory = MethodType(  # type: ignore[method-assign]
         lambda self, traj, selected, current_mesh_only=False, pin_mesh=False: {
             "n_frames": len(traj),
             "current_mesh_only": current_mesh_only,
@@ -122,7 +131,7 @@ corrections:
         },
         rig,
     )
-    rig.meshes = SimpleNamespace(unpin=lambda mesh_id: None)
+    rig.meshes = SimpleNamespace(unpin=lambda mesh_id: None)  # type: ignore[assignment]
     session_dir = tmp_path / "demo_runner_artifacts" / "test_session"
     session = Session(
         rig=rig,
@@ -132,7 +141,7 @@ corrections:
         corpus=TrajectoryCorpus.create(session_dir / "trajectory_corpus", rig.context),
     )
     rig.session = session
-    session.run_oracle = MethodType(lambda self, from_trigger: {}, session)
+    session.run_oracle = MethodType(lambda self, from_trigger: {}, session)  # type: ignore[method-assign]
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *args: {})
     return session, user
@@ -157,7 +166,7 @@ def test_trajectory_pauses_and_logs_discomfort_segment(monkeypatch, tmp_path) ->
     }
     assert payload["trajectory"]["n_frames"] == 2
     assert trajectory.samples is None
-    assert trajectory.mpc.pushed is None
+    assert trajectory.mpc.pushed is None  # type: ignore[attr-defined]
     assert session.corpus.entries()[0] == {
         "index": 0,
         "kind": "executed_segment",
@@ -209,10 +218,10 @@ def test_exit_trajectory_keeps_session_context(monkeypatch, tmp_path) -> None:
         lambda selected, context, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
-    artifact_dir = str(session.trajectory.artifact_dir)
+    artifact_dir = str(session.trajectory.artifact_dir)  # type: ignore[union-attr]
     session.round_records = [{"index": 0}]
-    session._round_costs = [FakeCost()]
-    session.unified_cost = FakeCost()
+    session._round_costs = [FakeCost()]  # type: ignore[list-item]
+    session.unified_cost = FakeCost()  # type: ignore[assignment]
 
     result = session.exit_trajectory()
 
@@ -233,11 +242,11 @@ def test_new_trajectory_installs_session_costs_from_frame_zero(
         lambda selected, context, q: np.array([0.0]),
     )
     learned = FakeCost()
-    session._round_costs = [learned]
+    session._round_costs = [learned]  # type: ignore[list-item]
 
     trajectory = session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
 
-    assert trajectory.mpc.kwargs["extra_costs"].terms() == (learned,)
+    assert trajectory.mpc.kwargs["extra_costs"].terms() == (learned,)  # type: ignore[attr-defined]
     assert session.trajectory_count == 1
     saved = json.loads((session.dir / "session.json").read_text(encoding="utf-8"))
     assert saved["trajectory_count"] == 1
@@ -254,22 +263,22 @@ def test_apply_round_resumes_same_planner_and_pauses_again(
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
     trajectory = session.trajectory
-    planner = trajectory.mpc
+    planner = trajectory.mpc  # type: ignore[union-attr]
     correction = np.stack([np.full((3, 3), 0.5), np.ones((3, 3))])
-    trajectory.scaled_correction = correction
-    trajectory._last_cost = FakeCost()
+    trajectory.scaled_correction = correction  # type: ignore[union-attr]
+    trajectory._last_cost = FakeCost()  # type: ignore[union-attr]
 
     def fake_commit(self):
         self._round_costs.append(self.trajectory._last_cost)
         self.round_records.append({"index": 0})
         return {"rounds": self.round_records, "unified": None}
 
-    session.commit_round = MethodType(fake_commit, session)
+    session.commit_round = MethodType(fake_commit, session)  # type: ignore[method-assign]
 
     payload = session.apply_round_and_continue()
 
-    assert session.trajectory.mpc is planner
-    np.testing.assert_array_equal(planner.pushed, correction)
+    assert session.trajectory.mpc is planner  # type: ignore[union-attr]
+    np.testing.assert_array_equal(planner.pushed, correction)  # type: ignore[union-attr]
     assert payload["status"] == "paused"
     assert payload["trigger"]["step"] == 3
     assert payload["trajectory"]["n_frames"] == 4
@@ -310,7 +319,7 @@ def test_commit_round_persists_all_recursive_cluster_labels(tmp_path) -> None:
     session._round_costs = []
     session.unified_cost = None
     session.combined_corpus_count = 0
-    session.corpus = SimpleNamespace(entries=lambda: [])
+    session.corpus = SimpleNamespace(entries=lambda: [])  # type: ignore[assignment]
     session.trajectory_count = 1
     session.beats = []
     trajectory = SimpleNamespace(
@@ -319,7 +328,7 @@ def test_commit_round_persists_all_recursive_cluster_labels(tmp_path) -> None:
         trigger_reason="discomfort",
         trigger_violation=0.03,
     )
-    session.trajectory = trajectory
+    session.trajectory = trajectory  # type: ignore[assignment]
     trajectory.cluster_levels = [
         ClusterLevel(
             np.array([], dtype=np.intp), np.array([], dtype=np.intp), 2, 3, 1.0
@@ -335,6 +344,8 @@ def test_commit_round_persists_all_recursive_cluster_labels(tmp_path) -> None:
     cost_dir.mkdir()
 
     class FakeEvalState:
+        """EvalState stand-in returning canned context and rollout hooks."""
+
         def save(self, path: Path) -> None:
             path.write_bytes(b"state")
 
@@ -352,7 +363,7 @@ def test_commit_round_persists_all_recursive_cluster_labels(tmp_path) -> None:
     trajectory._last_instruction = "feedback"
     trajectory._last_cost_payload = {"description": "accepted cost"}
 
-    session.commit_round()
+    session.commit_round()  # pylint: disable=not-callable
 
     assert session.rounds[0].cluster_labels == (2, 0, 1)
     assert session.round_records[0]["cluster_labels"] == [2, 0, 1]
@@ -381,7 +392,9 @@ def test_cost_round_loads_legacy_records_without_cluster_labels(tmp_path) -> Non
     assert data["cluster_labels"] == [2, 1, 0]
     assert CostRound.from_json(data).cluster_labels == (2, 1, 0)
     data.pop("cluster_labels")
-    assert CostRound.from_json(data).cluster_labels == ()
+    assert (  # pylint: disable=use-implicit-booleaness-not-comparison
+        CostRound.from_json(data).cluster_labels == ()
+    )
 
 
 def test_remove_round_reindexes_remaining_feedback(tmp_path) -> None:
@@ -400,16 +413,16 @@ def test_remove_round_reindexes_remaining_feedback(tmp_path) -> None:
         )
 
     session = Session.__new__(Session)
-    session.rig = SimpleNamespace()
+    session.rig = SimpleNamespace()  # type: ignore[assignment]
     session.persona_name = "restricted"
     session.started = "now"
     session.trajectory_count = 0
     session.dir = tmp_path / "session"
     session.rounds = [round_(0), round_(1), round_(2)]
     session.round_records = [{"index": 0}, {"index": 1}, {"index": 2}]
-    session._round_costs = [FakeCost(), FakeCost(), FakeCost()]
+    session._round_costs = [FakeCost(), FakeCost(), FakeCost()]  # type: ignore[list-item]
     session.trajectory = None
-    session.unified_cost = FakeCost()
+    session.unified_cost = FakeCost()  # type: ignore[assignment]
     session.combined_corpus_count = 0
 
     payload = session.remove_round(1)

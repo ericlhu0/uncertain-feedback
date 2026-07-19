@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 from functools import partial
+from typing import Any
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -50,10 +51,10 @@ class _DedupTextEncoder:
     ``num_samples``.
     """
 
-    def __init__(self, encoder):  # type: ignore[no-untyped-def]
+    def __init__(self, encoder: Any) -> None:
         self._encoder = encoder
 
-    def __call__(self, texts):  # type: ignore[no-untyped-def]
+    def __call__(self, texts: Any) -> Any:
         if isinstance(texts, str):
             return self._encoder(texts)
         unique = list(dict.fromkeys(texts))
@@ -62,10 +63,11 @@ class _DedupTextEncoder:
         rows = [row_of[text] for text in texts]
         return feat[rows], [lengths[i] for i in rows]
 
-    def __getattr__(self, name):  # type: ignore[no-untyped-def]
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._encoder, name)
 
-def _positions_to_global_rots(model, positions):  # type: ignore[no-untyped-def]
+
+def _positions_to_global_rots(model: Any, positions: np.ndarray) -> np.ndarray:
     """Per-joint global rotations reproducing ``positions`` under kimodo's
     skeleton FK (standard SMPL convention): joint ``j``'s rotation orients its
     *outgoing* bones (``j`` → children), so it is recovered by least-squares
@@ -99,9 +101,7 @@ def _positions_to_global_rots(model, positions):  # type: ignore[no-untyped-def]
         kids = children[j]
         if not kids:
             parent = int(parents[j])
-            world_rots[j] = (
-                world_rots[parent] if parent >= 0 else Rotation.identity()
-            )
+            world_rots[j] = world_rots[parent] if parent >= 0 else Rotation.identity()
         else:
             neutral_bones = [neutral_joints[c] - neutral_joints[j] for c in kids]
             target_bones = [positions_np[c] - positions_np[j] for c in kids]
@@ -111,12 +111,11 @@ def _positions_to_global_rots(model, positions):  # type: ignore[no-untyped-def]
     return global_rots
 
 
-def _build_constraints(model, start_positions_path):  # type: ignore[no-untyped-def]
+def _build_constraints(model: Any, start_positions_path: str | None) -> list[Any]:
     if start_positions_path is None:
         return []
 
     import torch
-
     from kimodo.constraints import FullBodyConstraintSet
 
     device = model.skeleton.device
@@ -149,12 +148,12 @@ def _build_constraints(model, start_positions_path):  # type: ignore[no-untyped-
 
 
 def main() -> None:
+    """Load the kimodo model, sample motions, and write them to the output path."""
     args = _parse_args()
 
     import os
 
     import torch
-
     from kimodo.exports import get_amass_parameters
     from kimodo.model.load_model import load_model
     from kimodo.tools import seed_everything

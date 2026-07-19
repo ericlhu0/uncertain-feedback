@@ -24,22 +24,22 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from uncertain_feedback.experiments.cluster_comparison import (
+    _read_json_if_exists,
+    _render_rollout_video,
+    _run_cluster_comparison_rollout,
+    _run_initial_state_rollout,
+)
+from uncertain_feedback.experiments.experiment_pipeline import (
+    evaluate_cost_conditions,
+    generate_cost_for_cluster,
+)
 from uncertain_feedback.planners.mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     MpcCostContext,
     artifact_run_dir,
     evaluate_candidate_cost,
-)
-from uncertain_feedback.experiments.experiment_pipeline import (
-    evaluate_cost_conditions,
-    generate_cost_for_cluster,
-)
-from uncertain_feedback.experiments.cluster_comparison import (
-    _read_json_if_exists,
-    _render_rollout_video,
-    _run_cluster_comparison_rollout,
-    _run_initial_state_rollout,
 )
 from uncertain_feedback.simulated_users import SimulatedUser
 
@@ -90,9 +90,7 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
     base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
     rollout_steps = max(1, rollout_steps)
 
-    cartesian_goal = (
-        np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian.goals else None
-    )
+    cartesian_goal = np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian.goals else None
 
     summary: dict[str, Any] = {
         "instruction": instruction,
@@ -183,32 +181,57 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
 
         if save_video:
             rollout, metrics, colors = _run_cluster_comparison_rollout(
-                cfg, current_q, correction_traj, context, base_extra_costs,
-                generated, rollout_steps, body_pos, spine3_pos, spine3_aa,
+                cfg,
+                current_q,
+                correction_traj,
+                context,
+                base_extra_costs,
+                generated,
+                rollout_steps,
+                body_pos,
+                spine3_pos,
+                spine3_aa,
             )
             np.save(backend_dir / "rollout.npy", rollout)
             entry["rollout_metrics"] = metrics
             n_frames = correction_traj.shape[0]
             cutoff = max(1, round(n_frames * cfg.trajectory_fraction))
             _render_rollout_video(
-                rollout, context.fk, spine3_pos, spine3_aa,
+                rollout,
+                context.fk,
+                spine3_pos,
+                spine3_aa,
                 backend_dir / "rollout.mp4",
-                body_pos=body_pos, cartesian_goal=cartesian_goal,
-                frame_colors=colors, mdm_goal_q=correction_traj[cutoff - 1],
+                body_pos=body_pos,
+                cartesian_goal=cartesian_goal,
+                frame_colors=colors,
+                mdm_goal_q=correction_traj[cutoff - 1],
             )
             if initial_q is not None and cfg.planner in (
-                "arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"
+                "arm_mpc_cartesian",
+                "arm_mpc_cartesian_no_mdm",
             ):
                 is_rollout, is_metrics = _run_initial_state_rollout(
-                    cfg, initial_q, context, base_extra_costs, generated,
-                    rollout_steps, body_pos, spine3_pos, spine3_aa,
+                    cfg,
+                    initial_q,
+                    context,
+                    base_extra_costs,
+                    generated,
+                    rollout_steps,
+                    body_pos,
+                    spine3_pos,
+                    spine3_aa,
                 )
                 np.save(backend_dir / "initial_state_rollout.npy", is_rollout)
                 entry["initial_state_metrics"] = is_metrics
                 _render_rollout_video(
-                    is_rollout, context.fk, spine3_pos, spine3_aa,
+                    is_rollout,
+                    context.fk,
+                    spine3_pos,
+                    spine3_aa,
                     backend_dir / "initial_state_rollout.mp4",
-                    body_pos=body_pos, cartesian_goal=cartesian_goal,
+                    body_pos=body_pos,
+                    cartesian_goal=cartesian_goal,
                 )
 
         summary["results"][backend] = entry
@@ -219,7 +242,10 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
             {"backend": b, "score": summary["results"][b]["score"]}
             for b in summary["results"]
         ),
-        key=lambda r: (r["score"] is None, r["score"] if r["score"] is not None else 0.0),
+        key=lambda r: (
+            r["score"] is None,
+            r["score"] if r["score"] is not None else 0.0,
+        ),
     )
     _write_backend_summary(root_dir, summary)
     print(f"[backend-compare] comparison artifacts saved to: {root_dir}")

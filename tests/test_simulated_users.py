@@ -1,3 +1,7 @@
+"""Tests for simulated users: hidden bounds, features, and violations."""
+
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 import numpy as np
@@ -18,8 +22,8 @@ def test_painful_arc_uses_plane_agnostic_elevation() -> None:
 
     assert bound.feature == "shoulder_elevation"
     assert bound.bound_type == "avoid_band"
-    assert bound.low == 1.05
-    assert bound.high == 2.1
+    assert bound.low == 1.05  # type: ignore[union-attr]
+    assert bound.high == 2.1  # type: ignore[union-attr]
 
     features = {
         "shoulder_elevation": np.array([0.5, 1.57, 2.5]),
@@ -37,7 +41,7 @@ def test_cross_body_pain_allowance_drops_with_adduction() -> None:
     bound = CROSS_BODY_PAIN.bounds[0]
 
     assert bound.feature == "shoulder_elevation"
-    assert bound.cond_feature == "shoulder_abduction_adduction"
+    assert bound.cond_feature == "shoulder_abduction_adduction"  # type: ignore[union-attr]
 
     features = {
         "shoulder_elevation": np.array([1.5, 1.5, 1.5, 0.3]),

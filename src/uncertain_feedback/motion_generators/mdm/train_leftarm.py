@@ -38,7 +38,9 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from uncertain_feedback.consts import MDM_ROOT  # noqa: E402
-from uncertain_feedback.motion_generators.mdm.mdm_api import N_PREFIX_FRAMES  # noqa: E402
+from uncertain_feedback.motion_generators.mdm.mdm_api import (  # noqa: E402
+    N_PREFIX_FRAMES,
+)
 
 _MDM_SUBMODULE = MDM_ROOT / "motion-diffusion-model"
 if str(_MDM_SUBMODULE) not in sys.path:
@@ -113,10 +115,10 @@ def _generate_leftarm(gen_args):
     """
     import shutil
 
-    import data_loaders.humanml.utils.paramUtil as paramUtil
     import numpy as np
     import torch
     from data_loaders.humanml.scripts.motion_process import recover_from_ric
+    from data_loaders.humanml.utils import paramUtil
     from data_loaders.humanml.utils.plot_script import plot_3d_motion
     from sample.generate import (
         construct_template_variables,
@@ -129,7 +131,9 @@ def _generate_leftarm(gen_args):
     from utils.sampler_util import ClassifierFreeSampleModel
 
     args = gen_args
-    args.batch_size = args.num_samples  # mirrors generate.py — one batch of exactly num_samples
+    args.batch_size = (
+        args.num_samples
+    )  # mirrors generate.py — one batch of exactly num_samples
     fixseed(args.seed)
     max_frames = 196 if args.dataset in ["kit", "humanml"] else 60
     fps = 12.5 if args.dataset == "kit" else 20
@@ -157,7 +161,7 @@ def _generate_leftarm(gen_args):
 
     start_pose = torch.load(_START_POSE_PATH, map_location=dist_util.dev())
 
-    (_, _, _, sample_file_template, _, all_file_template) = construct_template_variables(
+    _, _, _, sample_file_template, _, all_file_template = construct_template_variables(
         False
     )
     skeleton = paramUtil.t2m_kinematic_chain
@@ -177,10 +181,13 @@ def _generate_leftarm(gen_args):
 
         if args.guidance_param != 1:
             model_kwargs["y"]["scale"] = (
-                torch.ones(args.batch_size, device=dist_util.dev()) * args.guidance_param
+                torch.ones(args.batch_size, device=dist_util.dev())
+                * args.guidance_param
             )
         if "text" in model_kwargs["y"]:
-            model_kwargs["y"]["text_embed"] = model.encode_text(model_kwargs["y"]["text"])
+            model_kwargs["y"]["text_embed"] = model.encode_text(
+                model_kwargs["y"]["text"]
+            )
 
         all_motions: list = []
         all_lengths: list = []
@@ -248,21 +255,26 @@ def _generate_leftarm(gen_args):
         npy_path = os.path.join(out_path, "results.npy")
         np.save(
             npy_path,
-            {
-                "motion": all_motions_np,
-                "text": all_text,
-                "lengths": all_lengths_np,
-                "num_samples": args.num_samples,
-                "num_repetitions": args.num_repetitions,
-            },
+            np.array(
+                {
+                    "motion": all_motions_np,
+                    "text": all_text,
+                    "lengths": all_lengths_np,
+                    "num_samples": args.num_samples,
+                    "num_repetitions": args.num_repetitions,
+                },
+                dtype=object,
+            ),
         )
-        with open(npy_path.replace(".npy", ".txt"), "w") as fw:
+        with open(npy_path.replace(".npy", ".txt"), "w", encoding="utf-8") as fw:
             fw.write("\n".join(all_text))
-        with open(npy_path.replace(".npy", "_len.txt"), "w") as fw:
+        with open(npy_path.replace(".npy", "_len.txt"), "w", encoding="utf-8") as fw:
             fw.write("\n".join([str(l) for l in all_lengths_np]))
 
         print(f"saving visualizations to [{out_path}]...")
-        animations = np.empty(shape=(args.num_samples, args.num_repetitions), dtype=object)
+        animations = np.empty(
+            shape=(args.num_samples, args.num_repetitions), dtype=object
+        )
         max_length = int(max(all_lengths_np))
 
         for sample_i in range(args.num_samples):
@@ -301,22 +313,22 @@ def _generate_leftarm(gen_args):
 
     # Dispatch
     if _BODY_MODE == "both":
-        _run_one(fix_body=True,  out_path=os.path.join(args.output_dir, "frozen"))
+        _run_one(fix_body=True, out_path=os.path.join(args.output_dir, "frozen"))
         _run_one(fix_body=False, out_path=os.path.join(args.output_dir, "free"))
         return args.output_dir
-    elif _BODY_MODE == "freeze":
-        return _run_one(fix_body=True,  out_path=args.output_dir)
-    else:  # "free"
-        return _run_one(fix_body=False, out_path=args.output_dir)
+    if _BODY_MODE == "freeze":
+        return _run_one(fix_body=True, out_path=args.output_dir)
+    return _run_one(fix_body=False, out_path=args.output_dir)  # "free"
 
 
 # ---------------------------------------------------------------------------
 # Monkey-patch and launch training
 # ---------------------------------------------------------------------------
 
-import train.training_loop as _training_loop  # noqa: E402
+import train.training_loop as _training_loop  # noqa: E402  # pylint: disable=wrong-import-order
 
 _training_loop.generate = _generate_leftarm
+
 
 def _auto_increment_save_dir() -> None:
     """If --save_dir already exists (and --overwrite not set), bump to the next free _N suffix."""

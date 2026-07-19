@@ -2,8 +2,8 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 from argparse import ArgumentParser
+from pathlib import Path
 
 _SRC_ROOT = Path(__file__).resolve().parents[3]
 if str(_SRC_ROOT) not in sys.path:

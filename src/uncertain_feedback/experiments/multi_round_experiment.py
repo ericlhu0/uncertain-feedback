@@ -104,7 +104,9 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
             goal=goal,
             trigger_step=initial.trigger_step,
             trigger_violation=initial.trigger_violation,
-            feedback_text=user.feedback_text if initial.trigger_step is not None else None,
+            feedback_text=(
+                user.feedback_text if initial.trigger_step is not None else None
+            ),
         )
         round_summary: dict[str, Any] = {
             "index": index,

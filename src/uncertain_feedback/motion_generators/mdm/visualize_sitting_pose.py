@@ -145,7 +145,7 @@ def _decode_hml263_to_xyz(hml_vec: torch.Tensor, dataset) -> np.ndarray:
 def main() -> None:
     """Load sitting pose, decode via MDM and via IK→FK, and save comparison."""
     print("Loading MDM model and dataset…")
-    model, data, _ = _load_model_and_data()  # type: ignore[no-untyped-call]
+    _model, data, _ = _load_model_and_data()  # type: ignore[no-untyped-call]
     fk = SmplLeftArmFK()
 
     # Load the sitting pose (263-dim, normalized)
@@ -170,10 +170,14 @@ def main() -> None:
     fig.suptitle("Sitting pose: MDM decode vs. HML→SMPL conversion", fontsize=13)
 
     ax1 = fig.add_subplot(121, projection="3d")
-    ArmVisualizer.draw_smpl_skeleton(ax1, original_xyz, "Original (MDM decode)", _ARM_JOINT_SET)
+    ArmVisualizer.draw_smpl_skeleton(
+        ax1, original_xyz, "Original (MDM decode)", _ARM_JOINT_SET
+    )
 
     ax2 = fig.add_subplot(122, projection="3d")
-    ArmVisualizer.draw_smpl_skeleton(ax2, reconstructed_xyz, "Converted (IK → FK)", _ARM_JOINT_SET)
+    ArmVisualizer.draw_smpl_skeleton(
+        ax2, reconstructed_xyz, "Converted (IK → FK)", _ARM_JOINT_SET
+    )
 
     # Add a legend note
     from matplotlib.lines import Line2D  # pylint: disable=import-outside-toplevel

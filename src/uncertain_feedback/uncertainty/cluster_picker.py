@@ -131,7 +131,14 @@ def _draw_bones_2d(
 ) -> None:
     for pi, ci in bone_pairs:
         seg = positions[[pi, ci]]
-        ax.plot(seg[:, hi], seg[:, vi], color=color, alpha=alpha, linewidth=lw, linestyle=linestyle)
+        ax.plot(
+            seg[:, hi],
+            seg[:, vi],
+            color=color,
+            alpha=alpha,
+            linewidth=lw,
+            linestyle=linestyle,
+        )
 
 
 def _merge_arm(arm_full: np.ndarray, body_pos: np.ndarray | None) -> np.ndarray:
@@ -185,9 +192,21 @@ def _draw_body(
 
     Returns (arm_bone_lines, arm_joint_scatter).
     """
-    from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+    from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+        ArmVisualizer,
+    )
+
     # Grey non-arm skeleton
-    _draw_bones_2d(ax, body_pos, ArmVisualizer.BODY_BONES, hi, vi, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+    _draw_bones_2d(
+        ax,
+        body_pos,
+        ArmVisualizer.BODY_BONES,
+        hi,
+        vi,
+        ArmVisualizer.BODY_COLOR,
+        alpha=0.45,
+        lw=1.2,
+    )
     ax.scatter(
         body_pos[ArmVisualizer.BODY_JOINTS, hi],
         body_pos[ArmVisualizer.BODY_JOINTS, vi],
@@ -212,7 +231,7 @@ def _draw_body(
     return arm_lines, arm_scat
 
 
-def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
+def _build_figure(
     unique_labels: list[int],
     cluster_body_cutoffs: list[np.ndarray],  # each (22, 3) — mean arm at cutoff
     cluster_wrist_traces: list[np.ndarray],  # each (n_frames, 3)
@@ -320,7 +339,9 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
                 )
 
             # Solid mean arm at trajectory-fraction cutoff (the pose that will be enqueued)
-            arm_lines, arm_scat = _draw_body(ax, body_cutoff, _COLOR_ARM, view.hi, view.vi)
+            arm_lines, arm_scat = _draw_body(
+                ax, body_cutoff, _COLOR_ARM, view.hi, view.vi
+            )
             cluster_lines.append(arm_lines)
             cluster_scats.append(arm_scat)
         panel_arm_lines.append(cluster_lines)
@@ -332,9 +353,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     col_w = (right - left) / n_clusters
     for idx, k in enumerate(unique_labels):
         col_x0 = left + idx * col_w
-        slider_ax = fig.add_axes(
-            [col_x0 + 0.15 * col_w, 0.085, 0.7 * col_w, 0.025]
-        )
+        slider_ax = fig.add_axes([col_x0 + 0.15 * col_w, 0.085, 0.7 * col_w, 0.025])
         slider = Slider(
             slider_ax,
             "magnitude",
@@ -357,7 +376,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     )
 
 
-def _pick_cluster_level(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
+def _pick_cluster_level(
     trajectories: np.ndarray,
     labels: np.ndarray,
     fk: SmplLeftArmFK | None = None,
@@ -443,7 +462,9 @@ def _pick_cluster_level(  # pylint: disable=too-many-locals,redefined-outer-name
         # Per-sample ghost arm body poses at the cutoff frame
         individual_previews = [
             _merge_arm(
-                _full_body_positions_for_arm(fk, traj[preview_idx], spine_pos, spine_aa),
+                _full_body_positions_for_arm(
+                    fk, traj[preview_idx], spine_pos, spine_aa
+                ),
                 body_pos,
             )  # (22, 3)
             for traj in trajectories[mask]
@@ -570,9 +591,7 @@ def _pick_cluster_level(  # pylint: disable=too-many-locals,redefined-outer-name
     )
     refine_btn.set_active(False)
     confirm_ax = fig.add_axes([0.63, 0.02, 0.18, 0.045])
-    confirm_btn = Button(
-        confirm_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB"
-    )
+    confirm_btn = Button(confirm_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
 
     def _finish(action: Literal["confirm", "refine", "back"]) -> None:
         state["action"] = action
@@ -598,8 +617,10 @@ def _pick_cluster_level(  # pylint: disable=too-many-locals,redefined-outer-name
     back_btn.on_clicked(_on_back)
     if selected_label is not None and selected_label in unique_labels:
         _set_selected(unique_labels.index(selected_label))
-    path_text = "Root" if not path else "Root > " + " > ".join(
-        f"cluster {label}" for label in path
+    path_text = (
+        "Root"
+        if not path
+        else "Root > " + " > ".join(f"cluster {label}" for label in path)
     )
     fig.suptitle(
         f"{path_text} — select a cluster, refine it, or confirm its mean",
@@ -620,16 +641,13 @@ def _pick_cluster_level(  # pylint: disable=too-many-locals,redefined-outer-name
     if state["action"] is None:
         raise RuntimeError("Window closed without confirming or navigating.")
     chosen_label = (
-        None
-        if state["selected"] is None
-        else unique_labels[int(state["selected"])]
+        None if state["selected"] is None else unique_labels[int(state["selected"])]
     )
     return _LevelPickResult(
         action=state["action"],
         selected_label=chosen_label,
         scales={
-            label: float(slider.val)
-            for label, slider in zip(unique_labels, sliders)
+            label: float(slider.val) for label, slider in zip(unique_labels, sliders)
         },
     )
 
@@ -666,9 +684,7 @@ def _navigate_cluster_levels(
         if level.selected_label is None:
             raise RuntimeError("Choose a cluster before confirming or refining.")
 
-        selected_indices = level.sample_indices[
-            level.labels == level.selected_label
-        ]
+        selected_indices = level.sample_indices[level.labels == level.selected_label]
         if result.action == "refine":
             if recluster is None:
                 raise RuntimeError("Recursive clustering is not configured.")
@@ -741,7 +757,7 @@ def pick_cluster(
     )
 
 
-def _pick_cluster_positions_level(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
+def _pick_cluster_positions_level(
     positions: np.ndarray,
     labels: np.ndarray,
     fk: SmplLeftArmFK | None = None,
@@ -820,9 +836,7 @@ def _pick_cluster_positions_level(  # pylint: disable=too-many-locals,redefined-
             )
             for sample_positions in positions[mask]
         ]
-        wrist_trace = fk.fk_batch(
-            mean_arm_aa, display_spine_pos, spine_aa
-        )[:, -1, :]
+        wrist_trace = fk.fk_batch(mean_arm_aa, display_spine_pos, spine_aa)[:, -1, :]
 
         cluster_body_cutoffs.append(body_cutoff)
         cluster_individual_previews.append(individual_previews)
@@ -936,9 +950,7 @@ def _pick_cluster_positions_level(  # pylint: disable=too-many-locals,redefined-
     )
     refine_btn.set_active(False)
     confirm_ax = fig.add_axes([0.63, 0.02, 0.18, 0.045])
-    confirm_btn = Button(
-        confirm_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB"
-    )
+    confirm_btn = Button(confirm_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
 
     def _finish(action: Literal["confirm", "refine", "back"]) -> None:
         state["action"] = action
@@ -964,8 +976,10 @@ def _pick_cluster_positions_level(  # pylint: disable=too-many-locals,redefined-
     back_btn.on_clicked(_on_back)
     if selected_label is not None and selected_label in unique_labels:
         _set_selected(unique_labels.index(selected_label))
-    path_text = "Root" if not path else "Root > " + " > ".join(
-        f"cluster {label}" for label in path
+    path_text = (
+        "Root"
+        if not path
+        else "Root > " + " > ".join(f"cluster {label}" for label in path)
     )
     fig.suptitle(
         f"{path_text} — select a cluster, refine it, or confirm its mean",
@@ -986,16 +1000,13 @@ def _pick_cluster_positions_level(  # pylint: disable=too-many-locals,redefined-
     if state["action"] is None:
         raise RuntimeError("Window closed without confirming or navigating.")
     chosen_label = (
-        None
-        if state["selected"] is None
-        else unique_labels[int(state["selected"])]
+        None if state["selected"] is None else unique_labels[int(state["selected"])]
     )
     return _LevelPickResult(
         action=state["action"],
         selected_label=chosen_label,
         scales={
-            label: float(slider.val)
-            for label, slider in zip(unique_labels, sliders)
+            label: float(slider.val) for label, slider in zip(unique_labels, sliders)
         },
     )
 
@@ -1043,7 +1054,8 @@ def pick_cluster_positions(
 # ---------------------------------------------------------------------------
 # Demo / screenshot entry point
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":  # pylint: disable=redefined-outer-name
+def _demo() -> None:
+    """Render a synthetic three-cluster preview, or run the picker interactively."""
     import sys
 
     rng = np.random.default_rng(42)
@@ -1069,7 +1081,6 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
     if backend.lower() == "agg":
         fk = SmplLeftArmFK()
         unique_labels = sorted(set(demo_labels.tolist()))
-        n_clusters = len(unique_labels)
 
         cluster_body_finals = []
         cluster_wrist_traces = []
@@ -1085,13 +1096,13 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
         all_body = np.stack(cluster_body_finals).reshape(-1, 3)
         all_wrists = np.concatenate(cluster_wrist_traces)
         all_pts = np.vstack([all_body, all_wrists])
-        margin = 0.05  # pylint: disable=invalid-name
+        margin = 0.05
         lims = [
             (float(all_pts[:, d].min()) - margin, float(all_pts[:, d].max()) + margin)
             for d in range(3)
         ]
 
-        fig, axes, _, _, _, _ = _build_figure(
+        fig, _axes, _, _, _, _ = _build_figure(
             unique_labels,
             cluster_body_finals,
             cluster_wrist_traces,
@@ -1122,3 +1133,7 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
         f"User chose cluster {chosen.root_label} at magnitude {chosen.scale:.2f} "
         f"from {len(chosen.sample_indices)} samples"
     )
+
+
+if __name__ == "__main__":
+    _demo()

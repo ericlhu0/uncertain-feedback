@@ -21,7 +21,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, cast
+from typing import Any, Callable, Iterable, Sequence, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,13 +44,7 @@ from uncertain_feedback.planners.mpc import (
     SmplLeftArmFK,
     SmplLeftArmMPC,
 )
-from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
-from uncertain_feedback.simulated_users import (
-    SimulatedUser,
-    choose_cluster,
-    get_persona,
-)
 from uncertain_feedback.planners.mpc.costs import (
     CombineCostGenerator,
     CompositeTrajectoryCost,
@@ -69,6 +63,12 @@ from uncertain_feedback.planners.mpc.costs import (
     replace_generated_costs,
     update_preference_cost,
 )
+from uncertain_feedback.simulated_users import (
+    SimulatedUser,
+    choose_cluster,
+    get_persona,
+)
+from uncertain_feedback.utils.plot import ArmVisualizer
 
 _MDM_PLANNERS = {"arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian"}
 
@@ -86,6 +86,7 @@ class _InitialPoseState:
 
     @classmethod
     def tpose(cls) -> "_InitialPoseState":
+        """Neutral T-pose start state: zero arm angles and a fixed collar."""
         return cls(arm_aa=np.zeros((3, 3)), fixed_collar_aa=np.zeros(3))
 
 
@@ -145,6 +146,7 @@ def _apply_arm_override(state: _InitialPoseState, arm_path: Path | None) -> None
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the shared argument parser for the MPC run entry points."""
     p = argparse.ArgumentParser(
         description="Run arm MPC motion planning",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -448,28 +450,26 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
     user = get_persona(cfg.user)
     extra_costs = build_extra_costs(cfg.costs, cost_context)
     if user.joint_limits:
-        extra_costs = CompositeTrajectoryCost(
-            [*extra_costs.terms(), user.limit_cost()]
-        )
+        extra_costs = CompositeTrajectoryCost([*extra_costs.terms(), user.limit_cost()])
 
     # Default goal: arm raised from the initial pose
     default_goal = arm_aa.copy() + np.array(
         [[0.0, 0.7, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     )
 
-    common: dict = dict(
-        horizon=cfg.horizon,
-        n_mpc_samples=cfg.n_mpc_samples,
-        max_angle_delta=cfg.max_angle_delta,
-        goal_threshold=cfg.goal_threshold,
-        visualize=visualize,
-        fk=fk,
-        spine3_pos=spine3_pos,
-        spine3_aa=spine3_aa,
-        body_pos=body_pos,
-        extra_costs=extra_costs,
-        seed=cfg.seed,
-    )
+    common: dict = {
+        "horizon": cfg.horizon,
+        "n_mpc_samples": cfg.n_mpc_samples,
+        "max_angle_delta": cfg.max_angle_delta,
+        "goal_threshold": cfg.goal_threshold,
+        "visualize": visualize,
+        "fk": fk,
+        "spine3_pos": spine3_pos,
+        "spine3_aa": spine3_aa,
+        "body_pos": body_pos,
+        "extra_costs": extra_costs,
+        "seed": cfg.seed,
+    }
 
     mpc: SmplLeftArmMPC
     if cfg.planner == "arm_mpc":
@@ -594,7 +594,9 @@ def run_planning_loop(
     q_history: list[np.ndarray] = []
     iterator: Iterable[int] = range(n_steps)
     if progress:
-        from tqdm import tqdm  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
+        from tqdm import (  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
+            tqdm,
+        )
 
         iterator = tqdm(iterator, desc=progress_desc, unit="step")
     error: str | None = None
@@ -695,8 +697,13 @@ def _assemble_full_correction_traj(
         segments.append(np.asarray(q_history, dtype=np.float64))
     segments.append(correction_traj)
     post = _rollout_reference_trajectory(
-        cfg, correction_traj[-1], context, base_extra_costs,
-        body_pos, spine3_pos, spine3_aa,
+        cfg,
+        correction_traj[-1],
+        context,
+        base_extra_costs,
+        body_pos,
+        spine3_pos,
+        spine3_aa,
     )
     if post is not None and len(post) > 1:
         segments.append(post[1:])
@@ -747,13 +754,16 @@ def run_repeated_correction_session(
     assert setup.gen is not None and setup.initial_pose is not None
     gen = setup.gen
     feedback_text = resolve_feedback_text(args.text, setup.user)
-    effective_text_time = args.text_time if args.text_time is not None else cfg.text_time
+    effective_text_time = (
+        args.text_time if args.text_time is not None else cfg.text_time
+    )
     configured_base_costs = replace_generated_costs(
         mpc._extra_costs, None  # pylint: disable=protected-access
     )
-    artifact_root = artifact_run_dir(
-        artifact_base_dir, cfg.llm_cost.artifact_dir
-    ) / f"trajectory_{trajectory_index:02d}"
+    artifact_root = (
+        artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
+        / f"trajectory_{trajectory_index:02d}"
+    )
     artifact_root.mkdir(parents=True, exist_ok=True)
     closed_visualizers: list[ArmVisualizer] = []
     runtime_rounds: list[
@@ -784,9 +794,7 @@ def run_repeated_correction_session(
         if args.save_motion is not None:
             path = Path(args.save_motion)
             save_path = str(
-                path.with_name(
-                    f"{path.stem}_round_{round_index:02d}{path.suffix}"
-                )
+                path.with_name(f"{path.stem}_round_{round_index:02d}{path.suffix}")
             )
 
         if cfg.planner == "arm_mpc_mdm":
@@ -853,21 +861,36 @@ def run_repeated_correction_session(
             reference_traj = old_suffix
             if reference_traj is None:
                 reference_traj = _rollout_reference_trajectory(
-                    cfg, q, setup.cost_context, configured_base_costs,
-                    setup.body_pos, setup.spine3_pos, setup.spine3_aa,
+                    cfg,
+                    q,
+                    setup.cost_context,
+                    configured_base_costs,
+                    setup.body_pos,
+                    setup.spine3_pos,
+                    setup.spine3_aa,
                 )
             goal_pos = (
                 np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-                if cfg.cartesian.goals else None
+                if cfg.cartesian.goals
+                else None
             )
             full_correction_traj = _assemble_full_correction_traj(
-                cfg, list(q_history), llm_traj, setup.cost_context,
-                configured_base_costs, setup.body_pos, setup.spine3_pos,
+                cfg,
+                list(q_history),
+                llm_traj,
+                setup.cost_context,
+                configured_base_costs,
+                setup.body_pos,
+                setup.spine3_pos,
                 setup.spine3_aa,
             )
             context = build_generated_cost_context(
-                setup.cost_context, q, llm_traj, list(q_history),
-                window=cfg.preference_window, body_pos=setup.body_pos,
+                setup.cost_context,
+                q,
+                llm_traj,
+                list(q_history),
+                window=cfg.preference_window,
+                body_pos=setup.body_pos,
                 reference_traj=reference_traj,
                 full_correction_traj=full_correction_traj,
                 cartesian_goal=goal_pos,
@@ -878,17 +901,25 @@ def run_repeated_correction_session(
             images: dict[str, Path] = {}
             if cfg.llm_cost.use_images:
                 images = render_prompt_images(
-                    context, round_dir / "images", candidate_trajs,
-                    highlight_label, reference_traj=reference_traj,
+                    context,
+                    round_dir / "images",
+                    candidate_trajs,
+                    highlight_label,
+                    reference_traj=reference_traj,
                     goal_pos=goal_pos,
                 )
             eval_state = EvalState(
-                cfg=cfg, current_q=q, correction_traj=llm_traj,
-                q_history=list(q_history), window=cfg.preference_window,
+                cfg=cfg,
+                current_q=q,
+                correction_traj=llm_traj,
+                q_history=list(q_history),
+                window=cfg.preference_window,
                 cost_context=setup.cost_context,
                 base_extra_costs=configured_base_costs,
-                body_pos=setup.body_pos, spine3_pos=setup.spine3_pos,
-                spine3_aa=setup.spine3_aa, reference_traj=reference_traj,
+                body_pos=setup.body_pos,
+                spine3_pos=setup.spine3_pos,
+                spine3_aa=setup.spine3_aa,
+                reference_traj=reference_traj,
                 full_correction_traj=full_correction_traj,
                 cartesian_goal=goal_pos,
                 cartesian_threshold=cfg.cartesian.threshold,
@@ -897,9 +928,15 @@ def run_repeated_correction_session(
             state_path = round_dir / "state.pkl"
             eval_state.save(state_path)
             generator = create_cost_generator(
-                cfg.llm_cost, context, feedback_text, summaries=summaries,
-                run_dir=round_dir / "cost_generation", images=images, mpc=None,
-                rollout_fn=eval_state.make_rollout_fn(), eval_state=eval_state,
+                cfg.llm_cost,
+                context,
+                feedback_text,
+                summaries=summaries,
+                run_dir=round_dir / "cost_generation",
+                images=images,
+                mpc=None,
+                rollout_fn=eval_state.make_rollout_fn(),
+                eval_state=eval_state,
             )
             generated = generator.generate(install=False)
             if generated is not None:
@@ -909,17 +946,23 @@ def run_repeated_correction_session(
                     )
                 )
                 goal = (
-                    tuple(float(value) for value in goal_pos)
+                    (float(goal_pos[0]), float(goal_pos[1]), float(goal_pos[2]))
                     if goal_pos is not None
                     else None
                 )
                 cost_round = CostRound(
-                    index=round_index, goal=goal, feedback_text=feedback_text,
-                    trigger_step=step, round_dir=round_dir.resolve(),
-                    state_path=state_path.resolve(), cost_code=generated.code,
-                    params=generated.params, summaries=summaries,
+                    index=round_index,
+                    goal=goal,
+                    feedback_text=feedback_text,
+                    trigger_step=step,
+                    round_dir=round_dir.resolve(),
+                    state_path=state_path.resolve(),
+                    cost_code=generated.code,
+                    params=generated.params,
+                    summaries=summaries,
                     image_paths=tuple(path.resolve() for path in images.values()),
-                    trajectory_index=trajectory_index, trigger_reason=reason,
+                    trajectory_index=trajectory_index,
+                    trigger_reason=reason,
                     trigger_violation=violation,
                 )
                 runtime_rounds.append(
@@ -928,15 +971,20 @@ def run_repeated_correction_session(
                 print(f"[llm-cost] stacked correction cost {round_index}")
         _restore_interactive_backend()
         return CorrectionRoundResult(
-            round_index=round_index, trajectory_index=trajectory_index,
-            trigger_step=step, trigger_reason=reason,
-            trigger_violation=violation, feedback_text=feedback_text,
-            correction_traj=llm_traj, generated_cost=generated,
-            cost_round=cost_round, artifact_dir=round_dir,
+            round_index=round_index,
+            trajectory_index=trajectory_index,
+            trigger_step=step,
+            trigger_reason=reason,
+            trigger_violation=violation,
+            feedback_text=feedback_text,
+            correction_traj=llm_traj,
+            generated_cost=generated,
+            cost_round=cost_round,
+            artifact_dir=round_dir,
         )
 
     def finish(
-        rounds: list[CorrectionRoundResult]
+        rounds: Sequence[CorrectionRoundResult],
     ) -> GeneratedPythonCost | None:
         all_cost_rounds = [
             *prior_rounds,
@@ -961,12 +1009,19 @@ def run_repeated_correction_session(
             return cost
         _, eval_state, context, summaries, images = runtime_rounds[-1]
         combinator = CombineCostGenerator(
-            context=context, instruction=feedback_text, summaries=summaries,
+            context=context,
+            instruction=feedback_text,
+            summaries=summaries,
             run_dir=artifact_root / f"combine_after_trajectory_{trajectory_index:02d}",
-            images=images, use_images=cfg.llm_cost.use_images,
-            model=cfg.llm_cost.model, strict=cfg.llm_cost.strict, mpc=None,
-            rollout_fn=eval_state.make_rollout_fn(), eval_state=eval_state,
-            codex_cmd=cfg.llm_cost.codex_cmd, rounds=all_cost_rounds,
+            images=images,
+            use_images=cfg.llm_cost.use_images,
+            model=cfg.llm_cost.model,
+            strict=cfg.llm_cost.strict,
+            mpc=None,
+            rollout_fn=eval_state.make_rollout_fn(),
+            eval_state=eval_state,
+            codex_cmd=cfg.llm_cost.codex_cmd,
+            rounds=all_cost_rounds,
         )
         combined = combinator.generate(install=False)
         if combined is not None:
@@ -980,12 +1035,17 @@ def run_repeated_correction_session(
         return prior_unified_cost
 
     session = CorrectionSession(
-        mpc=mpc, user=setup.user, cost_context=setup.cost_context,
+        mpc=mpc,
+        user=setup.user,
+        cost_context=setup.cost_context,
         feedback_text=feedback_text,
         trigger_threshold=cfg.corrections.trigger_threshold,
-        text_time=effective_text_time, artifact_dir=artifact_root,
-        handle_correction=handle_correction, finish=finish,
-        trajectory_index=trajectory_index, prior_rounds=prior_rounds,
+        text_time=effective_text_time,
+        artifact_dir=artifact_root,
+        handle_correction=handle_correction,
+        finish=finish,
+        trajectory_index=trajectory_index,
+        prior_rounds=prior_rounds,
         prior_unified_cost=prior_unified_cost,
     )
     result = session.run_trajectory(
@@ -1018,6 +1078,7 @@ def run_repeated_correction_session(
 
 
 def main() -> None:
+    """Parse CLI arguments and run the configured MPC planner."""
     args = build_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
@@ -1033,8 +1094,11 @@ def main() -> None:
         )
     else:
         run_planning_loop(
-            setup.mpc, setup.arm_aa.copy(), cfg.steps,
-            progress=True, progress_desc="MPC",
+            setup.mpc,
+            setup.arm_aa.copy(),
+            cfg.steps,
+            progress=True,
+            progress_desc="MPC",
         )
 
     if args.save and setup.visualize:

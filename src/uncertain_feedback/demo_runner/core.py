@@ -3,9 +3,10 @@
 One :class:`DemoRig` per server process holds everything that outlives an
 individual session: the loaded config, the persona library (with CRUD), the
 motion generator, the initial pose / body / spine, forward kinematics, the mesh
-cache, and the shared :class:`MpcCostContext`. A :class:`~uncertain_feedback.demo_runner.session.Session`
-is spawned from the rig; it owns one simulated user plus the context accumulated
-while correcting them (trajectory corpus, correction rounds, unified cost) and
+cache, and the shared :class:`MpcCostContext`. A
+:class:`~uncertain_feedback.demo_runner.session.Session` is spawned from the
+rig; it owns one simulated user plus the context accumulated while correcting
+them (trajectory corpus, correction rounds, unified cost) and
 each trajectory driven under that user.
 """
 
@@ -42,10 +43,10 @@ from uncertain_feedback.planners.mpc.kinematics import (
 )
 from uncertain_feedback.simulated_users.base import (
     FEATURE_NAMES,
+    JOINT_SLOTS,
     Bound,
     CoupledBound,
     HiddenBound,
-    JOINT_SLOTS,
     SimulatedUser,
     feature_series,
 )
@@ -71,6 +72,7 @@ def _log(message: str) -> None:
 
 
 def bound_to_json(bound: Bound) -> dict[str, Any]:
+    """Serialize a hidden or coupled preference bound for the browser."""
     if isinstance(bound, CoupledBound):
         return {
             "kind": "coupled",
@@ -90,6 +92,7 @@ def bound_to_json(bound: Bound) -> dict[str, Any]:
 
 
 def bound_from_json(data: dict[str, Any]) -> Bound:
+    """Rebuild a preference bound from its JSON form."""
     if data["kind"] == "coupled":
         return CoupledBound(
             feature=data["feature"],
@@ -107,6 +110,7 @@ def bound_from_json(data: dict[str, Any]) -> Bound:
 
 
 def persona_to_json(user: SimulatedUser, builtin: bool) -> dict[str, Any]:
+    """Serialize a simulated user, tagging whether it ships with the repo."""
     return {
         "name": user.name,
         "description": user.description,
@@ -121,6 +125,7 @@ def persona_to_json(user: SimulatedUser, builtin: bool) -> dict[str, Any]:
 
 
 def persona_from_json(data: dict[str, Any]) -> SimulatedUser:
+    """Rebuild a simulated user from its JSON form."""
     return SimulatedUser(
         name=data["name"],
         description=data.get("description", ""),
@@ -200,6 +205,7 @@ class DemoRig:
             json.dump(customs, f, indent=2)
 
     def personas_payload(self) -> list[dict[str, Any]]:
+        """Every persona plus its induced feature-space ranges, for the UI."""
         payload = []
         for name, user in sorted(self.personas.items()):
             data = persona_to_json(user, builtin=name in self.builtin_names)
@@ -239,6 +245,7 @@ class DemoRig:
         }
 
     def upsert_persona(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create or replace a persona, retriggering the live session if it is the active one."""
         user = persona_from_json(data)
         self.personas[user.name] = user
         if user.name not in self.builtin_names:
@@ -248,6 +255,7 @@ class DemoRig:
         return {"retriggered": False, "trigger_step": None}
 
     def delete_persona(self, name: str) -> None:
+        """Delete a custom persona; built-ins cannot be removed."""
         if name in self.builtin_names:
             raise ValueError(f"Built-in persona {name!r} cannot be deleted.")
         if name not in self.personas:
@@ -256,6 +264,7 @@ class DemoRig:
         self._save_custom_personas()
 
     def get_persona(self, name: str) -> SimulatedUser:
+        """Look up a persona by name."""
         if name not in self.personas:
             raise ValueError(f"Unknown persona {name!r}.")
         return self.personas[name]
@@ -277,11 +286,13 @@ class DemoRig:
         )
 
     def trajectory_configs_payload(self) -> dict[str, list[dict[str, Any]]]:
+        """The saved named initial poses and goals."""
         return self.trajectory_configs
 
     def upsert_trajectory_config(
         self, kind: str, data: dict[str, Any]
     ) -> dict[str, list[dict[str, Any]]]:
+        """Save a named initial pose or goal and return the updated collection."""
         name = data["name"].strip()
         if not name:
             raise ValueError("Config name is required.")
@@ -385,6 +396,7 @@ class DemoRig:
         }
 
     def preview_pose(self, arm_aa: list[list[float]]) -> dict[str, Any]:
+        """Forward-kinematics preview of an arm pose: joints, mesh, and wrist offset."""
         q = np.asarray(arm_aa, dtype=np.float64)
         arm_pos = self.fk.fk(q, self.spine3_pos, self.spine3_aa)
         return {
@@ -394,11 +406,13 @@ class DemoRig:
         }
 
     def mesh_vertices(self, mesh_id: str, frame: int | None = None) -> np.ndarray:
+        """Cached mesh vertices for a whole trajectory, or one frame of it."""
         if frame is None:
             return self.meshes.vertices(mesh_id)
         return self.meshes.vertices_at(mesh_id, frame)
 
     def init_payload(self) -> dict[str, Any]:
+        """The one-shot bootstrap payload the browser loads on connect."""
         arm_bones = {
             (p, c)
             for p, c in SMPL_BONE_PAIRS_22
@@ -449,13 +463,14 @@ class DemoRig:
     # --- session management -----------------------------------------------
 
     def begin_session(self, persona: str) -> "Session":
+        """Start a fresh session for ``persona`` in a new timestamped artifact dir."""
         from uncertain_feedback.demo_runner.session import Session
 
         user = self.get_persona(persona)
         session_dir = self.artifact_root / (
             f"{time.strftime('%Y%m%d_%H%M%S')}_session_{persona}"
         )
-        self.session = Session(
+        session = Session(
             rig=self,
             persona_name=persona,
             user=user,
@@ -464,11 +479,13 @@ class DemoRig:
                 session_dir / "trajectory_corpus", self.context
             ),
         )
-        self.session._save()
+        session._save()  # pylint: disable=not-callable
+        self.session = session
         _log(f"session started: persona={persona} dir={session_dir}")
-        return self.session
+        return session
 
     def list_sessions(self) -> list[dict[str, Any]]:
+        """Summarize every saved session under the artifact root, newest first."""
         root = getattr(self, "artifact_root", Path("demo_runner_artifacts"))
         sessions: list[dict[str, Any]] = []
         if not root.exists():
@@ -497,11 +514,12 @@ class DemoRig:
             )
         return sessions
 
-    def resume_session(self, dir: str) -> "Session":
+    def resume_session(self, session_dir: str) -> "Session":
+        """Reload a saved session in place and make it the live one."""
         from uncertain_feedback.demo_runner.session import Session
 
-        self.session = Session.load(self, Path(dir))
-        _log(f"session resumed: dir={dir} persona={self.session.persona_name}")
+        self.session = Session.load(self, Path(session_dir))
+        _log(f"session resumed: dir={session_dir} persona={self.session.persona_name}")
         return self.session
 
     def fork_session(self, name: str) -> "Session":
@@ -535,13 +553,13 @@ class DemoRig:
         return self.session
 
     def delete_session(self, name: str) -> dict[str, Any]:
+        """Remove a saved session directory, clearing it if it is currently live."""
         root = self.artifact_root.resolve()
         session_dir = (root / name).resolve()
         if session_dir.parent != root or not (session_dir / "session.json").exists():
             raise ValueError("Unknown session.")
         active_deleted = (
-            self.session is not None
-            and self.session.dir.resolve() == session_dir
+            self.session is not None and self.session.dir.resolve() == session_dir
         )
         if active_deleted:
             self.session = None

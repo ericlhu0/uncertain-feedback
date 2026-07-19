@@ -35,7 +35,7 @@ def _build_agglo_end_pose(
 
 
 def _build_agglo_path_pca(
-    n_clusters: int, fk: "SmplLeftArmFK | None"
+    n_clusters: int, _fk: "SmplLeftArmFK | None"
 ) -> TrajectoryClusterer:
     from uncertain_feedback.uncertainty.clustering.path_pca_clusterer import (  # pylint: disable=import-outside-toplevel
         PathPcaClusterer,
@@ -45,7 +45,7 @@ def _build_agglo_path_pca(
 
 
 def _build_agglo_t2m(
-    n_clusters: int, fk: "SmplLeftArmFK | None"
+    n_clusters: int, _fk: "SmplLeftArmFK | None"
 ) -> TrajectoryClusterer:
     from uncertain_feedback.uncertainty.clustering.t2m_clusterer import (  # pylint: disable=import-outside-toplevel
         T2mEmbeddingClusterer,

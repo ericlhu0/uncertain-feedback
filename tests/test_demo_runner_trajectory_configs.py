@@ -1,3 +1,7 @@
+"""Tests for saving and reloading named initial poses and goals."""
+
+# pylint: disable=missing-function-docstring
+
 import json
 from types import SimpleNamespace
 
@@ -21,9 +25,7 @@ def test_named_trajectory_configs_persist_and_update(tmp_path) -> None:
     rig.upsert_trajectory_config(
         "initial_poses", {"name": "ready", "arm_aa": first_pose.tolist()}
     )
-    rig.upsert_trajectory_config(
-        "goals", {"name": "high", "goal": [0.1, 0.5, -0.2]}
-    )
+    rig.upsert_trajectory_config("goals", {"name": "high", "goal": [0.1, 0.5, -0.2]})
     rig.upsert_trajectory_config(
         "initial_poses",
         {"name": "ready", "arm_aa": np.ones((3, 3)).tolist()},
@@ -56,9 +58,7 @@ def test_trajectory_config_endpoint_returns_updated_library(monkeypatch) -> None
         "initial_poses": [],
         "goals": [{"name": "high", "goal": [0.1, 0.5, -0.2]}],
     }
-    fake_rig = SimpleNamespace(
-        upsert_trajectory_config=lambda kind, data: expected
-    )
+    fake_rig = SimpleNamespace(upsert_trajectory_config=lambda kind, data: expected)
     monkeypatch.setattr(server, "rig", fake_rig)
 
     response = server.app.test_client().post(

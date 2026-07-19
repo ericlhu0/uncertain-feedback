@@ -1,3 +1,7 @@
+"""Tests for cost-generation prompt assembly and image attachment."""
+
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -54,8 +58,8 @@ def test_interpret_prompt_fills_placeholders_without_code_contract() -> None:
     )
     assert "Large chosen-versus-marked-wrong separation alone is not enough" in text
     assert [p.name for p in attached] == [f"{key}.png" for key in IMAGE_PLACEHOLDERS]
-    for key in IMAGE_PLACEHOLDERS:
-        assert IMAGE_PLACEHOLDERS[key] in text
+    for key, placeholder in IMAGE_PLACEHOLDERS.items():
+        assert placeholder in text
     assert "candidate the person explicitly marked as wrong" in text
 
 
@@ -76,10 +80,10 @@ def test_unavailable_image_dropped_without_attachment() -> None:
 
 def test_no_images_attached_when_none_available() -> None:
     text, attached = build_interpret_prompt("x", {}, {})
-    assert attached == []
-    for key in IMAGE_PLACEHOLDERS:
+    assert attached == []  # pylint: disable=use-implicit-booleaness-not-comparison
+    for key, placeholder in IMAGE_PLACEHOLDERS.items():
         assert "{" + key + "}" not in text
-        assert IMAGE_PLACEHOLDERS[key] not in text
+        assert placeholder not in text
 
 
 def test_ground_and_author_split_numeric_work_from_code_contract() -> None:

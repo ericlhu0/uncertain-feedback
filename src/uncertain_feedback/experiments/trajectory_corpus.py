@@ -22,18 +22,22 @@ from uncertain_feedback.simulated_users.base import FEATURE_NAMES, feature_serie
 
 @dataclass(frozen=True)
 class TrajectoryCorpus:
+    """On-disk log of executed and corrected trajectories for one session."""
+
     dir: Path
     context: MpcCostContext
 
     @classmethod
-    def create(cls, dir: Path, context: MpcCostContext) -> "TrajectoryCorpus":
-        dir.mkdir(parents=True, exist_ok=True)
-        manifest = dir / "manifest.json"
+    def create(cls, corpus_dir: Path, context: MpcCostContext) -> "TrajectoryCorpus":
+        """Open (creating if needed) the corpus rooted at ``corpus_dir``."""
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+        manifest = corpus_dir / "manifest.json"
         if not manifest.exists():
             manifest.write_text("[]")
-        return cls(dir=dir, context=context)
+        return cls(dir=corpus_dir, context=context)
 
     def entries(self) -> list[dict[str, Any]]:
+        """Every logged entry, in insertion order."""
         return json.loads((self.dir / "manifest.json").read_text())
 
     def log(
@@ -47,6 +51,7 @@ class TrajectoryCorpus:
         trigger_violation: float | None,
         feedback_text: str | None,
     ) -> dict[str, Any]:
+        """Save a trajectory with its features and return the new manifest entry."""
         entries = self.entries()
         index = max((e["index"] for e in entries), default=-1) + 1
 
@@ -59,7 +64,9 @@ class TrajectoryCorpus:
             writer = csv.writer(f)
             writer.writerow(["frame", *FEATURE_NAMES])
             for frame in range(n_frames):
-                writer.writerow([frame, *(feats[name][frame] for name in FEATURE_NAMES)])
+                writer.writerow(
+                    [frame, *(feats[name][frame] for name in FEATURE_NAMES)]
+                )
 
         entry = {
             "index": index,
@@ -79,6 +86,7 @@ class TrajectoryCorpus:
         return entry
 
     def remove(self, index: int) -> None:
+        """Drop the entry with the given index and its artifacts."""
         entries = self.entries()
         kept = [e for e in entries if e["index"] != index]
         (self.dir / "manifest.json").write_text(json.dumps(kept, indent=2))

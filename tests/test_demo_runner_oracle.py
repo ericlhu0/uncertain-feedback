@@ -1,3 +1,7 @@
+"""Tests for demo-runner oracle rollouts, cost fields, and round combining."""
+
+# pylint: disable=missing-function-docstring
+
 import json
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -74,13 +78,17 @@ def test_generated_bounds_skip_invalid_structured_terms(tmp_path) -> None:
     }
     (tmp_path / "rationale.json").write_text(json.dumps(rationale), encoding="utf-8")
 
-    assert _generated_bounds_from_artifacts(tmp_path) == []
+    assert (  # pylint: disable=use-implicit-booleaness-not-comparison
+        _generated_bounds_from_artifacts(tmp_path) == []
+    )
 
 
 def test_generated_cost_field_identifies_single_named_feature(
     monkeypatch, tmp_path
 ) -> None:
     class SingleFeatureCost:
+        """Generated cost depending on exactly one named feature."""
+
         code = """def cost(q_trajs, context, params):
     elbow = context.elbow_flexion_angles(q_trajs[:, 1:])
     return np.sum(elbow ** 2, axis=1)
@@ -90,13 +98,13 @@ def test_generated_cost_field_identifies_single_named_feature(
             return np.arange(q_trajs.shape[0], dtype=np.float64)
 
     session = Session(
-        rig=SimpleNamespace(context=object()),
+        rig=SimpleNamespace(context=object()),  # type: ignore[arg-type]
         persona_name="persona",
-        user=SimpleNamespace(),
+        user=SimpleNamespace(),  # type: ignore[arg-type]
         dir=tmp_path,
-        corpus=SimpleNamespace(),
+        corpus=SimpleNamespace(),  # type: ignore[arg-type]
     )
-    session.trajectory = SimpleNamespace(
+    session.trajectory = SimpleNamespace(  # type: ignore[assignment]
         base_traj=np.zeros((2, 3, 3)),
         cluster_fulls={},
         cluster_corrections={},
@@ -107,7 +115,7 @@ def test_generated_cost_field_identifies_single_named_feature(
         lambda context, poses: {"elbow_flexion": np.linspace(0.0, 1.0, poses.shape[0])},
     )
 
-    field = Session.generated_cost_field(session, SingleFeatureCost())
+    field = Session.generated_cost_field(session, SingleFeatureCost())  # type: ignore[arg-type]
 
     assert field["active_features"] == ["elbow_flexion"]
     assert len(field["features"]["elbow_flexion"]) == len(field["penalty"])
@@ -145,7 +153,9 @@ def test_manual_trajectory_requires_session(monkeypatch) -> None:
     }
 
 
-def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch, tmp_path) -> None:
+def test_oracle_rollouts_start_at_initial_and_trigger_poses(
+    monkeypatch, tmp_path
+) -> None:
     user = SimulatedUser("persona", "", "", bounds=())
     rig = SimpleNamespace(
         context=object(),
@@ -158,7 +168,11 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch, tmp_pat
             "values": traj[:, 0, 0].tolist(),
             "mesh_id": "mesh",
         },
-        meshes=SimpleNamespace(unpin=lambda mesh_id: unpinned.append(mesh_id)),
+        meshes=SimpleNamespace(
+            unpin=lambda mesh_id: unpinned.append(  # pylint: disable=unnecessary-lambda
+                mesh_id
+            )
+        ),
     )
     unpinned: list[str] = []
     q_feedback = np.full((3, 3), 2.0)
@@ -176,9 +190,9 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch, tmp_pat
         oracle_package=None,
     )
     session = Session.__new__(Session)
-    session.rig = rig
+    session.rig = rig  # type: ignore[assignment]
     session.user = user
-    session.trajectory = trajectory
+    session.trajectory = trajectory  # type: ignore[assignment]
     session.dir = tmp_path
     session.persona_name = user.name
     session.started = ""
@@ -196,8 +210,8 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(monkeypatch, tmp_pat
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *args: {})
 
-    initial = session.run_oracle(from_trigger=False)
-    trigger = session.run_oracle(from_trigger=True)
+    initial = session.run_oracle(from_trigger=False)  # pylint: disable=not-callable
+    trigger = session.run_oracle(from_trigger=True)  # pylint: disable=not-callable
 
     np.testing.assert_array_equal(calls[0][0][1], trajectory.start_arm_aa)
     np.testing.assert_array_equal(calls[1][0][1], trajectory.q_feedback)
@@ -212,6 +226,8 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
     monkeypatch, tmp_path
 ) -> None:
     class CombinedCost:
+        """Marker cost standing in for the combined result."""
+
         description = "combined"
         code = "def cost(): pass"
         params: dict[str, float] = {}
@@ -223,6 +239,8 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
     constructor_args = {}
 
     class FakeCombinator:
+        """Combinator stand-in returning the marker combined cost."""
+
         def __init__(self, **kwargs) -> None:
             constructor_args.update(kwargs)
 
@@ -236,6 +254,8 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
     )
 
     class FakeEvalState:
+        """EvalState stand-in returning canned context and rollout hooks."""
+
         @classmethod
         def load(cls, path):
             assert path == tmp_path / "second.pkl"
@@ -282,17 +302,17 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
         package_trajectory=lambda traj, user: {"values": traj[:, 0, 0].tolist()},
     )
     session = Session.__new__(Session)
-    session.rig = rig
-    session.user = object()
-    session.rounds = rounds
+    session.rig = rig  # type: ignore[assignment]
+    session.user = object()  # type: ignore[assignment]
+    session.rounds = rounds  # type: ignore[assignment]
     session.round_records = []
-    session.trajectory = trajectory
+    session.trajectory = trajectory  # type: ignore[assignment]
     session.dir = tmp_path
-    session.corpus = SimpleNamespace(
+    session.corpus = SimpleNamespace(  # type: ignore[assignment]
         dir=tmp_path / "trajectory_corpus", entries=lambda: []
     )
-    session._save = MethodType(lambda self: None, session)
-    session.generated_cost_field = MethodType(lambda self, cost: {}, session)
+    session._save = MethodType(lambda self: None, session)  # type: ignore[method-assign]
+    session.generated_cost_field = MethodType(lambda self, cost: {}, session)  # type: ignore[method-assign]
     rollout = np.zeros((2, 3, 3))
     calls = []
 
@@ -321,6 +341,8 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
     monkeypatch, tmp_path
 ) -> None:
     class CombinedCost:
+        """Marker cost standing in for the combined result."""
+
         description = "combined"
         code = "def cost(): pass"
         params: dict[str, float] = {}
@@ -328,15 +350,21 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
     combined = CombinedCost()
 
     class FakeCombinator:
+        """Combinator stand-in returning the marker combined cost."""
+
         def __init__(self, **kwargs) -> None:
             pass
 
         def generate(self, install):
+            del install
             return combined
 
     class FakeEvalState:
+        """EvalState stand-in returning canned context and rollout hooks."""
+
         @classmethod
         def load(cls, path):
+            del path
             return SimpleNamespace(
                 make_generated_context=lambda: "persisted context",
                 make_rollout_fn=lambda: "persisted rollout",
@@ -350,7 +378,7 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
     monkeypatch.setattr(demo_session, "rollout_to_goal", fail_rollout)
 
     session = Session.__new__(Session)
-    session.rig = SimpleNamespace(
+    session.rig = SimpleNamespace(  # type: ignore[assignment]
         cfg=SimpleNamespace(
             llm_cost=SimpleNamespace(
                 use_images=False, model=None, strict=True, codex_cmd="codex"
@@ -358,23 +386,26 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
         )
     )
     session.rounds = [
-        SimpleNamespace(
-            feedback_text=text, state_path=tmp_path / "s.pkl", summaries={}, image_paths=()
+        SimpleNamespace(  # type: ignore[misc]
+            feedback_text=text,
+            state_path=tmp_path / "s.pkl",
+            summaries={},
+            image_paths=(),
         )
         for text in ("first", "second")
     ]
     session.round_records = []
     session.trajectory = None
     session.dir = tmp_path
-    session.corpus = SimpleNamespace(
+    session.corpus = SimpleNamespace(  # type: ignore[assignment]
         dir=tmp_path / "trajectory_corpus", entries=lambda: []
     )
-    session._save = MethodType(lambda self: None, session)
-    session.generated_cost_field = MethodType(lambda self, cost: {}, session)
+    session._save = MethodType(lambda self: None, session)  # type: ignore[method-assign]
+    session.generated_cost_field = MethodType(lambda self, cost: {}, session)  # type: ignore[method-assign]
 
     result = session.combine_rounds()
 
-    assert session.unified_cost is combined
+    assert session.unified_cost is combined  # type: ignore[comparison-overlap]
     assert result["description"] == "combined"
     assert "trajectory" not in result
     assert "goal_reach" not in result
@@ -425,6 +456,8 @@ def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) 
     generated_context = object()
 
     class FakeEvalState:
+        """EvalState stand-in returning canned context and rollout hooks."""
+
         @classmethod
         def load(cls, path):
             assert path == cost_round.state_path
@@ -432,14 +465,14 @@ def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) 
 
     monkeypatch.setattr(demo_session, "EvalState", FakeEvalState)
 
-    loaded = Session.load(rig, session_dir)
+    loaded = Session.load(rig, session_dir)  # type: ignore[arg-type]
 
     assert loaded.trajectory is None
     assert loaded.trajectory_count == 2
     assert loaded.rounds[0].grounding == "threshold"
     q_trajs = np.zeros((2, 1, 3, 3))
     np.testing.assert_array_equal(loaded._round_costs[0](q_trajs), [2.0, 2.0])
-    np.testing.assert_array_equal(loaded.unified_cost(q_trajs), [3.0, 3.0])
+    np.testing.assert_array_equal(loaded.unified_cost(q_trajs), [3.0, 3.0])  # type: ignore[misc]
 
 
 def test_list_sessions_is_newest_first_with_context_counts(
@@ -491,7 +524,7 @@ def test_delete_session_removes_directory_and_clears_active(tmp_path) -> None:
     (session_dir / "session.json").write_text("{}", encoding="utf-8")
     rig = DemoRig.__new__(DemoRig)
     rig.artifact_root = root
-    rig.session = SimpleNamespace(dir=session_dir)
+    rig.session = SimpleNamespace(dir=session_dir)  # type: ignore[assignment]
 
     result = rig.delete_session(session_dir.name)
 

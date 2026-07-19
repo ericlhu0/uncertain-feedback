@@ -94,6 +94,10 @@ disallow_untyped_calls = true
 warn_unreachable = true
 exclude = [
     "venv/*",
+    "demo_runner_artifacts/",
+    "demo_designer_artifacts/",
+    "llm_cost_artifacts/",
+    "transfer_artifacts/",
     "src/uncertain_feedback/motion_generators/mdm/mdm_parser_util.py",
     "src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py",
 ]
@@ -112,6 +116,10 @@ module = [
     "torch.*",
     "sklearn.*",
     "yaml",
+    "kimodo.*",
+    "train.*",
+    "smplx",
+    "tqdm.*",
 ]
 ignore_missing_imports = true
 

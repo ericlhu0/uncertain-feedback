@@ -121,9 +121,9 @@ def _arm_feature_mask() -> np.ndarray:
     """Return a (263,) bool mask that is True for left-arm HML263 features."""
     mask = np.zeros(263, dtype=bool)
     for j in _L_ARM_JOINTS:
-        mask[4 + (j - 1) * 3 : 4 + (j - 1) * 3 + 3] = True   # positions
+        mask[4 + (j - 1) * 3 : 4 + (j - 1) * 3 + 3] = True  # positions
         mask[67 + (j - 1) * 6 : 67 + (j - 1) * 6 + 6] = True  # rotations
-        mask[193 + j * 3 : 193 + j * 3 + 3] = True             # velocities
+        mask[193 + j * 3 : 193 + j * 3 + 3] = True  # velocities
     return mask
 
 
@@ -265,7 +265,9 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
             motion_id += 1
             id_str = f"{motion_id:06d}"
             caption_note = f"  ({n_captions} caption{'s' if n_captions > 1 else ''})"
-            print(f"[{id_str}] {clip_name}  f{start_frame}-f{end_frame}{caption_note} ...")
+            print(
+                f"[{id_str}] {clip_name}  f{start_frame}-f{end_frame}{caption_note} ..."
+            )
 
             fps_tag = f"{clip_fps:.4g}".replace(".", "p")
             cache_file = (
@@ -331,9 +333,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                     (len(hml263), int(arm_mask.sum()))
                 ).astype(np.float32)
                 hml263_aug[:, arm_mask] += noise_norm * noise_std * hml_std[arm_mask]
-                np.save(
-                    output_dir / "new_joint_vecs" / f"{aug_id_str}.npy", hml263_aug
-                )
+                np.save(output_dir / "new_joint_vecs" / f"{aug_id_str}.npy", hml263_aug)
                 _write_text_file(
                     output_dir / "texts" / f"{aug_id_str}.txt", captions, nlp
                 )

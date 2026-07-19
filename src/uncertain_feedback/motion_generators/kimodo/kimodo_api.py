@@ -134,9 +134,7 @@ class KimodoMotionGenerator(MotionGenerator):
             )
         self._align_fk_collar_to_pose(start_pose)
         n_frames = self._resolve_frames(motion_length_seconds, num_frames)
-        body_pose, positions = self._run_worker(
-            text, n_frames, num_samples, start_pose
-        )
+        body_pose, positions = self._run_worker(text, n_frames, num_samples, start_pose)
 
         if spine3_aa is not None:
             # Fixed-base path: route through positions so the trajectory lands
@@ -175,8 +173,10 @@ class KimodoMotionGenerator(MotionGenerator):
 
     @staticmethod
     def _resolve_frames(motion_length_seconds: float, num_frames: int | None) -> int:
-        return int(num_frames) if num_frames is not None else int(
-            motion_length_seconds * _FPS
+        return (
+            int(num_frames)
+            if num_frames is not None
+            else int(motion_length_seconds * _FPS)
         )
 
     def _body_pose_to_visualizer_positions(self, body_pose: np.ndarray) -> np.ndarray:

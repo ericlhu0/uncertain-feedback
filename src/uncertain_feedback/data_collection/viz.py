@@ -17,16 +17,17 @@ from uncertain_feedback.data_collection import (
 )
 from uncertain_feedback.utils.plot import ArmVisualizer
 
-
 # ── Run pipeline ──────────────────────────────────────────────────────────────
 config = MhrToHml263Config(
     mhr_estimator_config=MhrEstimatorConfig(
-        sam_checkpoint_path=str(Path(__file__).parent
-        / "sam-3d-body"
-        / "checkpoints"
-        / "sam-3d-body-dinov3"
-        / "model.ckpt",
-    )),
+        sam_checkpoint_path=str(
+            Path(__file__).parent
+            / "sam-3d-body"
+            / "checkpoints"
+            / "sam-3d-body-dinov3"
+            / "model.ckpt",
+        )
+    ),
     hml_stats_dir=Path("path/to/HumanML3D/Mean_Std/"),
 )
 pipeline = MhrToHml263Pipeline(config)

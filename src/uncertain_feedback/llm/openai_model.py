@@ -147,9 +147,7 @@ class OpenAIModel(BaseModel):
         ]
         for msg in messages:
             if msg["role"] == "user":
-                content: Any = self._create_prompt(
-                    msg["text"], msg.get("images")
-                )
+                content: Any = self._create_prompt(msg["text"], msg.get("images"))
             else:
                 content = msg["text"]
             api_messages.append({"role": msg["role"], "content": content})
@@ -170,9 +168,9 @@ class OpenAIModel(BaseModel):
         api_input: List[Dict[str, Any]] = []
         for msg in messages:
             if msg["role"] == "user":
-                content = self._create_responses_input(
-                    msg["text"], msg.get("images")
-                )[0]["content"]
+                content = self._create_responses_input(msg["text"], msg.get("images"))[
+                    0
+                ]["content"]
             else:
                 content = [{"type": "output_text", "text": msg["text"]}]
             api_input.append({"role": msg["role"], "content": content})

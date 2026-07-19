@@ -1,9 +1,13 @@
+"""Tests for the trajectory clusterer registry and its implementations."""
+
+# pylint: disable=missing-function-docstring
+
 import numpy as np
 import pytest
 
 # uncertainty.clustering <-> planners.mpc import cycle: planners.mpc must be
 # fully initialized before the clustering package is imported.
-import uncertain_feedback.planners.mpc  # noqa: F401
+import uncertain_feedback.planners.mpc  # noqa: F401  # pylint: disable=unused-import
 from uncertain_feedback.uncertainty.clustering import make_clusterer
 
 
@@ -31,7 +35,7 @@ def _two_group_positions(n_per_group: int = 6, n_frames: int = 30) -> np.ndarray
 )
 def test_clusterers_separate_distinct_groups(name: str) -> None:
     positions = _two_group_positions()
-    clusterer = make_clusterer(name, 2, fk=object())
+    clusterer = make_clusterer(name, 2, fk=object())  # type: ignore[arg-type]
     labels = clusterer.cluster_positions(positions)
 
     assert labels.shape == (12,)
@@ -48,20 +52,20 @@ def test_clusterers_separate_distinct_groups(name: str) -> None:
 
 def test_medoid_is_min_summed_distance_member() -> None:
     positions = _two_group_positions(n_per_group=4)
-    clusterer = make_clusterer("kmeans_end_pose", 2, fk=object())
+    clusterer = make_clusterer("kmeans_end_pose", 2, fk=object())  # type: ignore[arg-type]
     labels = clusterer.cluster_positions(positions)
     features = clusterer._position_features
     for label, idx in clusterer.medoid_indices(labels).items():
         members = np.flatnonzero(labels == label)
         sums = [
-            np.linalg.norm(features[members] - features[m], axis=1).sum()
+            np.linalg.norm(features[members] - features[m], axis=1).sum()  # type: ignore[index]
             for m in members
         ]
         assert idx == members[int(np.argmin(sums))]
 
 
 def test_medoid_indices_requires_prior_clustering() -> None:
-    clusterer = make_clusterer("kmeans_end_pose", 2, fk=object())
+    clusterer = make_clusterer("kmeans_end_pose", 2, fk=object())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="cluster_positions"):
         clusterer.medoid_indices(np.zeros(4, dtype=np.intp))
 

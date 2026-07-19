@@ -86,6 +86,7 @@ def corpus_grounding_note(corpus_dir: Path) -> str:
     """Stage-2 / combine grounding note referencing the corpus at ``corpus_dir``."""
     return _CORPUS_GROUNDING.replace("{corpus_dir}", str(corpus_dir))
 
+
 # Stage heads: interpret -> ground -> author for single-shot; interpret -> refine loop
 # for the iterating backend. Each is a focused subtask.
 _STAGES_DIR = _DIR / "stages"

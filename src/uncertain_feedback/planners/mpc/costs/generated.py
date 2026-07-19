@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import ast
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import FunctionType
 from typing import Any
@@ -210,9 +210,7 @@ class GeneratedCostContext:
         under this repo's FK convention."""
         collar = Rotation.from_rotvec(self.fk.collar_aa[None])
         return (
-            collar
-            * Rotation.from_rotvec(flat[:, 0])
-            * Rotation.from_rotvec(flat[:, 1])
+            collar * Rotation.from_rotvec(flat[:, 0]) * Rotation.from_rotvec(flat[:, 1])
         )
 
     def _upper_arm_direction_spine_frame(self, trajectory: np.ndarray) -> np.ndarray:
@@ -225,9 +223,7 @@ class GeneratedCostContext:
         trajectory = np.asarray(trajectory, dtype=np.float64)
         leading = trajectory.shape[:-2]
         flat = trajectory.reshape(-1, 3, 3)
-        directions = self._upper_arm_rotations(flat).apply(
-            self._tpose_upper_arm_axis()
-        )
+        directions = self._upper_arm_rotations(flat).apply(self._tpose_upper_arm_axis())
         return directions.reshape((*leading, 3))
 
     def _tpose_upper_arm_axis(self) -> np.ndarray:
@@ -284,6 +280,7 @@ class GeneratedPythonCost(TrajectoryCost):
     params: dict[str, Any]
     context: GeneratedCostContext
     description: str = ""
+    _func: FunctionType = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         func = compile_generated_cost(self.code)
@@ -291,7 +288,7 @@ class GeneratedPythonCost(TrajectoryCost):
 
     def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
         q_trajs = np.asarray(q_trajs, dtype=np.float64)
-        raw = self._func(q_trajs, self.context, self.params)  # type: ignore[attr-defined]
+        raw = self._func(q_trajs, self.context, self.params)
         costs = np.asarray(raw, dtype=np.float64)
         expected_shape = (q_trajs.shape[0],)
         if costs.shape != expected_shape:
@@ -393,7 +390,9 @@ def compile_generated_cost(code: str) -> FunctionType:
     """Compile and exec generated Python cost source."""
     namespace: dict[str, Any] = {"np": np}
     locals_dict: dict[str, Any] = {}
-    exec(compile(code, "<llm_generated_cost>", "exec"), namespace, locals_dict)  # pylint: disable=exec-used
+    exec(  # pylint: disable=exec-used
+        compile(code, "<llm_generated_cost>", "exec"), namespace, locals_dict
+    )
     func = locals_dict.get("cost")
     if not isinstance(func, FunctionType):
         raise GeneratedCostValidationError("generated code must define cost")
@@ -424,7 +423,9 @@ def build_generated_cost_context(
         current_q=np.asarray(current_q, dtype=np.float64),
         mdm_traj=np.asarray(mdm_traj, dtype=np.float64),
         recent_q=recent_q,
-        body_pos=np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None,
+        body_pos=(
+            np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None
+        ),
         reference_traj=(
             np.asarray(reference_traj, dtype=np.float64)
             if reference_traj is not None
@@ -538,7 +539,9 @@ def render_prompt_images(
     label = highlight_label if highlight_label is not None else next(iter(trajs))
     visualizer = ArmVisualizer(context.fk)
 
-    def _render(filename: str, *, include_others: bool, include_reference: bool) -> Path:
+    def _render(
+        filename: str, *, include_others: bool, include_reference: bool
+    ) -> Path:
         path = output_dir / filename
         visualizer.render_cluster_contrast_overlay(
             path,
@@ -613,10 +616,11 @@ def build_rollout_joint_comparison(
         else context.mdm_traj
     )
     return {
-        "rollout": _joint_feature_summary(context, np.asarray(rollout, dtype=np.float64)),
+        "rollout": _joint_feature_summary(
+            context, np.asarray(rollout, dtype=np.float64)
+        ),
         "target": _joint_feature_summary(context, target_traj),
     }
-
 
 
 def build_joint_angle_series(

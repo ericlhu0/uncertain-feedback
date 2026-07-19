@@ -226,8 +226,12 @@ def anatomical_elbow_wrist_slots(
     tpose_forearm_axis = np.asarray(tpose_forearm_axis, dtype=np.float64)
     tpose_forearm_axis = tpose_forearm_axis / np.linalg.norm(tpose_forearm_axis)
 
-    u = np.asarray(elbow_pos, dtype=np.float64) - np.asarray(shoulder_pos, dtype=np.float64)
-    f = np.asarray(wrist_pos, dtype=np.float64) - np.asarray(elbow_pos, dtype=np.float64)
+    u = np.asarray(elbow_pos, dtype=np.float64) - np.asarray(
+        shoulder_pos, dtype=np.float64
+    )
+    f = np.asarray(wrist_pos, dtype=np.float64) - np.asarray(
+        elbow_pos, dtype=np.float64
+    )
     u = u / np.linalg.norm(u)
     f = f / np.linalg.norm(f)
 
@@ -445,8 +449,7 @@ class SmplLeftArmFK:
             arm_positions = positions
         else:
             raise ValueError(
-                "positions must have shape (22, 3) or (5, 3), "
-                f"got {positions.shape}"
+                "positions must have shape (22, 3) or (5, 3), " f"got {positions.shape}"
             )
 
         spine3_aa = (
@@ -505,10 +508,7 @@ class SmplLeftArmFK:
         leading = positions.shape[:-2]
         flat = positions.reshape((-1, *positions.shape[-2:]))
         out = np.stack(
-            [
-                self.arm_aa_from_positions(frame, spine3_aa)
-                for frame in flat
-            ],
+            [self.arm_aa_from_positions(frame, spine3_aa) for frame in flat],
             axis=0,
         )
         return out.reshape((*leading, 3, 3))

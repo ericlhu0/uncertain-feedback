@@ -36,8 +36,7 @@ def agglomerative_labels(features: np.ndarray, n_clusters: int) -> np.ndarray:
     agglo_t0 = time.perf_counter()
     labels = agglo.fit_predict(features).astype(np.intp)
     print(
-        "[timing] Agglomerative fit_predict: "
-        f"{time.perf_counter() - agglo_t0:.3f}s"
+        "[timing] Agglomerative fit_predict: " f"{time.perf_counter() - agglo_t0:.3f}s"
     )
     return labels
 
@@ -72,8 +71,7 @@ class TrajectoryClusterer(ABC):
         return (
             type(self)._positions_to_features
             is not TrajectoryClusterer._positions_to_features
-            or type(self).cluster_positions
-            is not TrajectoryClusterer.cluster_positions
+            or type(self).cluster_positions is not TrajectoryClusterer.cluster_positions
         )
 
     @abstractmethod

@@ -38,11 +38,11 @@ import argparse
 import dataclasses
 import sys
 import warnings
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 import matplotlib
 import numpy as np
-from pathlib import Path
 
 # Select an interactive backend when running as a script; skip if one is
 # already active (e.g. when imported inside Jupyter).
@@ -63,6 +63,8 @@ if matplotlib.get_backend().lower() in ("agg", ""):
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from matplotlib.animation import FuncAnimation
+from matplotlib.axes import Axes
+from matplotlib.colors import Colormap
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3d projection
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
@@ -108,12 +110,8 @@ class _OrthoView(NamedTuple):
 # the overlays can resolve "out to the side" vs "across the body" without guessing
 # the handedness of the projection.
 _ORTHO_VIEWS = [
-    _OrthoView(
-        "Front (XY)", 0, 1, "X (m), + = person's left", "Y (m), + = up"
-    ),
-    _OrthoView(
-        "Side (ZY)", 2, 1, "Z (m), + = person's front", "Y (m), + = up"
-    ),
+    _OrthoView("Front (XY)", 0, 1, "X (m), + = person's left", "Y (m), + = up"),
+    _OrthoView("Side (ZY)", 2, 1, "Z (m), + = person's front", "Y (m), + = up"),
     _OrthoView(
         "Top (XZ)", 0, 2, "X (m), + = person's left", "Z (m), + = person's front"
     ),
@@ -151,7 +149,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
     BODY_COLOR: str = "#aaaaaa"
     TARGET_COLOR: str = "royalblue"
     MDM_COLOR: str = "darkorange"
-    BODY_BONES: list = [p for p in SMPL_BONE_PAIRS_22 if p not in LEFT_ARM_BONE_PAIRS_22]
+    BODY_BONES: list = [
+        p for p in SMPL_BONE_PAIRS_22 if p not in LEFT_ARM_BONE_PAIRS_22
+    ]
     BODY_JOINTS: list = [j for j in range(22) if j not in LEFT_ARM_JOINT_INDICES_22]
 
     # ------------------------------------------------------------------
@@ -441,7 +441,11 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         pos = self._full_body_positions(q, self._live.spine_pos, self._live.spine_aa)
         arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
         self._live.wrist_trace.append(pos[_WRIST_IDX])
-        trace_color = ArmVisualizer.MDM_COLOR if color == ArmVisualizer.MDM_COLOR else _TRACE_COLOR
+        trace_color = (
+            ArmVisualizer.MDM_COLOR
+            if color == ArmVisualizer.MDM_COLOR
+            else _TRACE_COLOR
+        )
         self._live.recorded_frames.append(
             {
                 "positions": pos.copy(),
@@ -625,19 +629,26 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             fps:             Frames per second.
         """
         import imageio  # pylint: disable=import-outside-toplevel
-        from matplotlib.backends.backend_agg import FigureCanvasAgg  # pylint: disable=import-outside-toplevel
-        from matplotlib.figure import Figure as _MplFigure  # pylint: disable=import-outside-toplevel
+        from matplotlib.backends.backend_agg import (  # pylint: disable=import-outside-toplevel
+            FigureCanvasAgg,
+        )
+        from matplotlib.figure import Figure as _MplFigure
 
         save_path = Path(save_path)
         try:
-            all_pos = np.stack([
-                self.fk.full_body_positions(rollout[i], spine3_pos, spine3_aa)
-                for i in range(len(rollout))
-            ])  # (T, 22, 3)
+            all_pos = np.stack(
+                [
+                    self.fk.full_body_positions(rollout[i], spine3_pos, spine3_aa)
+                    for i in range(len(rollout))
+                ]
+            )  # (T, 22, 3)
             ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
             mg = 0.15
             all_pts = np.vstack([all_pos.reshape(-1, 3), ref_body])
-            lims = [(float(all_pts[:, i].min()) - mg, float(all_pts[:, i].max()) + mg) for i in range(3)]
+            lims = [
+                (float(all_pts[:, i].min()) - mg, float(all_pts[:, i].max()) + mg)
+                for i in range(3)
+            ]
 
             # Create figure with Agg canvas directly — avoids touching global pyplot
             # state (no matplotlib.use() call), making this safe to call from threads.
@@ -658,29 +669,47 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             )
 
             if cartesian_goal is not None:
-                s3 = np.asarray(spine3_pos, dtype=np.float64) if spine3_pos is not None else self.fk.tpose_spine3_pos
+                s3 = (
+                    np.asarray(spine3_pos, dtype=np.float64)
+                    if spine3_pos is not None
+                    else self.fk.tpose_spine3_pos
+                )
                 world_goal = s3 + np.asarray(cartesian_goal, dtype=np.float64)
                 for a3 in artists_3d:
-                    a3["cartesian_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
-                        [world_goal[0]], [world_goal[1]], [world_goal[2]]
+                    a3[
+                        "cartesian_goal_scat"
+                    ]._offsets3d = (  # pylint: disable=protected-access
+                        [world_goal[0]],
+                        [world_goal[1]],
+                        [world_goal[2]],
                     )
                 for a2 in artists_2d:
-                    a2["cartesian_goal_scat"].set_offsets([[world_goal[a2["hi"]], world_goal[a2["vi"]]]])
+                    a2["cartesian_goal_scat"].set_offsets(
+                        [[world_goal[a2["hi"]], world_goal[a2["vi"]]]]
+                    )
 
             if mdm_goal_q is not None:
                 goal_full = self._full_body_positions(mdm_goal_q, spine3_pos, spine3_aa)
                 arm_pts = goal_full[LEFT_ARM_JOINT_INDICES_22]
                 for a3 in artists_3d:
-                    a3["mdm_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
-                        arm_pts[:, 0], arm_pts[:, 1], arm_pts[:, 2]
+                    a3[
+                        "mdm_goal_scat"
+                    ]._offsets3d = (  # pylint: disable=protected-access
+                        arm_pts[:, 0],
+                        arm_pts[:, 1],
+                        arm_pts[:, 2],
                     )
-                    for line, (pi, ci) in zip(a3["mdm_goal_lines"], LEFT_ARM_BONE_PAIRS_22):
+                    for line, (pi, ci) in zip(
+                        a3["mdm_goal_lines"], LEFT_ARM_BONE_PAIRS_22
+                    ):
                         seg = goal_full[[pi, ci]]
                         line.set_data(seg[:, 0], seg[:, 1])
                         line.set_3d_properties(seg[:, 2])
                 for a2 in artists_2d:
                     a2["mdm_goal_scat"].set_offsets(arm_pts[:, [a2["hi"], a2["vi"]]])
-                    for line, (pi, ci) in zip(a2["mdm_goal_lines"], LEFT_ARM_BONE_PAIRS_22):
+                    for line, (pi, ci) in zip(
+                        a2["mdm_goal_lines"], LEFT_ARM_BONE_PAIRS_22
+                    ):
                         seg = goal_full[[pi, ci]]
                         line.set_data(seg[:, a2["hi"]], seg[:, a2["vi"]])
 
@@ -695,13 +724,24 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 pos = all_pos[i]
                 arm_pts = pos[LEFT_ARM_JOINT_INDICES_22]
                 wrist_trace.append(pos[_WRIST_IDX])
-                color = frame_colors[i] if frame_colors is not None else ArmVisualizer.TARGET_COLOR
-                trace_color = ArmVisualizer.MDM_COLOR if color == ArmVisualizer.MDM_COLOR else _TRACE_COLOR
+                color = (
+                    frame_colors[i]
+                    if frame_colors is not None
+                    else ArmVisualizer.TARGET_COLOR
+                )
+                trace_color = (
+                    ArmVisualizer.MDM_COLOR
+                    if color == ArmVisualizer.MDM_COLOR
+                    else _TRACE_COLOR
+                )
                 _update_artists(
-                    artists_3d, artists_2d,
-                    pos, arm_pts,
+                    artists_3d,
+                    artists_2d,
+                    pos,
+                    arm_pts,
                     np.array(wrist_trace),
-                    step=i, n_steps=n_steps,
+                    step=i,
+                    n_steps=n_steps,
                     dist=float(np.linalg.norm(q - rollout[-1])),
                     color=color,
                     trace_color=trace_color,
@@ -712,7 +752,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 frames_out.append(buf.reshape(h, w, 4)[..., :3].copy())
 
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            imageio.mimsave(str(save_path), frames_out, fps=fps)
+            imageio.mimsave(str(save_path), np.stack(frames_out), fps=fps)
             print(f"[rollout-video] saved {save_path}")
         except Exception as exc:  # pylint: disable=broad-except
             print(f"[rollout-video] failed to render {save_path}: {exc}")
@@ -736,8 +776,10 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             highlight_joints: Joints drawn in arm color (defaults to left arm).
         """
         import imageio  # pylint: disable=import-outside-toplevel
-        from matplotlib.backends.backend_agg import FigureCanvasAgg  # pylint: disable=import-outside-toplevel
-        from matplotlib.figure import Figure as _MplFigure  # pylint: disable=import-outside-toplevel
+        from matplotlib.backends.backend_agg import (  # pylint: disable=import-outside-toplevel
+            FigureCanvasAgg,
+        )
+        from matplotlib.figure import Figure as _MplFigure
 
         positions = np.asarray(positions, dtype=np.float64)
         if highlight_joints is None:
@@ -755,10 +797,10 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         ax = agg_fig.add_subplot(111, projection="3d")
 
         frames_out: list[np.ndarray] = []
-        for t in range(len(positions)):
+        for t, frame in enumerate(positions):
             ax.clear()
             ArmVisualizer.draw_smpl_skeleton(
-                ax, positions[t], title=f"frame {t}", highlight_joints=highlight_joints
+                ax, frame, title=f"frame {t}", highlight_joints=highlight_joints
             )
             ax.set_xlim(center[0] - radius, center[0] + radius)
             ax.set_ylim(center[1] - radius, center[1] + radius)
@@ -769,7 +811,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             frames_out.append(buf.reshape(h, w, 4)[..., :3].copy())
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        imageio.mimsave(str(save_path), frames_out, fps=fps)
+        imageio.mimsave(str(save_path), np.stack(frames_out), fps=fps)
         print(f"[body-video] saved {save_path}")
 
     def render_trajectory_overlay(
@@ -803,7 +845,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         if body_pos is not None:
             ref_body = body_pos
         else:
-            ref_body = self.fk.tpose_all_joints + (spine3_pos - self.fk.tpose_spine3_pos)
+            ref_body = self.fk.tpose_all_joints + (
+                spine3_pos - self.fk.tpose_spine3_pos
+            )
 
         cur_full = self.fk.full_body_positions(current_q, spine3_pos, spine3_aa)
 
@@ -839,8 +883,16 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.tick_params(labelsize=7)
 
             # Static reference body (grey)
-            _draw_bones_2d(ax, ref_body, ArmVisualizer.BODY_BONES, view.hi, view.vi,
-                           ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+            _draw_bones_2d(
+                ax,
+                ref_body,
+                ArmVisualizer.BODY_BONES,
+                view.hi,
+                view.vi,
+                ArmVisualizer.BODY_COLOR,
+                alpha=0.45,
+                lw=1.2,
+            )
 
             # MDM trajectory arm bones (blue gradient, sampled frames)
             for frame_idx in sample_indices:
@@ -848,32 +900,84 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 full = self.fk.full_body_positions(
                     mdm_traj[frame_idx], spine3_pos, spine3_aa
                 )
-                _draw_bones_2d(ax, full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
-                               cmap(t), alpha=0.5, lw=1.2)
+                _draw_bones_2d(
+                    ax,
+                    full,
+                    LEFT_ARM_BONE_PAIRS_22,
+                    view.hi,
+                    view.vi,
+                    cmap(t),
+                    alpha=0.5,
+                    lw=1.2,
+                )
 
             # Wrist path and start/end markers
-            ax.plot(wrist_path[:, view.hi], wrist_path[:, view.vi],
-                    color="steelblue", alpha=0.5, linewidth=1.0)
-            ax.scatter(start_w[view.hi], start_w[view.vi], marker="o", color="lime", s=55, zorder=5)
-            ax.scatter(end_w[view.hi], end_w[view.vi], marker="X", color="red", s=65, zorder=5)
+            ax.plot(
+                wrist_path[:, view.hi],
+                wrist_path[:, view.vi],
+                color="steelblue",
+                alpha=0.5,
+                linewidth=1.0,
+            )
+            ax.scatter(
+                start_w[view.hi],
+                start_w[view.vi],
+                marker="o",
+                color="lime",
+                s=55,
+                zorder=5,
+            )
+            ax.scatter(
+                end_w[view.hi], end_w[view.vi], marker="X", color="red", s=65, zorder=5
+            )
 
             # Current pose arm (orange)
-            _draw_bones_2d(ax, cur_full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
-                           "tab:orange", alpha=1.0, lw=2.2)
+            _draw_bones_2d(
+                ax,
+                cur_full,
+                LEFT_ARM_BONE_PAIRS_22,
+                view.hi,
+                view.vi,
+                "tab:orange",
+                alpha=1.0,
+                lw=2.2,
+            )
 
         scalar_mappable = plt.cm.ScalarMappable(
             cmap=cmap, norm=plt.Normalize(vmin=0, vmax=positions.shape[0] - 1)
         )
         scalar_mappable.set_array([])
-        fig.colorbar(scalar_mappable, ax=axes[-1], shrink=0.8, pad=0.04,
-                     label="frame (light=early, dark=late)")
+        fig.colorbar(
+            scalar_mappable,
+            ax=axes[-1],
+            shrink=0.8,
+            pad=0.04,
+            label="frame (light=early, dark=late)",
+        )
         axes[0].legend(
             handles=[
                 plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
-                plt.Line2D([0], [0], marker="o", color="lime", linestyle="", markersize=7, label="traj start"),
-                plt.Line2D([0], [0], marker="X", color="red", linestyle="", markersize=7, label="traj end"),
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="lime",
+                    linestyle="",
+                    markersize=7,
+                    label="traj start",
+                ),
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="X",
+                    color="red",
+                    linestyle="",
+                    markersize=7,
+                    label="traj end",
+                ),
             ],
-            fontsize=7, loc="upper left",
+            fontsize=7,
+            loc="upper left",
         )
         fig.tight_layout()
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -935,7 +1039,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         )
         ref_positions = (
             self.fk.fk_batch(ref_traj_arr, spine3_pos, spine3_aa)
-            if draw_reference
+            if ref_traj_arr is not None
             else None
         )
         goal_world = (
@@ -963,7 +1067,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         if body_pos is not None:
             ref_body = body_pos
         else:
-            ref_body = self.fk.tpose_all_joints + (spine3_pos - self.fk.tpose_spine3_pos)
+            ref_body = self.fk.tpose_all_joints + (
+                spine3_pos - self.fk.tpose_spine3_pos
+            )
 
         cur_full = self.fk.full_body_positions(current_q, spine3_pos, spine3_aa)
 
@@ -981,7 +1087,13 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
         lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
 
-        def _sampled_arm_frames(ax, traj, cmap, view, alpha):
+        def _sampled_arm_frames(
+            ax: Axes,
+            traj: np.ndarray,
+            cmap: Colormap,
+            view: _OrthoView,
+            alpha: float,
+        ) -> None:
             """Draw up to 12 full-arm frames sampled along ``traj`` in a colour gradient."""
             n_total = traj.shape[0]
             n_samples = min(12, n_total)
@@ -989,9 +1101,19 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             denom = max(1, n_total - 1)
             for frame_idx in sample_indices:
                 t = 0.3 + 0.7 * (frame_idx / denom)
-                full = self.fk.full_body_positions(traj[frame_idx], spine3_pos, spine3_aa)
-                _draw_bones_2d(ax, full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
-                               cmap(t), alpha=alpha, lw=1.2)
+                full = self.fk.full_body_positions(
+                    traj[frame_idx], spine3_pos, spine3_aa
+                )
+                _draw_bones_2d(
+                    ax,
+                    full,
+                    LEFT_ARM_BONE_PAIRS_22,
+                    view.hi,
+                    view.vi,
+                    cmap(t),
+                    alpha=alpha,
+                    lw=1.2,
+                )
 
         hi_cmap = plt.get_cmap("Blues")
         other_cmap = plt.get_cmap("Greys")
@@ -1009,8 +1131,16 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.tick_params(labelsize=7)
 
             # Static reference body (grey)
-            _draw_bones_2d(ax, ref_body, ArmVisualizer.BODY_BONES, view.hi, view.vi,
-                           ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+            _draw_bones_2d(
+                ax,
+                ref_body,
+                ArmVisualizer.BODY_BONES,
+                view.hi,
+                view.vi,
+                ArmVisualizer.BODY_COLOR,
+                alpha=0.45,
+                lw=1.2,
+            )
 
             # Other clusters: terminal grey arm pose + wrist end marker only.
             for label in other_labels:
@@ -1021,58 +1151,122 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     spine3_aa,
                 )
                 _draw_bones_2d(
-                    ax, terminal_full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
-                    other_cmap(0.75), alpha=0.65, lw=1.4,
+                    ax,
+                    terminal_full,
+                    LEFT_ARM_BONE_PAIRS_22,
+                    view.hi,
+                    view.vi,
+                    other_cmap(0.75),
+                    alpha=0.65,
+                    lw=1.4,
                 )
                 other_wrist = positions[wrist_chain_idx]
-                ax.scatter(other_wrist[view.hi], other_wrist[view.vi],
-                           marker="x", color="dimgrey", s=40, alpha=0.8, zorder=4)
+                ax.scatter(
+                    other_wrist[view.hi],
+                    other_wrist[view.vi],
+                    marker="x",
+                    color="dimgrey",
+                    s=40,
+                    alpha=0.8,
+                    zorder=4,
+                )
 
             # Original-goal reference: green full arm + green dashed wrist path.
-            if ref_positions is not None:
+            if ref_positions is not None and ref_traj_arr is not None:
                 _sampled_arm_frames(ax, ref_traj_arr, ref_cmap, view, alpha=0.4)
                 ref_wrist = ref_positions[:, wrist_chain_idx]
-                ax.plot(ref_wrist[:, view.hi], ref_wrist[:, view.vi],
-                        color="green", alpha=0.7, linewidth=1.3, linestyle="--")
+                ax.plot(
+                    ref_wrist[:, view.hi],
+                    ref_wrist[:, view.vi],
+                    color="green",
+                    alpha=0.7,
+                    linewidth=1.3,
+                    linestyle="--",
+                )
             if goal_world is not None:
-                ax.scatter(goal_world[view.hi], goal_world[view.vi],
-                           marker="*", color="gold", edgecolors="black",
-                           linewidths=0.5, s=180, zorder=6)
+                ax.scatter(
+                    goal_world[view.hi],
+                    goal_world[view.vi],
+                    marker="*",
+                    color="gold",
+                    edgecolors="black",
+                    linewidths=0.5,
+                    s=180,
+                    zorder=6,
+                )
 
             # Highlighted cluster: blue-gradient arm + wrist path (no start/end markers).
             _sampled_arm_frames(ax, hi_traj, hi_cmap, view, alpha=0.5)
-            ax.plot(hi_wrist[:, view.hi], hi_wrist[:, view.vi],
-                    color="steelblue", alpha=0.6, linewidth=1.2)
+            ax.plot(
+                hi_wrist[:, view.hi],
+                hi_wrist[:, view.vi],
+                color="steelblue",
+                alpha=0.6,
+                linewidth=1.2,
+            )
 
             # Current pose arm (orange, shared start)
-            _draw_bones_2d(ax, cur_full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
-                           "tab:orange", alpha=1.0, lw=2.2)
+            _draw_bones_2d(
+                ax,
+                cur_full,
+                LEFT_ARM_BONE_PAIRS_22,
+                view.hi,
+                view.vi,
+                "tab:orange",
+                alpha=1.0,
+                lw=2.2,
+            )
 
         scalar_mappable = plt.cm.ScalarMappable(
             cmap=hi_cmap, norm=plt.Normalize(vmin=0, vmax=hi_positions.shape[0] - 1)
         )
         scalar_mappable.set_array([])
-        fig.colorbar(scalar_mappable, ax=axes[-1], shrink=0.8, pad=0.04,
-                     label="chosen frame (light=early, dark=late)")
+        fig.colorbar(
+            scalar_mappable,
+            ax=axes[-1],
+            shrink=0.8,
+            pad=0.04,
+            label="chosen frame (light=early, dark=late)",
+        )
         legend_handles = [
             plt.Line2D([0], [0], color="steelblue", linewidth=2, label="chosen path"),
             plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
         ]
         if other_labels:
             legend_handles.append(
-                plt.Line2D([0], [0], color="darkgrey", linewidth=1.5,
-                           marker="x", markeredgecolor="dimgrey",
-                           label="other candidate end poses")
+                plt.Line2D(
+                    [0],
+                    [0],
+                    color="darkgrey",
+                    linewidth=1.5,
+                    marker="x",
+                    markeredgecolor="dimgrey",
+                    label="other candidate end poses",
+                )
             )
         if ref_positions is not None:
             legend_handles.append(
-                plt.Line2D([0], [0], color="green", linewidth=1.5, linestyle="--",
-                           label="goal path (pre-correction)")
+                plt.Line2D(
+                    [0],
+                    [0],
+                    color="green",
+                    linewidth=1.5,
+                    linestyle="--",
+                    label="goal path (pre-correction)",
+                )
             )
         if goal_world is not None:
             legend_handles.append(
-                plt.Line2D([0], [0], marker="*", color="gold", markeredgecolor="black",
-                           linestyle="", markersize=11, label="original goal")
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="*",
+                    color="gold",
+                    markeredgecolor="black",
+                    linestyle="",
+                    markersize=11,
+                    label="original goal",
+                )
             )
         axes[0].legend(handles=legend_handles, fontsize=7, loc="upper left")
         fig.tight_layout()
@@ -1119,7 +1313,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         save_path = Path(save_path)
         wrist_chain_idx = 4  # left_wrist in the 5-joint arm chain
         target = np.asarray(correction_traj, dtype=np.float64)
-        rollout = _resample_traj(np.asarray(rollout_traj, dtype=np.float64), target.shape[0])
+        rollout = _resample_traj(
+            np.asarray(rollout_traj, dtype=np.float64), target.shape[0]
+        )
         rollout_positions = self.fk.fk_batch(rollout, spine3_pos, spine3_aa)
         target_positions = self.fk.fk_batch(target, spine3_pos, spine3_aa)
         current_positions = self.fk.fk(current_q, spine3_pos, spine3_aa)
@@ -1132,7 +1328,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         if body_pos is not None:
             ref_body = body_pos
         else:
-            ref_body = self.fk.tpose_all_joints + (spine3_pos - self.fk.tpose_spine3_pos)
+            ref_body = self.fk.tpose_all_joints + (
+                spine3_pos - self.fk.tpose_spine3_pos
+            )
         cur_full = self.fk.full_body_positions(current_q, spine3_pos, spine3_aa)
 
         extra_pts = [
@@ -1148,16 +1346,32 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
         lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
 
-        def _sampled_arm_frames(ax, traj, cmap, view, alpha):
+        def _sampled_arm_frames(
+            ax: Axes,
+            traj: np.ndarray,
+            cmap: Colormap,
+            view: _OrthoView,
+            alpha: float,
+        ) -> None:
             n_total = traj.shape[0]
             n_samples = min(12, n_total)
             sample_indices = np.linspace(0, n_total - 1, n_samples).round().astype(int)
             denom = max(1, n_total - 1)
             for frame_idx in sample_indices:
                 t = 0.3 + 0.7 * (frame_idx / denom)
-                full = self.fk.full_body_positions(traj[frame_idx], spine3_pos, spine3_aa)
-                _draw_bones_2d(ax, full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
-                               cmap(t), alpha=alpha, lw=1.2)
+                full = self.fk.full_body_positions(
+                    traj[frame_idx], spine3_pos, spine3_aa
+                )
+                _draw_bones_2d(
+                    ax,
+                    full,
+                    LEFT_ARM_BONE_PAIRS_22,
+                    view.hi,
+                    view.vi,
+                    cmap(t),
+                    alpha=alpha,
+                    lw=1.2,
+                )
 
         target_cmap = plt.get_cmap("Greens")
         rollout_cmap = plt.get_cmap("Reds")
@@ -1174,40 +1388,89 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.set_ylim(*lims[view.vi])
             ax.tick_params(labelsize=7)
 
-            _draw_bones_2d(ax, ref_body, ArmVisualizer.BODY_BONES, view.hi, view.vi,
-                           ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+            _draw_bones_2d(
+                ax,
+                ref_body,
+                ArmVisualizer.BODY_BONES,
+                view.hi,
+                view.vi,
+                ArmVisualizer.BODY_COLOR,
+                alpha=0.45,
+                lw=1.2,
+            )
 
             # Target correction: green full arm + green wrist path.
             _sampled_arm_frames(ax, target, target_cmap, view, alpha=0.45)
-            ax.plot(target_wrist[:, view.hi], target_wrist[:, view.vi],
-                    color="green", alpha=0.7, linewidth=1.3)
+            ax.plot(
+                target_wrist[:, view.hi],
+                target_wrist[:, view.vi],
+                color="green",
+                alpha=0.7,
+                linewidth=1.3,
+            )
 
             # Cost rollout: red full arm + red wrist path.
             _sampled_arm_frames(ax, rollout, rollout_cmap, view, alpha=0.5)
-            ax.plot(rollout_wrist[:, view.hi], rollout_wrist[:, view.vi],
-                    color="firebrick", alpha=0.7, linewidth=1.3)
-            ax.scatter(rollout_wrist[-1, view.hi], rollout_wrist[-1, view.vi],
-                       marker="x", color="firebrick", s=40, alpha=0.9, zorder=4)
+            ax.plot(
+                rollout_wrist[:, view.hi],
+                rollout_wrist[:, view.vi],
+                color="firebrick",
+                alpha=0.7,
+                linewidth=1.3,
+            )
+            ax.scatter(
+                rollout_wrist[-1, view.hi],
+                rollout_wrist[-1, view.vi],
+                marker="x",
+                color="firebrick",
+                s=40,
+                alpha=0.9,
+                zorder=4,
+            )
 
             if goal_world is not None:
-                ax.scatter(goal_world[view.hi], goal_world[view.vi],
-                           marker="*", color="gold", edgecolors="black",
-                           linewidths=0.5, s=180, zorder=6)
+                ax.scatter(
+                    goal_world[view.hi],
+                    goal_world[view.vi],
+                    marker="*",
+                    color="gold",
+                    edgecolors="black",
+                    linewidths=0.5,
+                    s=180,
+                    zorder=6,
+                )
 
             # Current pose arm (orange, shared start)
-            _draw_bones_2d(ax, cur_full, LEFT_ARM_BONE_PAIRS_22, view.hi, view.vi,
-                           "tab:orange", alpha=1.0, lw=2.2)
+            _draw_bones_2d(
+                ax,
+                cur_full,
+                LEFT_ARM_BONE_PAIRS_22,
+                view.hi,
+                view.vi,
+                "tab:orange",
+                alpha=1.0,
+                lw=2.2,
+            )
 
         legend_handles = [
             plt.Line2D([0], [0], color="firebrick", linewidth=2, label="cost rollout"),
-            plt.Line2D([0], [0], color="green", linewidth=2,
-                       label="target corrected path"),
+            plt.Line2D(
+                [0], [0], color="green", linewidth=2, label="target corrected path"
+            ),
             plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
         ]
         if goal_world is not None:
             legend_handles.append(
-                plt.Line2D([0], [0], marker="*", color="gold", markeredgecolor="black",
-                           linestyle="", markersize=11, label="original goal")
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="*",
+                    color="gold",
+                    markeredgecolor="black",
+                    linestyle="",
+                    markersize=11,
+                    label="original goal",
+                )
             )
         axes[0].legend(handles=legend_handles, fontsize=7, loc="upper left")
         fig.tight_layout()
@@ -1257,12 +1520,24 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     np.asarray(reference_series[name], dtype=np.float64),
                     target.shape[0],
                 )
-                ax.plot(frames, reference, color="steelblue", linewidth=1.4,
-                        linestyle="--", label="initial uncorrected path")
-            ax.plot(frames, target, color="green", linewidth=1.6,
-                    label="target corrected path")
-            ax.plot(frames, rollout, color="firebrick", linewidth=1.6,
-                    label="cost rollout")
+                ax.plot(
+                    frames,
+                    reference,
+                    color="steelblue",
+                    linewidth=1.4,
+                    linestyle="--",
+                    label="initial uncorrected path",
+                )
+            ax.plot(
+                frames,
+                target,
+                color="green",
+                linewidth=1.6,
+                label="target corrected path",
+            )
+            ax.plot(
+                frames, rollout, color="firebrick", linewidth=1.6, label="cost rollout"
+            )
             ax.set_title(name.replace("_", " "), fontsize=9)
             ax.set_xlabel("frame", fontsize=8)
             ax.set_ylabel("angle (rad)", fontsize=8)
@@ -1363,7 +1638,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         tpose = self.fk.tpose_all_joints
 
         ArmVisualizer.draw_bones_3d(
-            ax, tpose, ArmVisualizer.BODY_BONES, ArmVisualizer.BODY_COLOR, alpha=0.5, lw=1.5
+            ax,
+            tpose,
+            ArmVisualizer.BODY_BONES,
+            ArmVisualizer.BODY_COLOR,
+            alpha=0.5,
+            lw=1.5,
         )
         ax.scatter(  # type: ignore[misc]
             *tpose[ArmVisualizer.BODY_JOINTS].T,
@@ -1516,7 +1796,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             elbow_planes = _add_elbow_height_planes_3d(ax, lims, elbow_height_range)
 
             ArmVisualizer.draw_bones_3d(
-                ax, ref_body, ArmVisualizer.BODY_BONES, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2
+                ax,
+                ref_body,
+                ArmVisualizer.BODY_BONES,
+                ArmVisualizer.BODY_COLOR,
+                alpha=0.45,
+                lw=1.2,
             )
             ax.scatter(
                 *ref_body[ArmVisualizer.BODY_JOINTS].T,
@@ -1564,18 +1849,32 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 [], [], [], color=_TRACE_COLOR, lw=1, alpha=0.6, linestyle=":"
             )
             mdm_goal_lines = [
-                ax.plot([], [], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, linestyle="--")[0]
+                ax.plot(
+                    [], [], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, linestyle="--"
+                )[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             mdm_goal_scat = ax.scatter(
-                [], [], [], color=ArmVisualizer.MDM_COLOR, s=30, alpha=0.6, depthshade=False
+                [],
+                [],
+                [],
+                color=ArmVisualizer.MDM_COLOR,
+                s=30,
+                alpha=0.6,
+                depthshade=False,
             )
             preview_lines = [
                 ax.plot([], [], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, alpha=0.5)[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             preview_scat = ax.scatter(
-                [], [], [], color=ArmVisualizer.MDM_COLOR, s=30, alpha=0.5, depthshade=False
+                [],
+                [],
+                [],
+                color=ArmVisualizer.MDM_COLOR,
+                s=30,
+                alpha=0.5,
+                depthshade=False,
             )
             cartesian_goal_scat = ax.scatter(
                 [],
@@ -1624,7 +1923,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax.set_xlim(*lims[view.hi])
             ax.set_ylim(*lims[view.vi])
             ax.tick_params(labelsize=7)
-            elbow_height_lines = _add_elbow_height_lines_2d(ax, view, elbow_height_range)
+            elbow_height_lines = _add_elbow_height_lines_2d(
+                ax, view, elbow_height_range
+            )
 
             _draw_bones_2d(
                 ax,
@@ -1674,7 +1975,9 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 [], [], color=_TRACE_COLOR, lw=1, alpha=0.6, linestyle=":"
             )
             mdm_goal_lines = [
-                ax.plot([], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, linestyle="--")[0]
+                ax.plot([], [], color=ArmVisualizer.MDM_COLOR, lw=1.8, linestyle="--")[
+                    0
+                ]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
             mdm_goal_scat = ax.scatter(
@@ -1849,7 +2152,9 @@ def _elbow_plane_vertices(
 ) -> list[list[tuple[float, float, float]]]:
     x0, x1 = lims[0]
     z0, z1 = lims[2]
-    return [[(x0, y_value, z0), (x1, y_value, z0), (x1, y_value, z1), (x0, y_value, z1)]]
+    return [
+        [(x0, y_value, z0), (x1, y_value, z0), (x1, y_value, z1), (x0, y_value, z1)]
+    ]
 
 
 def _add_elbow_height_planes_3d(

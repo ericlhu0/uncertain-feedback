@@ -87,7 +87,9 @@ def _draw_plane(
         ax.plot(x[-1], y[-1], "s", color=line.get_color(), markersize=6)
     ax.set_xlabel(f"{cond_name} (rad)")
     ax.set_ylabel(f"{bound.feature} (rad)")
-    ax.set_title(f"{bound.bound_type} on {bound.feature}\nvs {cond_name} (shaded = forbidden)")
+    ax.set_title(
+        f"{bound.bound_type} on {bound.feature}\nvs {cond_name} (shaded = forbidden)"
+    )
 
 
 def _draw_series(

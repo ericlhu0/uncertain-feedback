@@ -152,14 +152,10 @@ class TurnsCostGenerator(CostGenerator):
                     turn_dir / "comparison.png",
                     angle_path=turn_dir / "angles.png",
                     rollout_path=(
-                        turn_dir / "rollout.npy"
-                        if self.save_candidate_videos
-                        else None
+                        turn_dir / "rollout.npy" if self.save_candidate_videos else None
                     ),
                     video_path=(
-                        turn_dir / "rollout.mp4"
-                        if self.save_candidate_videos
-                        else None
+                        turn_dir / "rollout.mp4" if self.save_candidate_videos else None
                     ),
                 )
             else:
@@ -172,7 +168,8 @@ class TurnsCostGenerator(CostGenerator):
             # conflicts with the goal); within that, candidates order by ranking
             # consistency, falling back to the L2 rollout score.
             reach_rank = (
-                1 if report is not None and not goal_conflict and not report["reached"]
+                1
+                if report is not None and not goal_conflict and not report["reached"]
                 else 0
             )
             ranking = rank_candidate_cost(self.context, cost)

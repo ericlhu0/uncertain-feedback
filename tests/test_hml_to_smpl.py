@@ -7,6 +7,8 @@ using only numpy/scipy and the SMPL neutral model PKL.
 Skipped automatically when SMPL_NEUTRAL.pkl is not present.
 """
 
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -291,9 +293,7 @@ class TestSmplArmAaToHml263FrameRoundtrip:
         out = smpl_arm_aa_to_hml263_frame(base_frame, arm_aa, mean, std, fk)
 
         decoded_positions = (
-            recover_from_ric(
-                torch.tensor(out, dtype=torch.float32).unsqueeze(0), 22
-            )[0]
+            recover_from_ric(torch.tensor(out, dtype=torch.float32).unsqueeze(0), 22)[0]
             .numpy()
             .astype(np.float64)
         )
@@ -314,14 +314,10 @@ class TestSmplArmAaToHml263FrameRoundtrip:
 
         from scipy.spatial.transform import Rotation
 
-        yaw_delta = self._hip_yaw(expected_positions) - self._hip_yaw(
-            decoded_positions
-        )
+        yaw_delta = self._hip_yaw(expected_positions) - self._hip_yaw(decoded_positions)
         unyaw = Rotation.from_euler("y", yaw_delta)
         for parent_j, child_j in [(13, 16), (16, 18), (18, 20)]:
-            got = unyaw.apply(
-                decoded_positions[child_j] - decoded_positions[parent_j]
-            )
+            got = unyaw.apply(decoded_positions[child_j] - decoded_positions[parent_j])
             want = expected_positions[child_j] - expected_positions[parent_j]
             got = got / np.linalg.norm(got)
             want = want / np.linalg.norm(want)

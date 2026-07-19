@@ -3,8 +3,42 @@ ignore-paths =
     src/uncertain_feedback/motion_generators/mdm/mdm_parser_util.py,
     src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py,
 
+# cv2 builds its bindings at import time, so pylint cannot see its members.
+generated-members =
+    cv2.*
+
 [MESSAGES CONTROL]
+# The size metrics are disabled because MPC rollouts, HML263 conversion and the
+# demo_runner request handlers are inherently long numeric procedures; splitting
+# them to satisfy a counter would obscure the math rather than clarify it.
+#
+# The import placement and resolution checks are disabled because the vendored
+# MDM / SAM-3D-Body / Kimodo submodules are only importable after a runtime
+# sys.path injection, so their imports must stay below that call and cannot
+# resolve at lint time.
+#
+# protected-access is disabled because tests and sibling planner classes
+# deliberately reach into each other's internals in this research codebase.
+#
+# line-too-long is disabled because black already enforces 88 columns; the only
+# lines left over are ones black cannot split (long string literals, argparse
+# help text, trailing type: ignore comments).
 disable=
+    line-too-long,
     too-many-arguments,
     too-many-positional-arguments,
     duplicate-code,
+    too-many-locals,
+    too-many-statements,
+    too-many-branches,
+    too-many-instance-attributes,
+    too-many-lines,
+    too-many-public-methods,
+    too-many-return-statements,
+    too-many-boolean-expressions,
+    too-few-public-methods,
+    import-outside-toplevel,
+    wrong-import-position,
+    import-error,
+    no-name-in-module,
+    protected-access,

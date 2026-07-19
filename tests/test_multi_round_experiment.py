@@ -1,3 +1,7 @@
+"""Tests for the multi-round experiment driver."""
+
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 import json
@@ -136,10 +140,10 @@ def test_multi_round_loop_persists_history_and_replaces_costs(
     )
 
     summary = multi_round.run_multi_round_experiment(
-        mpc,
+        mpc,  # type: ignore[arg-type]
         cfg,
         get_persona("stroke_flexor_synergy"),
-        SimpleNamespace(),
+        SimpleNamespace(),  # type: ignore[arg-type]
         np.zeros(263),
         np.zeros((3, 3)),
         context,

@@ -195,9 +195,7 @@ def rank_candidate_cost(
     )
 
 
-def _score_rollout(
-    context: GeneratedCostContext, rollout: np.ndarray
-) -> float:
+def _score_rollout(context: GeneratedCostContext, rollout: np.ndarray) -> float:
     """Mean per-frame FK L2 distance between a rollout and the MDM correction.
 
     Both trajectories are resampled to equidistant joint-space points
@@ -381,9 +379,7 @@ class CostGenerator(ABC):
         strict: bool = False,
         mpc: Any | None = None,
         llm_model_factory: Callable[[str], Any] = _make_llm_model,
-        rollout_fn: (
-            Callable[[GeneratedPythonCost], np.ndarray | None] | None
-        ) = None,
+        rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
         eval_state: Any | None = None,
         save_candidate_videos: bool = False,
         corpus_dir: Path | None = None,
@@ -411,7 +407,9 @@ class CostGenerator(ABC):
     @property
     def model_name(self) -> str:
         """Resolved model name (config, then env, then default)."""
-        return self.model or os.getenv("OPENAI_MODEL", _DEFAULT_LLM_MODEL)
+        if self.model:
+            return self.model
+        return os.getenv("OPENAI_MODEL", _DEFAULT_LLM_MODEL)
 
     def make_llm(self) -> Any:
         """Construct the cost-generator LLM wrapper for this run's model."""
@@ -597,9 +595,7 @@ class CostGenerator(ABC):
     def parse_cost(self, raw: str) -> tuple[LlmCostResponse, GeneratedPythonCost]:
         """Parse a JSON LLM response and compile it into a cost."""
         response = parse_llm_cost_response(raw)
-        cost = self.compile_cost(
-            response.code, response.params, response.description
-        )
+        cost = self.compile_cost(response.code, response.params, response.description)
         self.require_comfortable_corpus_unpenalized(cost)
         return response, cost
 
@@ -661,17 +657,14 @@ class CostGenerator(ABC):
         out.mkdir(parents=True, exist_ok=True)
         (out / "cost.py").write_text(response.code, encoding="utf-8")
         if response.explanation:
-            (out / "explanation.txt").write_text(
-                response.explanation, encoding="utf-8"
-            )
+            (out / "explanation.txt").write_text(response.explanation, encoding="utf-8")
             print(f"[cost-gen] explanation: {response.explanation}")
         if response.recipient_explanation:
             (out / "recipient_explanation.txt").write_text(
                 response.recipient_explanation, encoding="utf-8"
             )
             print(
-                "[cost-gen] recipient explanation: "
-                f"{response.recipient_explanation}"
+                "[cost-gen] recipient explanation: " f"{response.recipient_explanation}"
             )
         with open(out / "params.json", "w", encoding="utf-8") as f:
             json.dump(
@@ -738,9 +731,7 @@ class CostGenerator(ABC):
         )
 
         existing = self.mpc._extra_costs  # pylint: disable=protected-access
-        self.mpc.set_extra_costs(
-            CompositeTrajectoryCost([*existing.terms(), cost])
-        )
+        self.mpc.set_extra_costs(CompositeTrajectoryCost([*existing.terms(), cost]))
 
     def _write_validation(self, payload: dict[str, Any]) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -803,22 +794,22 @@ def create_cost_generator(
         TurnsCostGenerator,
     )
 
-    common: dict[str, Any] = dict(
-        context=context,
-        instruction=instruction,
-        summaries=summaries,
-        run_dir=run_dir,
-        images=images,
-        use_images=cfg.use_images,
-        model=cfg.model,
-        strict=cfg.strict,
-        mpc=mpc,
-        llm_model_factory=llm_model_factory,
-        rollout_fn=rollout_fn,
-        eval_state=eval_state,
-        save_candidate_videos=save_candidate_videos,
-        corpus_dir=corpus_dir,
-    )
+    common: dict[str, Any] = {
+        "context": context,
+        "instruction": instruction,
+        "summaries": summaries,
+        "run_dir": run_dir,
+        "images": images,
+        "use_images": cfg.use_images,
+        "model": cfg.model,
+        "strict": cfg.strict,
+        "mpc": mpc,
+        "llm_model_factory": llm_model_factory,
+        "rollout_fn": rollout_fn,
+        "eval_state": eval_state,
+        "save_candidate_videos": save_candidate_videos,
+        "corpus_dir": corpus_dir,
+    }
     backend = cfg.backend
     if backend == "llm":
         return LlmCostGenerator(**common)

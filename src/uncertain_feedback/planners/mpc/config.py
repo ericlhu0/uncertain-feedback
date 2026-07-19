@@ -21,6 +21,8 @@ PLANNER_CHOICES = {
 
 @dataclass(frozen=True)
 class UqConfig:
+    """How many MDM samples to draw, how to cluster them, and how to pick one."""
+
     diffusion_samples: int = 128
     n_clusters: int = 3
     clusterer: str = "agglo_end_pose"
@@ -33,6 +35,8 @@ class UqConfig:
 
 @dataclass(frozen=True)
 class CartesianConfig:
+    """Cartesian wrist goals and the distance that counts as reaching one."""
+
     goals: list[list[float]] = field(default_factory=list)
     threshold: float = 0.05
 
@@ -68,6 +72,8 @@ class PersonaGoals:
 
 @dataclass(frozen=True)
 class LlmCostConfig:
+    """Which cost-generation backend runs, with what model and artifacts."""
+
     enabled: bool = False
     model: str | None = None
     strict: bool = False
@@ -89,6 +95,8 @@ COST_BACKENDS = {"llm", "turns", "agent"}
 
 @dataclass(frozen=True)
 class MpcRunConfig:
+    """Everything one MPC run needs: planner choice, solver sizes, and sub-configs."""
+
     planner: str
     steps: int
     horizon: int
@@ -310,9 +318,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 else int(uq_data["auto_cluster"])
             ),
             scale=_float(uq_data.get("scale", 1.0), "uq.scale"),
-            user_cluster=_bool(
-                uq_data.get("user_cluster", False), "uq.user_cluster"
-            ),
+            user_cluster=_bool(uq_data.get("user_cluster", False), "uq.user_cluster"),
         ),
         cartesian=CartesianConfig(
             goals=normalized_goals,

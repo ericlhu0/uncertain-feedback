@@ -268,6 +268,7 @@ class Trajectory:
     _last_cost_payload: dict[str, Any] | None = None
 
     def clear_pending_feedback(self) -> None:
+        """Drop the uncommitted MDM samples, clusters, and pending correction."""
         self.samples = None
         self.cluster_levels = []
         self.labels = None
@@ -281,6 +282,10 @@ class Trajectory:
         self._last_cost_dir = None
         self._last_instruction = None
         self._last_cost_payload = None
+
+    def stopped(self) -> bool:
+        """Whether the trajectory is paused for feedback or has finished."""
+        return self.paused or self.complete
 
     def advance(self, session: "Session", max_steps: int | None = None) -> None:
         """Step the planner to the next pause and log the executed segment."""
@@ -337,7 +342,7 @@ class Trajectory:
                 f"multi-turn trajectory complete: steps={self.step} "
                 f"reached_goal={self.reached_goal}"
             )
-        if self.trigger.automatic and (self.paused or self.complete):
+        if self.trigger.automatic and self.stopped():
             segment = self.base_traj[self.logged_frames :]
             if segment.shape[0]:
                 discomfort = self.paused and self.trigger_reason == "discomfort"
@@ -345,7 +350,11 @@ class Trajectory:
                     segment,
                     kind="executed_segment",
                     round_index=len(session.rounds),
-                    goal=tuple(map(float, self.goal)),
+                    goal=(
+                        float(self.goal[0]),
+                        float(self.goal[1]),
+                        float(self.goal[2]),
+                    ),
                     trigger_step=segment.shape[0] - 1 if discomfort else None,
                     trigger_violation=self.trigger_violation if discomfort else None,
                     feedback_text=user.feedback_text if discomfort else None,
@@ -361,7 +370,7 @@ class Session:
         rig: "DemoRig",
         persona_name: str,
         user: SimulatedUser,
-        dir: Path,
+        dir: Path,  # pylint: disable=redefined-builtin
         corpus: TrajectoryCorpus,
         started: str | None = None,
     ) -> None:
@@ -463,26 +472,28 @@ class Session:
         )
 
     @classmethod
-    def load(cls, rig: "DemoRig", dir: Path) -> "Session":
+    def load(cls, rig: "DemoRig", session_dir: Path) -> "Session":
         """Rebuild a session from ``session.json``, recompiling every cost.
 
         The live trajectory is not restored (MPC state is not persisted): a
         resumed session starts with no active trajectory but full context.
         """
-        dir = Path(dir)
-        data = json.loads((dir / "session.json").read_text(encoding="utf-8"))
+        session_dir = Path(session_dir)
+        data = json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
         persona_name = str(data["persona"])
         session = cls(
             rig=rig,
             persona_name=persona_name,
             user=rig.get_persona(persona_name),
-            dir=dir,
-            corpus=TrajectoryCorpus.create(dir / "trajectory_corpus", rig.context),
+            dir=session_dir,
+            corpus=TrajectoryCorpus.create(
+                session_dir / "trajectory_corpus", rig.context
+            ),
             started=data.get("started"),
         )
         session.trajectory_count = int(data.get("trajectory_count", 0))
         session.combined_corpus_count = int(data.get("combined_corpus_count", 0))
-        replay_index = dir / "replay" / "index.json"
+        replay_index = session_dir / "replay" / "index.json"
         if replay_index.exists():
             session.beats = json.loads(replay_index.read_text(encoding="utf-8"))[
                 "beats"
@@ -602,13 +613,13 @@ class Session:
     ) -> dict[str, Any]:
         """Advance a live trajectory incrementally for browser animation."""
         traj = self.trajectory
-        if traj is None or traj.paused or traj.complete:
+        if traj is None or traj.stopped():
             raise ValueError("The trajectory is not running.")
         traj.advance(self, max_steps=max_steps)
         payload = self._trajectory_payload(
-            current_mesh_only=current_mesh_only and not (traj.paused or traj.complete)
+            current_mesh_only=current_mesh_only and not traj.stopped()
         )
-        if traj.paused or traj.complete:
+        if traj.stopped():
             return self._record("trajectory", payload)
         return payload
 
@@ -625,6 +636,7 @@ class Session:
     # --- oracle -----------------------------------------------------------
 
     def run_oracle(self, from_trigger: bool) -> dict[str, Any]:
+        """Roll out with the persona's hidden cost revealed, for an upper-bound reference."""
         traj = self.trajectory
         rig = self.rig
         if traj is None or traj.goal is None:
@@ -638,7 +650,11 @@ class Session:
                 HiddenCostTerm(self.user, rig.context),
             ]
         )
-        start = traj.q_feedback if from_trigger else traj.start_arm_aa
+        start = (
+            traj.q_feedback
+            if from_trigger and traj.q_feedback is not None
+            else traj.start_arm_aa
+        )
         source = "trigger" if from_trigger else "initial"
         _log(f"oracle rollout: starting from the {source} pose")
         trajectory = rollout_to_goal(
@@ -744,6 +760,7 @@ class Session:
         scale: float,
         clusterer: str = "agglo_end_pose",
     ) -> dict[str, Any]:
+        """Sample MDM corrections for ``prompt``, cluster them, and scale each cluster mean."""
         traj = self.trajectory
         rig = self.rig
         if traj is None or traj.base_traj is None:
@@ -894,6 +911,7 @@ class Session:
         return payload
 
     def pick_cluster(self, label: int) -> dict[str, Any]:
+        """Select a cluster's mean as the pending correction."""
         traj = self.trajectory
         if traj is None or label not in traj.cluster_corrections:
             raise ValueError(f"Unknown cluster label {label}.")
@@ -906,6 +924,7 @@ class Session:
         return {"ok": True}
 
     def mark_cluster(self, label: int, undesirable: bool) -> dict[str, Any]:
+        """Flag or unflag a cluster as undesirable, so cost generation avoids it."""
         traj = self.trajectory
         if traj is None or label not in traj.cluster_corrections:
             raise ValueError(f"Unknown cluster label {label}.")
@@ -987,7 +1006,9 @@ class Session:
         anchors = np.concatenate(frames, axis=0)
         rng = np.random.default_rng(0)
         perturbed = anchors[None] + rng.normal(0.0, 0.25, size=(8, *anchors.shape))
-        poses = np.concatenate([anchors[None], perturbed], axis=0).reshape(-1, 3, 3)
+        # pylint mis-infers ndarray.reshape as taking a single tuple.
+        stacked = np.concatenate([anchors[None], perturbed], axis=0)
+        poses = stacked.reshape(-1, 3, 3)  # pylint: disable=too-many-function-args
         if poses.shape[0] > 1500:
             poses = poses[rng.choice(poses.shape[0], 1500, replace=False)]
         feats = feature_series(self.rig.context, poses)
@@ -995,7 +1016,8 @@ class Session:
         active_features = generated_cost_feature_dependencies(cost.code)
         try:
             penalty = np.asarray(cost(batch), dtype=np.float64)
-        except Exception:  # pragma: no cover - viz must not sink an expensive cost
+        except Exception:  # pylint: disable=broad-exception-caught
+            # pragma: no cover - viz must not sink an expensive cost
             return {
                 "features": {},
                 "penalty": [],
@@ -1008,6 +1030,7 @@ class Session:
         }
 
     def generate_cost(self, backend: str) -> dict[str, Any]:
+        """Run the chosen cost-generation backend against the picked cluster."""
         traj = self.trajectory
         rig = self.rig
         if traj is None or traj.scaled_correction is None or traj.goal is None:
@@ -1140,6 +1163,7 @@ class Session:
         }
 
     def commit_round(self) -> dict[str, Any]:
+        """Accept the pending generated cost as a new correction round."""
         traj = self.trajectory
         if (
             traj is None
@@ -1193,7 +1217,8 @@ class Session:
         self._save()
         _log(
             f"committed round {cost_round.index} "
-            f"(goal={list(cost_round.goal)}, cluster_labels={list(cluster_labels)})"
+            f"(goal={list(cost_round.goal or ())}, "
+            f"cluster_labels={list(cluster_labels)})"
         )
         return self._record(
             "round",
@@ -1246,6 +1271,7 @@ class Session:
         return self._record("trajectory", self._trajectory_payload())
 
     def remove_round(self, index: int) -> dict[str, Any]:
+        """Drop a committed round and reindex the ones after it."""
         rig = self.rig
         if index < 0 or index >= len(self.rounds):
             raise ValueError(f"Unknown feedback round {index}.")
@@ -1269,6 +1295,7 @@ class Session:
         return {"rounds": self.round_records, "unified": self._unified_record()}
 
     def combine_rounds(self) -> dict[str, Any]:
+        """Fold every committed round into one unified cost, replacing the per-round ones."""
         traj = self.trajectory
         rig = self.rig
         if not self.rounds:
@@ -1346,6 +1373,7 @@ class Session:
         return payload
 
     def reset_rounds(self) -> dict[str, Any]:
+        """Clear all rounds, the unified cost, and any pending feedback."""
         rig = self.rig
         self.rounds = []
         self.round_records = []
@@ -1362,6 +1390,7 @@ class Session:
     # --- corpus -----------------------------------------------------------
 
     def remove_corpus_entry(self, index: int) -> dict[str, Any]:
+        """Delete one logged trajectory from the session corpus."""
         self.corpus.remove(index)
         self._save()
         return {"corpus": self.corpus.entries()}
@@ -1411,6 +1440,7 @@ class Session:
         }
 
     def payload(self) -> dict[str, Any]:
+        """The full session state the browser renders."""
         return {
             "persona": self.persona_name,
             "dir": str(self.dir),

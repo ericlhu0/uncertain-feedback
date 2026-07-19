@@ -1,6 +1,11 @@
+"""Tests for the correction session loop: triggers, rounds, and persistence."""
+
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 from argparse import Namespace
+
 import numpy as np
 
 from uncertain_feedback.planners import correction_session as session_module
@@ -10,8 +15,8 @@ from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
 )
 from uncertain_feedback.planners.mpc import LeftArmMPCMDM, SmplLeftArmFK
-from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.run import RunSetup, run_repeated_correction_session
 from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
 
@@ -85,7 +90,7 @@ def test_session_triggers_again_after_comfort_rearms(monkeypatch, tmp_path) -> N
     q0 = np.zeros((3, 3), dtype=np.float64)
     fk = SmplLeftArmFK()
     planner = LeftArmMPCMDM(goals=[np.ones((3, 3))], visualize=False, fk=fk)
-    monkeypatch.setattr(planner, "step", lambda q: np.asarray(q))
+    monkeypatch.setattr(planner, "step", np.asarray)
     violations = iter((0.0, 0.03, 0.0, 0.03, 0.04))
     monkeypatch.setattr(
         session_module,
@@ -159,7 +164,7 @@ corrections:
     q0 = np.zeros((3, 3), dtype=np.float64)
     fk = SmplLeftArmFK()
     planner = LeftArmMPCMDM(goals=[np.ones((3, 3))], visualize=False, fk=fk)
-    monkeypatch.setattr(planner, "step", lambda q: np.asarray(q))
+    monkeypatch.setattr(planner, "step", np.asarray)
     violations = iter((0.0, 0.03, 0.0, 0.03, 0.04))
     monkeypatch.setattr(
         session_module,
@@ -174,6 +179,8 @@ corrections:
     )
 
     class FakeGenerator:
+        """Motion generator stand-in returning a canned correction."""
+
         @staticmethod
         def build_pose_from_arm_aa(_initial_pose, arm_aa):
             return np.asarray(arm_aa)

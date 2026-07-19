@@ -37,13 +37,13 @@ if str(_SRC) not in sys.path:
 from uncertain_feedback.data_collection.show_conversion import (
     _BG,
     _FG,
-    _draw_skeleton,
     _hml263_to_local_positions,
 )
 from uncertain_feedback.data_collection.smpl_to_hml263 import (
     load_hml_stats,
     positions_to_hml263,
 )
+from uncertain_feedback.utils.plot import ArmVisualizer
 
 _DEMO_DIR = Path(__file__).parent
 _MDM_ROOT = (
@@ -102,7 +102,9 @@ def main() -> None:
 
         ax_sk = fig.add_subplot(2, n_frames, n_frames + col + 1, projection="3d")
         ax_sk.set_facecolor(_BG)
-        _draw_skeleton(ax_sk, positions[t], title=f"Frame {t}  HML263 pose")
+        ArmVisualizer.draw_smpl_skeleton(
+            ax_sk, positions[t], title=f"Frame {t}  HML263 pose"
+        )
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     plt.savefig(str(_OUT), dpi=150, bbox_inches="tight", facecolor=_BG)

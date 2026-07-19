@@ -14,19 +14,18 @@ from __future__ import annotations
 import argparse
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-from typing import TYPE_CHECKING
-
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 if TYPE_CHECKING:
     from uncertain_feedback.motion_generators.base import MotionGenerator
+
 from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster,
     pick_cluster_positions,

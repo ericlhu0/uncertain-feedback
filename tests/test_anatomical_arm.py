@@ -6,6 +6,8 @@ rotation and the wrist a pure forearm hinge (zero pronation), while preserving
 joint positions exactly.
 """
 
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 import numpy as np
@@ -130,7 +132,7 @@ def test_recovers_shoulder_rotation_into_elbow_slot() -> None:
         # elbow-slot twist about u (recovered shoulder internal/external rotation)
         hinge = elbow_world.apply([0.0, 1.0, 0.0])  # canonical hinge carried to world
         twists.append(np.arctan2(np.dot(np.cross([0, 1, 0], hinge), u), hinge[1]))
-        wrist_angles.append(np.linalg.norm(wrist_aa))
+        wrist_angles.append(float(np.linalg.norm(wrist_aa)))
 
     # Wrist flexion magnitude is invariant to the plane orientation ...
     np.testing.assert_allclose(wrist_angles, wrist_angles[0], atol=1e-9)

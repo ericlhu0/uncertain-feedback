@@ -31,6 +31,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Parse CLI arguments, generate a kimodo motion, and render it."""
     args = _parse_args()
 
     gen = KimodoMotionGenerator(model_path=args.model_name)
@@ -48,7 +49,9 @@ def main() -> None:
     print(f"[kimodo-motion] saved {args.output_npz}")
 
     if not args.no_video:
-        from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+        from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+            ArmVisualizer,
+        )
 
         ArmVisualizer().render_body_trajectory_video(
             positions[0],

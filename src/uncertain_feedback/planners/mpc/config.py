@@ -57,6 +57,17 @@ class CorrectionConfig:
 
 
 @dataclass(frozen=True)
+class SimulatedUserConfig:
+    """Automated simulated-user episode settings (verbalizer + re-trigger loop)."""
+
+    verbalizer: str = "everyday"
+    seed: int = 0
+    max_rounds: int = 3
+    magnitudes: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5)
+    nominal_steps: int = 20
+
+
+@dataclass(frozen=True)
 class PersonaGoals:
     """Per-persona override of the correction goal and transfer goals.
 
@@ -120,6 +131,7 @@ class MpcRunConfig:
     motion_generator: str = "mdm"
     transfer: TransferConfig = TransferConfig()
     corrections: CorrectionConfig = CorrectionConfig()
+    simulated_user: SimulatedUserConfig = SimulatedUserConfig()
     # Simulated-user persona name (see simulated_users.PERSONAS); every run
     # loads this user alongside the pose.
     user: str = "unrestricted"
@@ -289,6 +301,35 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     if trigger_threshold < 0.0:
         raise ValueError("corrections.trigger_threshold must be nonnegative.")
 
+    simulated_user_data = _mapping(data.get("simulated_user"), "simulated_user")
+    default_sim_user = SimulatedUserConfig()
+    magnitudes_value = simulated_user_data.get(
+        "magnitudes", list(default_sim_user.magnitudes)
+    )
+    if not isinstance(magnitudes_value, list) or not magnitudes_value:
+        raise ValueError("simulated_user.magnitudes must be a non-empty list.")
+    simulated_user = SimulatedUserConfig(
+        verbalizer=str(
+            simulated_user_data.get("verbalizer", default_sim_user.verbalizer)
+        ),
+        seed=_nonnegative_int(
+            simulated_user_data.get("seed", default_sim_user.seed),
+            "simulated_user.seed",
+        ),
+        max_rounds=_positive_int(
+            simulated_user_data.get("max_rounds", default_sim_user.max_rounds),
+            "simulated_user.max_rounds",
+        ),
+        magnitudes=tuple(
+            _float(value, f"simulated_user.magnitudes[{idx}]")
+            for idx, value in enumerate(magnitudes_value)
+        ),
+        nominal_steps=_positive_int(
+            simulated_user_data.get("nominal_steps", default_sim_user.nominal_steps),
+            "simulated_user.nominal_steps",
+        ),
+    )
+
     return MpcRunConfig(
         planner=planner,
         steps=_positive_int(data.get("steps"), "steps"),
@@ -379,4 +420,5 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             trigger_threshold=trigger_threshold,
         ),
         corrections=CorrectionConfig(trigger_threshold=trigger_threshold),
+        simulated_user=simulated_user,
     )

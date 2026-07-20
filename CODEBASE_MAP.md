@@ -76,6 +76,8 @@ uncertain-feedback/
 │   │   ├── trajectory_corpus.py      # TrajectoryCorpus: per-session on-disk log of executed trajectories (npy + per-frame feature csv + manifest.json)
 │   │   ├── multi_round_experiment.py # Multi-goal feedback history + cost combination loop (logs every goal's executed rollout to trajectory_corpus/ and threads corpus_dir into both codex generators)
 │   │   ├── run_multi_round_experiment.py # CLI entry point for multi-round experiments
+│   │   ├── episode_loop.py           # Automated simulated-user episode: oracle path → trigger → attribute → verbalize → choose → cost gen → re-trigger loop
+│   │   ├── run_episode_experiment.py # CLI entry point for automated simulated-user episodes
 │   │   └── render_cost_comparison.py # CLI the agent backend runs to render rollout-vs-correction overlay
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator
@@ -104,6 +106,10 @@ uncertain-feedback/
 │   │   └── cluster_picker.py         # Recursive matplotlib cluster picker with refine/back navigation
 │   ├── simulated_users/
 │   │   ├── base.py                   # SimulatedUser, HiddenBound/CoupledBound, violations, cluster choice, oracle cost term
+│   │   ├── attribution.py            # attribute_correction: nominal-vs-oracle-window contrast → CorrectionIntent
+│   │   ├── verbalizers.py            # vague/everyday/joint_resolved verbalizers + VERBALIZERS registry
+│   │   ├── visual.py                 # VisualVerbalizer: VLM speaks from rendered pose images, disk-cached
+│   │   ├── chooser.py                # choose_correction: oracle-path lexicographic cluster+magnitude chooser
 │   │   ├── personas.py               # Clinically motivated personas (PERSONAS registry)
 │   │   └── viz.py                    # render_hidden_bounds: shaded forbidden regions + trajectories
 │   ├── data_collection/
@@ -379,6 +385,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets); legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
 | `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments (applied by `experiment_pipeline.apply_persona_goals`; falls back to top-level goals when absent). Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
+| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings (`run_episode_experiment.py`): `verbalizer` (`vague` \| `everyday` [default] \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20) |
 
 ---
 
@@ -479,6 +486,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison with base/oracle/generated hidden-cost evaluation |
 | `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
 | `uv run python src/.../experiments/run_multi_round_experiment.py --mpc-config <yaml> [--persona <name>]` | Multi-round cost experiment; `cartesian.goals` is the ordered round sequence and successful feedback contexts are unified into one replacement cost |
+| `uv run python src/.../experiments/run_episode_experiment.py --mpc-config <yaml> [--persona <name>] [--save-video]` | Automated simulated-user episode: reactive verbalized feedback + oracle-path cluster choice + re-trigger loop until the goal is reached cleanly |
 | `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
 | `uv run python src/.../demo_runner/server.py [--mpc-config <yaml>] [--trajectory-configs-file <json>] [--port 6781]` | Browser tool (run from the repo root; artifact root is CWD-relative). Named initial-pose and goal libraries persist through `/api/trajectory-configs/<kind>`; clicking the header summary opens a dropdown to start/resume/delete sessions (one locked persona), the corpus panel browses/deletes executed evidence, and session-owned rounds/unified costs carry into successive trajectories; sessions persist to `session.json` and are resumable after restart (`/api/session/start`, `/api/sessions`, `/api/session/resume`, `DELETE /api/sessions/<name>`, `DELETE /api/corpus/<i>`); cluster selection exposes `/api/pick_cluster` and the explicit-negative `/api/mark_cluster`; pending-cost and committed-round payloads include `rationale`, rendered as *why this cost*, while `/api/artifact/<path>` serves their `rationale.json`/`stage_log.md` files from the demo artifact root (see README). Both **demo** and **dev** use a collapsible Scenario configuration above the guided Trajectory decision → Language correction → Cost generation → Apply feedback stages; it auto-collapses on trajectory start while Start/Exit and live status remain visible. The right column begins with persistent pending/active cost summaries whose disclosures show the generated Python; a unified cost replaces individual round entries after combination. Runner-only `/api/live_trajectory/start`, `/step`, and `/apply_round` routes animate initial and post-cost MPC execution one frame at a time until discomfort or completion; tab 3 streams cost-generation progress and the opt-in OpenAI reasoning summary through `/api/logs` character cursors. Scenario always exposes saved start-pose/goal selection, the decision stage chooses correction or ignore/continue, cluster selection remains in Language correction until its explicit Next action, and completed cost generation similarly waits for an explicit Next action before Apply feedback; refinement and Exclude controls remain available in both modes, cluster oracle/violation diagnostics are dev-only, completed stages are reviewable, and repeated feedback returns to the decision. Dev exposes advanced controls inside this organization; demo hides scenario authoring, bound dragging, sampling knobs, cost backend/code in the workflow panel, corpus, and console. The Cost functions panel's Combine rounds (codex) action is visible in both modes. The choice persists in `localStorage`. Every session records a beat stream to `<session>/replay/` (`index.json` + one `NNNN_<kind>.json` per beat, each with the payload the UI received and a per-beat persona snapshot); `GET /api/replay/<name>` and `/api/replay/<name>/<i>` serve it, and Replay steps through it with no MDM/LLM/MPC calls while synchronizing the stage navigator |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
@@ -548,6 +556,34 @@ The hidden bounds are the evaluation ground truth in headless experiments
   (mean/max/frac violated — evaluation metric), `HiddenCostTerm` (oracle
   planner cost adapter implementing `TrajectoryCost`; also used by transfer
   experiments to score scaled raw UQ cluster options before cost generation).
+- `attribute_correction()` (`attribution.py`) — deterministic feedback
+  attribution for the automated episode loop: joins the trigger pose to the
+  nearest oracle-path waypoint (`j ≥ min_join`), contrasts the robot's nominal
+  continuation against the oracle window as signed feature deltas
+  (nominal − oracle, four features) plus world-frame wrist/elbow offsets, and
+  returns a frozen `CorrectionIntent`. No thresholds inside;
+  `has_feedback_content()` (any |feature delta| > 0.15 rad) is the
+  level-invariant termination check.
+- Verbalizers (`verbalizers.py`, `visual.py`) — one function per specificity
+  level, all phrasing the same `CorrectionIntent` and returning an
+  `Utterance(text, form)` or `None` exactly when `has_feedback_content` is
+  false: `verbalize_vague` (fixed complaint), `verbalize_joint_resolved` (top
+  two above-dead-band features through an 8-entry phrase table),
+  `verbalize_everyday` (seeded categorical over arm/elbow/joint-resolved
+  phrases, weight ∝ contrast magnitude × form prior), and `VisualVerbalizer`
+  (VLM sees rendered trigger + oracle-window-end poses, responses disk-cached
+  per episode/round). `VERBALIZERS` registry maps config names to callables.
+  Intent deltas are nominal − oracle, so phrases point the opposite way.
+- `choose_correction()` (`chooser.py`) — episode-loop replacement for
+  `choose_cluster` (which stays for legacy call sites): candidates are every
+  cluster mean × magnitude (default grid 0.5–1.5, scaled via
+  `scale_trajectory` in the means' native axis-angle representation),
+  lexicographic — pain filter (max violation ≤ 0.02 rad, the trigger
+  threshold) then score `min_j(‖end − oracle[j]‖ + remaining_arc(j))` over
+  `j ≥ min_join`; candidates and the oracle path are canonicalized to 7-DOF q
+  (`arm_features.canonical_arm_q`) before scoring. All-painful → lowest mean
+  violation with `no_acceptable_cluster=True`. Returns frozen `ChoiceResult`
+  (label, magnitude, per-cluster acceptability + scores).
 - Features come from the shared `arm_features.arm_feature_series()` implementation
   used by `GeneratedCostContext`, so hidden bounds, generated costs, corpus CSVs,
   and demo graphs are directly comparable. Demo Runner parses validated constant and

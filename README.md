@@ -829,6 +829,57 @@ trajectory and feature files are copied into its task workspace and the oracle-d
 The original manifest remains unchanged for the demo UI and session history; only
 explicit round instructions enter the agent prompt.
 
+### Automated simulated-user episodes
+
+The episode experiment fully automates the care recipient: instead of one
+static `feedback_text`, the persona reacts to what the robot is actually doing.
+Once per episode an oracle path (base MPC + the hidden cost, from the initial
+pose) is rolled out as the user's internal ideal. Whenever the robot's motion
+triggers discomfort, a deterministic attribution step contrasts the robot's
+nominal continuation (`simulated_user.nominal_steps` base-MPC steps) with the
+nearest oracle window, the configured verbalizer phrases the contrast, and the
+oracle-path chooser picks the cluster and magnitude whose endpoint leaves the
+least oracle path remaining (painful candidates filtered at the trigger
+threshold). After cost generation the run resumes toward the goal with the
+generated cost installed; renewed discomfort re-triggers the loop (from the
+second round through the multi-round Codex combinator) until the goal is
+reached cleanly, the verbalizer has nothing left to say, or
+`simulated_user.max_rounds` is hit (logged as a capped failure).
+
+```bash
+uv run python src/uncertain_feedback/experiments/run_episode_experiment.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_multiround.yaml \
+  --persona cross_body_pain \
+  --save-video
+```
+
+Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`, and an MDM
+pose; the episode uses the first `cartesian.goals` entry (after
+`persona_goals` overrides). The optional `simulated_user` config block
+controls the automated user:
+
+```yaml
+simulated_user:
+  verbalizer: everyday   # vague | everyday (default) | joint_resolved | visual
+  seed: 0                # rng seed for everyday's sampled phrasing
+  max_rounds: 3          # feedback rounds before the episode is capped
+  magnitudes: [0.5, 0.75, 1.0, 1.25, 1.5]   # chooser magnitude grid
+  nominal_steps: 20      # base-MPC continuation length used for attribution
+```
+
+The `visual` verbalizer additionally needs `llm_cost.model` and
+`OPENAI_API_KEY`: a VLM sees renders of the arm at the trigger pose and at the
+end of the oracle window and answers in the persona's voice; responses are
+cached under `episode_artifacts/<timestamp>/visual_cache/` keyed by episode
+and round, so reruns never call the API.
+
+Artifacts go to `episode_artifacts/<timestamp>/`: `oracle_path.npy`, the
+initial rollout, per-round `round_<k>/` directories (nominal plan, correction,
+continuation, `round_summary.json` with the full `CorrectionIntent`, utterance
+text + sampled form, and `ChoiceResult` scores/acceptability/magnitude),
+`executed.npy` (+ MP4 with `--save-video`), and `episode_summary.json` with
+joint success, rounds used, and the capped flag.
+
 
 ## Demo runner web tool
 

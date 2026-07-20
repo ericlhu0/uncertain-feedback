@@ -1,11 +1,11 @@
-[MASTER]
-ignore-paths =
-    src/uncertain_feedback/motion_generators/mdm/mdm_parser_util.py,
-    src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py,
+[MAIN]
+# NOTE: pylint silently ignores the multi-line/indented list form for these
+# options — every pattern must stay on one comma-separated line. Patterns are
+# matched against full paths, so they are written as unanchored regexes.
+ignore-paths = .*mdm_parser_util.*,.*sample_leftarm.*,.*motion-diffusion-model/.*,.*sam-3d-body/.*,.*/MHR/.*
 
 # cv2 builds its bindings at import time, so pylint cannot see its members.
-generated-members =
-    cv2.*
+generated-members = cv2.*
 
 [MESSAGES CONTROL]
 # The size metrics are disabled because MPC rollouts, HML263 conversion and the

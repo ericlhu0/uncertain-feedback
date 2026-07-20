@@ -34,7 +34,7 @@ jobs:
       run: uv sync --all-extras --dev
     - name: Lint
       run: |
-        uv run pytest . --ignore=src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model --pylint -m pylint --pylint-rcfile=.pylintrc
+        uv run pylint --rcfile=.pylintrc src/uncertain_feedback tests
   static-type-checking:
     runs-on: ubuntu-latest
     strategy:
@@ -53,7 +53,7 @@ jobs:
       run: uv sync --all-extras --dev
     - name: Mypy
       run: |
-        uv run mypy . --exclude src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model
+        uv run mypy . --exclude src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model --exclude src/uncertain_feedback/data_collection/sam-3d-body --exclude src/uncertain_feedback/data_collection/MHR
   unit-tests:
     runs-on: ubuntu-latest
     strategy:

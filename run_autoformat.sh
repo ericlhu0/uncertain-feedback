@@ -1,4 +1,6 @@
 #!/bin/bash
 python -m black .
-docformatter -i -r . --exclude venv --exclude motion-diffusion-model --exclude sam-3d-body --exclude MHR --exclude sam-3d-body --exclude MHR
+# docformatter is intentionally not run here: a repo-wide pass rewraps every
+# existing docstring and its summary wrapping breaks hyphenated words. Run it
+# manually if you want it.
 isort .

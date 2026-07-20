@@ -62,12 +62,11 @@ dependencies = [
 [project.optional-dependencies]
 develop = [
     "black",
-    "docformatter",
+    "docformatter>=1.7.5",  # <1.7.5 crashes on links in docstrings
     "isort",
     "mypy",
     "types-PyYAML",
     "pylint>=2.14.5",
-    "pytest-pylint>=0.18.0",
     "pytest>=7.2.2",
 ]
 
@@ -80,12 +79,31 @@ uncertain_feedback = ["py.typed"]
 [tool.black]
 line-length = 88
 target-version = ["py310"]
+# Vendored submodules are upstream code — never reformat them.
+force-exclude = '''
+/(
+    motion-diffusion-model
+  | sam-3d-body
+  | MHR
+)/
+'''
+
+[tool.docformatter]
+# Match black's line length so docstrings are not re-wrapped narrower.
+wrap-summaries = 88
+wrap-descriptions = 88
 
 [tool.isort]
 py_version = 310
 profile = "black"
 multi_line_output = 2
-skip_glob = ["venv/*"]
+skip_glob = [
+    "venv/*",
+    "build/",
+    "*/motion-diffusion-model/*",
+    "*/sam-3d-body/*",
+    "*/MHR/*",
+]
 split_on_trailing_comma = true
 
 [tool.mypy]
@@ -94,6 +112,7 @@ disallow_untyped_calls = true
 warn_unreachable = true
 exclude = [
     "venv/*",
+    "build/",
     "demo_runner_artifacts/",
     "demo_designer_artifacts/",
     "llm_cost_artifacts/",
@@ -140,7 +159,7 @@ detectron2 = { git = "https://github.com/facebookresearch/detectron2.git" }
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
-    "pytest-pylint>=0.18.0",
     "mypy>=1.0",
+    "pylint>=2.14.5",
     "types-PyYAML",
 ]

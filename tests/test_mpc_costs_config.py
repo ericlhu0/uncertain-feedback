@@ -278,7 +278,7 @@ def test_non_mdm_initial_pose_uses_pose_when_provided(tmp_path) -> None:
         args, uses_mdm=False, motion_generator_factory=factory
     )
 
-    assert gen is fake_gen  # type: ignore[comparison-overlap]
+    assert cast(object, gen) is fake_gen
     np.testing.assert_allclose(state.arm_aa, np.ones((3, 3)))
     np.testing.assert_allclose(state.fixed_collar_aa, [0.4, 0.5, 0.6])
     np.testing.assert_allclose(state.body_pos, fake_gen.body_pos)  # type: ignore[arg-type]
@@ -299,7 +299,7 @@ def test_initial_pose_uses_config_pose_when_cli_pose_is_omitted(tmp_path) -> Non
         motion_generator_factory=lambda _model_path: fake_gen,  # type: ignore[arg-type, return-value]
     )
 
-    assert gen is fake_gen  # type: ignore[comparison-overlap]
+    assert cast(object, gen) is fake_gen
     np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)  # type: ignore[arg-type]
 
 
@@ -316,7 +316,7 @@ def test_initial_pose_cli_pose_overrides_config_pose(tmp_path) -> None:
         motion_generator_factory=lambda _model_path: fake_gen,  # type: ignore[arg-type, return-value]
     )
 
-    assert gen is fake_gen  # type: ignore[comparison-overlap]
+    assert cast(object, gen) is fake_gen
     np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)  # type: ignore[arg-type]
 
 

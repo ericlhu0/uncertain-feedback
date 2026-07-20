@@ -5,6 +5,7 @@
 import json
 from pathlib import Path
 from types import MethodType, SimpleNamespace
+from typing import cast
 
 import numpy as np
 
@@ -405,7 +406,7 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
 
     result = session.combine_rounds()
 
-    assert session.unified_cost is combined  # type: ignore[comparison-overlap]
+    assert cast(object, session.unified_cost) is combined
     assert result["description"] == "combined"
     assert "trajectory" not in result
     assert "goal_reach" not in result

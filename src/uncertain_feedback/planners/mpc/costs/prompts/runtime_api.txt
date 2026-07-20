@@ -1,34 +1,35 @@
 Runtime API:
 - Define exactly: def cost(q_trajs, context, params):
-- q_trajs has shape (n_rollouts, horizon + 1, 3, 3) for left_shoulder,
-  left_elbow, left_wrist axis-angle states.
+- q_trajs has shape (n_rollouts, horizon + 1, 3, 3). This is the decoded
+  FK/cost-boundary form of the 7-DOF planner state: row 0 is clavicle rotation,
+  row 1 is anatomical shoulder rotation, and row 2 is the hinge-constrained
+  elbow rotation vector. There is no controlled wrist rotation.
 - Prefer these named joint-feature helpers when writing joint-space costs:
   context.elbow_flexion_angles(q_trajs)
   context.shoulder_flexion_extension_angles(q_trajs)
   context.shoulder_abduction_adduction_angles(q_trajs)
   context.shoulder_elevation_angles(q_trajs)
   context.shoulder_internal_external_rotation_angles(q_trajs)
-  Each accepts any array ending in (3, 3), including q_trajs[:, 1:] or
-  context.mdm_traj, and returns the matching leading shape. Values are radians.
+  Each accepts decoded arrays ending in (3, 3), including q_trajs[:, 1:], or
+  canonical planner arrays ending in (7,), including context.mdm_traj and
+  context.recent_q. They return the matching leading shape. Values are radians.
   The shoulder helpers are preference-friendly component-angle approximations
   in the spine3 frame: flexion/extension is signed upper-arm movement along
   the z axis, abduction/adduction is signed lateral upper-arm movement along
   the x axis (positive is away from the torso for the left arm), and
-  internal/external rotation is signed twist around the T-pose upper-arm axis
-  (positive = internal rotation, twisting the forearm toward the body midline;
-  negative = external rotation).
+  internal/external rotation is the signed swing-twist component stored in the
+  anatomical shoulder block q[3:6], about the T-pose upper-arm axis. Clavicle
+  rotation does not contribute. Positive = internal rotation, twisting the
+  forearm toward the body midline; negative = external rotation.
   shoulder_elevation is total upper-arm elevation from straight down (0 = arm
   hanging at side, pi/2 = horizontal, pi = overhead); it increases when the arm
   is raised in any direction and is the only feature that can express a height
   limit independent of whether the arm was raised forward or sideways.
-- Raw joint indexing is also allowed for advanced cases: q_trajs[:, :, 0, :]
-  is left_shoulder, q_trajs[:, :, 1, :] is left_elbow, and q_trajs[:, :, 2, :]
-  is left_wrist. The final dimension is a 3D local axis-angle rotation vector,
-  not separate named anatomical DOFs. Avoid selecting one arbitrary rotvec
-  component and calling it flexion/abduction/rotation. The left_wrist row exists
-  in the SMPL/HML state, but this simplified arm model has no hand joint beyond
-  the wrist, so use wrist joint-angle terms only when a wrist-rotation
-  preference is clearly implied.
+- Avoid raw row indexing for anatomical preferences; use the named helpers.
+  If raw access is unavoidable, q_trajs[:, :, 0, :] is clavicle rotation,
+  q_trajs[:, :, 1, :] is shoulder rotation, and q_trajs[:, :, 2, :] is the
+  elbow hinge rotation vector. Do not call individual rotvec components
+  flexion, abduction, or internal/external rotation.
 - The Cartesian/position helpers below (fk_rollouts, mdm_positions,
   current_positions, joint_index, ...) are provided to help you UNDERSTAND the
   correction. The returned cost itself must stay joint-space (see Hard
@@ -52,7 +53,8 @@ Runtime API:
   read those values from the Summaries section below and encode them as
   hardcoded floats or params in your cost function — do not try to compute
   them from context.mdm_positions using dict-style access.
-- context.mdm_traj and context.recent_q/recent_positions are also available
-  as numpy arrays.
+- context.current_q has shape (7,), while context.mdm_traj and context.recent_q
+  have shapes (T, 7). Their layout is [clavicle rotvec (3), shoulder rotvec (3),
+  elbow flexion angle (1)].
 - np is available. Do not import anything.
 - Return a finite numpy array with shape (n_rollouts,).

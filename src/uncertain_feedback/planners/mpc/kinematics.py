@@ -64,11 +64,12 @@ SMPL_BONE_PAIRS_22 = [(p, c) for c, p in enumerate(SMPL_PARENTS_22) if p >= 0]
 # Left arm joints in the 22-joint skeleton (collar through wrist)
 LEFT_ARM_JOINT_INDICES_22 = [13, 16, 18, 20]
 
-# Names of the 3 MPC-controlled joints (shoulder, elbow, wrist)
+# Anatomical names of the three controlled rotation slots.  Under this FK
+# convention each slot rotates the bone arriving at the named joint.
 LEFT_ARM_NAMES = [
+    "left_clavicle",
     "left_shoulder",
     "left_elbow",
-    "left_wrist",
 ]
 
 # Bones that belong to the left arm (including the spine3→collar connection)
@@ -84,8 +85,13 @@ LEFT_ARM_CHAIN_NAMES = [
     "left_wrist",
 ]
 
-# Number of joints MPC controls (shoulder, elbow, wrist)
+# Number of axis-angle slots consumed by the arm FK.
 _N_JOINTS = 3
+
+Q_DIM = 7
+Q_CLAVICLE = slice(0, 3)
+Q_SHOULDER = slice(3, 6)
+Q_ELBOW = 6
 
 
 def _compose_rotvec(rotvec: np.ndarray, delta: np.ndarray) -> np.ndarray:
@@ -138,6 +144,56 @@ def _rate_limited_step(
     delta = rel * scale[:, np.newaxis]
     next_q = _compose_rotvec(current_q, delta)
     reached = bool(np.all(angles <= max_delta))
+    return next_q, reached
+
+
+def q_to_arm_aa(q: np.ndarray, hinge_axis: np.ndarray) -> np.ndarray:
+    """Convert ``(..., 7)`` planner states to ``(..., 3, 3)`` arm rotations."""
+    q = np.asarray(q, dtype=np.float64)
+    if q.shape[-1:] != (Q_DIM,):
+        raise ValueError(f"q must end in shape ({Q_DIM},), got {q.shape}")
+    hinge_axis = np.asarray(hinge_axis, dtype=np.float64)
+    return np.stack(
+        (
+            q[..., Q_CLAVICLE],
+            q[..., Q_SHOULDER],
+            q[..., Q_ELBOW, np.newaxis] * hinge_axis,
+        ),
+        axis=-2,
+    )
+
+
+def _compose_q(q: np.ndarray, delta: np.ndarray) -> np.ndarray:
+    """Compose 7-DOF arm states with tangent-space action deltas."""
+    q = np.asarray(q, dtype=np.float64)
+    delta = np.asarray(delta, dtype=np.float64)
+    out = np.empty_like(q)
+    out[..., Q_CLAVICLE] = _compose_rotvec(q[..., Q_CLAVICLE], delta[..., Q_CLAVICLE])
+    out[..., Q_SHOULDER] = _compose_rotvec(q[..., Q_SHOULDER], delta[..., Q_SHOULDER])
+    out[..., Q_ELBOW] = q[..., Q_ELBOW] + delta[..., Q_ELBOW]
+    return out
+
+
+def _rate_limited_step_q(
+    current_q: np.ndarray,
+    target_q: np.ndarray,
+    max_delta: float,
+) -> tuple[np.ndarray, bool]:
+    """Step toward a 7-DOF target with one angular cap per joint block."""
+    current_q = np.asarray(current_q, dtype=np.float64)
+    target_q = np.asarray(target_q, dtype=np.float64)
+    next_q = np.empty_like(current_q)
+    reached = True
+    for block in (Q_CLAVICLE, Q_SHOULDER):
+        current = Rotation.from_rotvec(current_q[block])
+        relative = (Rotation.from_rotvec(target_q[block]) * current.inv()).as_rotvec()
+        angle = float(np.linalg.norm(relative))
+        scale = min(1.0, max_delta / max(angle, 1e-12))
+        next_q[block] = _compose_rotvec(current_q[block], relative * scale)
+        reached = reached and angle <= max_delta
+    elbow_delta = float(target_q[Q_ELBOW] - current_q[Q_ELBOW])
+    next_q[Q_ELBOW] = current_q[Q_ELBOW] + np.clip(elbow_delta, -max_delta, max_delta)
+    reached = reached and abs(elbow_delta) <= max_delta
     return next_q, reached
 
 
@@ -283,6 +339,9 @@ class SmplLeftArmFK:
         self._bone_offsets, self._tpose_joints, self._tpose_22 = self._load_from_pkl(
             pkl_path
         )
+        self._hinge_axis = _canonical_hinge_axis(
+            self._bone_offsets[2], self._bone_offsets[3]
+        )
         self.collar_aa: np.ndarray = np.zeros(3, dtype=np.float64)
 
     # ------------------------------------------------------------------
@@ -339,6 +398,11 @@ class SmplLeftArmFK:
     def tpose_all_joints(self) -> np.ndarray:
         """T-pose positions of all 22 body joints ``(22, 3)``."""
         return self._tpose_22.copy()
+
+    @property
+    def elbow_hinge_axis(self) -> np.ndarray:
+        """Canonical elbow-flexion axis in the shoulder-local frame."""
+        return self._hinge_axis.copy()
 
     # ------------------------------------------------------------------
     # FK — arm only
@@ -512,6 +576,44 @@ class SmplLeftArmFK:
             axis=0,
         )
         return out.reshape((*leading, 3, 3))
+
+    def arm_aa_to_q(
+        self,
+        arm_aa: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Convert one arm pose to the planner's 7-DOF representation.
+
+        Hinge-constrained input is extracted directly so planner states round-trip
+        exactly.  Raw input with an off-hinge elbow rotation is first decoded from
+        its FK positions, preserving every arm joint position while reallocating
+        axial rotation to the anatomical shoulder slot.
+        """
+        arm_aa = np.asarray(arm_aa, dtype=np.float64)
+        if arm_aa.shape != (_N_JOINTS, 3):
+            raise ValueError(f"arm_aa must have shape (3, 3), got {arm_aa.shape}")
+        elbow_angle = float(np.dot(arm_aa[2], self._hinge_axis))
+        off_hinge = arm_aa[2] - elbow_angle * self._hinge_axis
+        if np.linalg.norm(off_hinge) > 1e-10:
+            arm_aa = self.arm_aa_from_positions(
+                self.fk(arm_aa, spine3_aa=spine3_aa), spine3_aa
+            )
+            elbow_angle = float(np.dot(arm_aa[2], self._hinge_axis))
+        return np.concatenate((arm_aa[0], arm_aa[1], [elbow_angle]))
+
+    def arm_aa_to_q_batch(
+        self,
+        arm_aa: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Vectorized-leading-dimension version of :meth:`arm_aa_to_q`."""
+        arm_aa = np.asarray(arm_aa, dtype=np.float64)
+        if arm_aa.shape[-2:] != (_N_JOINTS, 3):
+            raise ValueError(f"arm_aa must end in shape (3, 3), got {arm_aa.shape}")
+        leading = arm_aa.shape[:-2]
+        flat = arm_aa.reshape((-1, _N_JOINTS, 3))
+        out = np.stack([self.arm_aa_to_q(frame, spine3_aa) for frame in flat], axis=0)
+        return out.reshape((*leading, Q_DIM))
 
     # ------------------------------------------------------------------
     # FK — full body

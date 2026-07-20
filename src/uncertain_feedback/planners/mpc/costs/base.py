@@ -7,15 +7,13 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol, runtime_checkable
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
+from uncertain_feedback.planners.mpc.arm_features import (
+    arm_feature_series,
+    elbow_heights,
+    shoulder_abduction_angles,
+)
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
-
-_JOINT_BEFORE_WRIST_POS_IDX = -2
-_SHOULDER_POS_IDX = 2
-_ELBOW_POS_IDX = 3
-_WRIST_POS_IDX = 4
-_TORSO_DOWN = np.array([0.0, -1.0, 0.0], dtype=np.float64)
 
 
 class TrajectoryCost(Protocol):
@@ -404,28 +402,13 @@ def compute_elbow_heights(
     """Return spine3-relative elbow Y-heights for each frame in a trajectory.
 
     Args:
-        trajectory: ``(N, 3, 3)`` axis-angle frames (shoulder/elbow/wrist).
+        trajectory: ``(N, 7)`` q states or ``(N, 3, 3)`` boundary frames.
         context:    Shared FK context with spine3 position and collar angle.
 
     Returns:
         ``(N,)`` elbow heights relative to spine3.
     """
-    positions = context.fk.fk_batch(
-        trajectory,
-        context.spine3_pos,
-        context.spine3_aa,
-    )
-    return positions[:, _JOINT_BEFORE_WRIST_POS_IDX, 1] - context.spine3_pos[1]
-
-
-def _tpose_bone_axis(fk: SmplLeftArmFK, start_idx: int, end_idx: int) -> np.ndarray:
-    """Return the unit T-pose bone axis between two arm-chain joints."""
-    tpose = fk.tpose_joints
-    axis = tpose[end_idx] - tpose[start_idx]
-    norm = np.linalg.norm(axis)
-    if norm <= 1e-12:
-        return np.array([1.0, 0.0, 0.0], dtype=np.float64)
-    return axis / norm
+    return elbow_heights(trajectory, context)
 
 
 def compute_elbow_flexion_angles(
@@ -434,17 +417,11 @@ def compute_elbow_flexion_angles(
 ) -> np.ndarray:
     """Return elbow bend as the angle between upper arm and forearm, in radians.
 
-    0 = fully extended; larger = more bent. Computed from the wrist-slot joint
-    rotation — under this repo's FK convention (joint *j*'s rotation transforms
-    the bone arriving at *j*) that slot rotates the forearm relative to the
-    upper arm, so the bend is the angle it opens between the T-pose bone axes.
-    Equivalent to the FK-position angle, without running FK.
+    0 = fully extended; larger = more bent. The shared feature implementation
+    canonicalizes boundary input to q before measuring the hinge-constrained
+    forearm angle.
     """
-    trajectory = np.asarray(trajectory, dtype=np.float64)
-    upper_axis = _tpose_bone_axis(context.fk, _SHOULDER_POS_IDX, _ELBOW_POS_IDX)
-    forearm_axis = _tpose_bone_axis(context.fk, _ELBOW_POS_IDX, _WRIST_POS_IDX)
-    forearm = Rotation.from_rotvec(trajectory[:, 2]).apply(forearm_axis)
-    return np.arccos(np.clip(forearm @ upper_axis, -1.0, 1.0))
+    return arm_feature_series(trajectory, context)["elbow_flexion"]
 
 
 def compute_shoulder_abduction_angles(
@@ -456,19 +433,9 @@ def compute_shoulder_abduction_angles(
     The angle is measured between the shoulder-to-elbow direction and the
     torso-down direction. Larger values mean the upper arm is farther away
     from the torso. The direction is the composed collar∘shoulder∘elbow joint
-    rotation applied to the T-pose bone axis (the spine3 rotation cancels) —
-    equivalent to the FK elbow−shoulder difference, without running FK.
+    rotation applied to the T-pose bone axis (the spine3 rotation cancels).
     """
-    trajectory = np.asarray(trajectory, dtype=np.float64)
-    upper_axis = _tpose_bone_axis(context.fk, _SHOULDER_POS_IDX, _ELBOW_POS_IDX)
-    composed = (
-        Rotation.from_rotvec(context.fk.collar_aa[None])
-        * Rotation.from_rotvec(trajectory[:, 0])
-        * Rotation.from_rotvec(trajectory[:, 1])
-    )
-    upper_arm_local = composed.apply(upper_axis)
-    dots = np.clip(upper_arm_local @ _TORSO_DOWN, -1.0, 1.0)
-    return np.arccos(dots)
+    return shoulder_abduction_angles(trajectory, context)
 
 
 def update_elbow_cost(

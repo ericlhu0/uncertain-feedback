@@ -21,7 +21,7 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
 
 if TYPE_CHECKING:
     from uncertain_feedback.motion_generators.base import MotionGenerator
@@ -69,7 +69,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                              Also controls which timestep is shown as a ghost
                              arm in the cluster-picker window.  Defaults to
                              :attr:`~LeftArmMPCMDM.TRAJECTORY_FRACTION`.
-        goals:               Initial list of ``(3, 3)`` target configurations.
+        goals:               Initial list of ``(7,)`` target configurations.
         goal_threshold:      Threshold passed to the base class.
         visualize:           If ``True``, open a live matplotlib window.
         fk:                  :class:`SmplLeftArmFK` instance (required when
@@ -145,7 +145,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         gen: MotionGenerator,
         text: str,
         start_pose: np.ndarray | None = None,
-        current_arm_aa: np.ndarray | None = None,
+        current_q: np.ndarray | None = None,
         auto_cluster: int | None = None,
         mdm_frames: int | None = None,
         frozen_body: bool = False,
@@ -269,7 +269,11 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     spine_pos=spine_pos,
                     spine_aa=spine_aa,
                     body_pos=body_pos,
-                    current_arm_aa=current_arm_aa,
+                    current_arm_aa=(
+                        q_to_arm_aa(current_q, self._fk.elbow_hinge_axis)
+                        if current_q is not None
+                        else None
+                    ),
                     init_scale=default_scale,
                     recluster=self._clusterer.cluster_positions,  # type: ignore[attr-defined]
                     n_clusters=self._clusterer.n_clusters,
@@ -291,7 +295,11 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     spine_pos=spine_pos,
                     spine_aa=spine_aa,
                     body_pos=body_pos,
-                    current_arm_aa=current_arm_aa,
+                    current_arm_aa=(
+                        q_to_arm_aa(current_q, self._fk.elbow_hinge_axis)
+                        if current_q is not None
+                        else None
+                    ),
                     init_scale=default_scale,
                     recluster=self._clusterer.cluster,
                     n_clusters=self._clusterer.n_clusters,
@@ -327,7 +335,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             f"Enqueuing first {cutoff} frames of chosen cluster mean"
             f" ({self.trajectory_fraction:.0%})."
         )
-        self.set_mdm_goal(chosen_mean[cutoff - 1])
+        self.set_mdm_goal(self._fk.arm_aa_to_q(chosen_mean[cutoff - 1], base_spine_aa))
         self.push_trajectory(chosen_mean[:cutoff])
         return chosen_mean
 
@@ -430,13 +438,9 @@ if __name__ == "__main__":
     ) = gen.decode_pose(initial_pose)
     demo_fk.collar_aa = np.asarray(initial_collar_aa, dtype=np.float64)
 
-    demo_target_q = initial_arm_aa.copy() + np.array(
-        [
-            [0.0, -1.6, 0.8],  # left_shoulder
-            [0.0, 0.0, 0.0],  # left_elbow
-            [0.0, 0.0, 0.0],  # left_wrist
-        ]
-    )
+    demo_q = demo_fk.arm_aa_to_q(initial_arm_aa, initial_spine3_aa)
+    demo_target_q = demo_q.copy()
+    demo_target_q[:3] += np.array([0.0, -1.6, 0.8])
 
     demo_mpc = LeftArmMPCMDMUQ(
         horizon=args.horizon,
@@ -452,8 +456,6 @@ if __name__ == "__main__":
         trajectory_fraction=args.trajectory_fraction,
     )
 
-    demo_q = initial_arm_aa.copy()
-
     for _ in range(args.text_time):
         demo_q = demo_mpc.step(demo_q)
 
@@ -466,12 +468,14 @@ if __name__ == "__main__":
         plt.close(pre_mdm_vis._live.fig)  # pylint: disable=protected-access
     demo_mpc._vis = None  # pylint: disable=protected-access
 
-    current_pose = gen.build_pose_from_arm_aa(initial_pose, demo_q)
+    current_pose = gen.build_pose_from_arm_aa(
+        initial_pose, q_to_arm_aa(demo_q, demo_fk.elbow_hinge_axis)
+    )
     demo_mpc.query_mdm_with_uncertainty(
         gen,
         args.text,
         start_pose=current_pose,
-        current_arm_aa=demo_q,
+        current_q=demo_q,
         mdm_frames=args.mdm_frames,
         frozen_body=args.frozen_body,
     )

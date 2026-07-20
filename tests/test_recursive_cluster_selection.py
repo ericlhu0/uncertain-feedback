@@ -13,6 +13,8 @@ from uncertain_feedback.demo_runner.session import Session
 from uncertain_feedback.experiments.experiment_pipeline import (
     _rejected_candidate_trajs,
 )
+from uncertain_feedback.planners.mpc.costs import MpcCostContext
+from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import (
     _LevelPickResult,
@@ -148,10 +150,13 @@ def _demo_session(tmp_path) -> Session:
     trajectory.prompt = None
     trajectory._last_cost_payload = None
     user = SimulatedUser("test", "", "", bounds=())
+    fk = SmplLeftArmFK()
     rig = SimpleNamespace(
         gen=_FakeGenerator(),
-        fk=object(),
-        context=object(),
+        fk=fk,
+        context=MpcCostContext(
+            fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+        ),
         spine3_aa=np.zeros(3),
         _cfg_with_goal=lambda goal: object(),
         package_trajectory=lambda traj, selected: {"n_frames": len(traj)},
@@ -341,7 +346,7 @@ def test_demo_runner_threads_scaled_clusters_to_cost_generation(
     session.rig.body_pos = None  # type: ignore[assignment]
     session.rig.spine3_pos = None  # type: ignore[assignment]
     session.trajectory.base_traj = np.zeros((1, 3, 3))  # type: ignore[union-attr]
-    session.trajectory.start_arm_aa = np.zeros((3, 3))  # type: ignore[union-attr]
+    session.trajectory.start_q = np.zeros((3, 3))  # type: ignore[union-attr]
     session.trajectory.q_feedback = None  # type: ignore[union-attr]
     session.trajectory.prompt = "move comfortably"  # type: ignore[union-attr]
     session.trajectory.samples[:, 1] += 10.0  # type: ignore[index, union-attr]

@@ -39,6 +39,11 @@ from uncertain_feedback.planners.correction_session import (
     TriggerReason,
 )
 from uncertain_feedback.planners.mpc import LeftArmMPCCartesian
+from uncertain_feedback.planners.mpc.arm_features import (
+    FEATURE_NAMES,
+    arm_feature_series,
+    canonical_arm_q,
+)
 from uncertain_feedback.planners.mpc.costs import (
     CombineCostGenerator,
     CompositeTrajectoryCost,
@@ -48,13 +53,12 @@ from uncertain_feedback.planners.mpc.costs import (
 )
 from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
 from uncertain_feedback.planners.mpc.costs.generated import GeneratedPythonCost
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.planners.run import _assemble_full_correction_traj
 from uncertain_feedback.simulated_users.base import (
-    FEATURE_NAMES,
     HiddenCostTerm,
     SimulatedUser,
     compute_violations,
-    feature_series,
     first_violation_step,
     violation_metrics,
 )
@@ -63,6 +67,13 @@ from uncertain_feedback.uncertainty.clustering import make_clusterer
 
 if TYPE_CHECKING:
     from uncertain_feedback.demo_runner.core import DemoRig
+
+
+def _arm_aa(rig: DemoRig, state: np.ndarray) -> np.ndarray:
+    state = np.asarray(state, dtype=np.float64)
+    if state.shape[-1:] == (7,):
+        return q_to_arm_aa(state, rig.fk.elbow_hinge_axis)
+    return state
 
 
 def _json_object(text: str) -> dict[str, Any]:
@@ -232,7 +243,7 @@ class Trajectory:
     q: np.ndarray
     executed: list[np.ndarray]
     artifact_dir: Path
-    start_arm_aa: np.ndarray
+    start_q: np.ndarray
     goal: np.ndarray
     scale: float
     step: int = 0
@@ -301,7 +312,9 @@ class Trajectory:
             violation = None
             if self.trigger.automatic:
                 violation = float(
-                    compute_violations(user, rig.context, self.q[np.newaxis])[0]
+                    compute_violations(
+                        user, rig.context, _arm_aa(rig, self.q[np.newaxis])
+                    )[0]
                 )
             reason = self.trigger.evaluate(self.step, violation)
             if reason is not None:
@@ -532,9 +545,11 @@ class Session:
             return {"retriggered": False, "trigger_step": None}
         if traj.paused and traj.q_feedback is not None:
             traj.trigger_violation = float(
-                compute_violations(user, self.rig.context, traj.q_feedback[np.newaxis])[
-                    0
-                ]
+                compute_violations(
+                    user,
+                    self.rig.context,
+                    _arm_aa(self.rig, traj.q_feedback[np.newaxis]),
+                )[0]
             )
             return {"retriggered": True, "trigger_step": traj.trigger_step}
         self._set_trigger(traj.base_traj)
@@ -546,7 +561,7 @@ class Session:
         traj.trigger_step = first_violation_step(
             self.user,
             self.rig.context,
-            traj_arr,
+            _arm_aa(self.rig, traj_arr),
             self.rig.cfg.corrections.trigger_threshold,
         )
         if traj.trigger_step is not None:
@@ -574,6 +589,7 @@ class Session:
                 "Multi-turn trajectories require planner: arm_mpc_cartesian."
             )
         start_arm_aa = np.asarray(arm_aa, dtype=np.float64)
+        start_q = rig.fk.arm_aa_to_q(start_arm_aa, rig.spine3_aa)
         goal_arr = np.asarray(goal, dtype=np.float64)
         artifact_dir = self.dir / f"{time.strftime('%Y%m%d_%H%M%S')}_trajectory"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -584,16 +600,16 @@ class Session:
             extra = CompositeTrajectoryCost([*base_terms.terms(), *self._round_costs])
         self._release_pinned_meshes()
         self.trajectory = Trajectory(
-            mpc=rig._manual_planner(start_arm_aa, goal_arr, extra),
+            mpc=rig._manual_planner(start_q, goal_arr, extra),
             trigger=CorrectionTrigger(
                 threshold=rig.cfg.corrections.trigger_threshold,
                 text_time=None,
                 automatic=bool(self.user.bounds and self.user.feedback_text),
             ),
-            q=start_arm_aa.copy(),
-            executed=[start_arm_aa.copy()],
+            q=start_q.copy(),
+            executed=[start_q.copy()],
             artifact_dir=artifact_dir,
-            start_arm_aa=start_arm_aa,
+            start_q=start_q,
             goal=goal_arr,
             scale=rig.cfg.uq.scale,
         )
@@ -653,7 +669,7 @@ class Session:
         start = (
             traj.q_feedback
             if from_trigger and traj.q_feedback is not None
-            else traj.start_arm_aa
+            else traj.start_q
         )
         source = "trigger" if from_trigger else "initial"
         _log(f"oracle rollout: starting from the {source} pose")
@@ -693,7 +709,9 @@ class Session:
             raise ValueError("Run an oracle rollout first.")
         return {
             "trajectory": traj.oracle_package,
-            "metrics": violation_metrics(self.user, rig.context, traj.oracle_traj),
+            "metrics": violation_metrics(
+                self.user, rig.context, _arm_aa(rig, traj.oracle_traj)
+            ),
             "goal_reach": goal_reach(
                 rig.context,
                 rig._cfg_with_goal(traj.goal),
@@ -716,7 +734,7 @@ class Session:
         _log("clean baseline: rolling out with box limits, no feedback")
         traj.clean_traj = rollout_to_goal(
             rig._cfg_with_goal(traj.goal),
-            traj.start_arm_aa,
+            traj.start_q,
             traj.goal,
             rig.context,
             rig._extra_costs(self.user),
@@ -765,8 +783,10 @@ class Session:
         rig = self.rig
         if traj is None or traj.base_traj is None:
             raise ValueError("Start a trajectory first.")
-        q_start = traj.q_feedback if traj.q_feedback is not None else traj.start_arm_aa
-        start_pose = rig.gen.build_pose_from_arm_aa(rig.initial_hml_pose, q_start)
+        q_start = traj.q_feedback if traj.q_feedback is not None else traj.start_q
+        start_pose = rig.gen.build_pose_from_arm_aa(
+            rig.initial_hml_pose, _arm_aa(rig, q_start)
+        )
         t0 = time.perf_counter()
         _log(f"MDM generation: {n_samples} samples for {prompt!r}")
         traj.samples = rig.gen.generate_left_arm_position_samples(
@@ -846,9 +866,12 @@ class Session:
         level_samples = traj.samples[level.sample_indices]
         traj.labels = level.labels
         traj.cluster_means = {
-            label: rig.gen.smpl_positions_to_left_arm_trajectory(
-                level_samples[level.medoid_indices[label]],
-                spine3_aa=rig.spine3_aa,
+            label: canonical_arm_q(
+                rig.gen.smpl_positions_to_left_arm_trajectory(
+                    level_samples[level.medoid_indices[label]],
+                    spine3_aa=rig.spine3_aa,
+                ),
+                rig.context,
             )
             for label in sorted(int(v) for v in np.unique(level.labels))
         }
@@ -883,7 +906,9 @@ class Session:
                         "history": len(traj.q_history),
                         "correction": int(scaled.shape[0]),
                     },
-                    "full_metrics": violation_metrics(user, rig.context, full),
+                    "full_metrics": violation_metrics(
+                        user, rig.context, _arm_aa(rig, full)
+                    ),
                     "full_goal_reach": goal_reach(
                         rig.context, cfg_goal, full, traj.goal
                     ),
@@ -995,7 +1020,9 @@ class Session:
         traj = self.trajectory
         assert traj is not None
         frames = [
-            np.asarray(f, dtype=np.float64).reshape(-1, 3, 3)
+            canonical_arm_q(np.asarray(f, dtype=np.float64), self.rig.context).reshape(
+                -1, 7
+            )
             for f in [
                 traj.base_traj,
                 *traj.cluster_fulls.values(),
@@ -1008,11 +1035,11 @@ class Session:
         perturbed = anchors[None] + rng.normal(0.0, 0.25, size=(8, *anchors.shape))
         # pylint mis-infers ndarray.reshape as taking a single tuple.
         stacked = np.concatenate([anchors[None], perturbed], axis=0)
-        poses = stacked.reshape(-1, 3, 3)  # pylint: disable=too-many-function-args
+        poses = stacked.reshape(-1, 7)  # pylint: disable=too-many-function-args
         if poses.shape[0] > 1500:
             poses = poses[rng.choice(poses.shape[0], 1500, replace=False)]
-        feats = feature_series(self.rig.context, poses)
-        batch = np.repeat(poses[:, None, :, :], 2, axis=1)
+        feats = arm_feature_series(poses, self.rig.context)
+        batch = np.repeat(poses[:, None, :], 2, axis=1)
         active_features = generated_cost_feature_dependencies(cost.code)
         try:
             penalty = np.asarray(cost(batch), dtype=np.float64)
@@ -1042,9 +1069,7 @@ class Session:
         user = self.user
         cfg_goal = rig._cfg_with_goal(traj.goal)
         extra = rig._extra_costs(user)
-        cost_q_start = (
-            traj.q_feedback if traj.q_feedback is not None else traj.start_arm_aa
-        )
+        cost_q_start = traj.q_feedback if traj.q_feedback is not None else traj.start_q
         cost_dir = self.dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{backend}"
         instruction = traj.prompt or user.feedback_text
         result = generate_cost_for_cluster(
@@ -1100,7 +1125,7 @@ class Session:
         _log("rolling out the generated cost from the initial pose")
         start_rollout = rollout_to_goal(
             cfg_goal,
-            traj.start_arm_aa,
+            traj.start_q,
             traj.goal,
             rig.context,
             cost_set,
@@ -1116,10 +1141,12 @@ class Session:
         )
         payload = {
             "trajectory": rig.package_trajectory(rollout, user),
-            "metrics": violation_metrics(user, rig.context, rollout),
+            "metrics": violation_metrics(user, rig.context, _arm_aa(rig, rollout)),
             "goal_reach": goal_reach(rig.context, cfg_goal, rollout, traj.goal),
             "start_trajectory": rig.package_trajectory(start_rollout, user),
-            "start_metrics": violation_metrics(user, rig.context, start_rollout),
+            "start_metrics": violation_metrics(
+                user, rig.context, _arm_aa(rig, start_rollout)
+            ),
             "start_goal_reach": goal_reach(
                 rig.context, cfg_goal, start_rollout, traj.goal
             ),
@@ -1354,7 +1381,7 @@ class Session:
         _log("rolling out the unified cost from the initial pose")
         rollout = rollout_to_goal(
             cfg_goal,
-            traj.start_arm_aa,
+            traj.start_q,
             traj.goal,
             rig.context,
             installed,
@@ -1367,7 +1394,7 @@ class Session:
         _log(f"unified-cost rollout done in {time.perf_counter() - t0:.1f}s")
         payload.update(
             trajectory=rig.package_trajectory(rollout, self.user),
-            metrics=violation_metrics(self.user, rig.context, rollout),
+            metrics=violation_metrics(self.user, rig.context, _arm_aa(rig, rollout)),
             goal_reach=goal_reach(rig.context, cfg_goal, rollout, traj.goal),
         )
         return payload
@@ -1418,7 +1445,9 @@ class Session:
             ),
             "oracle": None if traj.oracle_traj is None else self._oracle_payload(),
             "clean_base": traj.clean_package,
-            "metrics": violation_metrics(self.user, rig.context, trajectory),
+            "metrics": violation_metrics(
+                self.user, rig.context, _arm_aa(rig, trajectory)
+            ),
             "goal_reach": goal_reach(
                 rig.context, rig._cfg_with_goal(traj.goal), trajectory, traj.goal
             ),

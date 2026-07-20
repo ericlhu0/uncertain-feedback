@@ -75,6 +75,9 @@ let showUnifiedBounds = true;
 const MDM_START_COLOR = "#7b2fbe";
 const GENERATED_LIMIT_COLOR = "#3567d6";
 const UNIFIED_COLOR = "#00838f";
+const FEATURE_LABELS = {
+  shoulder_internal_external_rotation: "shoulder internal / external rotation (q shoulder twist)",
+};
 
 let frame = 0;
 let playing = false;
@@ -1995,7 +1998,7 @@ function buildGraphs() {
     panel.className = "panel";
     const title = document.createElement("div");
     title.className = "graph-title";
-    title.textContent = name;
+    title.textContent = FEATURE_LABELS[name] || name.replaceAll("_", " ");
     const canvas = document.createElement("canvas");
     canvas.className = "feature-graph";
     canvas.id = `graph-${name}`;

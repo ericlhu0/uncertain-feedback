@@ -24,6 +24,7 @@ from uncertain_feedback.planners.mpc.costs import (
     build_generated_cost_context,
     render_prompt_images,
 )
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.planners.run import (
     _rollout_reference_trajectory,
     build_parser,
@@ -52,7 +53,7 @@ def main() -> None:
     effective_text_time = (
         args.text_time if args.text_time is not None else cfg.text_time
     )
-    q = setup.arm_aa.copy()
+    q = setup.q0.copy()
     q_history: list = []
     if effective_text_time > 0:
         result = run_planning_loop(mpc, q, effective_text_time)
@@ -61,12 +62,15 @@ def main() -> None:
             q = q_history[-1]
 
     mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
-    current_pose = setup.gen.build_pose_from_arm_aa(setup.initial_pose, q)
+    current_pose = setup.gen.build_pose_from_arm_aa(
+        setup.initial_pose,
+        q_to_arm_aa(q, setup.fk.elbow_hinge_axis),
+    )
     mpc.query_mdm_with_uncertainty(  # pylint: disable=no-member
         setup.gen,
         args.text,
         start_pose=current_pose,
-        current_arm_aa=q,
+        current_q=q,
         auto_cluster=cfg.uq.auto_cluster,
         mdm_frames=mdm_frames,
         frozen_body=args.frozen_body,
@@ -76,7 +80,7 @@ def main() -> None:
         raise RuntimeError("UQ clustering produced no result.")
 
     # Match what the LLM sees: the same always-on original-goal reference + goal marker.
-    reference_traj = _rollout_reference_trajectory(
+    reference_q = _rollout_reference_trajectory(
         cfg,
         q,
         setup.cost_context,
@@ -87,10 +91,9 @@ def main() -> None:
     )
     goal_pos = (
         np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-        if reference_traj is not None and cfg.cartesian.goals
+        if reference_q is not None and cfg.cartesian.goals
         else None
     )
-
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for label in sorted(uqr.cluster_means):
@@ -101,14 +104,14 @@ def main() -> None:
             q_history,
             window=cfg.preference_window,
             body_pos=setup.body_pos,
-            reference_traj=reference_traj,
+            reference_traj=reference_q,
         )
         images = render_prompt_images(
             context,
             out_dir / f"cluster_{label}",
             candidate_trajs=uqr.cluster_means,
             highlight_label=label,
-            reference_traj=reference_traj,
+            reference_traj=reference_q,
             goal_pos=goal_pos,
         )
         for key, path in images.items():

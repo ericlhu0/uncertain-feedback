@@ -134,7 +134,10 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
             frozen_body=frozen_body,
             log_prefix="[multi-round]",
         )
-        np.save(round_dir / "correction.npy", correction.correction_traj)
+        np.save(
+            round_dir / "correction.npy",
+            context.fk.arm_aa_to_q_batch(correction.correction_traj, spine3_aa),
+        )
         uq_result = correction.uq_result
         generation = generate_cost_for_cluster(
             mpc=None,

@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostContext,
     GeneratedCostValidationError,
@@ -159,14 +160,14 @@ def rank_candidate_cost(
     rollout and no marked-undesirable clusters), in which case callers fall back to
     the L2 rollout score.
     """
-    chosen = np.asarray(context.mdm_traj, dtype=np.float64)
-    if chosen.ndim != 3 or chosen.shape[0] == 0:
+    chosen = canonical_arm_q(context.mdm_traj, context)
+    if chosen.ndim != 2 or chosen.shape[0] == 0:
         return None
     trajs: dict[str, np.ndarray] = {}
     if context.reference_traj is not None and context.reference_traj.size > 0:
-        trajs["original_plan"] = context.reference_traj
+        trajs["original_plan"] = canonical_arm_q(context.reference_traj, context)
     for i, rejected in enumerate(context.rejected_trajs):
-        trajs[f"rejected_cluster_{i}"] = rejected
+        trajs[f"rejected_cluster_{i}"] = canonical_arm_q(rejected, context)
     if not trajs:
         return None
     trajs["chosen_correction"] = chosen
@@ -203,12 +204,12 @@ def _score_rollout(context: GeneratedCostContext, rollout: np.ndarray) -> float:
     output is systematically slower than a fresh rollout, so frame-wise timing is
     a pipeline artifact. ``math.inf`` when either trajectory is empty / malformed.
     """
-    rollout = np.asarray(rollout, dtype=np.float64)
-    target = np.asarray(context.mdm_traj, dtype=np.float64)
+    rollout = canonical_arm_q(rollout, context)
+    target = canonical_arm_q(context.mdm_traj, context)
     if (
-        rollout.ndim != 3
+        rollout.ndim != 2
         or rollout.shape[0] == 0
-        or target.ndim != 3
+        or target.ndim != 2
         or target.shape[0] == 0
     ):
         return math.inf
@@ -233,10 +234,12 @@ def goal_reach_report(
         return None
     if rollout is None:
         return None
-    rollout = np.asarray(rollout, dtype=np.float64)
-    if rollout.ndim != 3 or rollout.shape[0] == 0:
+    rollout = canonical_arm_q(rollout, context)
+    if rollout.ndim != 2 or rollout.shape[0] == 0:
         return None
-    arm_pos = context.fk.fk(rollout[-1], context.spine3_pos, context.spine3_aa)
+    arm_pos = context.fk.fk(
+        context.arm_aa(rollout[-1]), context.spine3_pos, context.spine3_aa
+    )
     wrist_rel = arm_pos[-1] - context.spine3_pos
     distance = float(np.linalg.norm(wrist_rel - context.cartesian_goal))
     return {
@@ -308,8 +311,8 @@ def evaluate_and_render(
     rollout = rollout_fn(cost)
     if rollout is None:
         return math.inf, None, None
-    rollout = np.asarray(rollout, dtype=np.float64)
-    if rollout.ndim != 3 or rollout.shape[0] == 0:
+    rollout = canonical_arm_q(rollout, context)
+    if rollout.ndim != 2 or rollout.shape[0] == 0:
         return math.inf, None, None
     score = _score_rollout(context, rollout)
     image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -317,9 +320,9 @@ def evaluate_and_render(
     correction_traj = _reference_with_correction_traj(context)
     visualizer.render_cost_feedback_overlay(
         image_path,
-        rollout_traj=rollout,
-        correction_traj=correction_traj,
-        current_q=context.current_q,
+        rollout_traj=context.arm_aa(rollout),
+        correction_traj=context.arm_aa(correction_traj),
+        current_q=context.arm_aa(context.current_q),
         spine3_pos=context.spine3_pos,
         spine3_aa=context.spine3_aa,
         body_pos=context.body_pos,
@@ -343,7 +346,7 @@ def evaluate_and_render(
     if video_path is not None:
         video_path.parent.mkdir(parents=True, exist_ok=True)
         visualizer.render_rollout_video(
-            rollout,
+            context.arm_aa(rollout),
             video_path,
             spine3_pos=context.spine3_pos,
             spine3_aa=context.spine3_aa,
@@ -625,26 +628,26 @@ class CostGenerator(ABC):
             ArmVisualizer,
         )
 
-        reference = np.asarray(
-            _reference_with_correction_traj(self.context), dtype=np.float64
+        reference = canonical_arm_q(
+            _reference_with_correction_traj(self.context), self.context
         )
-        if reference.ndim != 3 or reference.shape[0] == 0:
+        if reference.ndim != 2 or reference.shape[0] == 0:
             return
         video_path = self.run_dir / "reference_with_correction.mp4"
-        mdm_traj = np.asarray(self.context.mdm_traj, dtype=np.float64)
+        mdm_traj = canonical_arm_q(self.context.mdm_traj, self.context)
         mdm_goal_q = (
             mdm_traj[-1]
-            if mdm_traj.ndim == 3 and mdm_traj.shape[0] > 0
+            if mdm_traj.ndim == 2 and mdm_traj.shape[0] > 0
             else reference[-1]
         )
         try:
             ArmVisualizer(self.context.fk).render_rollout_video(
-                reference,
+                self.context.arm_aa(reference),
                 video_path,
                 spine3_pos=self.context.spine3_pos,
                 spine3_aa=self.context.spine3_aa,
                 body_pos=self.context.body_pos,
-                mdm_goal_q=mdm_goal_q,
+                mdm_goal_q=self.context.arm_aa(mdm_goal_q),
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             print(f"[cost-gen] failed to render {video_path}: {exc}")

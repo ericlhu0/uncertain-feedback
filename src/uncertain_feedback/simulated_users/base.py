@@ -8,7 +8,7 @@ and scores any trajectory by how much the hidden restrictions are violated
 (:func:`violation_metrics`). The hidden cost is never shown to the cost
 generator — it is the ground truth the generated cost is evaluated against.
 
-Restrictions are expressed over the same four anatomical joint features the cost
+Restrictions are expressed over the same five anatomical joint features the cost
 generator uses (see ``GeneratedCostContext``), so a hidden bound and a generated
 bound are directly comparable.
 """
@@ -19,47 +19,25 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from uncertain_feedback.planners.mpc.arm_features import (
+    FEATURE_NAMES,
+    arm_aa_from_state,
+    arm_feature_series,
+)
 from uncertain_feedback.planners.mpc.costs.base import (
     JointLimitCost,
     MpcCostContext,
     TrajectoryCost,
 )
-from uncertain_feedback.planners.mpc.costs.generated import (
-    GeneratedCostContext,
-    build_joint_angle_series,
-)
-
-FEATURE_NAMES = (
-    "elbow_flexion",
-    "shoulder_flexion_extension",
-    "shoulder_abduction_adduction",
-    "shoulder_elevation",
-    "shoulder_internal_external_rotation",
-)
 
 BOUND_TYPES = ("upper_bound", "lower_bound", "avoid_band")
-
-
-def _feature_context(context: MpcCostContext) -> GeneratedCostContext:
-    """Wrap an MPC cost context so the shared joint-feature helpers apply."""
-    empty = np.empty((0, 3, 3), dtype=np.float64)
-    return GeneratedCostContext(
-        fk=context.fk,
-        spine3_pos=np.asarray(context.spine3_pos, dtype=np.float64),
-        spine3_aa=np.asarray(context.spine3_aa, dtype=np.float64),
-        current_q=np.zeros((3, 3), dtype=np.float64),
-        mdm_traj=empty,
-        recent_q=empty,
-    )
 
 
 def feature_series(
     context: MpcCostContext, trajectory: np.ndarray
 ) -> dict[str, np.ndarray]:
-    """Return the four joint-feature series for any ``(..., 3, 3)`` trajectory."""
-    return build_joint_angle_series(
-        _feature_context(context), np.asarray(trajectory, dtype=np.float64)
-    )
+    """Return the canonical anatomical features for q or axis-angle states."""
+    return arm_feature_series(trajectory, context)
 
 
 @dataclass(frozen=True)
@@ -224,7 +202,7 @@ class SimulatedUser:
         return JointLimitCost(slots=slots, low=low, high=high, weight=weight)
 
     def limit_violation_series(self, trajectory: np.ndarray) -> np.ndarray:
-        """Return summed per-frame joint-box-limit violations."""
+        """Return joint-box violations for FK-boundary ``(..., 3, 3)`` data."""
         trajectory = np.asarray(trajectory, dtype=np.float64)
         total = np.zeros(trajectory.shape[:-2], dtype=np.float64)
         for limit in self.joint_limits:
@@ -235,10 +213,10 @@ class SimulatedUser:
 def compute_violations(
     user: SimulatedUser, context: MpcCostContext, trajectory: np.ndarray
 ) -> np.ndarray:
-    """Return the hidden-cost violation series for a ``(..., 3, 3)`` trajectory."""
+    """Return the hidden-cost violation series for q or axis-angle states."""
     return user.violation_series(
         feature_series(context, trajectory)
-    ) + user.limit_violation_series(trajectory)
+    ) + user.limit_violation_series(arm_aa_from_state(trajectory, context))
 
 
 def first_violation_step(
@@ -295,5 +273,5 @@ class HiddenCostTerm(TrajectoryCost):
         future = q_trajs[:, 1:] if q_trajs.shape[1] > 1 else q_trajs
         violations = self.user.violation_series(
             feature_series(self.context, future)
-        ) + self.user.limit_violation_series(future)
+        ) + self.user.limit_violation_series(arm_aa_from_state(future, self.context))
         return self.weight * np.mean(violations**2, axis=1)

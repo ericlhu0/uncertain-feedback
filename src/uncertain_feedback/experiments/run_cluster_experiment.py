@@ -21,6 +21,7 @@ from uncertain_feedback.experiments.cluster_comparison import run_cluster_compar
 from uncertain_feedback.experiments.experiment_pipeline import apply_persona_goals
 from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import COST_BACKENDS, load_mpc_config
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.planners.run import (
     build_parser,
     build_run,
@@ -97,7 +98,7 @@ def main() -> None:
     effective_text_time = (
         args.text_time if args.text_time is not None else cfg.text_time
     )
-    q = setup.arm_aa.copy()
+    q = setup.q0.copy()
     q_history: list = []
     if effective_text_time > 0:
         result = run_planning_loop(mpc, q, effective_text_time)
@@ -112,12 +113,15 @@ def main() -> None:
         if cfg.uq.user_cluster and setup.user.bounds
         else None
     )
-    current_pose = setup.gen.build_pose_from_arm_aa(setup.initial_pose, q)
+    current_pose = setup.gen.build_pose_from_arm_aa(
+        setup.initial_pose,
+        q_to_arm_aa(q, setup.fk.elbow_hinge_axis),
+    )
     mpc.query_mdm_with_uncertainty(  # pylint: disable=no-member
         setup.gen,
         feedback_text,
         start_pose=current_pose,
-        current_arm_aa=q,
+        current_q=q,
         auto_cluster=cfg.uq.auto_cluster,
         mdm_frames=mdm_frames,
         frozen_body=args.frozen_body,
@@ -146,7 +150,7 @@ def main() -> None:
         body_pos=setup.body_pos,
         spine3_pos=setup.spine3_pos,
         spine3_aa=setup.spine3_aa,
-        initial_q=setup.arm_aa,
+        initial_q=setup.q0,
         install=False,
         save_video=args.save_video,
         user=user,

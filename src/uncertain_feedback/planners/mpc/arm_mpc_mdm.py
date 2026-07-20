@@ -27,7 +27,7 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_mpc import (
     SmplLeftArmMPC,
-    _as_controlled_arm_aa,
+    _as_state_q,
     _VisConfig,
 )
 from uncertain_feedback.planners.mpc.costs import (
@@ -35,9 +35,11 @@ from uncertain_feedback.planners.mpc.costs import (
     LearnablePreferenceCost,
 )
 from uncertain_feedback.planners.mpc.kinematics import (
+    Q_DIM,
     SmplLeftArmFK,
-    _compose_rotvec,
-    _rate_limited_step,
+    _compose_q,
+    _rate_limited_step_q,
+    q_to_arm_aa,
 )
 
 if TYPE_CHECKING:
@@ -72,7 +74,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                              (e.g. ``0.75`` enqueues the first 75 % of
                              frames).  Defaults to
                              :attr:`TRAJECTORY_FRACTION`.
-        goals:               Initial list of ``(3, 3)`` target configurations.
+        goals:               Initial list of ``(7,)`` target configurations.
         goal_threshold:      Threshold passed to the base class (used only
                              when ``advance_threshold`` is not overriding).
         visualize:           If ``True``, open a live matplotlib window.
@@ -184,7 +186,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         """Return the current pose followed by the unexecuted playback targets."""
         if not self._in_playback():
             return None
-        current = _as_controlled_arm_aa(current_q, "current_q")
+        current = _as_state_q(current_q, "current_q")
         assert self._playback_frames is not None
         remaining = self._playback_frames[self._playback_idx :]
         return np.concatenate((current[np.newaxis], remaining.copy()), axis=0)
@@ -210,7 +212,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         not strictly guarantee the executed motion stays in-band.
 
         Args:
-            frames: ``(n_frames, 3, 3)`` axis-angle trajectory.
+            frames: ``(n_frames, 7)`` planner-state trajectory.
             tol:    Violation magnitude below which a frame is treated as
                     in-range (guards against floating-point noise).
 
@@ -219,18 +221,19 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             the trajectory respects every configured range cost).
         """
         frames = np.asarray(frames, dtype=np.float64)
-        if frames.ndim != 3 or frames.shape[1:] != (3, 3):
+        if frames.ndim != 2 or frames.shape[1:] != (7,):
             raise ValueError(
-                "frames must have shape (n_frames, 3, 3) for "
-                "[left_shoulder, left_elbow, left_wrist]; "
-                f"left_collar is fixed on SmplLeftArmFK.collar_aa, got {frames.shape}"
+                "frames must have shape (n_frames, 7) for "
+                "[clavicle rotvec, shoulder rotvec, elbow angle], "
+                f"got {frames.shape}"
             )
+        aa_frames = q_to_arm_aa(frames, self._fk.elbow_hinge_axis)
         warnings: list[str] = []
         n_frames = len(frames)
         for term in self._extra_costs.terms():
             if not isinstance(term, LearnablePreferenceCost):
                 continue
-            values = term.feature_values(frames)
+            values = term.feature_values(aa_frames)
             violation = np.maximum(term.min_value - values, 0.0) + np.maximum(
                 values - term.max_value, 0.0
             )
@@ -259,15 +262,17 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         already in the queue.
 
         Args:
-            frames:   ``(n_frames, 3, 3)`` axis-angle trajectory for
-                      ``[left_shoulder, left_elbow, left_wrist]``,
-                      as returned by
-                      :meth:`~uncertain_feedback.motion_generators.mdm.mdm_api\
-.MdmMotionGenerator.generate_left_arm_trajectory`.
+            frames: ``(n_frames, 7)`` canonical arm trajectory or
+                    ``(n_frames, 3, 3)`` decoded axis-angle trajectory.
         """
         frames = np.asarray(frames, dtype=np.float64)
 
-        warnings = self.validate_trajectory(frames)
+        q_frames = (
+            frames
+            if frames.shape[-1:] == (Q_DIM,)
+            else self._fk.arm_aa_to_q_batch(frames, self._mdm_spine3_aa)
+        )
+        warnings = self.validate_trajectory(q_frames)
         if warnings:
             print(
                 "[validate] generated trajectory violates safety costs "
@@ -278,15 +283,17 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         else:
             print("[validate] generated trajectory respects all safety costs.")
 
-        self._playback_frames = frames
+        self._playback_frames = q_frames
         self._playback_idx = 0
         self.reset_warmstart()
 
         # Notify live visualiser of the new preview frame (last MDM frame).
-        preview_q = frames[-1].copy()
+        preview_q = q_frames[-1].copy()
         self._preview_q = preview_q
         if self._vis is not None:
-            self._vis.update_trajectory_preview(preview_q)
+            self._vis.update_trajectory_preview(
+                q_to_arm_aa(preview_q, self._fk.elbow_hinge_axis)
+            )
 
     def _advance_playback(self, current_q: np.ndarray) -> np.ndarray:
         """Take one rate-limited step toward the current MDM frame.
@@ -301,7 +308,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         """
         assert self._playback_frames is not None
         target_q = self._playback_frames[self._playback_idx]
-        next_q, reached = _rate_limited_step(
+        next_q, reached = _rate_limited_step_q(
             current_q, target_q, self._max_playback_delta
         )
         if reached:
@@ -319,12 +326,13 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         when the window first opens.
 
         Args:
-            goal_q: ``(3, 3)`` axis-angle joint angles for the last frame of
-                    the MDM-generated trajectory.
+            goal_q: ``(7,)`` planner state for the last generated frame.
         """
-        self._mdm_goal = _as_controlled_arm_aa(goal_q, "goal_q")
+        self._mdm_goal = _as_state_q(goal_q, "goal_q")
         if self._vis is not None:
-            self._vis.update_mdm_goal(self._mdm_goal)
+            self._vis.update_mdm_goal(
+                q_to_arm_aa(self._mdm_goal, self._fk.elbow_hinge_axis)
+            )
 
     # ------------------------------------------------------------------
     # step override: advance_threshold + MDM color
@@ -353,13 +361,13 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         trajectory and blue once the MPC is reaching the final goal.
 
         Args:
-            current_q:         ``(3, 3)`` current axis-angle joint angles.
+            current_q:         ``(7,)`` current planner state.
             advance_threshold: Distance (L2 norm) below which the MPC advances
                                to the next queued goal during the resume phase.
                                Defaults to :attr:`advance_threshold`.
 
         Returns:
-            ``(3, 3)`` updated axis-angle joint angles.
+            ``(7,)`` updated planner state.
         """
         playing = self._in_playback()
         if playing:
@@ -375,9 +383,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         else:
             target_q = self._goals[0]
             first_action, _ = self.solve(current_q)
-            next_q = _compose_rotvec(
-                np.asarray(current_q, dtype=np.float64), first_action
-            )
+            next_q = _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
 
             threshold = (
                 advance_threshold
@@ -400,7 +406,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                 vis_goal = self._goals[-1] if self._goals else next_q
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    vis_goal,
+                    q_to_arm_aa(vis_goal, self._fk.elbow_hinge_axis),
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     body_pos=self._vis_config.body_pos,
@@ -410,11 +416,19 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                 if self._vis_config.capture:
                     self._vis.start_capture()
                 if self._mdm_goal is not None:
-                    self._vis.update_mdm_goal(self._mdm_goal)
+                    self._vis.update_mdm_goal(
+                        q_to_arm_aa(self._mdm_goal, self._fk.elbow_hinge_axis)
+                    )
                 if self._preview_q is not None:
-                    self._vis.update_trajectory_preview(self._preview_q)
+                    self._vis.update_trajectory_preview(
+                        q_to_arm_aa(self._preview_q, self._fk.elbow_hinge_axis)
+                    )
             color = ArmVisualizer.MDM_COLOR if playing else ArmVisualizer.TARGET_COLOR
-            self._vis.update_step(next_q, dist=dist, color=color)
+            self._vis.update_step(
+                q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),
+                dist=dist,
+                color=color,
+            )
 
         return next_q
 
@@ -504,13 +518,9 @@ def _demo() -> None:
     ) = gen.decode_pose(initial_pose)
     demo_fk.collar_aa = np.asarray(initial_collar_aa, dtype=np.float64)
 
-    demo_target_q = initial_arm_aa.copy() + np.array(
-        [
-            [0.0, -1.6, 0.8],  # left_shoulder
-            [0.0, 0.0, 0.0],  # left_elbow
-            [0.0, 0.0, 0.0],  # left_wrist
-        ]
-    )
+    demo_q = demo_fk.arm_aa_to_q(initial_arm_aa, initial_spine3_aa)
+    demo_target_q = demo_q.copy()
+    demo_target_q[:3] += np.array([0.0, -1.6, 0.8])
 
     demo_mpc = LeftArmMPCMDM(
         horizon=args.horizon,
@@ -522,8 +532,6 @@ def _demo() -> None:
         spine3_aa=initial_spine3_aa,
         body_pos=initial_body_positions,
     )
-
-    demo_q = initial_arm_aa.copy()
 
     for _ in range(args.text_time):
         demo_q = demo_mpc.step(demo_q)
@@ -541,7 +549,9 @@ def _demo() -> None:
     print(
         f"Generating MDM trajectory for: '{args.text}' (starting from current MPC state)"
     )
-    current_pose = gen.build_pose_from_arm_aa(initial_pose, demo_q)
+    current_pose = gen.build_pose_from_arm_aa(
+        initial_pose, q_to_arm_aa(demo_q, demo_fk.elbow_hinge_axis)
+    )
     trajectory = gen.generate_left_arm_trajectory(
         args.text,
         start_pose=current_pose,
@@ -565,7 +575,9 @@ def _demo() -> None:
             except Exception:  # pylint: disable=broad-exception-caught
                 continue
 
-    demo_mpc.set_mdm_goal(trajectory[cutoff - 1])
+    demo_mpc.set_mdm_goal(
+        demo_fk.arm_aa_to_q(trajectory[cutoff - 1], initial_spine3_aa)
+    )
     demo_mpc.push_trajectory(
         trajectory[:cutoff]
     )  # prepends first-fraction MDM frames; demo_target_q stays last

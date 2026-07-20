@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-18
+**Last updated:** 2026-07-20
 **Branch:** pose-dependent-users
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -33,6 +33,7 @@ uncertain-feedback/
 │   │       ├── __init__.py           # Public exports
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
 │   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants
+│   │       ├── arm_features.py        # Canonical q conversion + shared anatomical arm features
 │   │       ├── costs/                # Cost package (public surface: mpc.costs)
 │   │       │   ├── __init__.py       # Re-exports the public cost API
 │   │       │   ├── base.py           # Cost terms + registry + preference learning
@@ -147,7 +148,7 @@ uncertain-feedback/
 ```
 SmplLeftArmMPC (arm_mpc.py)
 │  Core sampling MPC: sample N action sequences, roll out, pick min-cost.
-│  State: (3, 3) axis-angle for [left_shoulder, left_elbow, left_wrist].
+│  State: (7,) [clavicle rotvec, shoulder rotvec, elbow flexion angle].
 │  Warm-start: shifts previous best plan by one step each iteration.
 │
 ├── LeftArmMPCMDM (arm_mpc_mdm.py)
@@ -235,14 +236,14 @@ SmplLeftArmMPC / subclass
     │   generated costs stack during execution and are unified at trajectory end.
     │   Each MPC step: sample N×H action sequences, rollout, compute cost, take best
     │
-    ├── Joint-space cost: L2 to current goal in (3,3) axis-angle space
+    ├── Joint-space cost: L2 to current goal in 7-DOF q-space
     └── Extra costs: CompositeTrajectoryCost terms [costs/base.py]
             ElbowHeightCost
             ElbowFlexionAngleCost
             ShoulderAbductionAngleCost
             GeneratedPythonCost [costs/llm_costs.py]
     │
-    ▼  next_q (3, 3) each step
+    ▼  next_q (7,) each step; converted to (3,3) arm aa for visualization
     │
 ArmVisualizer.update_step()                          [utils/plot.py]
     Live matplotlib 3D window + optional video capture
@@ -254,11 +255,13 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 
 - **`SmplLeftArmFK`** — loads SMPL neutral PKL once; stores T-pose bone offsets for the arm chain
 - Joint chain: `spine3 (9) → left_collar (13) → left_shoulder (16) → left_elbow (18) → left_wrist (20)`
-- MPC controls 3 joints: shoulder, elbow, wrist — collar is fixed from initial pose decode
+- MPC controls 7 DOFs: clavicle rotvec (3), shoulder rotvec (3), and elbow flexion (1)
 - Key methods:
   - `fk(arm_aa, spine3_pos, spine3_aa) → (5, 3)` world positions
   - `fk_batch(arm_aa, ...) → (N, 5, 3)` batched
   - `arm_aa_from_positions(positions, spine3_aa) → (3, 3)` inverse: XYZ → local axis-angles
+  - `arm_aa_to_q(arm_aa, spine3_aa) → (7,)` boundary conversion; off-hinge elbow rotation is anatomically decoded
+  - `q_to_arm_aa(q, elbow_hinge_axis) → (..., 3, 3)` FK/visualization/cost boundary
   - `full_body_positions(arm_aa, ...) → (22, 3)` for visualization
 - **`anatomical_elbow_wrist_slots(...)`** (module function) — anatomically-constrained
   elbow + wrist slot rotations for the left arm, shared by the three reconstruction sites
@@ -274,7 +277,7 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 
 ### Cost term protocol
 
-All cost terms implement `TrajectoryCost`: callable `(q_trajs: np.ndarray) → np.ndarray` where input is `(N, H+1, 3, 3)` rollout states and output is `(N,)` per-rollout scalar costs.
+All cost terms implement `TrajectoryCost`: callable `(q_trajs: np.ndarray) → np.ndarray` with `(N,)` per-rollout output. The MPC currently decodes its `(N, H+1, 7)` state batch to the `(N, H+1,3,3)` FK/cost boundary once before invoking the cost system; every anatomical feature immediately canonicalizes through `arm_features.py`, so q and boundary inputs have identical feature semantics. Generated costs receive the decoded boundary for source compatibility, while their context trajectories are canonical q.
 
 ### Learnable preference costs (`LearnablePreferenceCost` Protocol)
 
@@ -453,7 +456,8 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 
 | Format                  | Shape      | Where used                                    |
 |-------------------------|------------|-----------------------------------------------|
-| Controlled arm aa       | `(3, 3)`   | MPC state/action (shoulder, elbow, wrist)     |
+| Planner arm state       | `(7,)`     | Clavicle (3), shoulder (3), elbow flexion (1)|
+| Controlled arm aa       | `(3, 3)`   | FK, visualization, costs, motion-gen boundary|
 | HML263 feature vector   | `(263,)`   | MDM input/output                              |
 | SMPL body_pose          | `(21, 3)`  | SMPL model; intermediate conversion format   |
 | XYZ joint positions     | `(22, 3)`  | FK output, visualization, clustering features|
@@ -461,7 +465,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | Arm chain positions     | `(5, 3)`   | FK arm output (spine3 through wrist)          |
 | Spine3 anchor           | `(3,)`×2   | Position + axis-angle; fixed reference frame  |
 | Cartesian wrist goal    | `(3,)`     | Spine3-relative target for Cartesian MPC      |
-| MPC rollout batch       | `(N,H+1,3,3)` | N samples × H+1 steps × 3 joints × 3 dim |
+| MPC rollout batch       | `(N,H+1,7)` | N samples × H+1 steps × 7 arm DOFs          |
 
 ---
 
@@ -544,9 +548,9 @@ The hidden bounds are the evaluation ground truth in headless experiments
   (mean/max/frac violated — evaluation metric), `HiddenCostTerm` (oracle
   planner cost adapter implementing `TrajectoryCost`; also used by transfer
   experiments to score scaled raw UQ cluster options before cost generation).
-- Features come from the same `GeneratedCostContext` joint-feature helpers the
-  cost generator uses (via `feature_series()`), so hidden bounds and generated
-  bounds are directly comparable. Demo Runner parses validated constant and
+- Features come from the shared `arm_features.arm_feature_series()` implementation
+  used by `GeneratedCostContext`, so hidden bounds, generated costs, corpus CSVs,
+  and demo graphs are directly comparable. Demo Runner parses validated constant and
   pose-dependent grounded terms from `rationale.json` (falling back to the Stage 2
   artifact) and draws their exact threshold or piecewise interpolation boundary.
   It also records which named helpers each compiled generated cost reads: two-feature
@@ -569,31 +573,19 @@ The hidden bounds are the evaluation ground truth in headless experiments
   hard conditional zone).
   Registry: `PERSONAS` / `get_persona(name)`.
 
-> **Elbow-flexion feature fix (2026-07-06):**
-> `GeneratedCostContext.elbow_flexion_angles` (generator-side) and
-> `compute_elbow_flexion_angles` in `costs/base.py` (the `elbow_flexion_angle`
-> YAML cost + preference learning) both now measure the angle between the upper
-> arm and forearm (0 = straight), computed from the **wrist-slot joint
-> rotation** applied to the T-pose bone axes (equivalent to the FK-position
-> angle, no FK needed). The old elbow-slot rotvec norm could not see an
-> anatomical elbow bend at all — under the repo FK convention (audit §3) the
-> bend is encoded in the wrist slot — and instead tracked upper-arm
-> re-orientation. Any old `elbow_flexion_angle` min/max values from before
-> this fix are on the wrong scale.
-
-> **Shoulder internal/external-rotation feature fix (2026-07-07):**
-> `GeneratedCostContext.shoulder_internal_external_rotation_angles` now
-> twist-decomposes the **composed collar∘shoulder∘elbow** rotation about the
-> T-pose upper-arm axis. Under the same FK convention that composition orients
-> the upper-arm bone, so the old shoulder-slot-only twist gave different
-> readings for physically identical poses (and read 0 for twist encoded in the
-> elbow slot, as position-derived MDM trajectories may do).
-> Abduction/adduction and flexion/extension were audited and are correct.
-> All joint features (and the cost-side `compute_elbow_flexion_angles` /
-> `compute_shoulder_abduction_angles`) are now closed-form joint-angle
-> computations — composed slot rotations applied to T-pose bone axes — with
-> outputs identical to the previous FK-position geometry (~5× faster on MPC
-> rollout batches since no FK positions are computed).
+> **Canonical arm-feature layer (2026-07-20):**
+> `planners/mpc/arm_features.py` is the single implementation for all five
+> anatomical features. It accepts canonical q arrays ending in `(7,)` and
+> decoded FK/cost-boundary arrays ending in `(3,3)`; boundary input is converted
+> to q once before feature evaluation. Hand-authored MPC feature costs,
+> `GeneratedCostContext`, simulated-user bounds, corpus CSV generation, demo
+> trajectory graphs, and the sampled generated-cost penalty field all route
+> through it. `shoulder_internal_external_rotation` is now the signed twist of
+> the anatomical shoulder block `q[3:6]` about the T-pose upper-arm axis;
+> clavicle `q[0:3]` does not contribute. The other four features, including
+> plane-independent `shoulder_elevation`, remain available. Generated Python
+> source still receives decoded `(3,3)` states for compatibility, but named
+> feature helpers and all stored context/corpus trajectories are q-native.
 
 > **Anatomical left-arm reparameterization (2026-07-14):**
 > The three left-arm reconstruction sites now route the elbow/wrist slots through
@@ -607,9 +599,8 @@ The hidden bounds are the evaluation ground truth in headless experiments
 > features (`elbow_flexion`, shoulder flexion/abduction/elevation) are unchanged.
 > On the reference clip this dropped the displayed hand-frame drift from 136°→~43°
 > (matching the true 41° forearm-direction change), wrist rate-limiter caps 6→0,
-> and `left_wrist` `JointBoxLimit` violations 2→0. The recovered
-> `shoulder_internal_external_rotation` now reports real twist relative to the
-> T-pose flexion plane (nothing bounds it). Full details in audit §3a.
+> and `left_wrist` `JointBoxLimit` violations 2→0. The recovered flexion-plane
+> twist is stored in the anatomical shoulder block of q. Full details in audit §3a.
 
 > **Shoulder-elevation feature (2026-07-07):**
 > `GeneratedCostContext.shoulder_elevation_angles` — upper-arm angle from

@@ -24,8 +24,8 @@ Live MPC visualization::
     mpc = SmplLeftArmMPC(horizon=10, n_mpc_samples=512)
     vis = ArmVisualizer(fk)
 
-    initial_q = np.zeros((3, 3))
-    target_q  = np.array([[0, 0.5, 0], [0, 0, 0.4], [0, 0, 0]])
+    initial_q = np.zeros(7)
+    target_q  = np.array([0, 0.5, 0, 0, 0, 0.4, 0])
 
     fig, anim = vis.animate(mpc, initial_q, target_q, n_steps=40)
     plt.show()
@@ -73,6 +73,7 @@ from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_JOINT_INDICES_22,
     SMPL_BONE_PAIRS_22,
     SmplLeftArmFK,
+    q_to_arm_aa,
 )
 
 # pylint: enable=wrong-import-position
@@ -305,8 +306,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         Args:
             mpc:        Configured :class:`SmplLeftArmMPC`.
-            initial_q:  ``(3, 3)`` controlled arm axis-angles.
-            target_q:   ``(3, 3)`` target controlled arm axis-angles.
+            initial_q:  ``(7,)`` planner state.
+            target_q:   ``(7,)`` target planner state.
             n_steps:    Number of MPC steps to simulate.
             spine3_pos: ``(3,)`` world position of spine3.
             spine3_aa:  ``(3,)`` world axis-angle of spine3.
@@ -317,10 +318,11 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ``(fig, anim)`` — the matplotlib Figure and FuncAnimation.
         """
         frames = self._run_mpc(mpc, initial_q, target_q, n_steps, spine3_pos, spine3_aa)
+        target_aa = q_to_arm_aa(target_q, self.fk.elbow_hinge_axis)
 
         fig, artists_3d, artists_2d = self._build_figure(
-            target_q,
-            _compute_lims(frames, self.fk, target_q, spine3_pos, spine3_aa),
+            target_aa,
+            _compute_lims(frames, self.fk, target_aa, spine3_pos, spine3_aa),
             spine3_pos,
             spine3_aa,
         )
@@ -2031,7 +2033,11 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         frames = []
         for step in range(n_steps + 1):
-            positions = self._full_body_positions(current_q, spine3_pos, spine3_aa)
+            positions = self._full_body_positions(
+                q_to_arm_aa(current_q, self.fk.elbow_hinge_axis),
+                spine3_pos,
+                spine3_aa,
+            )
             dist = float(np.linalg.norm(current_q - target_q))
             frames.append({"q": current_q.copy(), "positions": positions, "dist": dist})
             if step < n_steps:
@@ -2301,14 +2307,8 @@ if __name__ == "__main__":
     )
     demo_vis = ArmVisualizer(demo_fk)
 
-    demo_initial_q = np.zeros((3, 3))
-    demo_target_q = np.array(
-        [
-            [0.0, -1.45, 0.0],  # left_shoulder
-            [0.0, 0.0, 0.4],  # left_elbow
-            [0.0, 0.0, 0.0],  # left_wrist
-        ]
-    )
+    demo_initial_q = np.zeros(7)
+    demo_target_q = np.array([0.0, -1.45, 0.0, 0.0, 0.0, 0.4, 0.0])
 
     demo_fig, demo_anim = demo_vis.animate(
         demo_mpc,

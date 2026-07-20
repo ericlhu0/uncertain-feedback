@@ -153,7 +153,7 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
     )
     old = GeneratedPythonCost(_CODE, {"weight": 9.0}, context)
     mpc = SmplLeftArmMPC(
-        goals=[np.zeros((3, 3))], extra_costs=CompositeTrajectoryCost([base, old])
+        goals=[np.zeros(7)], extra_costs=CompositeTrajectoryCost([base, old])
     )
     generator = CombineCostGenerator(
         context=context,

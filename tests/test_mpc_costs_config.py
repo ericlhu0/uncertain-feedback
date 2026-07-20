@@ -47,8 +47,13 @@ from uncertain_feedback.planners.mpc.costs import (
     update_elbow_cost,
     update_preference_cost,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
-from uncertain_feedback.simulated_users import JointBoxLimit, SimulatedUser
+from uncertain_feedback.planners.mpc.kinematics import Q_DIM, SmplLeftArmFK
+from uncertain_feedback.simulated_users import (
+    HiddenCostTerm,
+    JointBoxLimit,
+    SimulatedUser,
+    compute_violations,
+)
 from uncertain_feedback.uncertainty.cluster_picker import ClusterPickResult
 from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
@@ -363,8 +368,8 @@ costs:
 
 
 def test_seeded_mpc_sampling_is_reproducible() -> None:
-    target_q = np.zeros((3, 3), dtype=np.float64)
-    current_q = np.zeros((3, 3), dtype=np.float64)
+    target_q = np.zeros(Q_DIM, dtype=np.float64)
+    current_q = np.zeros(Q_DIM, dtype=np.float64)
     first = SmplLeftArmMPC(goals=[target_q], horizon=2, n_mpc_samples=8, seed=17)
     second = SmplLeftArmMPC(goals=[target_q], horizon=2, n_mpc_samples=8, seed=17)
 
@@ -955,8 +960,8 @@ costs:
 
 
 def test_joint_space_mpc_adds_extra_costs() -> None:
-    q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
-    target_q = np.zeros((3, 3), dtype=np.float64)
+    q_trajs = np.zeros((2, 2, Q_DIM), dtype=np.float64)
+    target_q = np.zeros(Q_DIM, dtype=np.float64)
     extra_costs = CompositeTrajectoryCost([_FixedCost([2.0, 3.0])])
     mpc = SmplLeftArmMPC(goals=[target_q], extra_costs=extra_costs)
 
@@ -965,12 +970,12 @@ def test_joint_space_mpc_adds_extra_costs() -> None:
 
 def test_cartesian_mpc_adds_extra_costs() -> None:
     fk = SmplLeftArmFK()
-    q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
+    q_trajs = np.zeros((2, 2, Q_DIM), dtype=np.float64)
     wrist_rel = fk.fk(np.zeros((3, 3)))[-1] - fk.tpose_spine3_pos
     extra_costs = CompositeTrajectoryCost([_FixedCost([4.0, 5.0])])
     mpc = LeftArmMPCCartesian(
         cartesian_goals=[wrist_rel],
-        initial_arm_aa=np.zeros((3, 3)),
+        initial_q=np.zeros(Q_DIM),
         fk=fk,
         extra_costs=extra_costs,
     )
@@ -983,10 +988,10 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
     spine3_pos = np.array([0.25, 1.0, -0.3], dtype=np.float64)
     spine3_aa = np.zeros(3, dtype=np.float64)
     cartesian_goal = np.array([0.3, 0.5, 0.1], dtype=np.float64)
-    q_trajs = np.zeros((1, 2, 3, 3), dtype=np.float64)
+    q_trajs = np.zeros((1, 2, Q_DIM), dtype=np.float64)
     mpc = LeftArmMPCCartesian(
         cartesian_goals=[cartesian_goal],
-        initial_arm_aa=np.zeros((3, 3)),
+        initial_q=np.zeros(Q_DIM),
         fk=fk,
         spine3_pos=spine3_pos,
         spine3_aa=spine3_aa,
@@ -995,7 +1000,7 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
     target_world_before = mpc._spine3_pos + mpc.current_cartesian_goal  # type: ignore[operator]
     mdm_endpoint = np.zeros((3, 3), dtype=np.float64)
     mdm_endpoint[0, 1] = 1.0
-    mpc.set_mdm_goal(mdm_endpoint)
+    mpc.set_mdm_goal(fk.arm_aa_to_q(mdm_endpoint, spine3_aa))
     mpc.push_trajectory(np.stack([np.zeros((3, 3)), mdm_endpoint]))
     target_world_after = mpc._spine3_pos + mpc.current_cartesian_goal  # type: ignore[operator]
 
@@ -1007,18 +1012,19 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
 
 def test_cartesian_mpc_consumes_final_mdm_goal_then_uses_cartesian_mode() -> None:
     fk = SmplLeftArmFK()
-    q0 = np.zeros((3, 3), dtype=np.float64)
-    cartesian_goal = fk.fk(q0)[-1] - fk.tpose_spine3_pos
+    arm0 = np.zeros((3, 3), dtype=np.float64)
+    q0 = fk.arm_aa_to_q(arm0)
+    cartesian_goal = fk.fk(arm0)[-1] - fk.tpose_spine3_pos
     mpc = LeftArmMPCCartesian(
         cartesian_goals=[cartesian_goal],
-        initial_arm_aa=q0,
+        initial_q=q0,
         fk=fk,
         horizon=1,
         n_mpc_samples=1,
         max_angle_delta=0.0,
         advance_threshold=0.1,
     )
-    mpc.push_trajectory(np.stack([q0]))
+    mpc.push_trajectory(np.stack([arm0]))
 
     assert not mpc.mdm_tracking_complete
     q1 = mpc.step(q0)
@@ -1031,7 +1037,7 @@ def test_cartesian_mpc_consumes_final_mdm_goal_then_uses_cartesian_mode() -> Non
 
     def fake_cartesian_solve(current_q):
         called["cartesian"] = True
-        plan = np.zeros((mpc._horizon, 3, 3), dtype=np.float64)
+        plan = np.zeros((mpc._horizon, Q_DIM), dtype=np.float64)
         np.testing.assert_allclose(current_q, q1)
         return plan[0], plan
 
@@ -1043,11 +1049,12 @@ def test_cartesian_mpc_consumes_final_mdm_goal_then_uses_cartesian_mode() -> Non
 
 def test_cartesian_mpc_tracking_complete_only_after_playback_exhausts() -> None:
     fk = SmplLeftArmFK()
-    q0 = np.zeros((3, 3), dtype=np.float64)
-    cartesian_goal = fk.fk(q0)[-1] - fk.tpose_spine3_pos
+    arm0 = np.zeros((3, 3), dtype=np.float64)
+    q0 = fk.arm_aa_to_q(arm0)
+    cartesian_goal = fk.fk(arm0)[-1] - fk.tpose_spine3_pos
     mpc = LeftArmMPCCartesian(
         cartesian_goals=[cartesian_goal],
-        initial_arm_aa=q0,
+        initial_q=q0,
         fk=fk,
         horizon=1,
         n_mpc_samples=1,
@@ -1055,7 +1062,7 @@ def test_cartesian_mpc_tracking_complete_only_after_playback_exhausts() -> None:
         max_playback_delta=10.0,  # large cap: each frame reached in one step
     )
     far_goal = np.full((3, 3), 0.5, dtype=np.float64)
-    mpc.push_trajectory(np.stack([q0, far_goal]))
+    mpc.push_trajectory(np.stack([arm0, far_goal]))
 
     assert not mpc.mdm_tracking_complete
     q1 = mpc.step(q0)
@@ -1066,7 +1073,7 @@ def test_cartesian_mpc_tracking_complete_only_after_playback_exhausts() -> None:
     assert mpc._playback_idx == 1
 
     q2 = mpc.step(q1)
-    np.testing.assert_allclose(q2, far_goal)
+    np.testing.assert_allclose(q2, fk.arm_aa_to_q(far_goal))
 
     # Trajectory exhausted: Cartesian mode now engages.
     assert mpc.mdm_tracking_complete
@@ -1119,11 +1126,11 @@ def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
     monkeypatch.setattr(plot_module, "ArmVisualizer", SpyArmVisualizer)
 
     fk = SmplLeftArmFK()
-    q0 = np.zeros((3, 3), dtype=np.float64)
+    q0 = np.zeros(Q_DIM, dtype=np.float64)
     cartesian_goal = np.array([0.1, 0.2, 0.3], dtype=np.float64)
     mpc = LeftArmMPCCartesian(
         cartesian_goals=[cartesian_goal],
-        initial_arm_aa=q0,
+        initial_q=q0,
         fk=fk,
         horizon=1,
         n_mpc_samples=1,
@@ -1146,27 +1153,38 @@ def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
 
 def test_mdm_push_trajectory_stores_full_trajectory_for_playback() -> None:
     frames = np.arange(23 * 3 * 3, dtype=np.float64).reshape(23, 3, 3)
-    final_goal = np.full((3, 3), 0.9, dtype=np.float64)
+    final_goal = np.full(Q_DIM, 0.9, dtype=np.float64)
     mpc = LeftArmMPCMDM(goals=[final_goal])
 
     mpc.push_trajectory(frames)
 
     # The full-resolution trajectory is stored for direct playback, not
     # downsampled into the goal queue.
-    np.testing.assert_allclose(mpc._playback_frames, frames)  # type: ignore[arg-type]
+    expected = mpc._fk.arm_aa_to_q_batch(frames)  # pylint: disable=protected-access
+    np.testing.assert_allclose(mpc._playback_frames, expected)  # type: ignore[arg-type]
     assert mpc._playback_idx == 0
     assert not mpc.mdm_tracking_complete
-    np.testing.assert_allclose(mpc._preview_q, frames[22])  # type: ignore[arg-type]
+    np.testing.assert_allclose(mpc._preview_q, expected[22])  # type: ignore[arg-type]
     # The pre-existing final goal is left untouched for the MPC resume phase.
     assert len(mpc._goals) == 1
     np.testing.assert_allclose(mpc._goals[0], final_goal)
 
 
+def test_mdm_push_trajectory_accepts_canonical_arm_q() -> None:
+    fk = SmplLeftArmFK()
+    frames = fk.arm_aa_to_q_batch(np.zeros((3, 3, 3), dtype=np.float64))
+    mpc = LeftArmMPCMDM(goals=[np.zeros(Q_DIM, dtype=np.float64)])
+
+    mpc.push_trajectory(frames)
+
+    np.testing.assert_allclose(mpc._playback_frames, frames)  # type: ignore[arg-type]
+
+
 def test_mdm_push_trajectory_rejects_collar_row() -> None:
-    mpc = LeftArmMPCMDM(goals=[np.zeros((3, 3), dtype=np.float64)])
+    mpc = LeftArmMPCMDM(goals=[np.zeros(Q_DIM, dtype=np.float64)])
     frames = np.zeros((2, 4, 3), dtype=np.float64)
 
-    with pytest.raises(ValueError, match="left_collar is fixed"):
+    with pytest.raises(ValueError, match="arm_aa must end in shape"):
         mpc.push_trajectory(frames)
 
 
@@ -1181,7 +1199,7 @@ def test_mdm_playback_smooth_frames_advance_one_per_step() -> None:
         ],
         dtype=np.float64,
     )
-    final_goal = np.zeros((3, 3), dtype=np.float64)
+    final_goal = np.zeros(Q_DIM, dtype=np.float64)
     mpc = LeftArmMPCMDM(
         goals=[final_goal],
         horizon=1,
@@ -1191,8 +1209,9 @@ def test_mdm_playback_smooth_frames_advance_one_per_step() -> None:
     )
     mpc.push_trajectory(frames)
 
-    q = np.zeros((3, 3), dtype=np.float64)
-    for expected in frames:
+    q = np.zeros(Q_DIM, dtype=np.float64)
+    expected_q = mpc._fk.arm_aa_to_q_batch(frames)  # pylint: disable=protected-access
+    for expected in expected_q:
         assert not mpc.mdm_tracking_complete
         q = mpc.step(q)
         np.testing.assert_allclose(q, expected, atol=1e-9)
@@ -1202,9 +1221,12 @@ def test_mdm_playback_smooth_frames_advance_one_per_step() -> None:
 
 
 def _max_joint_rotation(q_a: np.ndarray, q_b: np.ndarray) -> float:
-    """Largest per-joint geodesic rotation (radians) between two (3, 3) configs."""
-    rel = (Rotation.from_rotvec(q_b) * Rotation.from_rotvec(q_a).inv()).as_rotvec()
-    return float(np.linalg.norm(rel, axis=1).max())
+    """Largest clavicle, shoulder, or elbow angular change."""
+    rel = (
+        Rotation.from_rotvec(q_b[:6].reshape(2, 3))
+        * Rotation.from_rotvec(q_a[:6].reshape(2, 3)).inv()
+    ).as_rotvec()
+    return max(float(np.linalg.norm(rel, axis=1).max()), abs(q_b[6] - q_a[6]))
 
 
 def test_mdm_playback_caps_large_jump_velocity() -> None:
@@ -1216,7 +1238,7 @@ def test_mdm_playback_caps_large_jump_velocity() -> None:
         dtype=np.float64,
     )
     mpc = LeftArmMPCMDM(
-        goals=[np.zeros((3, 3))],
+        goals=[np.zeros(Q_DIM)],
         horizon=1,
         n_mpc_samples=1,
         max_angle_delta=0.0,
@@ -1224,7 +1246,7 @@ def test_mdm_playback_caps_large_jump_velocity() -> None:
     )
     mpc.push_trajectory(frames)
 
-    q = np.zeros((3, 3), dtype=np.float64)
+    q = np.zeros(Q_DIM, dtype=np.float64)
     n_steps = 0
     while not mpc.mdm_tracking_complete and n_steps < 100:
         prev = q
@@ -1234,20 +1256,20 @@ def test_mdm_playback_caps_large_jump_velocity() -> None:
 
     assert n_steps > 1  # not snapped in a single step
     assert mpc.mdm_tracking_complete
-    np.testing.assert_allclose(q, frames[0], atol=1e-9)
+    np.testing.assert_allclose(q, mpc._fk.arm_aa_to_q(frames[0]), atol=1e-9)
 
 
 def test_mdm_playback_eases_in_from_live_pose() -> None:
     # The arm's live pose differs from frames[0]; the first step must ease in
     # (move at most max_playback_delta), not snap straight to frames[0].
     max_delta = 0.1
-    current_q = np.zeros((3, 3), dtype=np.float64)
+    current_q = np.zeros(Q_DIM, dtype=np.float64)
     frames = np.array(
         [[[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
         dtype=np.float64,
     )
     mpc = LeftArmMPCMDM(
-        goals=[np.zeros((3, 3))],
+        goals=[np.zeros(Q_DIM)],
         horizon=1,
         n_mpc_samples=1,
         max_angle_delta=0.0,
@@ -1257,16 +1279,13 @@ def test_mdm_playback_eases_in_from_live_pose() -> None:
 
     q1 = mpc.step(current_q)
     assert _max_joint_rotation(current_q, q1) <= max_delta + 1e-9
-    assert not np.allclose(q1, frames[0])  # did not snap to the first frame
+    assert not np.allclose(q1, mpc._fk.arm_aa_to_q(frames[0]))
 
 
 def test_mdm_mpc_resumes_toward_final_goal_after_playback() -> None:
     np.random.seed(0)
     frames = np.zeros((2, 3, 3), dtype=np.float64)  # trivial trajectory at origin
-    final_goal = np.array(
-        [[0.0, 0.6, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
-        dtype=np.float64,
-    )
+    final_goal = np.array([0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0])
     mpc = LeftArmMPCMDM(
         goals=[final_goal],
         horizon=5,
@@ -1275,7 +1294,7 @@ def test_mdm_mpc_resumes_toward_final_goal_after_playback() -> None:
     )
     mpc.push_trajectory(frames)
 
-    q = np.zeros((3, 3), dtype=np.float64)
+    q = np.zeros(Q_DIM, dtype=np.float64)
     for _ in range(len(frames)):  # phase 1: direct playback
         q = mpc.step(q)
     assert mpc.mdm_tracking_complete
@@ -1309,16 +1328,16 @@ def test_mdm_validate_trajectory_warns_on_range_violation() -> None:
             )
         ]
     )
-    mpc = LeftArmMPCMDM(goals=[np.zeros((3, 3))], extra_costs=extra_costs)
+    mpc = LeftArmMPCMDM(goals=[np.zeros(Q_DIM)], extra_costs=extra_costs)
 
     safe = np.zeros((4, 3, 3), dtype=np.float64)
     assert (  # pylint: disable=use-implicit-booleaness-not-comparison
-        mpc.validate_trajectory(safe) == []
+        mpc.validate_trajectory(fk.arm_aa_to_q_batch(safe)) == []
     )
 
     violating = np.zeros((4, 3, 3), dtype=np.float64)
     violating[2, 2, 1] = 1.5  # large forearm bend on frame 2
-    warnings = mpc.validate_trajectory(violating)
+    warnings = mpc.validate_trajectory(fk.arm_aa_to_q_batch(violating))
     assert len(warnings) == 1
     assert "elbow_flexion_angle" in warnings[0]
     assert "frame 2" in warnings[0]
@@ -1349,7 +1368,9 @@ def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
     assert gen.received_spine3_aa is not None
     assert mpc._playback_frames is not None
     np.testing.assert_allclose(gen.received_spine3_aa, spine3_aa)
-    np.testing.assert_allclose(mpc._playback_frames[0], trajectory[0])
+    np.testing.assert_allclose(
+        mpc._playback_frames[0], fk.arm_aa_to_q(trajectory[0], spine3_aa)
+    )
 
 
 def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
@@ -1500,14 +1521,31 @@ def test_transfer_oracle_cluster_selection_tiebreaks_by_label() -> None:
     assert scores[3] == pytest.approx(scores[7])
 
 
+def test_hidden_joint_limits_accept_canonical_arm_q() -> None:
+    fk = SmplLeftArmFK()
+    context = _cost_context(fk)
+    arm_aa = np.zeros((2, 3, 3), dtype=np.float64)
+    arm_aa[1, 1, 0] = 0.4
+    q = fk.arm_aa_to_q_batch(arm_aa)
+    user = _joint_limit_user()
+
+    expected = compute_violations(user, context, arm_aa)
+
+    np.testing.assert_allclose(compute_violations(user, context, q), expected)
+    rollouts = np.stack([q, q])
+    costs = HiddenCostTerm(user=user, context=context)(rollouts)
+    assert costs.shape == (2,)
+    assert np.all(np.isfinite(costs))
+
+
 def test_no_mdm_cartesian_mpc_adds_extra_costs() -> None:
     fk = SmplLeftArmFK()
-    q_trajs = np.zeros((2, 2, 3, 3), dtype=np.float64)
+    q_trajs = np.zeros((2, 2, Q_DIM), dtype=np.float64)
     wrist_rel = fk.fk(np.zeros((3, 3)))[-1] - fk.tpose_spine3_pos
     extra_costs = CompositeTrajectoryCost([_FixedCost([6.0, 7.0])])
     mpc = ArmMPCCartesianNoMDM(
         cartesian_goals=[wrist_rel],
-        initial_arm_aa=np.zeros((3, 3)),
+        initial_q=np.zeros(Q_DIM),
         fk=fk,
         extra_costs=extra_costs,
     )
@@ -1611,12 +1649,39 @@ def test_generated_cost_context_shoulder_twist_matches_tpose_axis_rotation() -> 
     )
     axis = fk.tpose_joints[3] - fk.tpose_joints[2]
     axis = axis / np.linalg.norm(axis)
-    trajectory = np.zeros((1, 3, 3), dtype=np.float64)
-    trajectory[0, 0] = axis * 0.4
+    trajectory = np.zeros((2, Q_DIM), dtype=np.float64)
+    trajectory[:, 3:6] = axis * 0.4
+    trajectory[1, :3] = axis * -0.7
 
     twist = context.shoulder_internal_external_rotation_angles(trajectory)
 
-    np.testing.assert_allclose(twist, [0.4], atol=1e-10)
+    np.testing.assert_allclose(twist, [0.4, 0.4], atol=1e-10)
+
+
+def test_generated_python_cost_uses_canonical_shoulder_twist_feature() -> None:
+    fk = SmplLeftArmFK()
+    context = build_generated_cost_context(
+        _cost_context(fk),
+        current_q=np.zeros(Q_DIM),
+        mdm_traj=np.zeros((2, Q_DIM)),
+        q_history=[],
+        window=5,
+    )
+    axis = fk.tpose_joints[3] - fk.tpose_joints[2]
+    axis = axis / np.linalg.norm(axis)
+    q_trajs = np.zeros((2, 2, Q_DIM), dtype=np.float64)
+    q_trajs[:, 1, 3:6] = axis * 0.4
+    q_trajs[1, 1, :3] = axis * -0.7
+    generated = GeneratedPythonCost(
+        code="""def cost(q_trajs, context, params):
+    twist = context.shoulder_internal_external_rotation_angles(q_trajs[:, 1:])
+    return np.mean(twist, axis=1)
+""",
+        params={},
+        context=context,
+    )
+
+    np.testing.assert_allclose(generated(q_trajs), [0.4, 0.4], atol=1e-10)
 
 
 def test_generated_cost_context_shoulder_component_angles_are_stable() -> None:
@@ -1628,13 +1693,13 @@ def test_generated_cost_context_shoulder_component_angles_are_stable() -> None:
         q_history=[],
         window=5,
     )
-    neutral = np.zeros((1, 3, 3), dtype=np.float64)
+    neutral = np.zeros((1, Q_DIM), dtype=np.float64)
     axis = fk.tpose_joints[3] - fk.tpose_joints[2]
     axis = axis / np.linalg.norm(axis)
     twisted = neutral.copy()
-    twisted[0, 0] = axis * 0.4
+    twisted[0, 3:6] = axis * 0.4
     adducted = neutral.copy()
-    adducted[0, 0, 2] = 0.4
+    adducted[0, 5] = 0.4
 
     neutral_flex = context.shoulder_flexion_extension_angles(neutral)[0]
     neutral_abduction = context.shoulder_abduction_adduction_angles(neutral)[0]
@@ -1856,12 +1921,17 @@ def test_prompt_images_render_only_other_clusters_terminal_poses(
     assert images["other_clusters_traj_img"].name == "others.png"
     for path in images.values():
         assert path.exists() and path.stat().st_size > 0
-    for intermediate_pose in rejected[:-1]:
+    canonical_rejected = context.arm_aa(rejected)
+    for intermediate_pose in canonical_rejected[:-1]:
         assert not any(
             np.array_equal(rendered, intermediate_pose) for rendered in rendered_poses
         )
     assert (
-        sum(np.array_equal(rendered, rejected[-1]) for rendered in rendered_poses) == 3
+        sum(
+            np.array_equal(rendered, canonical_rejected[-1])
+            for rendered in rendered_poses
+        )
+        == 3
     )
 
 
@@ -1886,7 +1956,7 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
         "code": "def cost(q_trajs, context, params):\n    positions = context.fk_rollouts(q_trajs)\n    elbow = positions[:, 1:, context.joint_index('elbow')]\n    violation = np.maximum(params['target_elbow_height'] - elbow[:, :, 1], 0.0)\n    return params['weight'] * np.mean(violation ** 2, axis=1)\n",
     }
     fake_model = _FakeLlmModel(json.dumps(response))
-    mpc = SmplLeftArmMPC(goals=[np.zeros((3, 3))])
+    mpc = SmplLeftArmMPC(goals=[np.zeros(Q_DIM)])
     llm_cfg = LlmCostConfig(
         enabled=True,
         artifact_dir=tmp_path / "artifacts",
@@ -1960,7 +2030,7 @@ llm_cost:
         labels=np.array([0, 0, 1, 1], dtype=np.intp),
         cluster_means=cluster_means,
     )
-    mpc = SmplLeftArmMPC(goals=[np.zeros((3, 3), dtype=np.float64)])
+    mpc = SmplLeftArmMPC(goals=[np.zeros(Q_DIM, dtype=np.float64)])
     fake_model = _FakeSequenceLlmModel()
 
     selected = cluster_comparison.run_cluster_comparison(
@@ -1968,7 +2038,7 @@ llm_cost:
         cfg,
         "prefer the demonstrated shape",
         uq_result,
-        np.zeros((3, 3), dtype=np.float64),
+        np.zeros(Q_DIM, dtype=np.float64),
         [],
         context,
         tmp_path,
@@ -1977,7 +2047,7 @@ llm_cost:
         body_pos=None,
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3, dtype=np.float64),
-        initial_q=np.zeros((3, 3), dtype=np.float64),
+        initial_q=np.zeros(Q_DIM, dtype=np.float64),
         llm_model_factory=lambda _model_name: fake_model,
         user=_joint_limit_user(),
     )
@@ -1998,7 +2068,7 @@ llm_cost:
         assert (cluster_dir / "rollout.npy").exists()
         assert (cluster_dir / "metrics.json").exists()
         rollout = np.load(cluster_dir / "rollout.npy")
-        assert rollout.shape == (3, 3, 3)
+        assert rollout.shape == (3, Q_DIM)
     with open(root / "comparison_summary.json", encoding="utf-8") as f:
         summary = json.load(f)
     assert summary["selected_cluster"] == 1
@@ -2017,11 +2087,12 @@ llm_cost:
 def test_planning_loop_stops_when_cartesian_goal_reached() -> None:
     fk = SmplLeftArmFK()
     arm0 = np.zeros((3, 3), dtype=np.float64)
+    q0 = fk.arm_aa_to_q(arm0)
     wrist0 = fk.fk(arm0, fk.tpose_spine3_pos, np.zeros(3))[-1] - fk.tpose_spine3_pos
     goal = wrist0 + np.array([0.03, 0.06, 0.0])
     planner = ArmMPCCartesianNoMDM(
         cartesian_goals=[goal],
-        initial_arm_aa=arm0,
+        initial_q=q0,
         cartesian_threshold=0.12,
         horizon=10,
         n_mpc_samples=256,
@@ -2034,9 +2105,7 @@ def test_planning_loop_stops_when_cartesian_goal_reached() -> None:
         body_pos=None,
     )
 
-    result = planner_run.run_planning_loop(
-        planner, arm0, 300, stop_on_runtime_error=True
-    )
+    result = planner_run.run_planning_loop(planner, q0, 300, stop_on_runtime_error=True)
 
     # Stops well before the 300-step budget once the wrist is within threshold.
     assert result.reached_goal is True
@@ -2047,10 +2116,11 @@ def test_planning_loop_stops_when_cartesian_goal_reached() -> None:
 def test_planning_loop_waits_for_mdm_correction_before_stopping() -> None:
     fk = SmplLeftArmFK()
     arm0 = np.zeros((3, 3), dtype=np.float64)
+    q0 = fk.arm_aa_to_q(arm0)
     # Joint goal == start pose, so goal_reached(q0) is True from the very first step;
     # the loop must still play the pushed correction out before it may stop.
     planner = LeftArmMPCMDM(
-        goals=[arm0.copy()],
+        goals=[q0.copy()],
         horizon=10,
         n_mpc_samples=64,
         max_angle_delta=0.1,
@@ -2066,12 +2136,10 @@ def test_planning_loop_waits_for_mdm_correction_before_stopping() -> None:
     )
     planner.push_trajectory(np.stack([arm0] * 8))
 
-    assert planner.goal_reached(arm0) is True  # goal trivially satisfied at the start
+    assert planner.goal_reached(q0) is True  # goal trivially satisfied at the start
     assert planner.mdm_ready_to_terminate is False  # but a correction is still queued
 
-    result = planner_run.run_planning_loop(
-        planner, arm0, 100, stop_on_runtime_error=True
-    )
+    result = planner_run.run_planning_loop(planner, q0, 100, stop_on_runtime_error=True)
 
     # The loop ran the 8 playback frames before stopping, not stopping at step 1.
     assert result.reached_goal is True
@@ -2085,11 +2153,12 @@ def test_planning_loop_runs_cartesian_phase_after_correction_then_stops() -> Non
     fk = SmplLeftArmFK()
     sp = fk.tpose_spine3_pos
     arm0 = np.zeros((3, 3), dtype=np.float64)
+    q0 = fk.arm_aa_to_q(arm0)
     wrist0 = fk.fk(arm0, sp, np.zeros(3))[-1] - sp
     goal = wrist0 + np.array([0.03, 0.06, 0.0])
     planner = LeftArmMPCCartesian(
         cartesian_goals=[goal],
-        initial_arm_aa=arm0,
+        initial_q=q0,
         cartesian_threshold=0.12,
         horizon=10,
         n_mpc_samples=256,
@@ -2115,12 +2184,10 @@ def test_planning_loop_runs_cartesian_phase_after_correction_then_stops() -> Non
     assert (
         float(np.linalg.norm(end_wrist - goal)) > 0.12
     )  # playback ends away from goal
-    planner.set_mdm_goal(playback[-1])
+    planner.set_mdm_goal(fk.arm_aa_to_q(playback[-1]))
     planner.push_trajectory(playback)
 
-    result = planner_run.run_planning_loop(
-        planner, arm0, 300, stop_on_runtime_error=True
-    )
+    result = planner_run.run_planning_loop(planner, q0, 300, stop_on_runtime_error=True)
 
     assert result.reached_goal is True
     # Cartesian phase ran AFTER the 4 playback frames, then stopped before the budget.

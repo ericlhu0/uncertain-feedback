@@ -19,8 +19,12 @@ from types import FunctionType
 from typing import Any
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
+from uncertain_feedback.planners.mpc.arm_features import (
+    arm_aa_from_state,
+    arm_feature_series,
+    canonical_arm_q,
+)
 from uncertain_feedback.planners.mpc.costs.base import (
     CompositeTrajectoryCost,
     MpcCostContext,
@@ -72,6 +76,8 @@ class LlmCostResponse:
 class GeneratedCostContext:
     """Read-only runtime context exposed to generated cost code.
 
+    Arm-state fields are canonical q arrays ending in ``(7,)``. Helper methods
+    also accept decoded arrays ending in ``(3, 3)`` at generated-code/FK boundaries.
     ``rejected_trajs`` contains only candidates the person explicitly marked wrong.
     """
 
@@ -91,7 +97,7 @@ class GeneratedCostContext:
     @property
     def current_positions(self) -> np.ndarray:
         """Current arm-chain positions with shape ``(5, 3)``."""
-        return self.fk.fk(self.current_q, self.spine3_pos, self.spine3_aa)
+        return self.fk_batch(self.current_q)
 
     @property
     def mdm_positions(self) -> np.ndarray:
@@ -116,10 +122,10 @@ class GeneratedCostContext:
         return self.fk_batch(self.recent_q)
 
     def fk_batch(self, trajectory: np.ndarray) -> np.ndarray:
-        """Return arm-chain positions for ``(..., 3, 3)`` axis-angle frames."""
-        trajectory = np.asarray(trajectory, dtype=np.float64)
-        leading = trajectory.shape[:-2]
-        flat = trajectory.reshape((-1, 3, 3))
+        """Return arm-chain positions for q or axis-angle arm states."""
+        arm_aa = arm_aa_from_state(trajectory, self)
+        leading = arm_aa.shape[:-2]
+        flat = arm_aa.reshape((-1, 3, 3))
         positions = self.fk.fk_batch(flat, self.spine3_pos, self.spine3_aa)
         return positions.reshape((*leading, 5, 3))
 
@@ -135,22 +141,8 @@ class GeneratedCostContext:
             raise KeyError(f"Unknown generated-cost joint name: {name!r}") from exc
 
     def elbow_flexion_angles(self, trajectory: np.ndarray) -> np.ndarray:
-        """Return elbow bend as the angle between upper arm and forearm.
-
-        Accepts any leading shape ending in ``(3, 3)`` and returns that leading
-        shape. 0 = fully extended; larger = more bent. Computed from the
-        wrist-slot joint rotation — under this repo's FK convention (joint
-        *j*'s rotation transforms the bone arriving at *j*) that slot rotates
-        the forearm relative to the upper arm, so the bend is the angle it
-        opens between the T-pose bone axes. Equivalent to the FK-position
-        angle, without running FK.
-        """
-        trajectory = np.asarray(trajectory, dtype=np.float64)
-        leading = trajectory.shape[:-2]
-        flat = trajectory.reshape(-1, 3, 3)
-        forearm = Rotation.from_rotvec(flat[:, 2]).apply(self._tpose_forearm_axis())
-        cos = forearm @ self._tpose_upper_arm_axis()
-        return np.arccos(np.clip(cos, -1.0, 1.0)).reshape(leading)
+        """Return elbow bend for q or axis-angle arm states."""
+        return self.feature_series(trajectory)["elbow_flexion"]
 
     def shoulder_abduction_adduction_angles(self, trajectory: np.ndarray) -> np.ndarray:
         """Return signed shoulder abduction/adduction proxy in the spine3 frame.
@@ -160,8 +152,7 @@ class GeneratedCostContext:
         torso), and negative values move toward ``-x`` (adduction / across the
         torso).
         """
-        upper_arm = self._upper_arm_direction_spine_frame(trajectory)
-        return np.arcsin(np.clip(upper_arm[..., 0], -1.0, 1.0))
+        return self.feature_series(trajectory)["shoulder_abduction_adduction"]
 
     def shoulder_flexion_extension_angles(self, trajectory: np.ndarray) -> np.ndarray:
         """Return signed shoulder flexion/extension proxy in the spine3 frame.
@@ -170,8 +161,7 @@ class GeneratedCostContext:
         positive values move toward ``+z`` and negative values move toward
         ``-z``.
         """
-        upper_arm = self._upper_arm_direction_spine_frame(trajectory)
-        return np.arcsin(np.clip(upper_arm[..., 2], -1.0, 1.0))
+        return self.feature_series(trajectory)["shoulder_flexion_extension"]
 
     def shoulder_elevation_angles(self, trajectory: np.ndarray) -> np.ndarray:
         """Return shoulder elevation: upper-arm angle from straight down.
@@ -181,95 +171,25 @@ class GeneratedCostContext:
         goniometric elevation the lateral/depth component proxies cannot
         capture (both read ~0 for a vertical upper arm).
         """
-        upper_arm = self._upper_arm_direction_spine_frame(trajectory)
-        return np.arccos(np.clip(-upper_arm[..., 1], -1.0, 1.0))
+        return self.feature_series(trajectory)["shoulder_elevation"]
 
     def shoulder_internal_external_rotation_angles(
         self, trajectory: np.ndarray
     ) -> np.ndarray:
-        """Return signed shoulder twist around the T-pose upper-arm axis.
+        """Return shoulder-only twist from the canonical ``q[3:6]`` block."""
+        return self.feature_series(trajectory)["shoulder_internal_external_rotation"]
 
-        Twist is decomposed from the composed collar∘shoulder∘elbow rotation
-        because under this repo's FK convention that composition orients the
-        upper-arm bone — the same physical twist can live in either controlled
-        slot. Positive sign follows the right-hand rule about the T-pose
-        shoulder-to-elbow axis, which is internal (medial) rotation twisting the
-        forearm toward the body midline; negative is external rotation.
-        """
-        trajectory = np.asarray(trajectory, dtype=np.float64)
-        leading = trajectory.shape[:-2]
-        flat = trajectory.reshape(-1, 3, 3)
-        upper_arm_rotvec = self._upper_arm_rotations(flat).as_rotvec()
-        axis = self._tpose_upper_arm_axis()
-        angles = _twist_angles_about_axis(upper_arm_rotvec, axis)
-        return angles.reshape(leading)
+    def feature_series(self, trajectory: np.ndarray) -> dict[str, np.ndarray]:
+        """Return every canonical anatomical feature in one conversion pass."""
+        return arm_feature_series(trajectory, self)
 
-    def _upper_arm_rotations(self, flat: np.ndarray) -> Rotation:
-        """Return the composed collar∘shoulder∘elbow rotations for ``(N, 3, 3)``
-        frames — the rotation orienting the upper-arm bone in the spine3 frame
-        under this repo's FK convention."""
-        collar = Rotation.from_rotvec(self.fk.collar_aa[None])
-        return (
-            collar * Rotation.from_rotvec(flat[:, 0]) * Rotation.from_rotvec(flat[:, 1])
-        )
+    def canonical_q(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return q-space states for a q or axis-angle arm trajectory."""
+        return canonical_arm_q(trajectory, self)
 
-    def _upper_arm_direction_spine_frame(self, trajectory: np.ndarray) -> np.ndarray:
-        """Return unit shoulder-to-elbow directions in the spine3 frame.
-
-        Computed by applying the composed joint rotations to the T-pose bone
-        axis; identical to normalizing the FK elbow−shoulder position
-        difference (the spine3 rotation cancels), without running FK.
-        """
-        trajectory = np.asarray(trajectory, dtype=np.float64)
-        leading = trajectory.shape[:-2]
-        flat = trajectory.reshape(-1, 3, 3)
-        directions = self._upper_arm_rotations(flat).apply(self._tpose_upper_arm_axis())
-        return directions.reshape((*leading, 3))
-
-    def _tpose_upper_arm_axis(self) -> np.ndarray:
-        """Return unit T-pose shoulder-to-elbow axis in the spine3 frame."""
-        tpose = self.fk.tpose_joints
-        axis = tpose[_JOINT_NAMES["left_elbow"]] - tpose[_JOINT_NAMES["left_shoulder"]]
-        norm = np.linalg.norm(axis)
-        if norm <= 1e-12:
-            return np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        return axis / norm
-
-    def _tpose_forearm_axis(self) -> np.ndarray:
-        """Return unit T-pose elbow-to-wrist axis in the spine3 frame."""
-        tpose = self.fk.tpose_joints
-        axis = tpose[_JOINT_NAMES["left_wrist"]] - tpose[_JOINT_NAMES["left_elbow"]]
-        norm = np.linalg.norm(axis)
-        if norm <= 1e-12:
-            return np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        return axis / norm
-
-
-def _twist_angles_about_axis(rotvecs: np.ndarray, axis: np.ndarray) -> np.ndarray:
-    """Return signed twist component of rotations about a unit axis."""
-    rotvecs = np.asarray(rotvecs, dtype=np.float64).reshape(-1, 3)
-    axis = np.asarray(axis, dtype=np.float64)
-    axis_norm = np.linalg.norm(axis)
-    if axis_norm <= 1e-12:
-        axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-    else:
-        axis = axis / axis_norm
-
-    quats = Rotation.from_rotvec(rotvecs).as_quat()  # (x, y, z, w)
-    vec = quats[:, :3]
-    w = quats[:, 3]
-    projected_vec = axis[np.newaxis, :] * (vec @ axis)[:, np.newaxis]
-    twist_norm = np.sqrt(np.sum(projected_vec**2, axis=1) + w**2)
-    safe_vec = np.divide(
-        projected_vec,
-        twist_norm[:, np.newaxis],
-        out=np.zeros_like(projected_vec),
-        where=twist_norm[:, np.newaxis] > 1e-12,
-    )
-    safe_w = np.divide(w, twist_norm, out=np.ones_like(w), where=twist_norm > 1e-12)
-    signed_vec = safe_vec @ axis
-    angles = 2.0 * np.arctan2(signed_vec, safe_w)
-    return (angles + np.pi) % (2.0 * np.pi) - np.pi
+    def arm_aa(self, trajectory: np.ndarray) -> np.ndarray:
+        """Return FK-boundary axis-angle states for a q or legacy trajectory."""
+        return arm_aa_from_state(trajectory, self)
 
 
 @dataclass(frozen=True)
@@ -288,7 +208,7 @@ class GeneratedPythonCost(TrajectoryCost):
 
     def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
         q_trajs = np.asarray(q_trajs, dtype=np.float64)
-        raw = self._func(q_trajs, self.context, self.params)
+        raw = self._func(self.context.arm_aa(q_trajs), self.context, self.params)
         costs = np.asarray(raw, dtype=np.float64)
         expected_shape = (q_trajs.shape[0],)
         if costs.shape != expected_shape:
@@ -412,27 +332,29 @@ def build_generated_cost_context(
     cartesian_threshold: float | None = None,
     rejected_trajs: tuple[np.ndarray, ...] | None = None,
 ) -> GeneratedCostContext:
-    """Build the runtime context passed to generated Python costs."""
-    recent_q = np.asarray(q_history[-window:], dtype=np.float64)
-    if recent_q.size == 0:
-        recent_q = np.empty((0, 3, 3), dtype=np.float64)
+    """Build a q-native runtime context passed to generated Python costs."""
+    recent_q = (
+        np.stack([canonical_arm_q(q, mpc_context) for q in q_history[-window:]], axis=0)
+        if q_history
+        else np.empty((0, 7), dtype=np.float64)
+    )
     return GeneratedCostContext(
         fk=mpc_context.fk,
         spine3_pos=np.asarray(mpc_context.spine3_pos, dtype=np.float64),
         spine3_aa=np.asarray(mpc_context.spine3_aa, dtype=np.float64),
-        current_q=np.asarray(current_q, dtype=np.float64),
-        mdm_traj=np.asarray(mdm_traj, dtype=np.float64),
+        current_q=canonical_arm_q(current_q, mpc_context),
+        mdm_traj=canonical_arm_q(mdm_traj, mpc_context),
         recent_q=recent_q,
         body_pos=(
             np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None
         ),
         reference_traj=(
-            np.asarray(reference_traj, dtype=np.float64)
+            canonical_arm_q(reference_traj, mpc_context)
             if reference_traj is not None
             else None
         ),
         full_correction_traj=(
-            np.asarray(full_correction_traj, dtype=np.float64)
+            canonical_arm_q(full_correction_traj, mpc_context)
             if full_correction_traj is not None
             else None
         ),
@@ -443,7 +365,7 @@ def build_generated_cost_context(
         ),
         cartesian_threshold=cartesian_threshold,
         rejected_trajs=tuple(
-            np.asarray(traj, dtype=np.float64) for traj in (rejected_trajs or ())
+            canonical_arm_q(traj, mpc_context) for traj in (rejected_trajs or ())
         ),
     )
 
@@ -467,8 +389,12 @@ def build_motion_summaries(
     recent_positions = context.recent_positions
     spine3_pos = context.spine3_pos
     summaries: dict[str, Any] = {
-        "current": _state_summary(context.current_q, current_positions, spine3_pos),
-        "mdm_traj": _trajectory_summary(context.mdm_traj, mdm_positions, spine3_pos),
+        "current": _state_summary(
+            context, context.current_q, current_positions, spine3_pos
+        ),
+        "mdm_traj": _trajectory_summary(
+            context, context.mdm_traj, mdm_positions, spine3_pos
+        ),
     }
     summaries["current"]["joint_features"] = _joint_feature_frame_summary(
         context,
@@ -482,6 +408,7 @@ def build_motion_summaries(
         summaries["candidate_comparison"] = _candidate_comparison_summary(context)
     if context.recent_q.size > 0:
         summaries["recent"] = _trajectory_summary(
+            context,
             context.recent_q,
             recent_positions,
             spine3_pos,
@@ -494,6 +421,7 @@ def build_motion_summaries(
         summaries["recent"] = {}
     if context.reference_traj is not None and context.reference_traj.size > 0:
         summaries["reference"] = _trajectory_summary(
+            context,
             context.reference_traj,
             context.reference_positions,
             spine3_pos,
@@ -535,7 +463,11 @@ def render_prompt_images(
     prompt layer can attach exactly the subset its template asks for.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    trajs = candidate_trajs if candidate_trajs else {0: context.mdm_traj}
+    raw_trajs = candidate_trajs if candidate_trajs else {0: context.mdm_traj}
+    trajs = {label: context.arm_aa(traj) for label, traj in raw_trajs.items()}
+    reference_aa = (
+        context.arm_aa(reference_traj) if reference_traj is not None else None
+    )
     label = highlight_label if highlight_label is not None else next(iter(trajs))
     visualizer = ArmVisualizer(context.fk)
 
@@ -547,11 +479,11 @@ def render_prompt_images(
             path,
             mdm_trajs=trajs,
             highlight_label=label,
-            current_q=context.current_q,
+            current_q=context.arm_aa(context.current_q),
             spine3_pos=context.spine3_pos,
             spine3_aa=context.spine3_aa,
             body_pos=context.body_pos,
-            reference_traj=reference_traj,
+            reference_traj=reference_aa,
             goal_pos=goal_pos,
             include_others=include_others,
             include_reference=include_reference,
@@ -574,28 +506,43 @@ def render_prompt_images(
     return images
 
 
-def _shoulder_elbow_frame_summary(q: np.ndarray) -> dict[str, Any]:
-    q = np.asarray(q, dtype=np.float64)
+def _arm_state_frame_summary(
+    context: GeneratedCostContext, trajectory: np.ndarray
+) -> dict[str, Any]:
+    q = context.canonical_q(trajectory)
     return {
-        "shoulder": {"value": q[0].tolist(), "norm": float(np.linalg.norm(q[0]))},
-        "elbow": {"value": q[1].tolist(), "norm": float(np.linalg.norm(q[1]))},
+        "clavicle": {
+            "value": q[0:3].tolist(),
+            "norm": float(np.linalg.norm(q[0:3])),
+        },
+        "shoulder": {
+            "value": q[3:6].tolist(),
+            "norm": float(np.linalg.norm(q[3:6])),
+        },
+        "elbow_flexion": float(q[6]),
     }
 
 
-def _shoulder_elbow_joint_summary(trajectory: np.ndarray) -> dict[str, Any]:
-    t = np.asarray(trajectory, dtype=np.float64)
+def _arm_state_trajectory_summary(
+    context: GeneratedCostContext, trajectory: np.ndarray
+) -> dict[str, Any]:
+    t = context.canonical_q(trajectory)
     return {
-        "shoulder": {
-            "start": t[0, 0].tolist(),
-            "end": t[-1, 0].tolist(),
-            "norm_start": float(np.linalg.norm(t[0, 0])),
-            "norm_end": float(np.linalg.norm(t[-1, 0])),
+        "clavicle": {
+            "start": t[0, 0:3].tolist(),
+            "end": t[-1, 0:3].tolist(),
+            "norm_start": float(np.linalg.norm(t[0, 0:3])),
+            "norm_end": float(np.linalg.norm(t[-1, 0:3])),
         },
-        "elbow": {
-            "start": t[0, 1].tolist(),
-            "end": t[-1, 1].tolist(),
-            "norm_start": float(np.linalg.norm(t[0, 1])),
-            "norm_end": float(np.linalg.norm(t[-1, 1])),
+        "shoulder": {
+            "start": t[0, 3:6].tolist(),
+            "end": t[-1, 3:6].tolist(),
+            "norm_start": float(np.linalg.norm(t[0, 3:6])),
+            "norm_end": float(np.linalg.norm(t[-1, 3:6])),
+        },
+        "elbow_flexion": {
+            "start": float(t[0, 6]),
+            "end": float(t[-1, 6]),
         },
     }
 
@@ -627,30 +574,12 @@ def build_joint_angle_series(
     context: GeneratedCostContext,
     trajectory: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    """Return the per-frame anatomical joint-feature series for a trajectory.
-
-    Same four features as :func:`_joint_feature_summary` (elbow flexion, shoulder
-    flexion/extension, abduction/adduction, internal/external rotation), but the
-    full ``(T,)`` radian series per feature instead of summary statistics — used
-    to plot joint angles over time.
-    """
-    trajectory = np.asarray(trajectory, dtype=np.float64)
-    return {
-        "elbow_flexion": context.elbow_flexion_angles(trajectory),
-        "shoulder_flexion_extension": context.shoulder_flexion_extension_angles(
-            trajectory
-        ),
-        "shoulder_abduction_adduction": context.shoulder_abduction_adduction_angles(
-            trajectory
-        ),
-        "shoulder_elevation": context.shoulder_elevation_angles(trajectory),
-        "shoulder_internal_external_rotation": (
-            context.shoulder_internal_external_rotation_angles(trajectory)
-        ),
-    }
+    """Return the shared anatomical feature series for a trajectory."""
+    return context.feature_series(trajectory)
 
 
 def _trajectory_summary(
+    context: GeneratedCostContext,
     trajectory: np.ndarray,
     positions: np.ndarray,
     spine3_pos: np.ndarray,
@@ -658,11 +587,12 @@ def _trajectory_summary(
     return {
         "joint_angles": _array_stats(trajectory),
         "positions": _position_summary(positions, spine3_pos),
-        "shoulder_elbow_values": _shoulder_elbow_joint_summary(trajectory),
+        "arm_state": _arm_state_trajectory_summary(context, trajectory),
     }
 
 
 def _state_summary(
+    context: GeneratedCostContext,
     q: np.ndarray,
     positions: np.ndarray,
     spine3_pos: np.ndarray,
@@ -670,7 +600,7 @@ def _state_summary(
     return {
         "joint_angles": np.asarray(q, dtype=np.float64).tolist(),
         "positions": _position_frame_summary(positions, spine3_pos),
-        "shoulder_elbow_values": _shoulder_elbow_frame_summary(q),
+        "arm_state": _arm_state_frame_summary(context, q),
     }
 
 
@@ -679,19 +609,8 @@ def _joint_feature_summary(
     trajectory: np.ndarray,
 ) -> dict[str, Any]:
     return {
-        "elbow_flexion": _series_stats(context.elbow_flexion_angles(trajectory)),
-        "shoulder_flexion_extension": _series_stats(
-            context.shoulder_flexion_extension_angles(trajectory)
-        ),
-        "shoulder_abduction_adduction": _series_stats(
-            context.shoulder_abduction_adduction_angles(trajectory)
-        ),
-        "shoulder_elevation": _series_stats(
-            context.shoulder_elevation_angles(trajectory)
-        ),
-        "shoulder_internal_external_rotation": _series_stats(
-            context.shoulder_internal_external_rotation_angles(trajectory)
-        ),
+        name: _series_stats(values)
+        for name, values in context.feature_series(trajectory).items()
     }
 
 
@@ -753,19 +672,7 @@ def _joint_feature_frame_summary(
 ) -> dict[str, float]:
     return {
         name: float(np.asarray(values).reshape(-1)[0])
-        for name, values in {
-            "elbow_flexion": context.elbow_flexion_angles(q),
-            "shoulder_flexion_extension": (
-                context.shoulder_flexion_extension_angles(q)
-            ),
-            "shoulder_abduction_adduction": (
-                context.shoulder_abduction_adduction_angles(q)
-            ),
-            "shoulder_elevation": context.shoulder_elevation_angles(q),
-            "shoulder_internal_external_rotation": (
-                context.shoulder_internal_external_rotation_angles(q)
-            ),
-        }.items()
+        for name, values in context.feature_series(q).items()
     }
 
 

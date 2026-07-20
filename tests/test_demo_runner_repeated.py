@@ -76,6 +76,39 @@ def test_mdm_locked_seed_resets_before_each_generation() -> None:
     assert calls == [7, 7]
 
 
+def test_cluster_activation_canonicalizes_mdm_axis_angles_before_history_concat(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    trajectory = session.start_trajectory(
+        np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False
+    )
+    trajectory.q_history = [np.zeros(7), np.ones(7)]
+    trajectory.samples = np.zeros((1, 2, 22, 3), dtype=np.float64)
+    trajectory.cluster_levels = [
+        ClusterLevel(
+            sample_indices=np.array([0]),
+            labels=np.array([0]),
+            selected_label=None,
+            n_clusters=1,
+            scale=1.0,
+            medoid_indices={0: 0},
+        )
+    ]
+    session.rig.gen = SimpleNamespace(
+        smpl_positions_to_left_arm_trajectory=lambda *_args, **_kwargs: np.zeros(
+            (2, 3, 3)
+        )
+    )  # type: ignore[assignment]
+    monkeypatch.setattr(demo_session, "oracle_cluster_scores", lambda *args: {0: 0.0})
+
+    session._activate_cluster_level()
+
+    assert trajectory.cluster_means[0].shape == (2, 7)
+    assert trajectory.cluster_corrections[0].shape == (2, 7)
+    assert trajectory.cluster_fulls[0].shape == (4, 7)
+
+
 def make_session(monkeypatch, tmp_path) -> tuple[Session, SimulatedUser]:
     config_path = tmp_path / "mpc.yaml"
     config_path.write_text(

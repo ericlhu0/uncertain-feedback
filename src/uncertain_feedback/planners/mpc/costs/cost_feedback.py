@@ -31,6 +31,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedPythonCost,
     build_generated_cost_context,
 )
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 
 if TYPE_CHECKING:
     from uncertain_feedback.planners.mpc.config import MpcRunConfig
@@ -115,7 +116,7 @@ class EvalState:
             self.cost_context,
             self.current_q,
             self.correction_traj,
-            list(self.q_history),
+            self.q_history,
             window=self.window,
             body_pos=self.body_pos,
             reference_traj=self.reference_traj,
@@ -146,7 +147,7 @@ class EvalState:
                 cartesian_goals=[
                     np.asarray(goal, dtype=np.float64) for goal in cfg.cartesian_goals
                 ],
-                initial_arm_aa=self.current_q,
+                initial_q=self.current_q,
                 cartesian_threshold=cfg.cartesian_threshold,
                 horizon=cfg.horizon,
                 n_mpc_samples=cfg.n_mpc_samples,
@@ -170,6 +171,9 @@ class EvalState:
                 q_history.append(q.copy())
                 if planner.goal_reached(q):
                     break
-            return np.asarray(q_history, dtype=np.float64)
+            return q_to_arm_aa(
+                np.asarray(q_history, dtype=np.float64),
+                self.cost_context.fk.elbow_hinge_axis,
+            )
 
         return rollout

@@ -262,6 +262,18 @@ Artifacts are grouped under
 `<llm_cost.artifact_dir>/<timestamp>/trajectory_00/`, with `round_<N>/`,
 `history.json`, `executed_trajectory.npy`, and the optional
 `combine_after_trajectory_00/` directory.
+Planner-state artifacts use the explicit 7-DOF layout
+`[clavicle_rotvec(3), shoulder_rotvec(3), elbow_flexion(1)]`:
+`executed_trajectory.npy`, `correction.npy`, and `interrupted_reference.npy`
+therefore have shape `(T, 7)`.
+
+All anatomical arm features use this same representation through
+`planners/mpc/arm_features.py`. This is the single implementation used by MPC
+feature costs, generated-cost helpers and summaries, simulated-user bounds,
+trajectory-corpus CSVs, and the demo runner graphs/penalty field. In particular,
+`shoulder_internal_external_rotation` is the signed twist of the anatomical
+shoulder block `q[3:6]`; clavicle rotation `q[0:3]` does not contribute.
+`shoulder_elevation` remains one of the five shared features.
 
 To compare multiple LLM costs across UQ clusters, use the experiment runner
 instead (see [Running Cluster Experiments](#running-cluster-experiments)).
@@ -511,14 +523,17 @@ costs:
 
 When MDM is enabled, set `preference_learning: false` to keep the configured
 preference bounds fixed after generated trajectories. Angle costs are in
-radians; `elbow_flexion_angle` uses the controlled elbow rotation magnitude,
+radians; `elbow_flexion_angle` uses the scalar anatomical elbow hinge angle,
 and `shoulder_abduction_angle` uses the upper-arm angle away from torso-down in
 the spine3 frame.
 
 `--arm` can override the starting arm state with a `.npy` file. The preferred
 shape is `(3, 3)` for `[left_shoulder, left_elbow, left_wrist]`. Legacy `(4, 3)`
 files are accepted; the first row fixes the left collar and the remaining rows
-control shoulder, elbow, and wrist.
+control shoulder, elbow, and wrist. This input is converted once to the internal
+7-DOF planner state; arbitrary off-hinge elbow rotation is anatomically decoded
+into shoulder rotation plus a scalar elbow-flexion angle while preserving arm
+joint positions.
 
 
 ## Running Simulated-User Experiments
@@ -798,7 +813,8 @@ forbidden region; for coupled personas this is the direct visual check that the
 learned pose-dependent anchors follow the hidden diagonal boundary.
 
 `trajectory_corpus/` holds one entry per goal — the goal's full executed
-rollout (`traj_<i>.npy`) plus a per-frame joint-feature `traj_<i>_features.csv`
+rollout as canonical `(T, 7)` q states (`traj_<i>.npy`) plus a per-frame
+joint-feature `traj_<i>_features.csv`
 — recorded in `manifest.json`. Each manifest entry carries `goal`, `n_frames`,
 `trigger_step`/`trigger_violation` (`null` when the goal never triggered a
 correction), `feedback_text`, and `comfortable_until` (the trigger step, or

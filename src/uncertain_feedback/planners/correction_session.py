@@ -10,6 +10,7 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost, MpcCostContext
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.simulated_users import SimulatedUser, compute_violations
 
 if TYPE_CHECKING:
@@ -129,7 +130,13 @@ class CorrectionSession:
             violation = None
             if automatic:
                 violation = float(
-                    compute_violations(self.user, self.cost_context, q[np.newaxis])[0]
+                    compute_violations(
+                        self.user,
+                        self.cost_context,
+                        q_to_arm_aa(
+                            q[np.newaxis], self.cost_context.fk.elbow_hinge_axis
+                        ),
+                    )[0]
                 )
             reason = trigger.evaluate(step, violation)
             if reason is None:

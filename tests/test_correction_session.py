@@ -61,12 +61,14 @@ def test_text_time_can_be_disabled() -> None:
 
 
 def test_remaining_mdm_trajectory_is_snapshot_and_replacement_discards_suffix() -> None:
-    q0 = np.zeros((3, 3), dtype=np.float64)
+    fk = SmplLeftArmFK()
+    q0 = np.zeros(7, dtype=np.float64)
     old = np.stack([np.full((3, 3), value) for value in (0.1, 0.2, 0.3)])
+    old_q = fk.arm_aa_to_q_batch(old)
     planner = LeftArmMPCMDM(
         goals=[q0],
         visualize=False,
-        fk=SmplLeftArmFK(),
+        fk=fk,
         max_playback_delta=10.0,
     )
     planner.push_trajectory(old)
@@ -75,21 +77,22 @@ def test_remaining_mdm_trajectory_is_snapshot_and_replacement_discards_suffix() 
     snapshot = planner.remaining_mdm_trajectory(q1)
     assert snapshot is not None
     np.testing.assert_allclose(snapshot[0], q1)
-    np.testing.assert_allclose(snapshot[1:], old[1:])
+    np.testing.assert_allclose(snapshot[1:], old_q[1:])
 
     replacement = np.stack([np.full((3, 3), value) for value in (0.8, 0.9)])
+    replacement_q = fk.arm_aa_to_q_batch(replacement)
     planner.push_trajectory(replacement)
     snapshot[1:] = -1.0
 
-    np.testing.assert_allclose(planner.step(q1), replacement[0])
-    np.testing.assert_allclose(planner.step(replacement[0]), replacement[1])
-    assert planner.remaining_mdm_trajectory(replacement[1]) is None
+    np.testing.assert_allclose(planner.step(q1), replacement_q[0])
+    np.testing.assert_allclose(planner.step(replacement_q[0]), replacement_q[1])
+    assert planner.remaining_mdm_trajectory(replacement_q[1]) is None
 
 
 def test_session_triggers_again_after_comfort_rearms(monkeypatch, tmp_path) -> None:
-    q0 = np.zeros((3, 3), dtype=np.float64)
+    q0 = np.zeros(7, dtype=np.float64)
     fk = SmplLeftArmFK()
-    planner = LeftArmMPCMDM(goals=[np.ones((3, 3))], visualize=False, fk=fk)
+    planner = LeftArmMPCMDM(goals=[np.ones(7)], visualize=False, fk=fk)
     monkeypatch.setattr(planner, "step", np.asarray)
     violations = iter((0.0, 0.03, 0.0, 0.03, 0.04))
     monkeypatch.setattr(
@@ -161,9 +164,9 @@ corrections:
         encoding="utf-8",
     )
     cfg = load_mpc_config(config_path)
-    q0 = np.zeros((3, 3), dtype=np.float64)
+    q0 = np.zeros(7, dtype=np.float64)
     fk = SmplLeftArmFK()
-    planner = LeftArmMPCMDM(goals=[np.ones((3, 3))], visualize=False, fk=fk)
+    planner = LeftArmMPCMDM(goals=[np.ones(7)], visualize=False, fk=fk)
     monkeypatch.setattr(planner, "step", np.asarray)
     violations = iter((0.0, 0.03, 0.0, 0.03, 0.04))
     monkeypatch.setattr(
@@ -200,7 +203,7 @@ corrections:
         body_pos=None,
         spine3_pos=fk.tpose_spine3_pos,
         spine3_aa=np.zeros(3),
-        arm_aa=q0,
+        q0=q0,
         initial_pose=np.zeros(263),
         uses_mdm=True,
         visualize=False,

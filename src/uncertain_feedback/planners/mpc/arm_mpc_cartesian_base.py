@@ -9,8 +9,9 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.costs.base import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import (
-    _N_JOINTS,
+    Q_DIM,
     SmplLeftArmFK,
+    q_to_arm_aa,
 )
 
 
@@ -28,13 +29,13 @@ class _CartesianGoalsMixin:
     _n_mpc_samples: int
     _max_angle_delta: float
     _extra_costs: CompositeTrajectoryCost
-    _sample_actions: Callable[[np.ndarray, tuple[int, int, int, int]], np.ndarray]
+    _sample_actions: Callable[[np.ndarray, tuple[int, ...]], np.ndarray]
     _rollout: Callable[[np.ndarray, np.ndarray], np.ndarray]
 
     def _init_cartesian(
         self,
         cartesian_goals: list[np.ndarray],
-        initial_arm_aa: np.ndarray,
+        initial_q: np.ndarray,
         cartesian_threshold: float,
         fk: SmplLeftArmFK,
         spine3_pos: np.ndarray | None,
@@ -44,7 +45,7 @@ class _CartesianGoalsMixin:
             np.asarray(g, dtype=np.float64) for g in cartesian_goals
         )
         self._cartesian_threshold = cartesian_threshold
-        self._initial_arm_aa = np.asarray(initial_arm_aa, dtype=np.float64)
+        self._initial_q = np.asarray(initial_q, dtype=np.float64)
         self._fk_inst = fk
         self._spine3_pos = (
             np.asarray(spine3_pos, dtype=np.float64)
@@ -79,7 +80,9 @@ class _CartesianGoalsMixin:
         if goal is None or len(self._cartesian_goals) > 1:
             return False
         arm_pos = self._fk_inst.fk(
-            np.asarray(q, dtype=np.float64), self._spine3_pos, self._spine3_aa
+            q_to_arm_aa(q, self._fk_inst.elbow_hinge_axis),
+            self._spine3_pos,
+            self._spine3_aa,
         )
         wrist_rel = arm_pos[-1] - self._spine3_pos
         return float(np.linalg.norm(wrist_rel - goal)) < self._cartesian_threshold
@@ -88,7 +91,7 @@ class _CartesianGoalsMixin:
         """L2 Cartesian cost: spine3-relative wrist distance to current target.
 
         Args:
-            q_trajs: ``(N, H+1, 4, 3)`` state trajectories.
+            q_trajs: ``(N, H+1, 7)`` state trajectories.
 
         Returns:
             ``(N,)`` cost per trajectory.
@@ -96,34 +99,35 @@ class _CartesianGoalsMixin:
         target = self.current_cartesian_goal
         if target is None:
             return np.zeros(q_trajs.shape[0])
-        terminal_q = q_trajs[:, -1]
+        aa_trajs = q_to_arm_aa(q_trajs, self._fk_inst.elbow_hinge_axis)
+        terminal_aa = aa_trajs[:, -1]
         positions = self._fk_inst.fk_batch(
-            terminal_q, self._spine3_pos, self._spine3_aa
+            terminal_aa, self._spine3_pos, self._spine3_aa
         )
         wrist_rel = positions[:, -1] - self._spine3_pos
         wrist_cost = ((wrist_rel - target) ** 2).sum(axis=-1)
-        return wrist_cost + self._extra_costs(q_trajs)
+        return wrist_cost + self._extra_costs(aa_trajs)
 
     def _cartesian_solve(self, current_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Sample and return the best Cartesian action.
 
         Args:
-            current_q: ``(3, 3)`` current axis-angle joint angles.
+            current_q: ``(7,)`` current planner state.
 
         Returns:
-            Tuple of first action ``(3, 3)`` and full plan ``(H, 3, 3)``.
+            Tuple of first action ``(7,)`` and full plan ``(H, 7)``.
         """
         current_q = np.asarray(current_q, dtype=np.float64)
 
         prev_best = self._prev_best
         if prev_best is not None:
-            mean = np.concatenate([prev_best[1:], np.zeros((1, _N_JOINTS, 3))], axis=0)
+            mean = np.concatenate([prev_best[1:], np.zeros((1, Q_DIM))], axis=0)
         else:
-            mean = np.zeros((self._horizon, _N_JOINTS, 3), dtype=np.float64)
+            mean = np.zeros((self._horizon, Q_DIM), dtype=np.float64)
 
         actions = self._sample_actions(
             mean,
-            (self._n_mpc_samples, self._horizon, _N_JOINTS, 3),
+            (self._n_mpc_samples, self._horizon, Q_DIM),
         )
         q_trajs = self._rollout(current_q, actions)
         costs = self._cartesian_cost(q_trajs)

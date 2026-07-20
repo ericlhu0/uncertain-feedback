@@ -1,6 +1,6 @@
 """Per-session on-disk corpus of executed arm trajectories.
 
-Each logged trajectory is saved as a raw ``.npy`` plus a per-frame joint-feature
+Each logged trajectory is saved as canonical ``(T, 7)`` q-space ``.npy`` plus a per-frame joint-feature
 ``.csv`` and recorded in ``manifest.json``. Codex-based cost generators read this
 corpus to reason about which configurations were reached comfortably (executed
 without a discomfort report) in past rounds.
@@ -16,8 +16,12 @@ from typing import Any
 
 import numpy as np
 
+from uncertain_feedback.planners.mpc.arm_features import (
+    FEATURE_NAMES,
+    arm_feature_series,
+    canonical_arm_q,
+)
 from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
-from uncertain_feedback.simulated_users.base import FEATURE_NAMES, feature_series
 
 
 @dataclass(frozen=True)
@@ -51,14 +55,14 @@ class TrajectoryCorpus:
         trigger_violation: float | None,
         feedback_text: str | None,
     ) -> dict[str, Any]:
-        """Save a trajectory with its features and return the new manifest entry."""
+        """Canonicalize and save a trajectory with its shared arm features."""
         entries = self.entries()
         index = max((e["index"] for e in entries), default=-1) + 1
 
-        trajectory = np.asarray(trajectory, dtype=np.float64)
+        trajectory = canonical_arm_q(trajectory, self.context)
         np.save(self.dir / f"traj_{index:03d}.npy", trajectory)
 
-        feats = feature_series(self.context, trajectory)
+        feats = arm_feature_series(trajectory, self.context)
         n_frames = int(trajectory.shape[0])
         with (self.dir / f"traj_{index:03d}_features.csv").open("w", newline="") as f:
             writer = csv.writer(f)

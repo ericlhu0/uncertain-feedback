@@ -13,7 +13,16 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.planners.mpc.kinematics import anatomical_elbow_wrist_slots
+from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
+from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
+from uncertain_feedback.planners.mpc.costs import MpcCostContext
+from uncertain_feedback.planners.mpc.kinematics import (
+    Q_DIM,
+    SmplLeftArmFK,
+    _rate_limited_step_q,
+    anatomical_elbow_wrist_slots,
+    q_to_arm_aa,
+)
 
 # Synthetic near-SMPL T-pose axes: upper arm along +x with a small forearm bend
 # (the real SMPL left arm carries a ~7.5° bend, which defines the hinge plane).
@@ -138,3 +147,66 @@ def test_recovers_shoulder_rotation_into_elbow_slot() -> None:
     np.testing.assert_allclose(wrist_angles, wrist_angles[0], atol=1e-9)
     # ... while the elbow-slot twist tracks the plane rotation (spans a range).
     assert np.degrees(np.ptp(twists)) > 90.0
+
+
+def test_q_roundtrip_is_exact_for_hinge_constrained_states() -> None:
+    fk = SmplLeftArmFK()
+    rng = np.random.default_rng(2)
+    states = rng.uniform(-0.8, 0.8, size=(100, Q_DIM))
+
+    recovered = fk.arm_aa_to_q_batch(q_to_arm_aa(states, fk.elbow_hinge_axis))
+
+    np.testing.assert_allclose(recovered, states, atol=1e-9)
+
+
+def test_all_arm_features_match_for_q_and_decoded_boundary_states() -> None:
+    fk = SmplLeftArmFK()
+    context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    q = np.random.default_rng(5).uniform(-0.6, 0.6, size=(20, Q_DIM))
+
+    q_features = arm_feature_series(q, context)
+    boundary_features = arm_feature_series(q_to_arm_aa(q, fk.elbow_hinge_axis), context)
+
+    assert q_features.keys() == boundary_features.keys()
+    for name in q_features:
+        np.testing.assert_allclose(q_features[name], boundary_features[name], atol=1e-9)
+
+
+def test_raw_arm_conversion_preserves_fk_positions() -> None:
+    fk = SmplLeftArmFK()
+    rng = np.random.default_rng(3)
+    raw = rng.uniform(-0.8, 0.8, size=(100, 3, 3))
+
+    converted = fk.arm_aa_to_q_batch(raw)
+    reconstructed = q_to_arm_aa(converted, fk.elbow_hinge_axis)
+
+    for original, constrained in zip(raw, reconstructed):
+        np.testing.assert_allclose(fk.fk(constrained), fk.fk(original), atol=1e-9)
+
+
+def test_rate_limited_q_step_reaches_target() -> None:
+    current = np.zeros(Q_DIM)
+    target = np.array([0.3, -0.2, 0.1, -0.4, 0.2, 0.3, 0.55])
+    reached = False
+
+    for _ in range(20):
+        current, reached = _rate_limited_step_q(current, target, 0.1)
+        if reached:
+            break
+
+    assert reached
+    np.testing.assert_allclose(current, target, atol=1e-9)
+
+
+def test_seeded_mpc_step_keeps_scalar_elbow_representation() -> None:
+    fk = SmplLeftArmFK()
+    target = np.array([0.1, -0.2, 0.1, 0.2, 0.1, -0.1, 0.4])
+    mpc = SmplLeftArmMPC(goals=[target], horizon=2, n_mpc_samples=16, fk=fk, seed=4)
+
+    next_q = mpc.step(np.zeros(Q_DIM))
+    arm_aa = q_to_arm_aa(next_q, fk.elbow_hinge_axis)
+
+    assert next_q.shape == (Q_DIM,)
+    np.testing.assert_allclose(arm_aa[2], next_q[6] * fk.elbow_hinge_axis, atol=1e-12)

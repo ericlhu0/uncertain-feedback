@@ -16,6 +16,7 @@ from uncertain_feedback.planners.mpc import (
     LeftArmMPCMDMUQ,
     SmplLeftArmMPC,
 )
+from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import UqClusterResult
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
@@ -32,6 +33,7 @@ from uncertain_feedback.planners.mpc.costs import (
     render_prompt_images,
 )
 from uncertain_feedback.planners.mpc.costs.cost_generator import _make_llm_model
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.planners.run import (
     _assemble_full_correction_traj,
     _make_cost_eval_rollout,
@@ -175,7 +177,7 @@ def rollout_to_goal(
     """Roll a headless Cartesian MPC from ``q0`` toward one goal."""
     planner = ArmMPCCartesianNoMDM(
         cartesian_goals=[np.asarray(goal, dtype=np.float64)],
-        initial_arm_aa=q0,
+        initial_q=q0,
         cartesian_threshold=cfg.cartesian.threshold,
         horizon=cfg.horizon,
         n_mpc_samples=cfg.n_mpc_samples,
@@ -215,7 +217,17 @@ def goal_reach(
     goal: np.ndarray,
 ) -> dict[str, Any]:
     """Final spine3-relative wrist distance to ``goal``."""
-    arm_pos = context.fk.fk(rollout[-1], context.spine3_pos, context.spine3_aa)
+    final = np.asarray(rollout[-1], dtype=np.float64)
+    final_aa = (
+        q_to_arm_aa(final, context.fk.elbow_hinge_axis)
+        if final.shape == (7,)
+        else final
+    )
+    arm_pos = context.fk.fk(
+        final_aa,
+        context.spine3_pos,
+        context.spine3_aa,
+    )
     wrist_rel = arm_pos[-1] - context.spine3_pos
     distance = float(np.linalg.norm(wrist_rel - np.asarray(goal, dtype=np.float64)))
     return {
@@ -233,7 +245,12 @@ def evaluate_rollout(
     goal: np.ndarray,
 ) -> dict[str, Any]:
     """Score one rollout: preference violations, goal reach, and length."""
-    metrics: dict[str, Any] = violation_metrics(user, context, rollout)
+    arm_aa = (
+        q_to_arm_aa(rollout, context.fk.elbow_hinge_axis)
+        if rollout.shape[-1:] == (7,)
+        else rollout
+    )
+    metrics: dict[str, Any] = violation_metrics(user, context, arm_aa)
     metrics["goal_reach"] = goal_reach(context, cfg, rollout, goal)
     metrics["steps"] = int(rollout.shape[0] - 1)
     return metrics
@@ -257,8 +274,13 @@ def save_rollout(
         video_path = out_dir / f"{name}.mp4"
         video_t0 = time.perf_counter()
         _log(f"rendering video: {video_path}", prefix=log_prefix)
+        arm_aa = (
+            q_to_arm_aa(rollout, context.fk.elbow_hinge_axis)
+            if rollout.shape[-1:] == (7,)
+            else rollout
+        )
         ArmVisualizer(context.fk).render_rollout_video(
-            rollout,
+            arm_aa,
             video_path,
             spine3_pos=context.spine3_pos,
             spine3_aa=context.spine3_aa,
@@ -335,8 +357,9 @@ def run_initial_rollout(
         f"{user.name}: scoring initial rollout for hidden-cost trigger",
         prefix=log_prefix,
     )
+    initial_arm_aa = q_to_arm_aa(initial_traj, context.fk.elbow_hinge_axis)
     trigger = first_violation_step(
-        user, context, initial_traj, cfg.corrections.trigger_threshold
+        user, context, initial_arm_aa, cfg.corrections.trigger_threshold
     )
     np.save(root_dir / "initial_rollout.npy", initial_traj)
     if trigger is None:
@@ -347,7 +370,7 @@ def run_initial_rollout(
             q_feedback=None,
             q_history=[],
         )
-    violations = compute_violations(user, context, initial_traj)
+    violations = compute_violations(user, context, initial_arm_aa)
     q_feedback = initial_traj[trigger]
     q_history = [np.asarray(q, dtype=np.float64) for q in initial_traj[: trigger + 1]]
     trigger_violation = float(violations[trigger])
@@ -408,12 +431,14 @@ def generate_uq_correction(
         f"frames={mdm_frames}, scale={cfg.uq.scale})",
         prefix=log_prefix,
     )
-    current_pose = gen.build_pose_from_arm_aa(initial_pose, q_feedback)
+    current_pose = gen.build_pose_from_arm_aa(
+        initial_pose, q_to_arm_aa(q_feedback, context.fk.elbow_hinge_axis)
+    )
     correction_traj = mpc.query_mdm_with_uncertainty(
         gen,
         user.feedback_text,
         start_pose=current_pose,
-        current_arm_aa=q_feedback,
+        current_q=q_feedback,
         default_scale=cfg.uq.scale,
         mdm_frames=mdm_frames,
         frozen_body=frozen_body,
@@ -505,7 +530,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     window = cfg.preference_window if history_window is None else history_window
     phase_t0 = time.perf_counter()
     _log("phase C building cost-generation context", prefix=log_prefix)
-    reference_traj = _rollout_reference_trajectory(
+    reference_q = _rollout_reference_trajectory(
         cfg_backend,
         current_q,
         context,
@@ -519,10 +544,11 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         if cfg_backend.cartesian.goals
         else None
     )
-    full_correction_traj = _assemble_full_correction_traj(
+    correction_q = canonical_arm_q(cluster_traj, context)
+    full_correction_q = _assemble_full_correction_traj(
         cfg_backend,
         q_history,
-        cluster_traj,
+        correction_q,
         context,
         base_extra_costs,
         body_pos,
@@ -550,12 +576,12 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     generated_context = build_generated_cost_context(
         context,
         current_q,
-        cluster_traj,
+        correction_q,
         q_history,
         window=window,
         body_pos=body_pos,
-        reference_traj=reference_traj,
-        full_correction_traj=full_correction_traj,
+        reference_traj=reference_q,
+        full_correction_traj=full_correction_q,
         cartesian_goal=goal_pos,
         cartesian_threshold=cfg_backend.cartesian.threshold,
         rejected_trajs=rejected_trajs,
@@ -574,7 +600,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
             cost_dir / "images",
             prompt_candidate_trajs,
             highlight_label,
-            reference_traj=reference_traj,
+            reference_traj=reference_q,
             goal_pos=goal_pos,
         )
         _log(
@@ -585,7 +611,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     eval_state = EvalState(
         cfg=cfg_backend,
         current_q=current_q,
-        correction_traj=cluster_traj,
+        correction_traj=correction_q,
         q_history=q_history,
         window=window,
         cost_context=context,
@@ -593,8 +619,8 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         body_pos=body_pos,
         spine3_pos=spine3_pos,
         spine3_aa=spine3_aa,
-        reference_traj=reference_traj,
-        full_correction_traj=full_correction_traj,
+        reference_traj=reference_q,
+        full_correction_traj=full_correction_q,
         cartesian_goal=goal_pos,
         cartesian_threshold=cfg_backend.cartesian.threshold,
         rejected_trajs=rejected_trajs,
@@ -643,8 +669,8 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     return CostGenerationResult(
         cost_dir=cost_dir,
         generated_context=generated_context,
-        reference_traj=reference_traj,
-        full_correction_traj=full_correction_traj,
+        reference_traj=reference_q,
+        full_correction_traj=full_correction_q,
         summaries=summaries,
         images=images,
         eval_state=eval_state,

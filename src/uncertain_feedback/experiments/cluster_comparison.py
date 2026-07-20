@@ -37,6 +37,7 @@ from uncertain_feedback.planners.mpc.costs import (
     artifact_run_dir,
 )
 from uncertain_feedback.planners.mpc.costs.cost_generator import _make_llm_model
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.planners.run import (
     _append_extra_cost,
     run_planning_loop,
@@ -83,7 +84,7 @@ def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
             cartesian_goals=[
                 np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals
             ],
-            initial_arm_aa=current_q,
+            initial_q=current_q,
             cartesian_threshold=cfg.cartesian.threshold,
             **common,
             advance_threshold=cfg.advance_threshold,
@@ -104,7 +105,9 @@ def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
     mdm_planner = cast(LeftArmMPCMDM, planner)
     n_frames = cluster_traj.shape[0]
     cutoff = max(1, round(n_frames * mdm_planner.trajectory_fraction))
-    mdm_planner.set_mdm_goal(cluster_traj[cutoff - 1])
+    mdm_planner.set_mdm_goal(
+        context.fk.arm_aa_to_q(cluster_traj[cutoff - 1], spine3_aa)
+    )
     mdm_planner.push_trajectory(cluster_traj[:cutoff])
     return planner
 
@@ -119,7 +122,11 @@ def _rollout_metrics(
         np.linalg.norm(deltas.reshape(deltas.shape[0], -1), axis=1).sum()
     )
     final_q = rollout[-1]
-    positions = context.fk.fk(final_q, context.spine3_pos, context.spine3_aa)
+    positions = context.fk.fk(
+        q_to_arm_aa(final_q, context.fk.elbow_hinge_axis),
+        context.spine3_pos,
+        context.spine3_aa,
+    )
     metrics: dict[str, Any] = {
         "path_length_joint_l2": path_length,
         "final_q_norm": float(np.linalg.norm(final_q)),
@@ -144,21 +151,25 @@ def _render_rollout_video(
     mdm_goal_q: np.ndarray | None = None,
     fps: int = 20,
 ) -> None:
-    """Render a ``(steps+1, 3, 3)`` rollout to a video via the shared visualizer.
+    """Render a ``(steps+1, 7)`` rollout to a video via the shared visualizer.
 
     Uses the same ``ArmVisualizer`` 6-panel layout as the live window, so a saved
     rollout looks identical to watching it live — only the ``save_video`` flag in
     :func:`run_cluster_comparison` decides whether this is called.
     """
     ArmVisualizer(fk).render_rollout_video(
-        rollout,
+        q_to_arm_aa(rollout, fk.elbow_hinge_axis),
         save_path,
         spine3_pos=spine3_pos,
         spine3_aa=spine3_aa,
         body_pos=body_pos,
         cartesian_goal=cartesian_goal,
         frame_colors=frame_colors,
-        mdm_goal_q=mdm_goal_q,
+        mdm_goal_q=(
+            q_to_arm_aa(mdm_goal_q, fk.elbow_hinge_axis)
+            if mdm_goal_q is not None and mdm_goal_q.shape == (7,)
+            else mdm_goal_q
+        ),
         fps=fps,
     )
 
@@ -224,7 +235,7 @@ def _run_initial_state_rollout(  # pylint: disable=too-many-arguments
     extra_costs = _append_extra_cost(base_extra_costs, generated_cost)
     planner = ArmMPCCartesianNoMDM(
         cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
-        initial_arm_aa=initial_q,
+        initial_q=initial_q,
         cartesian_threshold=cfg.cartesian.threshold,
         horizon=cfg.horizon,
         n_mpc_samples=cfg.n_mpc_samples,
@@ -420,7 +431,7 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
                 body_pos=body_pos,
                 cartesian_goal=cartesian_goal,
                 frame_colors=colors,
-                mdm_goal_q=traj[cutoff - 1],
+                mdm_goal_q=context.fk.arm_aa_to_q(traj[cutoff - 1], spine3_aa),
             )
         summary["clusters"][str(label)] = entry
         _write_comparison_summary(root_dir, summary)

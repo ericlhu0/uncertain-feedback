@@ -119,7 +119,7 @@ def main() -> None:
             user,
             setup.gen,
             setup.initial_pose,
-            setup.arm_aa,
+            setup.q0,
             setup.cost_context,
             artifact_base_dir,
             body_pos=setup.body_pos,

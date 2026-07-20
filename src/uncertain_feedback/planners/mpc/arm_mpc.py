@@ -1,9 +1,5 @@
 # pylint: disable=duplicate-code
-"""Sampling-based MPC for the SMPL left arm in joint angle space.
-
-State and target are expressed as axis-angle vectors, matching SMPL's
-native ``body_pose`` format (``smplx.SMPL``)
-"""
+"""Sampling-based MPC for the SMPL left arm in 7-DOF joint space."""
 
 from __future__ import annotations
 
@@ -20,23 +16,24 @@ from uncertain_feedback.planners.mpc.costs import (
     ElbowHeightCost,
 )
 from uncertain_feedback.planners.mpc.kinematics import (
-    _N_JOINTS,
+    Q_DIM,
     SmplLeftArmFK,
-    _compose_rotvec,
+    _compose_q,
+    q_to_arm_aa,
 )
 
 if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
 
 
-def _as_controlled_arm_aa(value: np.ndarray, name: str) -> np.ndarray:
-    """Return a controlled shoulder/elbow/wrist axis-angle array."""
+def _as_state_q(value: np.ndarray, name: str) -> np.ndarray:
+    """Return a clavicle/shoulder/elbow planner state."""
     arr = np.asarray(value, dtype=np.float64)
-    if arr.shape != (_N_JOINTS, 3):
+    if arr.shape != (Q_DIM,):
         raise ValueError(
-            f"{name} must have shape (3, 3) for "
-            "[left_shoulder, left_elbow, left_wrist]; "
-            f"left_collar is fixed on SmplLeftArmFK.collar_aa, got {arr.shape}"
+            f"{name} must have shape ({Q_DIM},) for "
+            "[clavicle rotvec, shoulder rotvec, elbow angle], "
+            f"got {arr.shape}"
         )
     return arr
 
@@ -74,9 +71,8 @@ class SmplLeftArmMPC:
                          ``solve`` call.
         max_angle_delta: Standard deviation of the sampling distribution
                          (radians).
-        goals:           Initial list of ``(3, 3)`` target joint configurations
-                         for [left_shoulder, left_elbow, left_wrist].
-        goal_threshold:  L2 distance (in rot-vec space) below which the
+        goals:           Initial list of ``(7,)`` target joint configurations.
+        goal_threshold:  L2 distance in the 7-DOF state below which the
                          current goal is considered reached (default: 0.01).
         visualize:       If ``True``, open a live matplotlib window and update
                          it each time :meth:`step` is called.  Requires
@@ -113,7 +109,7 @@ class SmplLeftArmMPC:
         self._extra_costs = extra_costs or CompositeTrajectoryCost()
 
         self._goals: deque[np.ndarray] = deque(
-            [_as_controlled_arm_aa(g, "goal") for g in goals] if goals else []
+            [_as_state_q(g, "goal") for g in goals] if goals else []
         )
         self._goal_threshold = goal_threshold
 
@@ -149,7 +145,7 @@ class SmplLeftArmMPC:
 
         Only the last remaining goal counts: while earlier goals are still
         queued the rollout has not finished. Returns ``True`` when ``q`` is
-        within ``goal_threshold`` (L2 in rot-vec space) of that final goal.
+        within ``goal_threshold`` (L2 in the 7-DOF state) of that final goal.
         :func:`~uncertain_feedback.planners.run.run_planning_loop` polls this
         (together with :attr:`mdm_ready_to_terminate`) to stop early.
         """
@@ -210,20 +206,18 @@ class SmplLeftArmMPC:
 
     def append_goal(self, goal: np.ndarray) -> None:
         """Add a goal to the back of the queue."""
-        self._goals.append(_as_controlled_arm_aa(goal, "goal"))
+        self._goals.append(_as_state_q(goal, "goal"))
 
     def prepend_goal(self, goal: np.ndarray) -> None:
         """Insert a goal at the front of the queue (becomes the immediate next
         target)."""
-        self._goals.appendleft(_as_controlled_arm_aa(goal, "goal"))
+        self._goals.appendleft(_as_state_q(goal, "goal"))
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _sample_actions(
-        self, mean: np.ndarray, size: tuple[int, int, int, int]
-    ) -> np.ndarray:
+    def _sample_actions(self, mean: np.ndarray, size: tuple[int, ...]) -> np.ndarray:
         rng = self._rng if self._rng is not None else np.random
         return rng.normal(
             loc=mean,
@@ -236,18 +230,18 @@ class SmplLeftArmMPC:
         ``actions``.
 
         Args:
-            current_q: ``(3, 3)`` current joint angles.
-            actions:   ``(N, H, 3, 3)`` sampled action sequences.
+            current_q: ``(7,)`` current joint angles.
+            actions:   ``(N, H, 7)`` sampled action sequences.
 
         Returns:
-            ``(N, H+1, 3, 3)`` state trajectories (includes initial state).
+            ``(N, H+1, 7)`` state trajectories (includes initial state).
         """
         n_seqs, h_len = actions.shape[0], actions.shape[1]
-        q_trajs = np.empty((n_seqs, h_len + 1, _N_JOINTS, 3), dtype=np.float64)
+        q_trajs = np.empty((n_seqs, h_len + 1, Q_DIM), dtype=np.float64)
         q_trajs[:, 0] = current_q[np.newaxis]
 
         for t in range(h_len):
-            q_trajs[:, t + 1] = _compose_rotvec(q_trajs[:, t], actions[:, t])
+            q_trajs[:, t + 1] = _compose_q(q_trajs[:, t], actions[:, t])
 
         return q_trajs
 
@@ -255,14 +249,15 @@ class SmplLeftArmMPC:
         """Compute terminal cost for each of the N sampled trajectories.
 
         Args:
-            q_trajs:  ``(N, H+1, 3, 3)`` state trajectories.
-            target_q: ``(3, 3)``         target joint configuration.
+            q_trajs:  ``(N, H+1, 7)`` state trajectories.
+            target_q: ``(7,)`` target joint configuration.
 
         Returns:
             ``(N,)`` cost per trajectory.
         """
-        joint_cost = ((q_trajs[:, -1] - target_q[np.newaxis]) ** 2).sum(axis=(-2, -1))
-        return joint_cost + self._extra_costs(q_trajs)
+        joint_cost = ((q_trajs[:, -1] - target_q[np.newaxis]) ** 2).sum(axis=-1)
+        aa_trajs = q_to_arm_aa(q_trajs, self._fk.elbow_hinge_axis)
+        return joint_cost + self._extra_costs(aa_trajs)
 
     # ------------------------------------------------------------------
     # Public API
@@ -275,14 +270,13 @@ class SmplLeftArmMPC:
         """Sample action sequences and return the best one.
 
         Args:
-            current_q: ``(3, 3)`` current axis-angle joint angles for
-                       [left_shoulder, left_elbow, left_wrist].
+            current_q: ``(7,)`` clavicle/shoulder/elbow state.
 
         Returns:
             Tuple of:
 
-            - ``first_action`` ``(3, 3)``: best delta to apply at the current step.
-            - ``plan`` ``(H, 3, 3)``: full best action sequence.
+            - ``first_action`` ``(7,)``: best delta to apply at the current step.
+            - ``plan`` ``(H, 7)``: full best action sequence.
 
         Raises:
             RuntimeError: If the goal queue is empty.
@@ -291,19 +285,17 @@ class SmplLeftArmMPC:
             raise RuntimeError(
                 "Goal queue is empty. Add a goal before calling solve()."
             )
-        current_q = _as_controlled_arm_aa(current_q, "current_q")
+        current_q = _as_state_q(current_q, "current_q")
         target_q = self.current_goal
 
         # Warm-start: shift previous best plan by one step; fill last with zeros
         if self._prev_best is not None:
-            mean = np.concatenate(
-                [self._prev_best[1:], np.zeros((1, _N_JOINTS, 3))], axis=0
-            )
+            mean = np.concatenate([self._prev_best[1:], np.zeros((1, Q_DIM))], axis=0)
         else:
-            mean = np.zeros((self._horizon, _N_JOINTS, 3), dtype=np.float64)
+            mean = np.zeros((self._horizon, Q_DIM), dtype=np.float64)
 
         actions = self._sample_actions(
-            mean, (self._n_mpc_samples, self._horizon, _N_JOINTS, 3)
+            mean, (self._n_mpc_samples, self._horizon, Q_DIM)
         )
 
         q_trajs = self._rollout(current_q, actions)
@@ -334,15 +326,13 @@ class SmplLeftArmMPC:
         updated automatically.
 
         Args:
-            current_q: ``(3, 3)`` current axis-angle joint angles.
+            current_q: ``(7,)`` clavicle/shoulder/elbow state.
 
         Returns:
-            ``(3, 3)`` updated axis-angle joint angles.
+            ``(7,)`` updated planner state.
         """
         first_action, _ = self.solve(current_q)
-        next_q = _compose_rotvec(
-            _as_controlled_arm_aa(current_q, "current_q"), first_action
-        )
+        next_q = _compose_q(_as_state_q(current_q, "current_q"), first_action)
 
         # Advance goal queue when the current goal is reached
         goal = self.current_goal
@@ -360,7 +350,7 @@ class SmplLeftArmMPC:
 
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    self._goals[-1],
+                    q_to_arm_aa(self._goals[-1], self._fk.elbow_hinge_axis),
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     body_pos=self._vis_config.body_pos,
@@ -370,7 +360,9 @@ class SmplLeftArmMPC:
                 if self._vis_config.capture:
                     self._vis.start_capture()
             dist = float(np.linalg.norm(next_q - self.current_goal))
-            self._vis.update_step(next_q, dist=dist)
+            self._vis.update_step(
+                q_to_arm_aa(next_q, self._fk.elbow_hinge_axis), dist=dist
+            )
 
         return next_q
 
@@ -389,22 +381,10 @@ if __name__ == "__main__":
 
     demo_fk = SmplLeftArmFK()
 
-    demo_initial_q = np.zeros((3, 3))
+    demo_initial_q = np.zeros(Q_DIM)
     demo_goals = [
-        np.array(
-            [
-                [0.0, -1.45, 0.0],  # left_shoulder
-                [0.0, 0.0, 0.4],  # left_elbow
-                [0.0, 0.0, 0.0],  # left_wrist
-            ]
-        ),
-        np.array(
-            [
-                [0.0, -0.8, 0.0],  # left_shoulder
-                [0.0, 0.0, 0.8],  # left_elbow
-                [0.0, 0.0, 0.0],  # left_wrist
-            ]
-        ),
+        np.array([0.0, -1.45, 0.0, 0.0, 0.0, 0.4, 0.0]),
+        np.array([0.0, -0.8, 0.0, 0.0, 0.0, 0.8, 0.0]),
     ]
 
     demo_mpc = SmplLeftArmMPC(

@@ -63,6 +63,7 @@ from uncertain_feedback.planners.mpc.costs import (
     replace_generated_costs,
     update_preference_cost,
 )
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.simulated_users import (
     SimulatedUser,
     choose_cluster,
@@ -298,19 +299,21 @@ def _apply_preference_update(
     window: int,
 ) -> list[LearnablePreferenceCost]:
     """Update configured preference bounds from MDM/MPC discrepancy."""
-    _ = context
     costs = _iter_learnable_costs(mpc._extra_costs)  # pylint: disable=protected-access
     if not costs:
         return []
     if not q_history:
         return []
     recent_q = np.array(q_history[-window:])
+    hinge_axis = context.fk.elbow_hinge_axis
+    recent_aa = q_to_arm_aa(recent_q, hinge_axis)
+    mdm_aa = q_to_arm_aa(mdm_traj, hinge_axis)
     updated_costs: list[LearnablePreferenceCost] = []
     extra_costs = mpc._extra_costs  # pylint: disable=protected-access
 
     for cost in costs:
-        mpc_values = cost.feature_values(recent_q)
-        mdm_values = cost.feature_values(mdm_traj)
+        mpc_values = cost.feature_values(recent_aa)
+        mdm_values = cost.feature_values(mdm_aa)
         mdm_lo, mdm_hi = np.percentile(mdm_values, [5.0, 95.0])
         mpc_mean = float(mpc_values.mean())
         mdm_mean = float(mdm_values.mean())
@@ -407,7 +410,7 @@ class RunSetup:
     body_pos: np.ndarray | None
     spine3_pos: np.ndarray | None
     spine3_aa: np.ndarray | None
-    arm_aa: np.ndarray
+    q0: np.ndarray
     initial_pose: np.ndarray | None
     uses_mdm: bool
     visualize: bool
@@ -437,6 +440,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
 
     fk = SmplLeftArmFK()
     fk.collar_aa = initial_state.fixed_collar_aa
+    q0 = fk.arm_aa_to_q(arm_aa, spine3_aa)
     cost_context = MpcCostContext(
         fk=fk,
         spine3_pos=np.asarray(
@@ -453,9 +457,8 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         extra_costs = CompositeTrajectoryCost([*extra_costs.terms(), user.limit_cost()])
 
     # Default goal: arm raised from the initial pose
-    default_goal = arm_aa.copy() + np.array(
-        [[0.0, 0.7, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-    )
+    default_goal = q0.copy()
+    default_goal[1] += 0.7
 
     common: dict = {
         "horizon": cfg.horizon,
@@ -492,7 +495,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = ArmMPCCartesianNoMDM(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
-            initial_arm_aa=arm_aa,
+            initial_q=q0,
             cartesian_threshold=cfg.cartesian.threshold,
             **common,
         )
@@ -506,7 +509,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
         mpc = LeftArmMPCCartesian(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
-            initial_arm_aa=arm_aa,
+            initial_q=q0,
             cartesian_threshold=cfg.cartesian.threshold,
             **common,
             advance_threshold=cfg.advance_threshold,
@@ -536,7 +539,7 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         body_pos=body_pos,
         spine3_pos=spine3_pos,
         spine3_aa=spine3_aa,
-        arm_aa=arm_aa,
+        q0=q0,
         initial_pose=initial_state.hml_pose,
         uses_mdm=uses_mdm,
         visualize=visualize,
@@ -639,7 +642,7 @@ def _rollout_reference_trajectory(
     driving toward before the correction — and avoid blocking it. With no MDM phase
     (``mdm_ready_to_terminate`` is always ``True``) the loop stops as soon as the wrist
     reaches the goal, so the trajectory ends at the goal rather than idling there for the
-    full ``cfg.steps``. Returns ``(T, 3, 3)``, or ``None`` for planners without a
+    full ``cfg.steps``. Returns ``(T, 7)``, or ``None`` for planners without a
     persistent Cartesian goal.
     """
     if cfg.planner not in ("arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"):
@@ -649,7 +652,7 @@ def _rollout_reference_trajectory(
 
     planner = ArmMPCCartesianNoMDM(
         cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
-        initial_arm_aa=current_q,
+        initial_q=current_q,
         cartesian_threshold=cfg.cartesian.threshold,
         horizon=cfg.horizon,
         n_mpc_samples=cfg.n_mpc_samples,
@@ -692,6 +695,8 @@ def _assemble_full_correction_traj(
     dropped.
     """
     correction_traj = np.asarray(correction_traj, dtype=np.float64)
+    if correction_traj.shape[-2:] == (3, 3):
+        correction_traj = context.fk.arm_aa_to_q_batch(correction_traj, spine3_aa)
     segments: list[np.ndarray] = []
     if q_history:
         segments.append(np.asarray(q_history, dtype=np.float64))
@@ -731,9 +736,12 @@ def _make_cost_eval_rollout(
 
     def rollout(cost: GeneratedPythonCost) -> np.ndarray | None:
         extra = _append_extra_cost(base_extra_costs, cost)
-        return _rollout_reference_trajectory(
+        rollout_q = _rollout_reference_trajectory(
             cfg, current_q, context, extra, body_pos, spine3_pos, spine3_aa
         )
+        if rollout_q is None:
+            return None
+        return q_to_arm_aa(rollout_q, context.fk.elbow_hinge_axis)
 
     return rollout
 
@@ -788,7 +796,9 @@ def run_repeated_correction_session(
         if old_suffix is not None:
             np.save(round_dir / "interrupted_reference.npy", old_suffix)
 
-        current_pose = gen.build_pose_from_arm_aa(setup.initial_pose, q)
+        current_pose = gen.build_pose_from_arm_aa(
+            setup.initial_pose, q_to_arm_aa(q, setup.fk.elbow_hinge_axis)
+        )
         mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
         save_path: str | None = None
         if args.save_motion is not None:
@@ -807,9 +817,10 @@ def run_repeated_correction_session(
                 spine3_aa=setup.spine3_aa,
             )
             cutoff = max(1, round(len(traj) * mpc.trajectory_fraction))
-            llm_traj = np.asarray(traj[:cutoff], dtype=np.float64)
+            arm_aa_traj = np.asarray(traj[:cutoff], dtype=np.float64)
+            llm_traj = setup.fk.arm_aa_to_q_batch(arm_aa_traj, setup.spine3_aa)
             mpc.set_mdm_goal(llm_traj[-1])
-            mpc.push_trajectory(llm_traj)
+            mpc.push_trajectory(arm_aa_traj)
         else:
             uq_mpc = cast(LeftArmMPCMDMUQ, mpc)
             selector = (
@@ -821,7 +832,7 @@ def run_repeated_correction_session(
                 gen,
                 feedback_text,
                 start_pose=current_pose,
-                current_arm_aa=q,
+                current_q=q,
                 auto_cluster=cfg.uq.auto_cluster,
                 default_scale=cfg.uq.scale,
                 mdm_frames=mdm_frames,
@@ -829,7 +840,9 @@ def run_repeated_correction_session(
                 cluster_selector=selector,
             )
             cutoff = max(1, round(len(traj) * mpc.trajectory_fraction))
-            llm_traj = np.asarray(traj[:cutoff], dtype=np.float64)
+            llm_traj = setup.fk.arm_aa_to_q_batch(
+                np.asarray(traj[:cutoff], dtype=np.float64), setup.spine3_aa
+            )
         np.save(round_dir / "correction.npy", llm_traj)
 
         if cfg.preference_learning:
@@ -858,9 +871,9 @@ def run_repeated_correction_session(
                     uqr.chosen_label: uqr.cluster_means[uqr.chosen_label]
                 }
                 highlight_label = uqr.chosen_label
-            reference_traj = old_suffix
-            if reference_traj is None:
-                reference_traj = _rollout_reference_trajectory(
+            reference_q = old_suffix
+            if reference_q is None:
+                reference_q = _rollout_reference_trajectory(
                     cfg,
                     q,
                     setup.cost_context,
@@ -874,7 +887,7 @@ def run_repeated_correction_session(
                 if cfg.cartesian.goals
                 else None
             )
-            full_correction_traj = _assemble_full_correction_traj(
+            full_correction_q = _assemble_full_correction_traj(
                 cfg,
                 list(q_history),
                 llm_traj,
@@ -888,11 +901,11 @@ def run_repeated_correction_session(
                 setup.cost_context,
                 q,
                 llm_traj,
-                list(q_history),
+                q_history,
                 window=cfg.preference_window,
                 body_pos=setup.body_pos,
-                reference_traj=reference_traj,
-                full_correction_traj=full_correction_traj,
+                reference_traj=reference_q,
+                full_correction_traj=full_correction_q,
                 cartesian_goal=goal_pos,
                 cartesian_threshold=cfg.cartesian.threshold,
                 rejected_trajs=rejected_trajs,
@@ -905,7 +918,7 @@ def run_repeated_correction_session(
                     round_dir / "images",
                     candidate_trajs,
                     highlight_label,
-                    reference_traj=reference_traj,
+                    reference_traj=reference_q,
                     goal_pos=goal_pos,
                 )
             eval_state = EvalState(
@@ -919,8 +932,8 @@ def run_repeated_correction_session(
                 body_pos=setup.body_pos,
                 spine3_pos=setup.spine3_pos,
                 spine3_aa=setup.spine3_aa,
-                reference_traj=reference_traj,
-                full_correction_traj=full_correction_traj,
+                reference_traj=reference_q,
+                full_correction_traj=full_correction_q,
                 cartesian_goal=goal_pos,
                 cartesian_threshold=cfg.cartesian.threshold,
                 rejected_trajs=rejected_trajs,
@@ -1049,9 +1062,9 @@ def run_repeated_correction_session(
         prior_unified_cost=prior_unified_cost,
     )
     result = session.run_trajectory(
-        setup.arm_aa.copy(), cfg.steps, progress=True, progress_desc="MPC"
+        setup.q0.copy(), cfg.steps, progress=True, progress_desc="MPC"
     )
-    executed = np.asarray([setup.arm_aa, *result.loop_result.q_history])
+    executed = np.asarray([setup.q0, *result.loop_result.q_history])
     np.save(artifact_root / "executed_trajectory.npy", executed)
     summary = {
         "trajectory_index": trajectory_index,
@@ -1095,7 +1108,7 @@ def main() -> None:
     else:
         run_planning_loop(
             setup.mpc,
-            setup.arm_aa.copy(),
+            setup.q0.copy(),
             cfg.steps,
             progress=True,
             progress_desc="MPC",

@@ -27,6 +27,10 @@ from uncertain_feedback.demo_runner.smpl_mesh import SmplMeshCache
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.planners.mpc import LeftArmMPCCartesian
+from uncertain_feedback.planners.mpc.arm_features import (
+    FEATURE_NAMES,
+    arm_feature_series,
+)
 from uncertain_feedback.planners.mpc.config import (
     MpcRunConfig,
     load_mpc_config,
@@ -40,15 +44,14 @@ from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_INDICES,
     SMPL_BONE_PAIRS_22,
     SmplLeftArmFK,
+    q_to_arm_aa,
 )
 from uncertain_feedback.simulated_users.base import (
-    FEATURE_NAMES,
     JOINT_SLOTS,
     Bound,
     CoupledBound,
     HiddenBound,
     SimulatedUser,
-    feature_series,
 )
 from uncertain_feedback.simulated_users.personas import (
     DEFAULT_ARM_JOINT_LIMITS,
@@ -179,6 +182,7 @@ class DemoRig:
         self.spine3_aa = np.asarray(spine3_aa, dtype=np.float64)
         self.fk = SmplLeftArmFK()
         self.fk.collar_aa = np.asarray(collar_aa, dtype=np.float64)
+        self.default_q = self.fk.arm_aa_to_q(self.default_arm_aa, self.spine3_aa)
         self.meshes = SmplMeshCache(self.body_pos)
         self.context = MpcCostContext(
             fk=self.fk, spine3_pos=self.spine3_pos, spine3_aa=self.spine3_aa
@@ -235,7 +239,7 @@ class DemoRig:
             for limit, choice in zip(user.joint_limits, choices):
                 corner_poses[index, JOINT_SLOTS[limit.joint]] = choice
         poses = np.concatenate((sampled, corner_poses), axis=0)
-        features = feature_series(self.context, poses)
+        features = arm_feature_series(poses, self.context)
         return {
             name: [
                 float(np.min(values) - 0.02 * (np.max(values) - np.min(values))),
@@ -338,13 +342,13 @@ class DemoRig:
 
     def _manual_planner(
         self,
-        start_arm_aa: np.ndarray,
+        start_q: np.ndarray,
         goal: np.ndarray,
         extra_costs: CompositeTrajectoryCost,
     ) -> LeftArmMPCCartesian:
         return LeftArmMPCCartesian(
             cartesian_goals=[goal.copy()],
-            initial_arm_aa=start_arm_aa,
+            initial_q=start_q,
             cartesian_threshold=self.cfg.cartesian.threshold,
             horizon=self.cfg.horizon,
             n_mpc_samples=self.cfg.n_mpc_samples,
@@ -383,8 +387,13 @@ class DemoRig:
         ``pin_mesh`` keeps the mesh alive for the trajectory's whole life.
         """
         traj = np.asarray(traj, dtype=np.float64)
-        arm_pos = self.fk.fk_batch(traj, self.spine3_pos, self.spine3_aa)
-        feats = feature_series(self.context, traj)
+        arm_aa = (
+            q_to_arm_aa(traj, self.fk.elbow_hinge_axis)
+            if traj.shape[-1:] == (7,)
+            else traj
+        )
+        arm_pos = self.fk.fk_batch(arm_aa, self.spine3_pos, self.spine3_aa)
+        feats = arm_feature_series(traj, self.context)
         return {
             "n_frames": int(traj.shape[0]),
             "arm_positions": arm_pos.tolist(),
@@ -392,7 +401,7 @@ class DemoRig:
                 arm_pos[-1:] if current_mesh_only else arm_pos, pin=pin_mesh
             ),
             "features": {k: v.tolist() for k, v in feats.items()},
-            "limit_violations": user.limit_violation_series(traj).tolist(),
+            "limit_violations": user.limit_violation_series(arm_aa).tolist(),
         }
 
     def preview_pose(self, arm_aa: list[list[float]]) -> dict[str, Any]:

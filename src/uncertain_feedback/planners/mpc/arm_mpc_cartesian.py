@@ -16,7 +16,11 @@ from uncertain_feedback.planners.mpc.arm_mpc_cartesian_base import _CartesianGoa
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, _compose_rotvec
+from uncertain_feedback.planners.mpc.kinematics import (
+    SmplLeftArmFK,
+    _compose_q,
+    q_to_arm_aa,
+)
 
 if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
@@ -36,7 +40,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
     Args:
         cartesian_goals: List of ``(3,)`` target wrist positions in
                          spine3-relative coordinates (Y-up, metres).
-        initial_arm_aa:  ``(3, 3)`` controlled arm axis-angles at run start.  Used as a
+        initial_q:       ``(7,)`` controlled arm state at run start. Used as a
                          ghost-arm placeholder in the visualiser while the
                          MDM waypoint queue is empty.
         cartesian_threshold: Cartesian L2 distance (metres) below which the
@@ -61,7 +65,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
     def __init__(
         self,
         cartesian_goals: list[np.ndarray],
-        initial_arm_aa: np.ndarray,
+        initial_q: np.ndarray,
         cartesian_threshold: float = 0.05,
         horizon: int = 10,
         n_mpc_samples: int = 512,
@@ -105,7 +109,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
         )
         self._init_cartesian(
             cartesian_goals,
-            initial_arm_aa,
+            initial_q,
             cartesian_threshold,
             fk,
             spine3_pos,
@@ -168,7 +172,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    self._initial_arm_aa,
+                    q_to_arm_aa(self._initial_q, self._fk.elbow_hinge_axis),
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     body_pos=self._vis_config.body_pos,
@@ -179,14 +183,22 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                 if self._vis_config.capture:
                     self._vis.start_capture()
                 if self._mdm_goal is not None:
-                    self._vis.update_mdm_goal(self._mdm_goal)
+                    self._vis.update_mdm_goal(
+                        q_to_arm_aa(self._mdm_goal, self._fk.elbow_hinge_axis)
+                    )
                 if self._preview_q is not None:
-                    self._vis.update_trajectory_preview(self._preview_q)
+                    self._vis.update_trajectory_preview(
+                        q_to_arm_aa(self._preview_q, self._fk.elbow_hinge_axis)
+                    )
                 if self.current_cartesian_goal is not None:
                     self._vis.update_cartesian_target(
                         self._spine3_pos + self.current_cartesian_goal
                     )
-            self._vis.update_step(next_q, dist=dist, color=ArmVisualizer.MDM_COLOR)
+            self._vis.update_step(
+                q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),
+                dist=dist,
+                color=ArmVisualizer.MDM_COLOR,
+            )
 
         return next_q
 
@@ -196,9 +208,13 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             return np.asarray(current_q, dtype=np.float64)
 
         first_action, _ = self.solve(current_q)
-        next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
+        next_q = _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
 
-        arm_pos = self._fk_inst.fk(next_q, self._spine3_pos, self._spine3_aa)
+        arm_pos = self._fk_inst.fk(
+            q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),
+            self._spine3_pos,
+            self._spine3_aa,
+        )
         wrist_rel = arm_pos[-1] - self._spine3_pos
         goal = self._cartesian_goals[0]
         dist = float(np.linalg.norm(wrist_rel - goal))
@@ -218,7 +234,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
-                    self._initial_arm_aa,
+                    q_to_arm_aa(self._initial_q, self._fk.elbow_hinge_axis),
                     self._vis_config.spine_pos,
                     self._vis_config.spine_aa,
                     body_pos=self._vis_config.body_pos,
@@ -229,8 +245,14 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                 if self._vis_config.capture:
                     self._vis.start_capture()
                 if self._mdm_goal is not None:
-                    self._vis.update_mdm_goal(self._mdm_goal)
+                    self._vis.update_mdm_goal(
+                        q_to_arm_aa(self._mdm_goal, self._fk.elbow_hinge_axis)
+                    )
             self._vis.update_cartesian_target(self._spine3_pos + goal)
-            self._vis.update_step(next_q, dist=dist, color=ArmVisualizer.TARGET_COLOR)
+            self._vis.update_step(
+                q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),
+                dist=dist,
+                color=ArmVisualizer.TARGET_COLOR,
+            )
 
         return next_q

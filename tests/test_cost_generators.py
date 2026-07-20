@@ -156,7 +156,7 @@ def test_create_cost_generator_selects_backend(tmp_path) -> None:
 def test_llm_generator_produces_and_installs_cost(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
     kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
-    mpc = SmplLeftArmMPC(goals=[np.zeros((3, 3))])
+    mpc = SmplLeftArmMPC(goals=[np.zeros(7)])
     gen = create_cost_generator(mpc=mpc, **kwargs)
 
     cost = gen.generate(install=True)
@@ -345,7 +345,7 @@ def test_generator_saves_reference_with_correction_video(tmp_path, monkeypatch) 
 
     assert (run_dir / "reference_with_correction.mp4").read_bytes() == b"video"
     assert len(saved_rollouts) == 1
-    np.testing.assert_allclose(saved_rollouts[0], full_correction)
+    np.testing.assert_allclose(saved_rollouts[0], context.arm_aa(full_correction))
 
 
 def test_turns_generator_keeps_state_and_returns_best(tmp_path) -> None:

@@ -150,7 +150,9 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         mdm_frames: int | None = None,
         frozen_body: bool = False,
         default_scale: float = 1.0,
-        cluster_selector: Callable[[dict[int, np.ndarray]], int] | None = None,
+        cluster_selector: (
+            Callable[[dict[int, np.ndarray]], int | tuple[int, float]] | None
+        ) = None,
     ) -> np.ndarray:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
@@ -179,9 +181,12 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                                  during MDM generation.
                     cluster_selector: Optional headless chooser called with the
                                  cluster-mean trajectories ``{label: (T, 3, 3)}``;
-                                 returns the chosen label (used by simulated-user
-                                 experiments). Takes precedence over
-                                 ``auto_cluster`` and the interactive picker.
+                                 returns the chosen label, or a
+                                 ``(label, magnitude)`` tuple whose magnitude
+                                 overrides ``default_scale`` (used by
+                                 simulated-user experiments). Takes precedence
+                                 over ``auto_cluster`` and the interactive
+                                 picker.
         """
         print(f"Generating {self._n_diffusion_samples} motion samples for: '{text}' …")
         generation_t0 = time.perf_counter()
@@ -233,8 +238,12 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                 cluster_means[label] = trajectories[labels == label].mean(axis=0)
 
         if cluster_selector is not None:
-            chosen_label = int(cluster_selector(cluster_means))
-            scale = default_scale
+            selection = cluster_selector(cluster_means)
+            if isinstance(selection, tuple):
+                chosen_label, scale = int(selection[0]), float(selection[1])
+            else:
+                chosen_label = int(selection)
+                scale = default_scale
             print(
                 f"Selector chose cluster {chosen_label} at magnitude "
                 f"{scale:.2f} (headless mode)."

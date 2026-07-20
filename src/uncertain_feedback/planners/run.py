@@ -98,6 +98,7 @@ def _load_initial_pose_state(
     motion_generator: str = "mdm",
     motion_generator_factory: Callable[[Path | None], MotionGenerator] | None = None,
     num_denoising_steps: int | None = None,
+    seed: int | None = None,
 ) -> tuple[MotionGenerator | None, _InitialPoseState]:
     """Load the optional HML pose used to initialize all planner variants.
 
@@ -112,7 +113,9 @@ def _load_initial_pose_state(
         return None, _InitialPoseState.tpose()
 
     factory = motion_generator_factory or (
-        lambda mp: make_motion_generator(motion_generator, mp, num_denoising_steps)
+        lambda mp: make_motion_generator(
+            motion_generator, mp, num_denoising_steps, seed=seed
+        )
     )
     gen = factory(args.model_path)
     hml_pose = gen.load_pose(pose_path)
@@ -418,7 +421,11 @@ class RunSetup:
     user: SimulatedUser
 
 
-def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
+def build_run(
+    args: argparse.Namespace,
+    cfg: MpcRunConfig,
+    motion_generator_factory: Callable[[Path | None], MotionGenerator] | None = None,
+) -> RunSetup:
     """Load the pose, kinematics, costs, and planner for a single run."""
     uses_mdm = cfg.planner in _MDM_PLANNERS
     visualize = args.live or (args.save is not None)
@@ -430,7 +437,9 @@ def build_run(args: argparse.Namespace, cfg: MpcRunConfig) -> RunSetup:
         uses_mdm,
         cfg.pose,
         motion_generator=cfg.motion_generator,
+        motion_generator_factory=motion_generator_factory,
         num_denoising_steps=cfg.num_denoising_steps,
+        seed=cfg.seed,
     )
     _apply_arm_override(initial_state, args.arm)
     arm_aa = initial_state.arm_aa

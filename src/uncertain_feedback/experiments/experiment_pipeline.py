@@ -171,10 +171,16 @@ def rollout_to_goal(
     spine3_pos: np.ndarray | None,
     spine3_aa: np.ndarray | None,
     *,
+    steps: int | None = None,
+    stop_at_goal: bool = True,
     progress_label: str | None = None,
     log_prefix: str = "[experiment]",
 ) -> np.ndarray:
-    """Roll a headless Cartesian MPC from ``q0`` toward one goal."""
+    """Roll a headless Cartesian MPC from ``q0`` toward one goal.
+
+    ``steps`` overrides ``cfg.steps`` and ``stop_at_goal=False`` forces the
+    full step budget (the episode loop's fixed-length nominal plan).
+    """
     planner = ArmMPCCartesianNoMDM(
         cartesian_goals=[np.asarray(goal, dtype=np.float64)],
         initial_q=q0,
@@ -192,20 +198,19 @@ def rollout_to_goal(
         seed=cfg.seed,
     )
     q0 = np.asarray(q0, dtype=np.float64).copy()
+    n_steps = max(1, cfg.steps if steps is None else steps)
 
     def _progress(step: int, _q: np.ndarray, _q_history: list[np.ndarray]) -> None:
         if progress_label is not None and (step + 1) % 50 == 0:
-            _log(
-                f"{progress_label}: step {step + 1}/{max(1, cfg.steps)}",
-                prefix=log_prefix,
-            )
+            _log(f"{progress_label}: step {step + 1}/{n_steps}", prefix=log_prefix)
 
     result = run_planning_loop(
         planner,
         q0,
-        max(1, cfg.steps),
+        n_steps,
         on_post_step=_progress if progress_label is not None else None,
         stop_on_runtime_error=True,
+        stop_at_goal=stop_at_goal,
     )
     return np.asarray([q0, *result.q_history], dtype=np.float64)
 
@@ -401,9 +406,19 @@ def generate_uq_correction(
     *,
     mdm_frames: int | None,
     frozen_body: bool,
+    feedback_text: str | None = None,
+    cluster_selector: (
+        Callable[[dict[int, np.ndarray]], int | tuple[int, float]] | None
+    ) = None,
     log_prefix: str = "[experiment]",
 ) -> UqCorrectionResult:
-    """Sample and cluster MDM corrections, then pick one by oracle score."""
+    """Sample and cluster MDM corrections, then pick one by oracle score.
+
+    ``feedback_text`` overrides the persona's static utterance and
+    ``cluster_selector`` overrides the default oracle-score selector (the
+    episode loop passes a :func:`choose_correction` wrapper returning
+    ``(label, magnitude)``).
+    """
     cluster_oracle_scores: dict[int, float] = {}
 
     def select_oracle_cluster(means: dict[int, np.ndarray]) -> int:
@@ -436,13 +451,15 @@ def generate_uq_correction(
     )
     correction_traj = mpc.query_mdm_with_uncertainty(
         gen,
-        user.feedback_text,
+        feedback_text if feedback_text is not None else user.feedback_text,
         start_pose=current_pose,
         current_q=q_feedback,
         default_scale=cfg.uq.scale,
         mdm_frames=mdm_frames,
         frozen_body=frozen_body,
-        cluster_selector=select_oracle_cluster,
+        cluster_selector=(
+            cluster_selector if cluster_selector is not None else select_oracle_cluster
+        ),
     )
     uq_result = mpc.last_uq_result
     if uq_result is None:
@@ -460,7 +477,7 @@ def generate_uq_correction(
             root_dir / "cluster_options.png",
             mdm_trajs=uq_result.cluster_means,
             highlight_label=uq_result.chosen_label,
-            current_q=q_feedback,
+            current_q=q_to_arm_aa(q_feedback, context.fk.elbow_hinge_axis),
             spine3_pos=context.spine3_pos,
             spine3_aa=context.spine3_aa,
             body_pos=body_pos,

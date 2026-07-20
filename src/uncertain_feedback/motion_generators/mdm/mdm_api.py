@@ -259,6 +259,17 @@ class MdmMotionGenerator(
     # Public interface
     # ------------------------------------------------------------------
 
+    def set_seed(self, seed: int, lock_seed: bool = False) -> None:
+        """Re-seed the generator without reloading the model.
+
+        Applies the seed immediately if the model is already loaded;
+        otherwise it takes effect when :meth:`_ensure_loaded` runs.
+        """
+        self._seed = seed
+        self._lock_seed = lock_seed
+        if self._fixseed is not None:
+            self._fixseed(seed)
+
     def load_pose(self, path: str | Path) -> np.ndarray:
         """Load a saved HML263 pose file and return as a ``(263,)`` numpy
         array.

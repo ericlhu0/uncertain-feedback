@@ -7,6 +7,9 @@ files next to this module so they are easy to read and diff:
 
 - ``runtime_api.txt`` and ``output_contract.txt`` are the shared technical contract
   appended to the code-writing stages.
+- ``corpus_task_section.txt`` (TASK.md block) and ``corpus_grounding.txt`` (Stage 2 /
+  combine note) are the optional executed-trajectory-corpus prose the codex backends
+  splice in when a corpus is available (``{corpus_dir}`` placeholder).
 - ``stages/interpret.txt`` — instruction + contrast images + a compact summary ->
   a plain-language preference (no API, no numbers, no code).
 - ``stages/ground.txt`` — that preference + the full numeric summaries -> a concrete
@@ -46,10 +49,10 @@ IMAGE_PLACEHOLDERS: dict[str, str] = {
         "to read the chosen path's posture clearly."
     ),
     "other_clusters_traj_img": (
-        "An image showing the chosen path's full arm alongside the OTHER candidate "
-        "paths' full arms (grey, with grey end markers) is attached — use the grey arms "
-        "only to see which dimension separates the chosen path from the candidates it "
-        "was picked over."
+        "An image showing the chosen path's full arm motion alongside only the terminal "
+        "full-arm pose of each candidate the person explicitly marked as wrong (grey, "
+        "with grey wrist end markers) is attached — use the grey end poses only to see "
+        "which dimension separates the chosen path from those marked-wrong candidates."
     ),
     "reference_traj_img": (
         "An image showing the chosen path's full arm alongside the ORIGINAL-GOAL "
@@ -68,6 +71,22 @@ def _read(path: Path) -> str:
 _RUNTIME_API = _read(_DIR / "runtime_api.txt")
 _OUTPUT_CONTRACT = _read(_DIR / "output_contract.txt")
 
+# Optional executed-trajectory-corpus prose, spliced in by the codex backends only
+# when a corpus is available (``{corpus_dir}`` placeholder).
+_CORPUS_TASK_SECTION = _read(_DIR / "corpus_task_section.txt")
+_CORPUS_GROUNDING = _read(_DIR / "corpus_grounding.txt")
+
+
+def corpus_task_section(corpus_dir: Path) -> str:
+    """TASK.md block describing the executed-trajectory corpus at ``corpus_dir``."""
+    return _CORPUS_TASK_SECTION.replace("{corpus_dir}", str(corpus_dir))
+
+
+def corpus_grounding_note(corpus_dir: Path) -> str:
+    """Stage-2 / combine grounding note referencing the corpus at ``corpus_dir``."""
+    return _CORPUS_GROUNDING.replace("{corpus_dir}", str(corpus_dir))
+
+
 # Stage heads: interpret -> ground -> author for single-shot; interpret -> refine loop
 # for the iterating backend. Each is a focused subtask.
 _STAGES_DIR = _DIR / "stages"
@@ -75,6 +94,7 @@ _INTERPRET_HEAD = _read(_STAGES_DIR / "interpret.txt")
 _GROUND_HEAD = _read(_STAGES_DIR / "ground.txt")
 _AUTHOR_HEAD = _read(_STAGES_DIR / "author.txt")
 _REFINE_HEAD = _read(_STAGES_DIR / "refine.txt")
+_COMBINE_HEAD = _read(_STAGES_DIR / "combine.txt")
 
 
 def _substitute_images(
@@ -150,14 +170,19 @@ def build_interpret_prompt(
     return text, ordered_paths
 
 
-def build_ground_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
+def build_ground_prompt(
+    interpretation: str,
+    summaries: dict[str, Any],
+    corpus_note: str | None = None,
+) -> str:
     """Build the stage-two (ground) prompt: preference + full numbers -> numeric spec.
 
     Text only — no images, no runtime API, no code contract.
     """
-    return _GROUND_HEAD.replace("{interpretation}", interpretation).replace(
+    text = _GROUND_HEAD.replace("{interpretation}", interpretation).replace(
         "{summaries}", _dump(summaries)
     )
+    return text if corpus_note is None else "\n\n".join([text, corpus_note])
 
 
 def build_author_prompt(specification: str) -> str:
@@ -173,6 +198,7 @@ def build_staged_task_body(
     instruction: str,
     summaries: dict[str, Any],
     images: dict[str, Path],
+    corpus_note: str | None = None,
 ) -> tuple[str, list[Path]]:
     """Compose the three stages into one method document for the autonomous agent.
 
@@ -182,6 +208,10 @@ def build_staged_task_body(
     lines; ground referring back to the agent's own stage-1 output; author plus the
     shared runtime API and output contract — so codex follows the same decomposition
     and produces one final author-stage cost JSON. Returns ``(text, image_paths)``.
+
+    ``corpus_note``, when given, is appended inside the Stage 2 (ground) section so
+    the agent grounds candidate bounds against the executed-trajectory corpus; when
+    ``None`` the assembled text is byte-identical to the no-corpus form.
     """
     interpret_text, image_paths = _substitute_images(_INTERPRET_HEAD, images)
     interpret_text = interpret_text.replace("{instruction}", instruction).replace(
@@ -190,6 +220,8 @@ def build_staged_task_body(
     ground_text = _GROUND_HEAD.replace(
         "{interpretation}", "(the preference you wrote in Stage 1)"
     ).replace("{summaries}", _dump(summaries))
+    if corpus_note is not None:
+        ground_text = "\n\n".join([ground_text, corpus_note])
     author_text = _AUTHOR_HEAD.replace(
         "{specification}", "(the numeric specification you wrote in Stage 2)"
     )
@@ -211,7 +243,11 @@ def build_staged_task_body(
     return body, image_paths
 
 
-def build_refine_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
+def build_refine_prompt(
+    interpretation: str,
+    summaries: dict[str, Any],
+    corpus_note: str | None = None,
+) -> str:
     """Build the seed prompt for the iterating ``turns`` backend.
 
     Grounds the fixed interpretation and implements it in one conversation, with the
@@ -222,4 +258,70 @@ def build_refine_prompt(interpretation: str, summaries: dict[str, Any]) -> str:
     head = _REFINE_HEAD.replace("{interpretation}", interpretation).replace(
         "{summaries}", _dump(summaries)
     )
+    if corpus_note is not None:
+        head = "\n\n".join([head, corpus_note])
     return "\n\n".join([head, _RUNTIME_API, _OUTPUT_CONTRACT]).strip()
+
+
+def _round_rationale_lines(round_data: dict[str, Any]) -> list[str]:
+    """Render a round's generation evidence chain; empty when no fields are set."""
+    fields = (
+        ("Interpretation (stage 1)", "interpretation"),
+        ("Grounding (stage 2)", "grounding"),
+        ("Explanation", "explanation"),
+    )
+    lines: list[str] = []
+    for label, key in fields:
+        value = round_data.get(key, "")
+        if value:
+            lines.extend([f"{label}:", value])
+    return ["Why this cost was generated:", *lines] if lines else []
+
+
+def build_combine_task_body(
+    rounds: list[dict[str, Any]],
+    corpus_note: str | None = None,
+) -> tuple[str, list[Path]]:
+    """Build the full-context prompt for unifying several correction rounds.
+
+    ``corpus_note``, when given, is appended after the combine head (before the
+    runtime API / output contract); when ``None`` the text is byte-identical to the
+    no-corpus form.
+    """
+    sections: list[str] = []
+    image_paths: list[Path] = []
+    for round_data in rounds:
+        paths = [Path(path) for path in round_data.get("image_paths", [])]
+        image_paths.extend(paths)
+        sections.append(
+            "\n".join(
+                [
+                    f"### Round {round_data['index']}",
+                    f"Feedback: {round_data['feedback_text']}",
+                    f"Goal: {json.dumps(round_data['goal'])}",
+                    f"Trigger step: {round_data['trigger_step']}",
+                    f"Eval state: {round_data['state_path']}",
+                    "Motion summaries:",
+                    "```json",
+                    _dump(round_data["summaries"]),
+                    "```",
+                    "Round cost code:",
+                    "```python",
+                    round_data["cost_code"],
+                    "```",
+                    "Round cost params:",
+                    "```json",
+                    _dump(round_data["params"]),
+                    "```",
+                    *_round_rationale_lines(round_data),
+                    "Images to open:",
+                    *(f"- `{path}`" for path in paths),
+                ]
+            )
+        )
+    head = _COMBINE_HEAD.replace("{round_count}", str(len(rounds))).replace(
+        "{rounds}", "\n\n".join(sections)
+    )
+    parts = [head] if corpus_note is None else [head, corpus_note]
+    parts += [_RUNTIME_API, _OUTPUT_CONTRACT]
+    return "\n\n".join(parts).strip(), image_paths

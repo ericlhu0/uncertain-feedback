@@ -58,14 +58,14 @@ def _experiment_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Parse CLI arguments and run one persona/backend experiment."""
     args = _experiment_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
 
     if cfg.planner != "arm_mpc_cartesian":
         raise ValueError(
-            "Experiments require planner: arm_mpc_cartesian; "
-            f"got {cfg.planner!r}."
+            "Experiments require planner: arm_mpc_cartesian; " f"got {cfg.planner!r}."
         )
     if not cfg.llm_cost.enabled:
         raise ValueError("Experiments require llm_cost.enabled: true.")
@@ -83,7 +83,9 @@ def main() -> None:
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Experiment config must provide an MDM pose.")
     mpc = cast(LeftArmMPCMDMUQ, setup.mpc)
-    mdm_frames = args.mdm_frames if args.mdm_frames is not None else persona_cfg.mdm_frames
+    mdm_frames = (
+        args.mdm_frames if args.mdm_frames is not None else persona_cfg.mdm_frames
+    )
 
     run_experiment(
         mpc,

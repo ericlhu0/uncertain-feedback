@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Demo Runner</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="demo">
+<header>
+  <h1>Demo Runner</h1>
+  <div id="session-bar">
+    <button id="session-summary" type="button" aria-haspopup="true"
+            aria-expanded="false" aria-controls="session-dropdown">No active session</button>
+    <div id="session-dropdown">
+      <div class="session-new-row">
+        <select id="session-new-persona" aria-label="Simulated user for new session"></select>
+        <button id="session-new-start" class="primary">Start new session</button>
+      </div>
+      <div id="session-picker"></div>
+    </div>
+  </div>
+  <label for="persona-select" data-mode="dev">Simulated user</label>
+  <select id="persona-select" data-mode="dev"></select>
+  <button id="persona-edit" data-mode="dev">Edit</button>
+  <button id="persona-new" data-mode="dev">New</button>
+  <button id="persona-delete" class="danger" data-mode="dev">Delete</button>
+  <div id="replay-bar">
+    <button id="replay-prev" disabled>&#9664;</button>
+    <span id="replay-label">no replay</span>
+    <button id="replay-next" disabled>&#9654;</button>
+    <button id="replay-fork" class="primary">Fork &amp; continue live</button>
+    <button id="replay-exit" class="danger">Exit replay</button>
+  </div>
+  <button id="mode-toggle">Dev mode</button>
+  <div id="status">ready</div>
+</header>
+
+<div id="layout">
+  <div id="controls">
+    <div class="panel demo-scenario">
+      <details id="scenario-details" open>
+        <summary>Scenario</summary>
+        <div class="row config-select-row">
+          <label for="initial-pose-config">Start pose</label>
+          <select id="initial-pose-config"></select>
+        </div>
+        <div class="row config-save-row" data-mode="dev">
+          <input type="text" id="initial-pose-config-name" placeholder="Name this pose">
+          <button id="save-initial-pose-config">Save pose</button>
+        </div>
+        <div class="joint-grid" id="arm-editor" data-mode="dev"></div>
+        <div class="row config-select-row" style="margin-top:8px">
+          <label for="goal-config">Goal</label>
+          <select id="goal-config"></select>
+        </div>
+        <div class="row" style="margin-top:8px" data-mode="dev">
+          <label>Goal (m)</label>
+          <input type="number" id="goal-x" step="0.02">
+          <input type="number" id="goal-y" step="0.02">
+          <input type="number" id="goal-z" step="0.02">
+        </div>
+        <div class="row config-save-row" data-mode="dev">
+          <input type="text" id="goal-config-name" placeholder="Name this goal">
+          <button id="save-goal-config">Save goal</button>
+        </div>
+        <div class="hint" data-mode="dev">Goal is the spine3-relative wrist target. Start wrist: <span id="wrist-rel">?</span></div>
+        <div class="row" data-mode="dev">
+          <button id="reset-pose">Reset pose</button>
+        </div>
+        <div class="hint" data-mode="dev">The trajectory pauses at each feedback trigger. You keep manual control of MDM sampling, clustering, magnitude, cluster selection, and cost generation before continuing the same trajectory.</div>
+        <div class="metrics" id="base-metrics" data-mode="dev"></div>
+        <div class="metrics" id="oracle-metrics" data-mode="dev"></div>
+      </details>
+      <div class="row scenario-actions">
+        <button id="run-base" class="primary">Start trajectory</button>
+        <button id="exit-trajectory" class="danger" disabled>Exit trajectory</button>
+      </div>
+      <div id="trajectory-session"></div>
+    </div>
+
+    <nav id="workflow-stage-nav" aria-label="Demo stages">
+      <button type="button" data-stage="1" class="viewed" aria-current="step"><span>1</span>Trajectory</button>
+      <button type="button" data-stage="2" disabled><span>2</span>Correction</button>
+      <button type="button" data-stage="3" disabled><span>3</span>Cost</button>
+      <button type="button" data-stage="4" disabled><span>4</span>Apply</button>
+    </nav>
+
+    <div class="panel workflow-stage-visible" data-workflow-stage="1">
+      <h2>1 &middot; Trajectory decision</h2>
+      <div class="hint">Advance to a feedback point, then choose whether to correct the motion or continue without feedback.</div>
+      <div class="row">
+        <button id="enter-correction" class="primary" disabled>Enter a correction</button>
+        <button id="ignore-violation" disabled>Ignore + continue</button>
+      </div>
+    </div>
+
+    <div class="panel" data-workflow-stage="2">
+      <h2>2 &middot; Language correction (MDM)</h2>
+      <textarea id="prompt" rows="2"></textarea>
+      <div class="row" data-mode="dev">
+        <label>Samples</label><input type="number" id="n-samples" min="1" step="1">
+        <label>Clusters</label><input type="number" id="n-clusters" min="1" max="10" step="1">
+      </div>
+      <div class="row" data-mode="dev">
+        <label for="clusterer-select">Clusterer</label>
+        <select id="clusterer-select">
+          <option value="kmeans_end_pose">kmeans_end_pose</option>
+          <option value="agglo_end_pose" selected>agglo_end_pose</option>
+          <option value="agglo_path_pca">agglo_path_pca</option>
+          <option value="agglo_t2m">agglo_t2m</option>
+        </select>
+      </div>
+      <div class="hint" id="mdm-start-hint"></div>
+      <div class="row">
+        <button id="generate" class="primary" disabled>Generate</button>
+        <button id="recluster" disabled data-mode="dev">Re-cluster</button>
+      </div>
+      <div class="row">
+        <button id="cluster-back" disabled>Back</button>
+        <button id="cluster-refine" disabled>Refine selected</button>
+        <span class="hint" id="cluster-navigation"></span>
+      </div>
+      <div class="row">
+        <label>Magnitude</label>
+        <input type="range" id="scale" min="0" max="2" step="0.05">
+        <input type="number" id="scale-num" min="0" max="2" step="0.05">
+      </div>
+      <div class="hint" data-mode="dev">Each option is shown as the full integrated path: executed history &rarr; scaled correction &rarr; goal continuation.</div>
+      <div id="cluster-list"></div>
+      <div class="metrics" id="correction-metrics"></div>
+      <div class="row stage-next-row">
+        <button id="correction-next" class="primary" disabled>Next</button>
+      </div>
+    </div>
+
+    <div class="panel" data-workflow-stage="3">
+      <h2>3 &middot; Cost generation</h2>
+      <div class="row" data-mode="dev">
+        <label for="cost-backend">Backend</label>
+        <select id="cost-backend">
+          <option value="llm">llm (single-pass)</option>
+          <option value="turns">turns (iterative)</option>
+          <option value="agent">agent (Codex)</option>
+        </select>
+      </div>
+      <div class="row"><button id="generate-cost" class="primary" disabled>Generate cost + rollout</button></div>
+      <div id="cost-thought-log-wrap" hidden>
+        <pre id="cost-thought-log" aria-live="polite"></pre>
+      </div>
+      <div id="cost-output"></div>
+      <div class="row stage-next-row">
+        <button id="cost-next" class="primary" disabled>Next</button>
+      </div>
+    </div>
+
+    <div class="panel" data-workflow-stage="4">
+      <h2>4 &middot; Session costs &amp; feedback</h2>
+      <div class="row">
+        <button id="apply-round" class="primary" disabled>Apply feedback + continue trajectory</button>
+      </div>
+      <div class="row" data-mode="dev">
+        <button id="commit-round" disabled>Commit only</button>
+        <button id="reset-rounds" class="danger" disabled>Reset</button>
+      </div>
+      <div class="hint" data-mode="dev">In multi-turn mode, Apply feedback + continue installs the chosen correction and cost, then advances the same trajectory to its next trigger. Remove unwanted feedback from its round card before combining; removal changes future planning and combination, but does not rewind already executed frames.</div>
+      <div id="round-list"></div>
+      <div id="unified-output"></div>
+      <div data-mode="dev" class="stage-subsection">
+        <h3>Trajectory corpus</h3>
+        <div class="hint">Executed session history used by codex cost generation. Comfortable frames precede the first discomfort report.</div>
+        <div id="corpus-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="center">
+    <div class="panel" id="skeleton-panel">
+      <canvas id="skeleton-canvas"></canvas>
+      <div id="view-labels"><span>Front (XY)</span><span>Side (ZY)</span><span>Top (XZ)</span></div>
+      <div id="legend"></div>
+    </div>
+    <div class="panel">
+      <div id="timeline">
+        <button id="play">&#9654;</button>
+        <div id="timeline-col">
+          <input type="range" id="frame-slider" min="0" max="0" value="0" step="1">
+          <canvas id="violation-strips"></canvas>
+        </div>
+        <span id="frame-label">frame 0 / 0</span>
+      </div>
+    </div>
+    <div class="panel" id="console-panel" data-mode="dev">
+      <pre id="console"></pre>
+    </div>
+  </div>
+
+  <div id="graphs"></div>
+</div>
+
+<div id="modal-backdrop" class="modal-backdrop" data-mode="dev">
+  <div id="persona-modal" class="modal-card">
+    <h2 id="modal-title">Persona</h2>
+    <div class="row"><label>Name</label><input type="text" id="p-name"></div>
+    <div class="row"><label>Feedback</label><input type="text" id="p-feedback"></div>
+    <div class="row"><label>Description</label><textarea id="p-description" rows="3"></textarea></div>
+    <h3 style="font-size:12px">Discomfort bounds (radians)</h3>
+    <div id="bound-rows"></div>
+    <button id="add-bound">+ add bound</button>
+    <div class="modal-actions">
+      <button id="modal-cancel">Cancel</button>
+      <button id="modal-save" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.165.0/build/three.module.js"}}
+</script>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

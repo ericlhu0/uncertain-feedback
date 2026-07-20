@@ -11,8 +11,9 @@ imports from ``...costs.llm_costs`` keep working.
 
 from __future__ import annotations
 
+import ast
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import FunctionType
 from typing import Any
@@ -21,6 +22,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.planners.mpc.costs.base import (
+    CompositeTrajectoryCost,
     MpcCostContext,
     TrajectoryCost,
 )
@@ -38,6 +40,16 @@ _JOINT_NAMES = {
     "shoulder": 2,
     "elbow": 3,
     "wrist": 4,
+}
+
+_NAMED_FEATURE_METHODS = {
+    "elbow_flexion_angles": "elbow_flexion",
+    "shoulder_flexion_extension_angles": "shoulder_flexion_extension",
+    "shoulder_abduction_adduction_angles": "shoulder_abduction_adduction",
+    "shoulder_elevation_angles": "shoulder_elevation",
+    "shoulder_internal_external_rotation_angles": (
+        "shoulder_internal_external_rotation"
+    ),
 }
 
 
@@ -58,7 +70,10 @@ class LlmCostResponse:
 
 @dataclass(frozen=True)
 class GeneratedCostContext:
-    """Read-only runtime context exposed to generated cost code."""
+    """Read-only runtime context exposed to generated cost code.
+
+    ``rejected_trajs`` contains only candidates the person explicitly marked wrong.
+    """
 
     fk: SmplLeftArmFK
     spine3_pos: np.ndarray
@@ -195,9 +210,7 @@ class GeneratedCostContext:
         under this repo's FK convention."""
         collar = Rotation.from_rotvec(self.fk.collar_aa[None])
         return (
-            collar
-            * Rotation.from_rotvec(flat[:, 0])
-            * Rotation.from_rotvec(flat[:, 1])
+            collar * Rotation.from_rotvec(flat[:, 0]) * Rotation.from_rotvec(flat[:, 1])
         )
 
     def _upper_arm_direction_spine_frame(self, trajectory: np.ndarray) -> np.ndarray:
@@ -210,9 +223,7 @@ class GeneratedCostContext:
         trajectory = np.asarray(trajectory, dtype=np.float64)
         leading = trajectory.shape[:-2]
         flat = trajectory.reshape(-1, 3, 3)
-        directions = self._upper_arm_rotations(flat).apply(
-            self._tpose_upper_arm_axis()
-        )
+        directions = self._upper_arm_rotations(flat).apply(self._tpose_upper_arm_axis())
         return directions.reshape((*leading, 3))
 
     def _tpose_upper_arm_axis(self) -> np.ndarray:
@@ -269,6 +280,7 @@ class GeneratedPythonCost(TrajectoryCost):
     params: dict[str, Any]
     context: GeneratedCostContext
     description: str = ""
+    _func: FunctionType = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         func = compile_generated_cost(self.code)
@@ -276,7 +288,7 @@ class GeneratedPythonCost(TrajectoryCost):
 
     def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
         q_trajs = np.asarray(q_trajs, dtype=np.float64)
-        raw = self._func(q_trajs, self.context, self.params)  # type: ignore[attr-defined]
+        raw = self._func(q_trajs, self.context, self.params)
         costs = np.asarray(raw, dtype=np.float64)
         expected_shape = (q_trajs.shape[0],)
         if costs.shape != expected_shape:
@@ -291,9 +303,39 @@ class GeneratedPythonCost(TrajectoryCost):
         return costs
 
 
-def parse_llm_cost_response(raw: str) -> LlmCostResponse:
-    """Parse the LLM JSON response, accepting optional Markdown fences."""
-    text = raw.strip()
+def generated_cost_feature_dependencies(code: str) -> tuple[str, ...]:
+    """Return named joint features read directly from the runtime context."""
+    tree = ast.parse(code)
+    methods = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "context"
+    }
+    return tuple(
+        feature
+        for method, feature in _NAMED_FEATURE_METHODS.items()
+        if method in methods
+    )
+
+
+def replace_generated_costs(
+    composite: CompositeTrajectoryCost,
+    cost: GeneratedPythonCost | None,
+) -> CompositeTrajectoryCost:
+    """Replace every generated term while preserving hand-authored costs."""
+    terms = [
+        term for term in composite.terms() if not isinstance(term, GeneratedPythonCost)
+    ]
+    if cost is not None:
+        terms.append(cost)
+    return CompositeTrajectoryCost(terms)
+
+
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    """Leniently parse a JSON object, accepting fences and surrounding prose."""
+    text = text.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if lines and lines[0].startswith("```"):
@@ -303,14 +345,23 @@ def parse_llm_cost_response(raw: str) -> LlmCostResponse:
         text = "\n".join(lines).strip()
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
-            raise GeneratedCostValidationError("LLM response is not JSON") from exc
-        data = json.loads(text[start : end + 1])
-    if not isinstance(data, dict):
-        raise GeneratedCostValidationError("LLM response must be a JSON object")
+            return None
+        try:
+            data = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
+def parse_llm_cost_response(raw: str) -> LlmCostResponse:
+    """Parse the LLM JSON response, accepting optional Markdown fences."""
+    data = extract_json_object(raw)
+    if data is None:
+        raise GeneratedCostValidationError("LLM response is not JSON")
     description = data.get("description", "")
     code = data.get("code")
     params = data.get("params", {})
@@ -339,7 +390,9 @@ def compile_generated_cost(code: str) -> FunctionType:
     """Compile and exec generated Python cost source."""
     namespace: dict[str, Any] = {"np": np}
     locals_dict: dict[str, Any] = {}
-    exec(compile(code, "<llm_generated_cost>", "exec"), namespace, locals_dict)  # pylint: disable=exec-used
+    exec(  # pylint: disable=exec-used
+        compile(code, "<llm_generated_cost>", "exec"), namespace, locals_dict
+    )
     func = locals_dict.get("cost")
     if not isinstance(func, FunctionType):
         raise GeneratedCostValidationError("generated code must define cost")
@@ -370,7 +423,9 @@ def build_generated_cost_context(
         current_q=np.asarray(current_q, dtype=np.float64),
         mdm_traj=np.asarray(mdm_traj, dtype=np.float64),
         recent_q=recent_q,
-        body_pos=np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None,
+        body_pos=(
+            np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None
+        ),
         reference_traj=(
             np.asarray(reference_traj, dtype=np.float64)
             if reference_traj is not None
@@ -403,7 +458,9 @@ def build_motion_summaries(
     original-goal rollout (the path the arm was taking before the correction,
     including its endpoint joint posture) is included. When ``cartesian_goal``
     (the spine3-relative wrist target) is given it is added under
-    ``"cartesian_goal"``. Both are omitted otherwise, leaving summaries unchanged.
+    ``"cartesian_goal"``. When explicitly marked-wrong candidate trajectories are
+    available, a rollout-labeled terminal joint-feature comparison is included under
+    ``"candidate_comparison"``.
     """
     mdm_positions = context.mdm_positions
     current_positions = context.current_positions
@@ -421,6 +478,8 @@ def build_motion_summaries(
         context,
         context.mdm_traj,
     )
+    if context.rejected_trajs:
+        summaries["candidate_comparison"] = _candidate_comparison_summary(context)
     if context.recent_q.size > 0:
         summaries["recent"] = _trajectory_summary(
             context.recent_q,
@@ -464,8 +523,9 @@ def render_prompt_images(
     and keyed by the prompt placeholder that requests it:
 
     - ``current_cluster_traj_img``: only the chosen cluster's arm (always rendered).
-    - ``other_clusters_traj_img``: the chosen cluster alongside every other candidate
-      cluster's arm (rendered only when ``candidate_trajs`` has more than one cluster).
+    - ``other_clusters_traj_img``: the chosen cluster's motion alongside every
+      marked-wrong candidate's terminal arm pose (rendered only when
+      ``candidate_trajs`` has more than one cluster).
     - ``reference_traj_img``: the chosen cluster alongside the original-goal reference
       arm (rendered only when ``reference_traj`` is given).
 
@@ -479,7 +539,9 @@ def render_prompt_images(
     label = highlight_label if highlight_label is not None else next(iter(trajs))
     visualizer = ArmVisualizer(context.fk)
 
-    def _render(filename: str, *, include_others: bool, include_reference: bool) -> Path:
+    def _render(
+        filename: str, *, include_others: bool, include_reference: bool
+    ) -> Path:
         path = output_dir / filename
         visualizer.render_cluster_contrast_overlay(
             path,
@@ -554,7 +616,9 @@ def build_rollout_joint_comparison(
         else context.mdm_traj
     )
     return {
-        "rollout": _joint_feature_summary(context, np.asarray(rollout, dtype=np.float64)),
+        "rollout": _joint_feature_summary(
+            context, np.asarray(rollout, dtype=np.float64)
+        ),
         "target": _joint_feature_summary(context, target_traj),
     }
 
@@ -631,6 +695,58 @@ def _joint_feature_summary(
     }
 
 
+def _candidate_comparison_summary(
+    context: GeneratedCostContext,
+) -> dict[str, Any]:
+    chosen = _joint_feature_summary(context, context.mdm_traj)
+    current = _joint_feature_frame_summary(context, context.current_q)
+    original = (
+        _joint_feature_summary(context, context.reference_traj)
+        if context.reference_traj is not None and context.reference_traj.size > 0
+        else None
+    )
+    rejected = [
+        _joint_feature_summary(context, trajectory)
+        for trajectory in context.rejected_trajs
+    ]
+    comparison: dict[str, Any] = {}
+    for feature, chosen_stats in chosen.items():
+        rejected_ends = {
+            f"rejected_cluster_{index}": float(stats[feature]["end"])
+            for index, stats in enumerate(rejected)
+        }
+        values = np.asarray(list(rejected_ends.values()), dtype=np.float64)
+        rejected_median = float(np.median(values))
+        rejected_std = float(np.std(values))
+        chosen_end = float(chosen_stats["end"])
+        feature_comparison: dict[str, Any] = {
+            "chosen_rollout": "mdm_traj",
+            "chosen_end": chosen_end,
+            "current_rollout": "current",
+            "current_value": float(current[feature]),
+            "chosen_minus_current": chosen_end - float(current[feature]),
+            "rejected_ends": rejected_ends,
+            "rejected_median": rejected_median,
+            "rejected_std": rejected_std,
+            "standardized_separation": (
+                None
+                if rejected_std <= 1e-12
+                else float((chosen_end - rejected_median) / rejected_std)
+            ),
+        }
+        if original is not None:
+            original_end = float(original[feature]["end"])
+            feature_comparison.update(
+                {
+                    "original_plan_rollout": "reference",
+                    "original_plan_end": original_end,
+                    "chosen_minus_original_plan": chosen_end - original_end,
+                }
+            )
+        comparison[feature] = feature_comparison
+    return comparison
+
+
 def _joint_feature_frame_summary(
     context: GeneratedCostContext,
     q: np.ndarray,
@@ -704,4 +820,3 @@ def _array_stats(values: np.ndarray) -> dict[str, Any]:
         "start": values[0].tolist(),
         "end": values[-1].tolist(),
     }
-

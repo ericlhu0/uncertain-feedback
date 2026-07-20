@@ -6,10 +6,10 @@ Usage::
         --hml_stats_dir /path/to/HumanML3D \\
         [--host 127.0.0.1] [--port 6769]
 """
+
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 from pathlib import Path
 
@@ -18,10 +18,7 @@ import spacy
 from flask import Flask, jsonify, request, send_from_directory
 from scipy.interpolate import CubicSpline
 
-from uncertain_feedback.data_collection.build_mdm_dataset import (
-    _pos_tag,
-    _write_text_file,
-)
+from uncertain_feedback.data_collection.build_mdm_dataset import _write_text_file
 from uncertain_feedback.data_collection.smpl_to_hml263 import (
     load_hml_stats,
     positions_to_hml263,
@@ -32,7 +29,10 @@ from uncertain_feedback.data_collection.trajectory_editor.hml_decode import (
     demo_pt_to_positions,
     get_tpose_bone_lengths,
 )
-from uncertain_feedback.planners.mpc.kinematics import SMPL_BONE_PAIRS_22, SMPL_PARENTS_22
+from uncertain_feedback.planners.mpc.kinematics import (
+    SMPL_BONE_PAIRS_22,
+    SMPL_PARENTS_22,
+)
 
 _MDM_MIN_FRAMES = 40
 _MDM_MAX_FRAMES = 196
@@ -47,21 +47,25 @@ _defaults: dict = {}
 
 @app.route("/api/config")
 def config():
+    """Return the CLI-supplied default paths for the editor UI."""
     return jsonify(_defaults)
 
 
 @app.route("/")
 def index():
+    """Serve the editor's single-page app."""
     return send_from_directory(_STATIC_DIR, "index.html")
 
 
 @app.route("/static/<path:filename>")
 def static_files(filename: str):
+    """Serve a static asset for the editor UI."""
     return send_from_directory(_STATIC_DIR, filename)
 
 
 @app.route("/api/base-pose")
 def base_pose():
+    """Decode the demo ``.pt`` start pose to 22-joint positions."""
     pt_path = request.args.get("pt_path", "").strip()
     hml_stats_dir = request.args.get("hml_stats_dir", "").strip()
 
@@ -81,21 +85,24 @@ def base_pose():
     try:
         positions = demo_pt_to_positions(pt_path, hml_stats_dir)
         bone_lengths = get_tpose_bone_lengths()
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         return jsonify({"error": str(exc)}), 500
 
-    return jsonify({
-        "joints": positions.tolist(),
-        "editable": EDITABLE_JOINTS,
-        "fixed": FIXED_JOINTS,
-        "bone_pairs": [[int(p), int(c)] for p, c in SMPL_BONE_PAIRS_22],
-        "parents": SMPL_PARENTS_22,
-        "bone_lengths": bone_lengths,
-    })
+    return jsonify(
+        {
+            "joints": positions.tolist(),
+            "editable": EDITABLE_JOINTS,
+            "fixed": FIXED_JOINTS,
+            "bone_pairs": [[int(p), int(c)] for p, c in SMPL_BONE_PAIRS_22],
+            "parents": SMPL_PARENTS_22,
+            "bone_lengths": bone_lengths,
+        }
+    )
 
 
 @app.route("/api/load-trajectory")
 def load_trajectory():
+    """Decode an HML263 ``.npy`` trajectory to per-frame joint positions."""
     npy_path = request.args.get("npy_path", "").strip()
     if not npy_path:
         return jsonify({"error": "npy_path is required"}), 400
@@ -106,28 +113,39 @@ def load_trajectory():
 
     try:
         hml263 = np.load(str(npy_path)).astype(np.float64)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         return jsonify({"error": f"Failed to load .npy: {exc}"}), 500
 
     if hml263.ndim != 2 or hml263.shape[1] != 263:
-        return jsonify({"error": f"Expected shape (N, 263), got {list(hml263.shape)}"}), 400
+        return (
+            jsonify({"error": f"Expected shape (N, 263), got {list(hml263.shape)}"}),
+            400,
+        )
 
-    N = hml263.shape[0]
-    positions = np.zeros((N, 22, 3), dtype=np.float64)
-    for t in range(N):
+    n_frames = hml263.shape[0]
+    positions = np.zeros((n_frames, 22, 3), dtype=np.float64)
+    for t in range(n_frames):
         raw = hml263[t]
         positions[t, 0] = [0.0, float(raw[3]), 0.0]
         positions[t, 1:] = raw[4:67].reshape(21, 3)
 
-    return jsonify({"positions": positions.tolist(), "num_frames": N})
+    return jsonify({"positions": positions.tolist(), "num_frames": n_frames})
 
 
 @app.route("/api/export", methods=["POST"])
 def export_trajectory():
+    """Interpolate the posted keyframes and write an MDM dataset."""
     data = request.get_json(force=True)
 
     # ── Validate required fields ──────────────────────────────────────────────
-    required = ["keyframes", "caption", "output_dir", "hml_stats_dir", "total_frames", "pt_path"]
+    required = [
+        "keyframes",
+        "caption",
+        "output_dir",
+        "hml_stats_dir",
+        "total_frames",
+        "pt_path",
+    ]
     for field in required:
         if field not in data:
             return jsonify({"error": f"Missing field: {field}"}), 400
@@ -144,7 +162,12 @@ def export_trajectory():
     if not caption:
         return jsonify({"error": "Caption must not be empty"}), 400
     if total_frames < _MDM_MIN_FRAMES or total_frames > _MDM_MAX_FRAMES:
-        return jsonify({"error": f"total_frames must be {_MDM_MIN_FRAMES}–{_MDM_MAX_FRAMES}"}), 400
+        return (
+            jsonify(
+                {"error": f"total_frames must be {_MDM_MIN_FRAMES}–{_MDM_MAX_FRAMES}"}
+            ),
+            400,
+        )
     if len(keyframes) < 1:
         return jsonify({"error": "Need at least 1 keyframe"}), 400
     if n_augment < 0:
@@ -155,13 +178,15 @@ def export_trajectory():
     # Sort keyframes by frame number
     keyframes = sorted(keyframes, key=lambda k: k["frame"])
     kf_frames = np.array([k["frame"] for k in keyframes], dtype=float)
-    kf_positions = np.array([k["positions"] for k in keyframes], dtype=np.float64)  # (K, 22, 3)
+    kf_positions = np.array(
+        [k["positions"] for k in keyframes], dtype=np.float64
+    )  # (K, 22, 3)
 
     # ── Load stats and base pose ──────────────────────────────────────────────
     try:
         mean, std = load_hml_stats(hml_stats_dir)
         base_positions = demo_pt_to_positions(pt_path, hml_stats_dir)  # (22, 3)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         return jsonify({"error": f"Failed to load stats/base pose: {exc}"}), 500
 
     # ── Interpolate keyframes → full trajectory ────────────────────────────────
@@ -189,7 +214,7 @@ def export_trajectory():
             std=std,
             normalize=False,
         )  # (N, 263) unnormalized float32
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         return jsonify({"error": f"HML263 conversion failed: {exc}"}), 500
 
     # ── Write MDM dataset layout ──────────────────────────────────────────────
@@ -239,24 +264,39 @@ def export_trajectory():
         if not dst.exists() and src.exists():
             shutil.copy2(src, dst)
 
-    return jsonify({
-        "ok": True,
-        "motion_id": base_motion_id,
-        "motion_ids": all_ids,
-        "shape": list(hml263.shape),
-        "output_dir": str(output_dir),
-        "n_augment": n_augment,
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "motion_id": base_motion_id,
+            "motion_ids": all_ids,
+            "shape": list(hml263.shape),
+            "output_dir": str(output_dir),
+            "n_augment": n_augment,
+        }
+    )
 
 
-def main():
+def main() -> None:
+    """Parse CLI arguments and serve the trajectory-editor app."""
     parser = argparse.ArgumentParser(description="Trajectory editor web server")
-    parser.add_argument("--hml_stats_dir", type=Path, required=True,
-                        help="Directory containing Mean.npy and Std.npy")
-    parser.add_argument("--pt_path", type=Path, default=None,
-                        help="Default demo.pt path to pre-fill in the editor")
-    parser.add_argument("--output_dir", type=Path, default=None,
-                        help="Default export output directory to pre-fill in the editor")
+    parser.add_argument(
+        "--hml_stats_dir",
+        type=Path,
+        required=True,
+        help="Directory containing Mean.npy and Std.npy",
+    )
+    parser.add_argument(
+        "--pt_path",
+        type=Path,
+        default=None,
+        help="Default demo.pt path to pre-fill in the editor",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=None,
+        help="Default export output directory to pre-fill in the editor",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6769)
     args = parser.parse_args()

@@ -1,7 +1,11 @@
+"""Tests for MPC cost terms, planner behavior, and YAML config loading."""
+
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
-from argparse import Namespace
 import json
+from argparse import Namespace
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,6 +19,9 @@ from uncertain_feedback.experiments.transfer_experiment import _choose_oracle_cl
 from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesian
+from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
+    ArmMPCCartesianNoMDM,
+)
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import (
     LeftArmMPCMDMUQ,
@@ -25,28 +32,24 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     ElbowFlexionAngleCost,
     ElbowHeightCost,
+    GeneratedCostValidationError,
+    GeneratedPythonCost,
     MpcCostContext,
     ShoulderAbductionAngleCost,
     build_extra_costs,
+    build_generated_cost_context,
+    build_motion_summaries,
     compute_elbow_flexion_angles,
     compute_elbow_heights,
     compute_shoulder_abduction_angles,
+    parse_llm_cost_response,
+    render_prompt_images,
     update_elbow_cost,
     update_preference_cost,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
-from uncertain_feedback.planners.mpc.costs import (
-    GeneratedCostValidationError,
-    GeneratedPythonCost,
-    build_generated_cost_context,
-    build_motion_summaries,
-    parse_llm_cost_response,
-    render_prompt_images,
-)
-from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
-    ArmMPCCartesianNoMDM,
-)
 from uncertain_feedback.simulated_users import JointBoxLimit, SimulatedUser
+from uncertain_feedback.uncertainty.cluster_picker import ClusterPickResult
 from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
 
@@ -171,13 +174,14 @@ class _FakeSequenceLlmModel:
         self.calls = 0
 
     def get_full_output(self, text_input: str, image_input=None) -> str:
+        del image_input
         if "Runtime API" not in text_input:
             return "The arm moves upward."
         self.calls += 1
         return json.dumps(
             {
                 "description": f"fake generated cost {self.calls}",
-                "params": {"weight": 1.0},
+                "params": {"weight": 1.0 if self.calls == 1 else -1.0},
                 "code": (
                     "def cost(q_trajs, context, params):\n"
                     "    future = q_trajs[:, 1:, 0, 0]\n"
@@ -274,13 +278,13 @@ def test_non_mdm_initial_pose_uses_pose_when_provided(tmp_path) -> None:
         args, uses_mdm=False, motion_generator_factory=factory
     )
 
-    assert gen is fake_gen
+    assert cast(object, gen) is fake_gen
     np.testing.assert_allclose(state.arm_aa, np.ones((3, 3)))
     np.testing.assert_allclose(state.fixed_collar_aa, [0.4, 0.5, 0.6])
-    np.testing.assert_allclose(state.body_pos, fake_gen.body_pos)
-    np.testing.assert_allclose(state.spine3_pos, fake_gen.body_pos[9])
-    np.testing.assert_allclose(state.spine3_aa, [0.1, 0.2, 0.3])
-    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)
+    np.testing.assert_allclose(state.body_pos, fake_gen.body_pos)  # type: ignore[arg-type]
+    np.testing.assert_allclose(state.spine3_pos, fake_gen.body_pos[9])  # type: ignore[arg-type]
+    np.testing.assert_allclose(state.spine3_aa, [0.1, 0.2, 0.3])  # type: ignore[arg-type]
+    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)  # type: ignore[arg-type]
 
 
 def test_initial_pose_uses_config_pose_when_cli_pose_is_omitted(tmp_path) -> None:
@@ -292,11 +296,11 @@ def test_initial_pose_uses_config_pose_when_cli_pose_is_omitted(tmp_path) -> Non
         args,
         uses_mdm=False,
         config_pose=pose_path,
-        motion_generator_factory=lambda _model_path: fake_gen,
+        motion_generator_factory=lambda _model_path: fake_gen,  # type: ignore[arg-type, return-value]
     )
 
-    assert gen is fake_gen
-    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)
+    assert cast(object, gen) is fake_gen
+    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)  # type: ignore[arg-type]
 
 
 def test_initial_pose_cli_pose_overrides_config_pose(tmp_path) -> None:
@@ -309,11 +313,11 @@ def test_initial_pose_cli_pose_overrides_config_pose(tmp_path) -> None:
         args,
         uses_mdm=False,
         config_pose=config_pose_path,
-        motion_generator_factory=lambda _model_path: fake_gen,
+        motion_generator_factory=lambda _model_path: fake_gen,  # type: ignore[arg-type, return-value]
     )
 
-    assert gen is fake_gen
-    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)
+    assert cast(object, gen) is fake_gen
+    np.testing.assert_allclose(state.hml_pose, fake_gen.loaded_pose)  # type: ignore[arg-type]
 
 
 def test_arm_override_legacy_shape_fixes_collar(tmp_path) -> None:
@@ -355,6 +359,19 @@ costs:
     assert cfg.steps == 2
     assert cfg.costs == {"elbow_height": {"min": 0.1, "max": 0.45, "weight": 100}}
     assert cfg.preference_learning is True
+    assert cfg.seed == 0
+
+
+def test_seeded_mpc_sampling_is_reproducible() -> None:
+    target_q = np.zeros((3, 3), dtype=np.float64)
+    current_q = np.zeros((3, 3), dtype=np.float64)
+    first = SmplLeftArmMPC(goals=[target_q], horizon=2, n_mpc_samples=8, seed=17)
+    second = SmplLeftArmMPC(goals=[target_q], horizon=2, n_mpc_samples=8, seed=17)
+
+    _, first_plan = first.solve(current_q)
+    _, second_plan = second.solve(current_q)
+
+    np.testing.assert_array_equal(first_plan, second_plan)
 
 
 def test_load_mpc_config_with_elbow_flexion_and_shoulder_abduction(tmp_path) -> None:
@@ -494,6 +511,51 @@ cartesian:
     assert cfg.planner == "arm_mpc_cartesian_no_mdm"
     assert cfg.pose == Path("src/uncertain_feedback/motion_generators/mdm/demo_pose.pt")
     assert cfg.cartesian.goals == [[0.1, 0.2, 0.3]]
+
+
+def test_correction_threshold_defaults_to_legacy_transfer_value(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+transfer:
+  trigger_threshold: 0.07
+"""),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.corrections.trigger_threshold == 0.07
+    assert cfg.transfer.trigger_threshold == 0.07
+
+
+def test_correction_threshold_overrides_legacy_transfer_value(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+corrections:
+  trigger_threshold: 0.03
+transfer:
+  trigger_threshold: 0.07
+"""),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.corrections.trigger_threshold == 0.03
+    assert cfg.transfer.trigger_threshold == 0.03
+
+
+def test_correction_threshold_rejects_negative_value(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+corrections:
+  trigger_threshold: -0.01
+"""),
+    )
+
+    with pytest.raises(ValueError, match="must be nonnegative"):
+        load_mpc_config(path)
 
 
 def test_elbow_height_cost_zero_inside_range() -> None:
@@ -718,7 +780,7 @@ def test_update_preference_cost_low_mpc_updates_only_min_to_mdm_5th() -> None:
     mdm_values = np.linspace(50.0, 150.0, 21)
     mpc_values = np.linspace(0.0, 20.0, 21)
 
-    updated = update_preference_cost(cost, mdm_values, mpc_values, alpha=0.0)
+    updated = update_preference_cost(cost, mdm_values, mpc_values, alpha=0.0)  # type: ignore[arg-type]
 
     np.testing.assert_allclose(updated.min_value, 55.0)
     np.testing.assert_allclose(updated.max_value, cost.max_value)
@@ -735,7 +797,7 @@ def test_update_preference_cost_high_mpc_updates_only_max_to_mdm_95th() -> None:
     mdm_values = np.linspace(-50.0, 50.0, 21)
     mpc_values = np.linspace(100.0, 120.0, 21)
 
-    updated = update_preference_cost(cost, mdm_values, mpc_values, alpha=0.0)
+    updated = update_preference_cost(cost, mdm_values, mpc_values, alpha=0.0)  # type: ignore[arg-type]
 
     np.testing.assert_allclose(updated.min_value, cost.min_value)
     np.testing.assert_allclose(updated.max_value, 45.0)
@@ -864,7 +926,7 @@ costs:
     planner_run._save_learned_preference_yaml(
         config_path,
         output_path,
-        [learned_height, learned_flexion, learned_abduction],
+        [learned_height, learned_flexion, learned_abduction],  # type: ignore[list-item]
     )
 
     with open(output_path, encoding="utf-8") as f:
@@ -930,12 +992,12 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
         spine3_aa=spine3_aa,
     )
 
-    target_world_before = mpc._spine3_pos + mpc.current_cartesian_goal
+    target_world_before = mpc._spine3_pos + mpc.current_cartesian_goal  # type: ignore[operator]
     mdm_endpoint = np.zeros((3, 3), dtype=np.float64)
     mdm_endpoint[0, 1] = 1.0
     mpc.set_mdm_goal(mdm_endpoint)
     mpc.push_trajectory(np.stack([np.zeros((3, 3)), mdm_endpoint]))
-    target_world_after = mpc._spine3_pos + mpc.current_cartesian_goal
+    target_world_after = mpc._spine3_pos + mpc.current_cartesian_goal  # type: ignore[operator]
 
     np.testing.assert_allclose(target_world_after, target_world_before)
     wrist_rel = fk.fk(np.zeros((3, 3)), spine3_pos, spine3_aa)[-1] - spine3_pos
@@ -962,7 +1024,7 @@ def test_cartesian_mpc_consumes_final_mdm_goal_then_uses_cartesian_mode() -> Non
     q1 = mpc.step(q0)
 
     assert mpc.mdm_tracking_complete
-    assert mpc.current_goal is None
+    assert mpc.current_goal is None  # type: ignore[unreachable]
     assert len(mpc._goals) == 0
 
     called = {"cartesian": False}
@@ -1008,7 +1070,7 @@ def test_cartesian_mpc_tracking_complete_only_after_playback_exhausts() -> None:
 
     # Trajectory exhausted: Cartesian mode now engages.
     assert mpc.mdm_tracking_complete
-    assert mpc._playback_idx == 2
+    assert mpc._playback_idx == 2  # type: ignore[unreachable]
 
 
 def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
@@ -1017,15 +1079,21 @@ def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
     from uncertain_feedback.utils import plot as plot_module
 
     class SpyArmVisualizer:
+        """Visualizer spy recording every live-view call it receives."""
+
         TARGET_COLOR = "royalblue"
         MDM_COLOR = "darkorange"
-        instances = []
+        instances: list["SpyArmVisualizer"] = []
 
         def __init__(self, fk):
             self.fk = fk
             self.open_live_kwargs = None
             self.cartesian_targets = []
             self.step_colors = []
+            self.open_live_args = ()
+            self.open_live_kwargs = {}
+            self.mdm_goal = None
+            self.preview_q = None
             SpyArmVisualizer.instances.append(self)
 
         def open_live(self, *args, **kwargs):
@@ -1045,6 +1113,7 @@ def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
             self.cartesian_targets.append(np.asarray(world_pos, dtype=np.float64))
 
         def update_step(self, q, dist, color=TARGET_COLOR):
+            del q, dist
             self.step_colors.append(color)
 
     monkeypatch.setattr(plot_module, "ArmVisualizer", SpyArmVisualizer)
@@ -1084,10 +1153,10 @@ def test_mdm_push_trajectory_stores_full_trajectory_for_playback() -> None:
 
     # The full-resolution trajectory is stored for direct playback, not
     # downsampled into the goal queue.
-    np.testing.assert_allclose(mpc._playback_frames, frames)
+    np.testing.assert_allclose(mpc._playback_frames, frames)  # type: ignore[arg-type]
     assert mpc._playback_idx == 0
     assert not mpc.mdm_tracking_complete
-    np.testing.assert_allclose(mpc._preview_q, frames[22])
+    np.testing.assert_allclose(mpc._preview_q, frames[22])  # type: ignore[arg-type]
     # The pre-existing final goal is left untouched for the MPC resume phase.
     assert len(mpc._goals) == 1
     np.testing.assert_allclose(mpc._goals[0], final_goal)
@@ -1243,7 +1312,9 @@ def test_mdm_validate_trajectory_warns_on_range_violation() -> None:
     mpc = LeftArmMPCMDM(goals=[np.zeros((3, 3))], extra_costs=extra_costs)
 
     safe = np.zeros((4, 3, 3), dtype=np.float64)
-    assert mpc.validate_trajectory(safe) == []
+    assert (  # pylint: disable=use-implicit-booleaness-not-comparison
+        mpc.validate_trajectory(safe) == []
+    )
 
     violating = np.zeros((4, 3, 3), dtype=np.float64)
     violating[2, 2, 1] = 1.5  # large forearm bend on frame 2
@@ -1307,6 +1378,92 @@ def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
     np.testing.assert_allclose(result.cluster_means[0], np.full((3, 3, 3), 0.1))
     np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
     np.testing.assert_allclose(chosen, result.chosen_mean)
+
+
+def test_uq_axis_angle_picker_uses_refined_subset_mean(monkeypatch) -> None:
+    trajectories = np.zeros((4, 3, 3, 3), dtype=np.float64)
+    trajectories[0] = 0.0
+    trajectories[1] = 0.2
+    trajectories[2] = 1.0
+    trajectories[3] = 1.2
+    gen = _FakeTrajectoryGenerator(trajectories)
+    mpc = LeftArmMPCMDMUQ(
+        n_diffusion_samples=4,
+        clusterer=_TwoTrajectoryClusterer(n_clusters=2),
+    )
+    monkeypatch.setattr(
+        "uncertain_feedback.planners.mpc.arm_mpc_mdm_uq.pick_cluster",
+        lambda *_args, **_kwargs: ClusterPickResult(
+            root_label=0,
+            sample_indices=np.array([1], dtype=np.intp),
+            scale=1.0,
+        ),
+    )
+
+    chosen = mpc.query_mdm_with_uncertainty(
+        cast(Any, gen), "move differently", start_pose=np.zeros(263)
+    )
+
+    result = mpc.last_uq_result
+    assert result is not None
+    assert result.chosen_label == 0
+    np.testing.assert_allclose(chosen, np.full((3, 3, 3), 0.2))
+    np.testing.assert_allclose(result.cluster_means[0], chosen)
+    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
+
+
+def test_uq_position_picker_uses_refined_subset_mean(monkeypatch) -> None:
+    class TwoPositionClusterer(TrajectoryClusterer):
+        """Clusterer splitting samples into two fixed position groups."""
+
+        def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
+            raise AssertionError("position path does not use axis-angle features")
+
+        def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
+            assert positions.shape[0] == 4
+            return np.array([0, 0, 1, 1], dtype=np.intp)
+
+    class PositionGenerator:
+        """Motion generator emitting a fixed pair of position trajectories."""
+
+        def generate_left_arm_position_samples(self, *_args, **_kwargs):
+            return positions
+
+        def smpl_positions_to_left_arm_trajectory(
+            self, selected: np.ndarray, spine3_aa: np.ndarray | None = None
+        ) -> np.ndarray:
+            del spine3_aa
+            return np.full((3, 3, 3), selected.mean())
+
+    positions = np.zeros((4, 3, 22, 3), dtype=np.float64)
+    positions[0] = 0.0
+    positions[1] = 0.2
+    positions[2] = 1.0
+    positions[3] = 1.2
+    mpc = LeftArmMPCMDMUQ(
+        n_diffusion_samples=4,
+        clusterer=TwoPositionClusterer(n_clusters=2),
+    )
+    monkeypatch.setattr(
+        "uncertain_feedback.planners.mpc.arm_mpc_mdm_uq.pick_cluster_positions",
+        lambda *_args, **_kwargs: ClusterPickResult(
+            root_label=0,
+            sample_indices=np.array([1], dtype=np.intp),
+            scale=1.0,
+        ),
+    )
+
+    chosen = mpc.query_mdm_with_uncertainty(
+        cast(Any, PositionGenerator()),
+        "move differently",
+        start_pose=np.zeros(263),
+    )
+
+    result = mpc.last_uq_result
+    assert result is not None
+    np.testing.assert_allclose(chosen, np.full((3, 3, 3), 0.2))
+    np.testing.assert_allclose(result.cluster_means[0], chosen)
+    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
 
 
 def test_transfer_oracle_cluster_selection_uses_scaled_raw_options() -> None:
@@ -1437,9 +1594,10 @@ def test_generated_cost_context_named_joint_features_keep_leading_shape() -> Non
         2,
         3,
     )
-    assert context.shoulder_internal_external_rotation_angles(
-        q_trajs[:, 1:]
-    ).shape == (2, 3)
+    assert context.shoulder_internal_external_rotation_angles(q_trajs[:, 1:]).shape == (
+        2,
+        3,
+    )
 
 
 def test_generated_cost_context_shoulder_twist_matches_tpose_axis_rotation() -> None:
@@ -1507,8 +1665,7 @@ def test_motion_summaries_include_named_joint_features() -> None:
     assert "shoulder_flexion_extension" in summaries["mdm_traj"]["joint_features"]
     assert "shoulder_abduction_adduction" in summaries["mdm_traj"]["joint_features"]
     assert (
-        "shoulder_internal_external_rotation"
-        in summaries["mdm_traj"]["joint_features"]
+        "shoulder_internal_external_rotation" in summaries["mdm_traj"]["joint_features"]
     )
 
 
@@ -1529,6 +1686,62 @@ def test_motion_summaries_include_reference_and_goal_when_present() -> None:
     assert "reference" in summaries
     assert "joint_features" in summaries["reference"]
     assert summaries["cartesian_goal"] == [0.1, 0.2, 0.3]
+
+
+def test_motion_summaries_compare_chosen_to_named_rejected_rollouts() -> None:
+    chosen = np.zeros((3, 3, 3), dtype=np.float64)
+    original = chosen.copy()
+    original[-1, 0, 2] = -0.3
+    rejected_0 = chosen.copy()
+    rejected_0[-1, 0, 2] = 0.2
+    rejected_1 = chosen.copy()
+    rejected_1[-1, 0, 2] = 0.5
+    context = build_generated_cost_context(
+        _cost_context(SmplLeftArmFK()),
+        current_q=np.zeros((3, 3), dtype=np.float64),
+        mdm_traj=chosen,
+        q_history=[],
+        window=5,
+        reference_traj=original,
+        rejected_trajs=(rejected_0, rejected_1),
+    )
+
+    summaries = build_motion_summaries(context)
+
+    comparison = summaries["candidate_comparison"]
+    abduction = comparison["shoulder_abduction_adduction"]
+    rejected_ends = np.array(
+        [
+            context.shoulder_abduction_adduction_angles(rejected_0)[-1],
+            context.shoulder_abduction_adduction_angles(rejected_1)[-1],
+        ]
+    )
+    assert abduction["chosen_rollout"] == "mdm_traj"
+    assert abduction["current_rollout"] == "current"
+    assert abduction["current_value"] == pytest.approx(
+        context.shoulder_abduction_adduction_angles(context.current_q)
+    )
+    assert abduction["chosen_minus_current"] == pytest.approx(
+        abduction["chosen_end"] - abduction["current_value"]
+    )
+    assert abduction["original_plan_rollout"] == "reference"
+    assert abduction["original_plan_end"] == pytest.approx(
+        context.shoulder_abduction_adduction_angles(original)[-1]
+    )
+    assert abduction["chosen_minus_original_plan"] == pytest.approx(
+        abduction["chosen_end"] - abduction["original_plan_end"]
+    )
+    assert list(abduction["rejected_ends"]) == [
+        "rejected_cluster_0",
+        "rejected_cluster_1",
+    ]
+    np.testing.assert_allclose(list(abduction["rejected_ends"].values()), rejected_ends)
+    assert abduction["rejected_median"] == pytest.approx(np.median(rejected_ends))
+    assert abduction["rejected_std"] == pytest.approx(np.std(rejected_ends))
+    assert abduction["standardized_separation"] == pytest.approx(
+        (abduction["chosen_end"] - np.median(rejected_ends)) / np.std(rejected_ends)
+    )
+    assert comparison["elbow_flexion"]["standardized_separation"] is None
 
 
 def test_motion_summaries_omit_reference_without_reference_traj() -> None:
@@ -1557,7 +1770,8 @@ def test_prompt_images_render_overlay_with_reference(tmp_path) -> None:
     )
 
     images = render_prompt_images(
-        context, tmp_path,
+        context,
+        tmp_path,
         reference_traj=np.zeros((5, 3, 3), dtype=np.float64),
         goal_pos=np.array([0.1, 0.2, 0.3]),
     )
@@ -1604,7 +1818,9 @@ def test_prompt_images_render_overlay(tmp_path) -> None:
     assert path.exists() and path.stat().st_size > 0
 
 
-def test_prompt_images_render_others_with_multiple_clusters(tmp_path) -> None:
+def test_prompt_images_render_only_other_clusters_terminal_poses(
+    tmp_path, monkeypatch
+) -> None:
     context = build_generated_cost_context(
         _cost_context(SmplLeftArmFK()),
         current_q=np.zeros((3, 3), dtype=np.float64),
@@ -1612,13 +1828,27 @@ def test_prompt_images_render_others_with_multiple_clusters(tmp_path) -> None:
         q_history=[],
         window=5,
     )
+    rejected = np.stack(
+        [np.full((3, 3), value, dtype=np.float64) for value in (0.1, 0.2, 0.3, 0.4)]
+    )
 
     candidate_trajs = {
         0: np.zeros((4, 3, 3), dtype=np.float64),
-        1: np.full((4, 3, 3), 0.1, dtype=np.float64),
+        1: rejected,
     }
+    rendered_poses: list[np.ndarray] = []
+    original_full_body_positions = context.fk.full_body_positions
+
+    def record_full_body_positions(q, spine3_pos, spine3_aa):
+        rendered_poses.append(np.asarray(q, dtype=np.float64).copy())
+        return original_full_body_positions(q, spine3_pos, spine3_aa)
+
+    monkeypatch.setattr(context.fk, "full_body_positions", record_full_body_positions)
     images = render_prompt_images(
-        context, tmp_path, candidate_trajs=candidate_trajs, highlight_label=0,
+        context,
+        tmp_path,
+        candidate_trajs=candidate_trajs,
+        highlight_label=0,
     )
 
     # More than one cluster → the "others" image is rendered; no reference.
@@ -1626,6 +1856,13 @@ def test_prompt_images_render_others_with_multiple_clusters(tmp_path) -> None:
     assert images["other_clusters_traj_img"].name == "others.png"
     for path in images.values():
         assert path.exists() and path.stat().st_size > 0
+    for intermediate_pose in rejected[:-1]:
+        assert not any(
+            np.array_equal(rendered, intermediate_pose) for rendered in rendered_poses
+        )
+    assert (
+        sum(np.array_equal(rendered, rejected[-1]) for rendered in rendered_poses) == 3
+    )
 
 
 def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
@@ -1769,7 +2006,7 @@ llm_cost:
     assert set(summary["clusters"]) == {"0", "1"}
     assert summary["clusters"]["0"]["validation"]["ok"] is True
     assert summary["clusters"]["1"]["rollout_metrics"]["steps_completed"] == 2
-    for label in ("0", "1"):
+    for label in ("0", "1"):  # type: ignore[assignment]
         evaluation = summary["clusters"][label]["hidden_cost_evaluation"]
         assert set(evaluation) == {"base", "oracle", "generated"}
         for condition in evaluation.values():
@@ -1783,12 +2020,23 @@ def test_planning_loop_stops_when_cartesian_goal_reached() -> None:
     wrist0 = fk.fk(arm0, fk.tpose_spine3_pos, np.zeros(3))[-1] - fk.tpose_spine3_pos
     goal = wrist0 + np.array([0.03, 0.06, 0.0])
     planner = ArmMPCCartesianNoMDM(
-        cartesian_goals=[goal], initial_arm_aa=arm0, cartesian_threshold=0.12,
-        horizon=10, n_mpc_samples=256, max_angle_delta=0.1, goal_threshold=0.15,
-        visualize=False, fk=fk, spine3_pos=None, spine3_aa=None, body_pos=None,
+        cartesian_goals=[goal],
+        initial_arm_aa=arm0,
+        cartesian_threshold=0.12,
+        horizon=10,
+        n_mpc_samples=256,
+        max_angle_delta=0.1,
+        goal_threshold=0.15,
+        visualize=False,
+        fk=fk,
+        spine3_pos=None,
+        spine3_aa=None,
+        body_pos=None,
     )
 
-    result = planner_run.run_planning_loop(planner, arm0, 300, stop_on_runtime_error=True)
+    result = planner_run.run_planning_loop(
+        planner, arm0, 300, stop_on_runtime_error=True
+    )
 
     # Stops well before the 300-step budget once the wrist is within threshold.
     assert result.reached_goal is True
@@ -1802,9 +2050,18 @@ def test_planning_loop_waits_for_mdm_correction_before_stopping() -> None:
     # Joint goal == start pose, so goal_reached(q0) is True from the very first step;
     # the loop must still play the pushed correction out before it may stop.
     planner = LeftArmMPCMDM(
-        goals=[arm0.copy()], horizon=10, n_mpc_samples=64, max_angle_delta=0.1,
-        goal_threshold=0.15, visualize=False, fk=fk, spine3_pos=None, spine3_aa=None,
-        body_pos=None, advance_threshold=0.1, max_playback_delta=0.2,
+        goals=[arm0.copy()],
+        horizon=10,
+        n_mpc_samples=64,
+        max_angle_delta=0.1,
+        goal_threshold=0.15,
+        visualize=False,
+        fk=fk,
+        spine3_pos=None,
+        spine3_aa=None,
+        body_pos=None,
+        advance_threshold=0.1,
+        max_playback_delta=0.2,
         trajectory_fraction=1.0,
     )
     planner.push_trajectory(np.stack([arm0] * 8))
@@ -1812,7 +2069,9 @@ def test_planning_loop_waits_for_mdm_correction_before_stopping() -> None:
     assert planner.goal_reached(arm0) is True  # goal trivially satisfied at the start
     assert planner.mdm_ready_to_terminate is False  # but a correction is still queued
 
-    result = planner_run.run_planning_loop(planner, arm0, 100, stop_on_runtime_error=True)
+    result = planner_run.run_planning_loop(
+        planner, arm0, 100, stop_on_runtime_error=True
+    )
 
     # The loop ran the 8 playback frames before stopping, not stopping at step 1.
     assert result.reached_goal is True
@@ -1829,21 +2088,39 @@ def test_planning_loop_runs_cartesian_phase_after_correction_then_stops() -> Non
     wrist0 = fk.fk(arm0, sp, np.zeros(3))[-1] - sp
     goal = wrist0 + np.array([0.03, 0.06, 0.0])
     planner = LeftArmMPCCartesian(
-        cartesian_goals=[goal], initial_arm_aa=arm0, cartesian_threshold=0.12,
-        horizon=10, n_mpc_samples=256, max_angle_delta=0.1, goal_threshold=0.15,
-        visualize=False, fk=fk, spine3_pos=None, spine3_aa=None, body_pos=None,
-        advance_threshold=0.1, max_playback_delta=0.3, trajectory_fraction=1.0,
+        cartesian_goals=[goal],
+        initial_arm_aa=arm0,
+        cartesian_threshold=0.12,
+        horizon=10,
+        n_mpc_samples=256,
+        max_angle_delta=0.1,
+        goal_threshold=0.15,
+        visualize=False,
+        fk=fk,
+        spine3_pos=None,
+        spine3_aa=None,
+        body_pos=None,
+        advance_threshold=0.1,
+        max_playback_delta=0.3,
+        trajectory_fraction=1.0,
     )
     # 4 playback frames whose endpoint wrist is well outside cartesian_threshold.
     playback = np.stack(
-        [k * np.array([[0.0, 0.0, 0.4], [0, 0, 0], [0, 0, 0]]) for k in (0.25, 0.5, 0.75, 1.0)]
+        [
+            k * np.array([[0.0, 0.0, 0.4], [0, 0, 0], [0, 0, 0]])
+            for k in (0.25, 0.5, 0.75, 1.0)
+        ]
     )
     end_wrist = fk.fk(playback[-1], sp, np.zeros(3))[-1] - sp
-    assert float(np.linalg.norm(end_wrist - goal)) > 0.12  # playback ends away from goal
+    assert (
+        float(np.linalg.norm(end_wrist - goal)) > 0.12
+    )  # playback ends away from goal
     planner.set_mdm_goal(playback[-1])
     planner.push_trajectory(playback)
 
-    result = planner_run.run_planning_loop(planner, arm0, 300, stop_on_runtime_error=True)
+    result = planner_run.run_planning_loop(
+        planner, arm0, 300, stop_on_runtime_error=True
+    )
 
     assert result.reached_goal is True
     # Cartesian phase ran AFTER the 4 playback frames, then stopped before the budget.

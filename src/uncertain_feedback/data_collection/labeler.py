@@ -38,6 +38,7 @@ from typing import Any
 
 import flask
 from flask import Flask, Response, jsonify, render_template_string, request
+from flask.typing import ResponseReturnValue
 
 app = Flask(__name__)
 
@@ -751,7 +752,7 @@ def label_page(clip_name: str) -> str:
 
 
 @app.route("/label/<path:clip_name>", methods=["POST"])
-def save_labels(clip_name: str) -> Response:
+def save_labels(clip_name: str) -> ResponseReturnValue:
     """Persist segments for a clip to labels.json."""
     payload: Any = request.get_json(silent=True)
     new_segments: list[dict[str, Any]] = (
@@ -779,8 +780,7 @@ def _make_autolabel_prompt(variants: int) -> str:
     if variants == 1:
         return shared + " Reply with only one phrase, no punctuation, no explanation."
     return (
-        shared
-        + f" Write {variants} distinct phrases, one per line, "
+        shared + f" Write {variants} distinct phrases, one per line, "
         "no numbering, no punctuation, no extra text."
     )
 
@@ -802,20 +802,31 @@ def _autolabel_many(
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_b64(start_path)}"}},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_b64(end_path)}"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{_b64(start_path)}"
+                        },
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{_b64(end_path)}"
+                        },
+                    },
                 ],
             },
         ],
         max_completion_tokens=max(64, 32 * variants),
     )
-    text = response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    text = content.strip() if content else ""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     return lines if lines else [text]
 
 
 @app.route("/autolabel/<path:clip_name>", methods=["POST"])
-def autolabel(clip_name: str) -> Response:
+def autolabel(clip_name: str) -> ResponseReturnValue:
     """Generate an AI caption for a snippet using OpenAI vision."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -831,7 +842,7 @@ def autolabel(clip_name: str) -> Response:
     frames_dir = Path(flask.current_app.config["FRAMES_DIR"])
     clip_dir = frames_dir / clip_name
     start_path = clip_dir / f"frame_{start_frame + 1:06d}.jpg"
-    end_path   = clip_dir / f"frame_{end_frame + 1:06d}.jpg"
+    end_path = clip_dir / f"frame_{end_frame + 1:06d}.jpg"
 
     if not start_path.exists() or not end_path.exists():
         return jsonify({"error": "frame file not found"}), 404
@@ -846,7 +857,7 @@ def autolabel(clip_name: str) -> Response:
 
 
 @app.route("/autolabel-batch/<path:clip_name>", methods=["POST"])
-def autolabel_batch(clip_name: str) -> Response:
+def autolabel_batch(clip_name: str) -> ResponseReturnValue:
     """Generate AI captions for multiple snippets in parallel."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -867,14 +878,24 @@ def autolabel_batch(clip_name: str) -> Response:
         sf = int(item.get("start_frame", 0))
         ef = int(item.get("end_frame", 0))
         start_path = clip_dir / f"frame_{sf + 1:06d}.jpg"
-        end_path   = clip_dir / f"frame_{ef + 1:06d}.jpg"
+        end_path = clip_dir / f"frame_{ef + 1:06d}.jpg"
         if not start_path.exists() or not end_path.exists():
-            return {"start_frame": sf, "end_frame": ef, "captions": [], "error": "frame not found"}
+            return {
+                "start_frame": sf,
+                "end_frame": ef,
+                "captions": [],
+                "error": "frame not found",
+            }
         try:
             captions = _autolabel_many(start_path, end_path, model, variants=variants)
             return {"start_frame": sf, "end_frame": ef, "captions": captions}
         except Exception as exc:  # pylint: disable=broad-except
-            return {"start_frame": sf, "end_frame": ef, "captions": [], "error": str(exc)}
+            return {
+                "start_frame": sf,
+                "end_frame": ef,
+                "captions": [],
+                "error": str(exc),
+            }
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         results = list(executor.map(process, snippets))
@@ -901,7 +922,9 @@ def main() -> None:
         "--port", type=int, default=6767, help="Port to serve on (default: 6767)."
     )
     parser.add_argument(
-        "--openai-model", default="gpt-5.4", help="OpenAI model for AI captioning (default: gpt-5.4)."
+        "--openai-model",
+        default="gpt-5.4",
+        help="OpenAI model for AI captioning (default: gpt-5.4).",
     )
     args = parser.parse_args()
 

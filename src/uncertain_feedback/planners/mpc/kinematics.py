@@ -141,6 +141,123 @@ def _rate_limited_step(
     return next_q, reached
 
 
+_WORLD_UP = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+
+def _signed_angle_about_axis(
+    v_from: np.ndarray, v_to: np.ndarray, axis: np.ndarray
+) -> float:
+    """Signed angle rotating ``v_from`` onto ``v_to`` about ``axis`` (radians).
+
+    ``v_from`` and ``v_to`` are assumed perpendicular to the unit ``axis``.
+    """
+    s = float(np.dot(np.cross(v_from, v_to), axis))
+    c = float(np.dot(v_from, v_to))
+    return float(np.arctan2(s, c))
+
+
+def _canonical_hinge_axis(
+    tpose_upper_axis: np.ndarray, tpose_forearm_axis: np.ndarray
+) -> np.ndarray:
+    """Canonical elbow hinge = T-pose flexion-plane normal (upper × forearm).
+
+    Perpendicular to the upper-arm axis by construction.  Referencing the
+    recovered shoulder internal/external rotation to the T-pose flexion plane
+    keeps the T-pose a zero-twist neutral (identity body_pose).  The SMPL T-pose
+    arm carries a ~7.5° bend, so this cross product is well-defined; only if a
+    skeleton's arm were exactly collinear does it fall back to the component of
+    world ``+z`` orthogonal to the upper-arm axis.  See
+    ``.claude/POSE_REPRESENTATION_AUDIT.md``.
+    """
+    axis = np.cross(tpose_upper_axis, tpose_forearm_axis)
+    norm = np.linalg.norm(axis)
+    if norm < 1e-6:
+        axis = np.cross(tpose_upper_axis, _WORLD_UP)
+        norm = np.linalg.norm(axis)
+        if norm < 1e-8:
+            axis = np.cross(tpose_upper_axis, np.array([0.0, 1.0, 0.0]))
+            norm = np.linalg.norm(axis)
+    return axis / norm
+
+
+def anatomical_elbow_wrist_slots(
+    shoulder_pos: np.ndarray,
+    elbow_pos: np.ndarray,
+    wrist_pos: np.ndarray,
+    parent_world_rot: Rotation,
+    tpose_upper_axis: np.ndarray,
+    tpose_forearm_axis: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Anatomically-constrained elbow + wrist slot rotations for the left arm.
+
+    Given the observed shoulder/elbow/wrist world positions, reallocate the two
+    axial DOFs so the reconstruction is anatomically faithful while preserving
+    positions exactly (both bone directions are reproduced by construction):
+
+    1. **Elbow slot** — aligns the T-pose upper-arm axis to the observed
+       upper-arm direction ``u``, then twists about ``u`` so the canonical hinge
+       axis lands on the observed flexion-plane normal ``n = normalize(u × f)``.
+       That twist *is* the recovered shoulder internal/external rotation.
+       Degenerate when the arm is straight (``‖u × f‖ ≈ 0``); falls back to the
+       minimal (zero-twist) alignment.
+    2. **Wrist slot** — the elbow-relative shortest-arc rotation onto the forearm
+       direction ``f``: a pure hinge with zero pronation, referenced to the
+       (stable) elbow frame rather than the near-antiparallel T-pose forearm.
+
+    Slot semantics follow the repo FK convention (a joint's rotation transforms
+    the bone arriving at it): the returned ``elbow_slot`` orients the upper arm
+    (shoulder→elbow) and the ``wrist_slot`` orients the forearm (elbow→wrist).
+    ``parent_world_rot`` is the world rotation of the slot upstream of the elbow
+    slot (the shoulder-slot world rotation).
+
+    Args:
+        shoulder_pos:       ``(3,)`` world position of the shoulder.
+        elbow_pos:          ``(3,)`` world position of the elbow.
+        wrist_pos:          ``(3,)`` world position of the wrist.
+        parent_world_rot:   Shoulder-slot world rotation (elbow slot's parent).
+        tpose_upper_axis:   ``(3,)`` T-pose shoulder→elbow bone (any length).
+        tpose_forearm_axis: ``(3,)`` T-pose elbow→wrist bone (any length).
+
+    Returns:
+        Tuple ``(elbow_slot_aa, wrist_slot_aa)`` of local axis-angle vectors.
+    """
+    tpose_upper_axis = np.asarray(tpose_upper_axis, dtype=np.float64)
+    tpose_upper_axis = tpose_upper_axis / np.linalg.norm(tpose_upper_axis)
+    tpose_forearm_axis = np.asarray(tpose_forearm_axis, dtype=np.float64)
+    tpose_forearm_axis = tpose_forearm_axis / np.linalg.norm(tpose_forearm_axis)
+
+    u = np.asarray(elbow_pos, dtype=np.float64) - np.asarray(
+        shoulder_pos, dtype=np.float64
+    )
+    f = np.asarray(wrist_pos, dtype=np.float64) - np.asarray(
+        elbow_pos, dtype=np.float64
+    )
+    u = u / np.linalg.norm(u)
+    f = f / np.linalg.norm(f)
+
+    r_up, _ = Rotation.align_vectors([u], [tpose_upper_axis])
+
+    normal = np.cross(u, f)
+    normal_len = np.linalg.norm(normal)
+    if normal_len < 1e-8:
+        elbow_world = r_up
+    else:
+        normal = normal / normal_len
+        hinge_now = r_up.apply(
+            _canonical_hinge_axis(tpose_upper_axis, tpose_forearm_axis)
+        )
+        theta = _signed_angle_about_axis(hinge_now, normal, u)
+        elbow_world = Rotation.from_rotvec(theta * u) * r_up
+
+    rest_forearm = elbow_world.apply(tpose_forearm_axis)
+    wrist_delta, _ = Rotation.align_vectors([f], [rest_forearm])
+    wrist_world = wrist_delta * elbow_world
+
+    elbow_local = parent_world_rot.inv() * elbow_world
+    wrist_local = elbow_world.inv() * wrist_world
+    return elbow_local.as_rotvec(), wrist_local.as_rotvec()
+
+
 class SmplLeftArmFK:
     """Forward kinematics for the SMPL left arm.
 
@@ -332,8 +449,7 @@ class SmplLeftArmFK:
             arm_positions = positions
         else:
             raise ValueError(
-                "positions must have shape (22, 3) or (5, 3), "
-                f"got {positions.shape}"
+                "positions must have shape (22, 3) or (5, 3), " f"got {positions.shape}"
             )
 
         spine3_aa = (
@@ -347,23 +463,30 @@ class SmplLeftArmFK:
         )
         controlled = np.zeros((3, 3), dtype=np.float64)
 
-        # Controlled joints are shoulder, elbow, wrist.  Each local rotation
-        # maps the corresponding outgoing T-pose bone into the MDM bone
-        # direction, then becomes the parent frame for the next joint.
-        for out_i, bone_i in enumerate(range(1, 4)):
-            actual_bone = arm_positions[bone_i + 1] - arm_positions[bone_i]
-            tpose_bone = self._bone_offsets[bone_i]
-            if np.linalg.norm(actual_bone) < 1e-8:
-                child_world_rot = parent_world_rot
-                local_rot = Rotation.identity()
-            else:
-                child_world_rot, _ = Rotation.align_vectors(
-                    [actual_bone],
-                    [tpose_bone],
-                )
-                local_rot = parent_world_rot.inv() * child_world_rot
-            controlled[out_i] = local_rot.as_rotvec()
-            parent_world_rot = child_world_rot
+        # Shoulder slot: minimum rotation mapping the T-pose clavicle bone onto
+        # the actual clavicle bone (collar→shoulder), then expressed relative to
+        # the fixed parent frame.
+        actual_clavicle = arm_positions[2] - arm_positions[1]
+        if np.linalg.norm(actual_clavicle) < 1e-8:
+            shoulder_world = parent_world_rot
+        else:
+            shoulder_world, _ = Rotation.align_vectors(
+                [actual_clavicle],
+                [self._bone_offsets[1]],
+            )
+            controlled[0] = (parent_world_rot.inv() * shoulder_world).as_rotvec()
+
+        # Elbow + wrist slots: anatomical reparameterization — the elbow slot
+        # carries the recovered shoulder rotation (upper-arm orientation) and the
+        # wrist slot is a pure forearm hinge.  Positions are preserved.
+        controlled[1], controlled[2] = anatomical_elbow_wrist_slots(
+            arm_positions[2],
+            arm_positions[3],
+            arm_positions[4],
+            shoulder_world,
+            self._bone_offsets[2],
+            self._bone_offsets[3],
+        )
 
         return controlled
 
@@ -385,10 +508,7 @@ class SmplLeftArmFK:
         leading = positions.shape[:-2]
         flat = positions.reshape((-1, *positions.shape[-2:]))
         out = np.stack(
-            [
-                self.arm_aa_from_positions(frame, spine3_aa)
-                for frame in flat
-            ],
+            [self.arm_aa_from_positions(frame, spine3_aa) for frame in flat],
             axis=0,
         )
         return out.reshape((*leading, 3, 3))

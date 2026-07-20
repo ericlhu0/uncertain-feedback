@@ -7,4 +7,5 @@ Implement each term as written:
 - "lower_bound": penalize only how far the feature falls BELOW threshold (e.g. np.clip(threshold - feature, 0, None) ** 2), zero above it.
 - "upper_bound": penalize only how far the feature rises ABOVE threshold, zero below it.
 - "band": penalize only how far the feature leaves [low, high], zero inside it.
+- A POSE-DEPENDENT lower_bound/upper_bound (values carry "cond_feature" and "points"): compute the conditioning feature per timestep with its helper, turn the anchor points into a PER-TIMESTEP threshold (interpolate between anchors — np.interp on the conditioning value works and holds the end anchors' thresholds outside their range), then penalize the bounded feature past that per-timestep threshold exactly as the constant case, only pointwise. Put the anchor points in params; do not force a straight line if the anchors are not collinear.
 Apply the term over the future timesteps and reduce to one scalar per rollout. Put each threshold / low / high into params. Use the specification's "source" text to fill the explanation field's account of where each number came from.

@@ -63,7 +63,8 @@ def apply_leftarm_inpainting(
     device = start_pose.device
 
     inpainted_motion = (
-        start_pose.unsqueeze(0).unsqueeze(-1)
+        start_pose.unsqueeze(0)
+        .unsqueeze(-1)
         .expand(batch_size, -1, 1, n_frames)
         .clone()
     )
@@ -90,9 +91,7 @@ def apply_leftarm_inpainting(
     if fix_body:
         body_mask = torch.tensor(NOT_L_ARM_MASK, dtype=torch.bool, device=device)
         inpainting_mask = (
-            body_mask[None, :, None, None]
-            .expand(batch_size, -1, 1, n_frames)
-            .clone()
+            body_mask[None, :, None, None].expand(batch_size, -1, 1, n_frames).clone()
         )
     else:
         inpainting_mask = torch.zeros(
@@ -204,7 +203,9 @@ def main():
 
     sitting_pose_path = args.initial_pose_path
     sitting_pose = torch.load(sitting_pose_path, map_location="cuda")  # (263, 1)
-    input_motions = sitting_pose.unsqueeze(0).unsqueeze(-1).repeat(args.num_samples, 1, 1, n_frames)
+    input_motions = (
+        sitting_pose.unsqueeze(0).unsqueeze(-1).repeat(args.num_samples, 1, 1, n_frames)
+    )
     gt_frames_per_sample = {}
     apply_leftarm_inpainting(
         model_kwargs,
@@ -259,9 +260,9 @@ def main():
             sample = sample.view(-1, *sample.shape[2:]).permute(0, 2, 3, 1)
         else:
             rot2xyz_pose_rep = model.data_rep
-            rot2xyz_mask = model_kwargs["y"]["mask"].reshape(
-                args.batch_size, n_frames
-            ).bool()
+            rot2xyz_mask = (
+                model_kwargs["y"]["mask"].reshape(args.batch_size, n_frames).bool()
+            )
             sample = model.rot2xyz(
                 x=sample,
                 mask=rot2xyz_mask,

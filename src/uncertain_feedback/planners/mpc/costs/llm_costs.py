@@ -8,7 +8,10 @@ stages (interpret -> ground -> author) once, with no rollout feedback loop.
 
 from __future__ import annotations
 
-from uncertain_feedback.planners.mpc.costs.cost_generator import CostGenerator
+from uncertain_feedback.planners.mpc.costs.cost_generator import (
+    CostGenerator,
+    rank_candidate_cost,
+)
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostContext,
     GeneratedCostValidationError,
@@ -45,7 +48,15 @@ class LlmCostGenerator(CostGenerator):
             interpretation = self.interpret(llm)
             specification = self.ground(llm, interpretation)
             response, cost = self.author(llm, specification)
+            ranking = rank_candidate_cost(self.context, cost)
             self.save_response(response)
+            self.save_rationale(
+                response,
+                interpret_raw=interpretation,
+                ground_raw=specification,
+                ranking=ranking,
+            )
+            self.require_original_plan_improvement(ranking)
             if install:
                 self.install(cost)
             self._on_success(cost, installed=install)

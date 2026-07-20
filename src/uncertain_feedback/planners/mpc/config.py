@@ -21,8 +21,11 @@ PLANNER_CHOICES = {
 
 @dataclass(frozen=True)
 class UqConfig:
+    """How many MDM samples to draw, how to cluster them, and how to pick one."""
+
     diffusion_samples: int = 128
     n_clusters: int = 3
+    clusterer: str = "agglo_end_pose"
     auto_cluster: int | None = None
     scale: float = 1.0
     # Delegate cluster selection to the configured simulated user (takes effect
@@ -32,6 +35,8 @@ class UqConfig:
 
 @dataclass(frozen=True)
 class CartesianConfig:
+    """Cartesian wrist goals and the distance that counts as reaching one."""
+
     goals: list[list[float]] = field(default_factory=list)
     threshold: float = 0.05
 
@@ -41,6 +46,13 @@ class TransferConfig:
     """Held-out goals + trigger settings for the simulated-user transfer experiment."""
 
     goals: list[list[float]] = field(default_factory=list)
+    trigger_threshold: float = 0.02
+
+
+@dataclass(frozen=True)
+class CorrectionConfig:
+    """Repeated within-trajectory feedback trigger settings."""
+
     trigger_threshold: float = 0.02
 
 
@@ -60,6 +72,8 @@ class PersonaGoals:
 
 @dataclass(frozen=True)
 class LlmCostConfig:
+    """Which cost-generation backend runs, with what model and artifacts."""
+
     enabled: bool = False
     model: str | None = None
     strict: bool = False
@@ -70,8 +84,9 @@ class LlmCostConfig:
     backend: str = "llm"
     max_turns: int = 6  # used by the "turns" backend
     # Used by the "agent" backend. --skip-git-repo-check is required because the
-    # per-generation artifact run dir is not a git repo. Depending on your codex
-    # auth/host you may also need e.g. `-m <model>` and a sandbox flag.
+    # per-generation artifact run dir is not a git repo. AgentCostGenerator wraps
+    # this command in a fail-closed Bubblewrap filesystem namespace, so an inner
+    # danger-full-access flag does not expose the repository or simulator oracle.
     codex_cmd: str = "codex exec --skip-git-repo-check"
 
 
@@ -80,6 +95,8 @@ COST_BACKENDS = {"llm", "turns", "agent"}
 
 @dataclass(frozen=True)
 class MpcRunConfig:
+    """Everything one MPC run needs: planner choice, solver sizes, and sub-configs."""
+
     planner: str
     steps: int
     horizon: int
@@ -102,6 +119,7 @@ class MpcRunConfig:
     preference_window: int = 50
     motion_generator: str = "mdm"
     transfer: TransferConfig = TransferConfig()
+    corrections: CorrectionConfig = CorrectionConfig()
     # Simulated-user persona name (see simulated_users.PERSONAS); every run
     # loads this user alongside the pose.
     user: str = "unrestricted"
@@ -109,6 +127,8 @@ class MpcRunConfig:
     # persona name. When the active persona is present, its goals replace the
     # top-level cartesian/transfer goals (see PersonaGoals).
     persona_goals: dict[str, PersonaGoals] = field(default_factory=dict)
+    # Seed for planner-local MPC action sampling.
+    seed: int = 0
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -126,6 +146,16 @@ def _positive_int(value: Any, name: str) -> int:
         raise ValueError(f"{name} must be a positive integer.") from exc
     if parsed <= 0:
         raise ValueError(f"{name} must be positive.")
+    return parsed
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a nonnegative integer.") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be nonnegative.")
     return parsed
 
 
@@ -227,6 +257,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
 
     normalized_goals = _goal_list(cartesian_data.get("goals", []), "cartesian.goals")
     transfer_data = _mapping(data.get("transfer"), "transfer")
+    corrections_data = _mapping(data.get("corrections"), "corrections")
     transfer_goals = _goal_list(transfer_data.get("goals", []), "transfer.goals")
 
     persona_goals: dict[str, PersonaGoals] = {}
@@ -249,6 +280,15 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         params_map = _mapping(params, f"costs.{name}")
         costs[name] = dict(params_map)
 
+    trigger_threshold = _float(
+        corrections_data.get(
+            "trigger_threshold", transfer_data.get("trigger_threshold", 0.02)
+        ),
+        "corrections.trigger_threshold",
+    )
+    if trigger_threshold < 0.0:
+        raise ValueError("corrections.trigger_threshold must be nonnegative.")
+
     return MpcRunConfig(
         planner=planner,
         steps=_positive_int(data.get("steps"), "steps"),
@@ -261,7 +301,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             data.get("advance_threshold", 0.1), "advance_threshold"
         ),
         max_playback_delta=_float(
-            data.get("max_playback_delta", 0.1), "max_playback_delta"
+            data.get("max_playback_delta", 0.05), "max_playback_delta"
         ),
         trajectory_fraction=_float(
             data.get("trajectory_fraction", 1.0), "trajectory_fraction"
@@ -271,15 +311,14 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 uq_data.get("diffusion_samples", 128), "uq.diffusion_samples"
             ),
             n_clusters=_positive_int(uq_data.get("n_clusters", 3), "uq.n_clusters"),
+            clusterer=str(uq_data.get("clusterer", "agglo_end_pose")),
             auto_cluster=(
                 None
                 if uq_data.get("auto_cluster") is None
                 else int(uq_data["auto_cluster"])
             ),
             scale=_float(uq_data.get("scale", 1.0), "uq.scale"),
-            user_cluster=_bool(
-                uq_data.get("user_cluster", False), "uq.user_cluster"
-            ),
+            user_cluster=_bool(uq_data.get("user_cluster", False), "uq.user_cluster"),
         ),
         cartesian=CartesianConfig(
             goals=normalized_goals,
@@ -313,6 +352,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 or "codex exec"
             ),
         ),
+        seed=_nonnegative_int(data.get("seed", 0), "seed"),
         mdm_frames=(
             None
             if data.get("mdm_frames") is None
@@ -336,9 +376,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         persona_goals=persona_goals,
         transfer=TransferConfig(
             goals=transfer_goals,
-            trigger_threshold=_float(
-                transfer_data.get("trigger_threshold", 0.02),
-                "transfer.trigger_threshold",
-            ),
+            trigger_threshold=trigger_threshold,
         ),
+        corrections=CorrectionConfig(trigger_threshold=trigger_threshold),
     )

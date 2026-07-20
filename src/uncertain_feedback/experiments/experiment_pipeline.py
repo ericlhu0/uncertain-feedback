@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 import json
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
 from uncertain_feedback.motion_generators.base import MotionGenerator
-from uncertain_feedback.planners.mpc import ArmMPCCartesianNoMDM, LeftArmMPCMDMUQ, SmplLeftArmMPC
+from uncertain_feedback.planners.mpc import (
+    ArmMPCCartesianNoMDM,
+    LeftArmMPCMDMUQ,
+    SmplLeftArmMPC,
+)
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import UqClusterResult
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
@@ -47,6 +51,8 @@ from uncertain_feedback.utils.plot import ArmVisualizer
 
 @dataclass
 class InitialRolloutResult:
+    """The pre-correction rollout and where (if anywhere) it triggered feedback."""
+
     initial_traj: np.ndarray
     trigger_step: int | None
     trigger_violation: float | None
@@ -56,6 +62,8 @@ class InitialRolloutResult:
 
 @dataclass
 class UqCorrectionResult:
+    """The chosen MDM correction plus the clustering it was chosen from."""
+
     correction_traj: np.ndarray
     uq_result: UqClusterResult
     cluster_oracle_scores: dict[int, float]
@@ -63,6 +71,8 @@ class UqCorrectionResult:
 
 @dataclass
 class CostGenerationResult:
+    """Everything one cost-generation call produced, including its prompt artifacts."""
+
     cost_dir: Path
     generated_context: GeneratedCostContext
     reference_traj: np.ndarray | None
@@ -71,10 +81,46 @@ class CostGenerationResult:
     images: dict[str, Path]
     eval_state: EvalState
     generated_cost: GeneratedPythonCost | None
+    description: str = ""
+    explanation: str = ""
+    interpretation: str = ""
+    grounding: str = ""
+
+
+def _rationale_fields(
+    cost_dir: Path, cost: GeneratedPythonCost | None
+) -> dict[str, str]:
+    """Read the generation evidence chain the combiner needs from ``rationale.json``.
+
+    ``interpretation``/``grounding`` are the parsed stage-1/stage-2 objects
+    ``save_rationale`` wrote, re-dumped as JSON text; all fields are empty when no
+    rationale was produced (e.g. a failed generation).
+    """
+    description = cost.description if cost is not None else ""
+    fields = {
+        "description": description,
+        "explanation": "",
+        "interpretation": "",
+        "grounding": "",
+    }
+    path = cost_dir / "rationale.json"
+    if not path.exists():
+        return fields
+    data = json.loads(path.read_text(encoding="utf-8"))
+    final = data.get("final") or {}
+    fields["description"] = description or str(final.get("description") or "")
+    fields["explanation"] = str(final.get("explanation") or "")
+    for key, stage in (("interpretation", "interpret"), ("grounding", "ground")):
+        value = data.get(stage)
+        if value:
+            fields[key] = json.dumps(value, indent=2, sort_keys=True)
+    return fields
 
 
 @dataclass
 class ExperimentResult:
+    """The finished experiment: artifact root, summary metrics, and the run inputs."""
+
     root_dir: Path
     summary: dict[str, Any]
     cfg: MpcRunConfig
@@ -141,6 +187,7 @@ def rollout_to_goal(
         spine3_aa=spine3_aa,
         body_pos=body_pos,
         extra_costs=extra_costs,
+        seed=cfg.seed,
     )
     q0 = np.asarray(q0, dtype=np.float64).copy()
 
@@ -185,6 +232,7 @@ def evaluate_rollout(
     rollout: np.ndarray,
     goal: np.ndarray,
 ) -> dict[str, Any]:
+    """Score one rollout: preference violations, goal reach, and length."""
     metrics: dict[str, Any] = violation_metrics(user, context, rollout)
     metrics["goal_reach"] = goal_reach(context, cfg, rollout, goal)
     metrics["steps"] = int(rollout.shape[0] - 1)
@@ -202,6 +250,7 @@ def save_rollout(
     *,
     log_prefix: str = "[experiment]",
 ) -> None:
+    """Write a rollout's ``.npy`` and, when asked, render its video."""
     out_dir.mkdir(parents=True, exist_ok=True)
     np.save(out_dir / f"{name}.npy", rollout)
     if save_video:
@@ -225,6 +274,7 @@ def oracle_cluster_scores(
     cluster_means: dict[int, np.ndarray],
     scale: float,
 ) -> dict[int, float]:
+    """Hidden-cost score for each cluster mean at the given magnitude."""
     oracle_cost = HiddenCostTerm(user=user, context=context)
     return {
         label: float(
@@ -245,6 +295,7 @@ def choose_oracle_cluster(
     cluster_means: dict[int, np.ndarray],
     scale: float,
 ) -> tuple[int, dict[int, float]]:
+    """The cluster the persona's hidden cost prefers, plus every score."""
     scores = oracle_cluster_scores(user, context, cluster_means, scale)
     chosen_label = min(sorted(scores), key=lambda label: scores[label])
     return chosen_label, scores
@@ -263,6 +314,7 @@ def run_initial_rollout(
     *,
     log_prefix: str = "[experiment]",
 ) -> InitialRolloutResult:
+    """Roll out toward the goal until the persona's discomfort triggers feedback."""
     phase_t0 = time.perf_counter()
     _log(
         f"{user.name}: phase A initial rollout "
@@ -279,9 +331,12 @@ def run_initial_rollout(
         f"({initial_traj.shape[0] - 1} steps) in {_elapsed(phase_t0)}",
         prefix=log_prefix,
     )
-    _log(f"{user.name}: scoring initial rollout for hidden-cost trigger", prefix=log_prefix)
+    _log(
+        f"{user.name}: scoring initial rollout for hidden-cost trigger",
+        prefix=log_prefix,
+    )
     trigger = first_violation_step(
-        user, context, initial_traj, cfg.transfer.trigger_threshold
+        user, context, initial_traj, cfg.corrections.trigger_threshold
     )
     np.save(root_dir / "initial_rollout.npy", initial_traj)
     if trigger is None:
@@ -325,11 +380,15 @@ def generate_uq_correction(
     frozen_body: bool,
     log_prefix: str = "[experiment]",
 ) -> UqCorrectionResult:
+    """Sample and cluster MDM corrections, then pick one by oracle score."""
     cluster_oracle_scores: dict[int, float] = {}
 
     def select_oracle_cluster(means: dict[int, np.ndarray]) -> int:
         nonlocal cluster_oracle_scores
-        _log(f"{user.name}: oracle-scoring {len(means)} cluster mean(s)", prefix=log_prefix)
+        _log(
+            f"{user.name}: oracle-scoring {len(means)} cluster mean(s)",
+            prefix=log_prefix,
+        )
         chosen, cluster_oracle_scores = choose_oracle_cluster(
             user, context, means, cfg.uq.scale
         )
@@ -337,7 +396,9 @@ def generate_uq_correction(
             f"{label}={score:.3f}"
             for label, score in sorted(cluster_oracle_scores.items())
         )
-        _log(f"{user.name}: oracle chose cluster {chosen} ({scores})", prefix=log_prefix)
+        _log(
+            f"{user.name}: oracle chose cluster {chosen} ({scores})", prefix=log_prefix
+        )
         return chosen
 
     mdm_t0 = time.perf_counter()
@@ -394,6 +455,22 @@ def generate_uq_correction(
     )
 
 
+def _rejected_candidate_trajs(
+    candidate_trajs: dict[int, np.ndarray],
+    selected_label: int,
+    undesirable_labels: frozenset[int],
+) -> tuple[np.ndarray, ...]:
+    if selected_label in undesirable_labels:
+        raise ValueError(
+            f"Selected cluster label {selected_label} cannot be undesirable."
+        )
+    return tuple(
+        trajectory
+        for label, trajectory in sorted(candidate_trajs.items())
+        if label in undesirable_labels
+    )
+
+
 def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-locals
     mpc: SmplLeftArmMPC | None,
     cfg: MpcRunConfig,
@@ -411,10 +488,12 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     backend: str | None = None,
     candidate_trajs: dict[int, np.ndarray] | None = None,
     highlight_label: int | None = None,
+    undesirable_labels: frozenset[int] = frozenset(),
     history_window: int | None = None,
     llm_model_factory: Callable[[str], Any] = _make_llm_model,
     install: bool = False,
     save_candidate_videos: bool = False,
+    corpus_dir: Path | None = None,
     log_prefix: str = "[experiment]",
 ) -> CostGenerationResult:
     """Build one prompt context and generate one cost for one cluster/backend."""
@@ -450,6 +529,24 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         spine3_pos,
         spine3_aa,
     )
+    rejected_trajs: tuple[np.ndarray, ...] = ()
+    prompt_candidate_trajs = candidate_trajs
+    if candidate_trajs:
+        selected_label = (
+            highlight_label
+            if highlight_label is not None
+            else next(iter(candidate_trajs))
+        )
+        rejected_trajs = _rejected_candidate_trajs(
+            candidate_trajs,
+            selected_label,
+            undesirable_labels,
+        )
+        prompt_candidate_trajs = {
+            label: trajectory
+            for label, trajectory in candidate_trajs.items()
+            if label == selected_label or label in undesirable_labels
+        }
     generated_context = build_generated_cost_context(
         context,
         current_q,
@@ -459,6 +556,9 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         body_pos=body_pos,
         reference_traj=reference_traj,
         full_correction_traj=full_correction_traj,
+        cartesian_goal=goal_pos,
+        cartesian_threshold=cfg_backend.cartesian.threshold,
+        rejected_trajs=rejected_trajs,
     )
     summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
     _log(f"cost-generation context ready in {_elapsed(phase_t0)}", prefix=log_prefix)
@@ -466,11 +566,13 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     images: dict[str, Path] = {}
     if cfg_backend.llm_cost.use_images:
         images_t0 = time.perf_counter()
-        _log(f"rendering cost prompt images to {cost_dir / 'images'}", prefix=log_prefix)
+        _log(
+            f"rendering cost prompt images to {cost_dir / 'images'}", prefix=log_prefix
+        )
         images = render_prompt_images(
             generated_context,
             cost_dir / "images",
-            candidate_trajs,
+            prompt_candidate_trajs,
             highlight_label,
             reference_traj=reference_traj,
             goal_pos=goal_pos,
@@ -493,6 +595,9 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         spine3_aa=spine3_aa,
         reference_traj=reference_traj,
         full_correction_traj=full_correction_traj,
+        cartesian_goal=goal_pos,
+        cartesian_threshold=cfg_backend.cartesian.threshold,
+        rejected_trajs=rejected_trajs,
     )
     generator: CostGenerator = create_cost_generator(
         cfg_backend.llm_cost,
@@ -514,6 +619,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         ),
         eval_state=eval_state,
         save_candidate_videos=save_candidate_videos,
+        corpus_dir=corpus_dir,
     )
     cost_t0 = time.perf_counter()
     _log(
@@ -524,7 +630,10 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     )
     generated_cost = generator.generate(install=install)
     if generated_cost is None:
-        _log(f"cost generation returned no cost in {_elapsed(cost_t0)}", prefix=log_prefix)
+        _log(
+            f"cost generation returned no cost in {_elapsed(cost_t0)}",
+            prefix=log_prefix,
+        )
     else:
         _log(
             f"cost generation finished in {_elapsed(cost_t0)}; "
@@ -540,6 +649,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         images=images,
         eval_state=eval_state,
         generated_cost=generated_cost,
+        **_rationale_fields(cost_dir, generated_cost),
     )
 
 
@@ -569,7 +679,10 @@ def evaluate_cost_conditions(  # pylint: disable=too-many-arguments
     if not cfg.cartesian.goals:
         raise ValueError("Experiment evaluation requires cartesian.goals.")
     goal_pos = np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-    _log(f"{user.name}: evaluating original goal (save_video={save_video})", prefix=log_prefix)
+    _log(
+        f"{user.name}: evaluating original goal (save_video={save_video})",
+        prefix=log_prefix,
+    )
     conditions: dict[str, CompositeTrajectoryCost] = {
         "base": base_extra_costs,
         "oracle": CompositeTrajectoryCost(
@@ -581,21 +694,28 @@ def evaluate_cost_conditions(  # pylint: disable=too-many-arguments
             [*base_extra_costs.terms(), generated_cost]
         )
     else:
-        _log(f"{user.name}: skipping generated condition because no cost was produced", prefix=log_prefix)
+        _log(
+            f"{user.name}: skipping generated condition because no cost was produced",
+            prefix=log_prefix,
+        )
 
     results: dict[str, dict[str, Any]] = {name: {} for name in conditions}
     for cond_name, extra_costs in conditions.items():
         rollout_t0 = time.perf_counter()
         progress_label = f"{user.name} {cond_name}/goal_0"
-        resume = q_history is not None and cond_name != "base"
+        resume_from = q_history if cond_name != "base" else None
         _log(
             f"{progress_label}: rolling"
-            + (f" (resuming from feedback step {len(q_history) - 1})" if resume else ""),
+            + (
+                f" (resuming from feedback step {len(resume_from) - 1})"
+                if resume_from is not None
+                else ""
+            ),
             prefix=log_prefix,
         )
         rollout = rollout_to_goal(
             cfg,
-            q_history[-1] if resume else initial_q,
+            resume_from[-1] if resume_from is not None else initial_q,
             goal_pos,
             context,
             extra_costs,
@@ -605,9 +725,9 @@ def evaluate_cost_conditions(  # pylint: disable=too-many-arguments
             progress_label=progress_label,
             log_prefix=log_prefix,
         )
-        if resume:
+        if resume_from is not None:
             rollout = np.concatenate(
-                [np.asarray(q_history[:-1], dtype=np.float64), rollout], axis=0
+                [np.asarray(resume_from[:-1], dtype=np.float64), rollout], axis=0
             )
         metrics = evaluate_rollout(user, context, cfg, rollout, goal_pos)
         results[cond_name]["goal_0"] = metrics
@@ -652,6 +772,7 @@ def evaluate_original_goal(  # pylint: disable=too-many-arguments
     q_history: list[np.ndarray] | None = None,
     log_prefix: str = "[experiment]",
 ) -> dict[str, dict[str, Any]]:
+    """Re-run the original goal with the generated cost applied, and score it."""
     results = evaluate_cost_conditions(
         cfg,
         user,
@@ -668,7 +789,10 @@ def evaluate_original_goal(  # pylint: disable=too-many-arguments
         log_prefix=log_prefix,
     )
     goal_pos = np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-    _log(f"{user.name} tracking/goal_0: scoring assembled correction trajectory", prefix=log_prefix)
+    _log(
+        f"{user.name} tracking/goal_0: scoring assembled correction trajectory",
+        prefix=log_prefix,
+    )
     results["tracking"] = {}
     results["tracking"]["goal_0"] = evaluate_rollout(
         user, context, cfg, full_correction_traj, goal_pos
@@ -717,7 +841,11 @@ def run_experiment(  # pylint: disable=too-many-arguments,too-many-locals
     if root_dir is None:
         root_dir = artifact_run_dir(
             artifact_base_dir,
-            artifact_dir if artifact_dir is not None else cfg_backend.llm_cost.artifact_dir,
+            (
+                artifact_dir
+                if artifact_dir is not None
+                else cfg_backend.llm_cost.artifact_dir
+            ),
         )
     root_dir.mkdir(parents=True, exist_ok=True)
     base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
@@ -728,7 +856,7 @@ def run_experiment(  # pylint: disable=too-many-arguments,too-many-locals
         "persona_description": user.description,
         "feedback_text": user.feedback_text,
         "backend": cfg_backend.llm_cost.backend,
-        "trigger_threshold": cfg_backend.transfer.trigger_threshold,
+        "trigger_threshold": cfg_backend.corrections.trigger_threshold,
     }
 
     initial = run_initial_rollout(

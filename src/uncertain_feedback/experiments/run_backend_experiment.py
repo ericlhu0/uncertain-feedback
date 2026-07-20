@@ -22,6 +22,7 @@ import argparse
 from pathlib import Path
 from typing import cast
 
+from uncertain_feedback.experiments.backend_comparison import run_backend_comparison
 from uncertain_feedback.experiments.experiment_pipeline import apply_persona_goals
 from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import load_mpc_config
@@ -31,7 +32,6 @@ from uncertain_feedback.planners.run import (
     resolve_feedback_text,
     run_planning_loop,
 )
-from uncertain_feedback.experiments.backend_comparison import run_backend_comparison
 from uncertain_feedback.simulated_users import PERSONAS, choose_cluster, get_persona
 
 
@@ -71,6 +71,7 @@ def _experiment_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Parse CLI arguments and run the per-backend cost-generation comparison."""
     args = _experiment_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
@@ -95,7 +96,9 @@ def main() -> None:
         raise ValueError("Experiment config must provide an MDM pose to generate from.")
     mpc = cast(LeftArmMPCMDMUQ, setup.mpc)
 
-    effective_text_time = args.text_time if args.text_time is not None else cfg.text_time
+    effective_text_time = (
+        args.text_time if args.text_time is not None else cfg.text_time
+    )
 
     q = setup.arm_aa.copy()
     q_history: list = []
@@ -113,7 +116,7 @@ def main() -> None:
         else None
     )
     current_pose = setup.gen.build_pose_from_arm_aa(setup.initial_pose, q)
-    mpc.query_mdm_with_uncertainty(
+    mpc.query_mdm_with_uncertainty(  # pylint: disable=no-member
         setup.gen,
         feedback_text,
         start_pose=current_pose,
@@ -123,7 +126,7 @@ def main() -> None:
         frozen_body=args.frozen_body,
         cluster_selector=cluster_selector,
     )
-    uq_result = mpc.last_uq_result
+    uq_result = mpc.last_uq_result  # pylint: disable=no-member
     if uq_result is None:
         raise RuntimeError("UQ clustering produced no result.")
     correction_traj = uq_result.cluster_means[uq_result.chosen_label]

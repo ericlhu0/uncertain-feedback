@@ -8,8 +8,9 @@ cost. The interpretation stays fixed — only grounding and authoring iterate.
 
 Candidates are selected by ranking consistency (:func:`rank_candidate_cost`): the
 cost is applied directly to the trajectories whose preference order the user
-revealed, so a cost that captures the intent wins without having to recreate the
-correction trajectory. When the context has no comparison trajectories the loop
+revealed, requiring the chosen correction to cost strictly less than the original
+plan and explicitly marked-wrong candidates. A cost that captures the intent wins
+without having to recreate the correction trajectory. When the context has no comparison trajectories the loop
 falls back to the L2 rollout score. Either way, a goal-reaching candidate beats a
 non-reaching one unless stage one judged the correction to conflict with the goal.
 """
@@ -75,13 +76,22 @@ class TurnsCostGenerator(CostGenerator):
     def generate(self, install: bool = False) -> GeneratedPythonCost | None:
         try:
             self.begin()
-            best = self._converse()
+            llm = self.make_llm()
+            interpretation = self.interpret(llm)
+            best = self._converse(llm, interpretation)
             if best is None:
                 raise GeneratedCostValidationError(
                     "no valid cost produced across turns"
                 )
-            best_cost, best_response = best
+            best_cost, best_response, best_ranking = best
             self.save_response(best_response)
+            self.save_rationale(
+                best_response,
+                interpret_raw=interpretation,
+                ground_raw=None,
+                ranking=best_ranking,
+            )
+            self.require_original_plan_improvement(best_ranking)
             if install:
                 self.install(best_cost)
             self._on_success(best_cost, installed=install)
@@ -92,21 +102,21 @@ class TurnsCostGenerator(CostGenerator):
 
     def _converse(
         self,
-    ) -> tuple[GeneratedPythonCost, LlmCostResponse] | None:
-        llm = self.make_llm()
-        # Interpret once; the correction and its images don't change between turns, so
-        # only grounding + authoring iterate against rollout feedback below.
-        interpretation = self.interpret(llm)
+        llm: Any,
+        interpretation: str,
+    ) -> tuple[GeneratedPythonCost, LlmCostResponse, CostRanking | None] | None:
         # Only insist the rollout still reaches the goal when stage one judged the goal
         # reachable; if the correction conflicts with the goal, stopping short is fine.
         goal_conflict = parse_goal_conflict(interpretation)
-        prompt_text = build_refine_prompt(interpretation, self.summaries)
+        prompt_text = build_refine_prompt(
+            interpretation, self.summaries, self.corpus_grounding_note()
+        )
         (self.run_dir / "refine_prompt.txt").write_text(prompt_text, encoding="utf-8")
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "text": prompt_text}
-        ]
+        messages: list[dict[str, Any]] = [{"role": "user", "text": prompt_text}]
 
-        best: tuple[GeneratedPythonCost, LlmCostResponse] | None = None
+        best: tuple[GeneratedPythonCost, LlmCostResponse, CostRanking | None] | None = (
+            None
+        )
         best_key: tuple[float, float, float] | None = None
         no_improve = 0
 
@@ -142,14 +152,10 @@ class TurnsCostGenerator(CostGenerator):
                     turn_dir / "comparison.png",
                     angle_path=turn_dir / "angles.png",
                     rollout_path=(
-                        turn_dir / "rollout.npy"
-                        if self.save_candidate_videos
-                        else None
+                        turn_dir / "rollout.npy" if self.save_candidate_videos else None
                     ),
                     video_path=(
-                        turn_dir / "rollout.mp4"
-                        if self.save_candidate_videos
-                        else None
+                        turn_dir / "rollout.mp4" if self.save_candidate_videos else None
                     ),
                 )
             else:
@@ -162,7 +168,8 @@ class TurnsCostGenerator(CostGenerator):
             # conflicts with the goal); within that, candidates order by ranking
             # consistency, falling back to the L2 rollout score.
             reach_rank = (
-                1 if report is not None and not goal_conflict and not report["reached"]
+                1
+                if report is not None and not goal_conflict and not report["reached"]
                 else 0
             )
             ranking = rank_candidate_cost(self.context, cost)
@@ -171,12 +178,7 @@ class TurnsCostGenerator(CostGenerator):
             (turn_dir / "cost.py").write_text(response.code, encoding="utf-8")
             payload: dict[str, Any] = {"turn": turn, "l2_score": score}
             if ranking is not None:
-                payload["ranking"] = {
-                    "rank_accuracy": ranking.rank_accuracy,
-                    "normalized_margin": ranking.normalized_margin,
-                    "inert": ranking.inert,
-                    "costs": ranking.costs,
-                }
+                payload["ranking"] = ranking.as_json()
             payload["goal_reach"] = report
             with open(turn_dir / "score.json", "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
@@ -192,7 +194,7 @@ class TurnsCostGenerator(CostGenerator):
 
             if best_key is None or key < best_key:
                 best_key = key
-                best = (cost, response)
+                best = (cost, response, ranking)
                 no_improve = 0
             else:
                 no_improve += 1
@@ -265,7 +267,8 @@ def _feedback_score_block(ranking: CostRanking | None, score: float) -> str:
         "matters, not timing). Per-trajectory costs: "
         f"{json.dumps(ranking.costs)}. The user's chosen correction "
         "('chosen_correction') must cost less than the original plan they "
-        "interrupted ('original_plan') and no more than the rejected alternatives "
+        "interrupted ('original_plan') and strictly less than the marked-wrong "
+        "candidates "
         "('rejected_cluster_*'). Rank accuracy: "
         f"{ranking.rank_accuracy:.2f} (fraction of those orderings satisfied), "
         f"separation margin: {ranking.normalized_margin:.2f} (both higher is "

@@ -8,7 +8,9 @@ generator pickles it next to the task; ``experiments/render_cost_comparison.py``
 loads it to render the rollout-vs-correction overlay codex inspects each turn.
 
 ``SmplLeftArmFK`` (carried via :class:`MpcCostContext`) and the comfort cost terms
-are plain numpy / dataclasses, so the pickle round-trips.
+are plain numpy / dataclasses, so the pickle round-trips. The full run config is
+reduced to :class:`EvalMpcConfig` before serialization so persona metadata and
+other non-operational settings never enter the agent workspace.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from __future__ import annotations
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
@@ -30,12 +32,50 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     build_generated_cost_context,
 )
 
+if TYPE_CHECKING:
+    from uncertain_feedback.planners.mpc.config import MpcRunConfig
+
+
+@dataclass(frozen=True)
+class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
+    """Operational MPC fields needed to reproduce a candidate-cost rollout."""
+
+    planner: str
+    steps: int
+    horizon: int
+    n_mpc_samples: int
+    max_angle_delta: float
+    goal_threshold: float
+    seed: int | None
+    cartesian_goals: tuple[tuple[float, float, float], ...]
+    cartesian_threshold: float
+
+    @classmethod
+    def from_config(cls, cfg: MpcRunConfig | EvalMpcConfig) -> EvalMpcConfig:
+        """Copy only rollout-relevant fields from a full MPC config."""
+        if isinstance(cfg, EvalMpcConfig):
+            return cfg
+        return cls(
+            planner=cfg.planner,
+            steps=cfg.steps,
+            horizon=cfg.horizon,
+            n_mpc_samples=cfg.n_mpc_samples,
+            max_angle_delta=cfg.max_angle_delta,
+            goal_threshold=cfg.goal_threshold,
+            seed=cfg.seed,
+            cartesian_goals=tuple(
+                (float(goal[0]), float(goal[1]), float(goal[2]))
+                for goal in cfg.cartesian.goals
+            ),
+            cartesian_threshold=cfg.cartesian.threshold,
+        )
+
 
 @dataclass
 class EvalState:
     """Everything needed to roll out and score a candidate cost off-process."""
 
-    cfg: Any  # MpcRunConfig (imported lazily to avoid a config import cycle)
+    cfg: MpcRunConfig | EvalMpcConfig
     current_q: np.ndarray
     correction_traj: np.ndarray
     q_history: list[np.ndarray]
@@ -51,17 +91,23 @@ class EvalState:
     cartesian_threshold: float | None = None
     rejected_trajs: tuple[np.ndarray, ...] = ()
 
+    def __post_init__(self) -> None:
+        self.cfg = EvalMpcConfig.from_config(self.cfg)
+
     def save(self, path: Path) -> None:
         """Pickle this state to ``path``."""
+        self.cfg = EvalMpcConfig.from_config(self.cfg)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
             pickle.dump(self, f)
 
     @classmethod
     def load(cls, path: Path) -> "EvalState":
-        """Load a pickled :class:`EvalState` from ``path``."""
+        """Load and sanitize a current or legacy :class:`EvalState` pickle."""
         with open(path, "rb") as f:
-            return pickle.load(f)
+            state = pickle.load(f)
+        state.cfg = EvalMpcConfig.from_config(state.cfg)
+        return state
 
     def make_generated_context(self) -> GeneratedCostContext:
         """Rebuild the runtime context passed to generated cost code."""
@@ -83,18 +129,47 @@ class EvalState:
         self,
     ) -> Callable[[GeneratedPythonCost], np.ndarray | None]:
         """Rebuild the goal-seeking rollout closure used to score a candidate."""
-        # Local import: run.py imports the costs package, so importing it at module
-        # top would create a cycle.
-        from uncertain_feedback.planners.run import (  # pylint: disable=import-outside-toplevel
-            _make_cost_eval_rollout,
+        from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (  # pylint: disable=import-outside-toplevel
+            ArmMPCCartesianNoMDM,
         )
 
-        return _make_cost_eval_rollout(
-            self.cfg,
-            self.current_q,
-            self.cost_context,
-            self.base_extra_costs,
-            self.body_pos,
-            self.spine3_pos,
-            self.spine3_aa,
-        )
+        def rollout(cost: GeneratedPythonCost) -> np.ndarray | None:
+            cfg = EvalMpcConfig.from_config(self.cfg)
+            if cfg.planner not in ("arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"):
+                return None
+            if not cfg.cartesian_goals:
+                return None
+            extra_costs = CompositeTrajectoryCost(
+                [*self.base_extra_costs.terms(), cost]
+            )
+            planner = ArmMPCCartesianNoMDM(
+                cartesian_goals=[
+                    np.asarray(goal, dtype=np.float64) for goal in cfg.cartesian_goals
+                ],
+                initial_arm_aa=self.current_q,
+                cartesian_threshold=cfg.cartesian_threshold,
+                horizon=cfg.horizon,
+                n_mpc_samples=cfg.n_mpc_samples,
+                max_angle_delta=cfg.max_angle_delta,
+                goal_threshold=cfg.goal_threshold,
+                visualize=False,
+                fk=self.cost_context.fk,
+                spine3_pos=self.spine3_pos,
+                spine3_aa=self.spine3_aa,
+                body_pos=self.body_pos,
+                extra_costs=extra_costs,
+                seed=cfg.seed,
+            )
+            q = np.asarray(self.current_q, dtype=np.float64).copy()
+            q_history = [q.copy()]
+            for _ in range(max(1, cfg.steps)):
+                try:
+                    q = planner.step(q)
+                except RuntimeError:
+                    break
+                q_history.append(q.copy())
+                if planner.goal_reached(q):
+                    break
+            return np.asarray(q_history, dtype=np.float64)
+
+        return rollout

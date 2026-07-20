@@ -15,10 +15,9 @@ Run as::
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
-
-import argparse
 from pathlib import Path
 
 from uncertain_feedback.planners.mpc.costs import (
@@ -42,6 +41,7 @@ def _next_candidate_dir(archive_dir: Path) -> Path:
 
 
 def main() -> None:
+    """Parse CLI arguments and render the cost-vs-target comparison figure."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--state",
@@ -94,9 +94,7 @@ def main() -> None:
     )
 
     candidate_dir = (
-        _next_candidate_dir(args.archive_dir)
-        if args.archive_dir is not None
-        else None
+        _next_candidate_dir(args.archive_dir) if args.archive_dir is not None else None
     )
     rollout_path = None
     video_path = None

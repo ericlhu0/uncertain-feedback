@@ -180,7 +180,9 @@ class JointBoxLimit:
 
     def __post_init__(self) -> None:
         if self.joint not in JOINT_SLOTS:
-            raise ValueError(f"Unknown joint {self.joint!r}; expected {sorted(JOINT_SLOTS)}.")
+            raise ValueError(
+                f"Unknown joint {self.joint!r}; expected {sorted(JOINT_SLOTS)}."
+            )
 
     def violation(self, trajectory: np.ndarray) -> np.ndarray:
         """Return per-frame violation magnitudes for ``(..., 3, 3)`` trajectories."""

@@ -64,6 +64,7 @@ import sys
 import time
 from os import cpu_count
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -76,6 +77,7 @@ if str(_SRC_ROOT) not in sys.path:
 from uncertain_feedback.planners.mpc.kinematics import (  # pylint: disable=wrong-import-position
     SMPL_PARENTS_22,
     SmplLeftArmFK,
+    anatomical_elbow_wrist_slots,
 )
 
 # ---------------------------------------------------------------------------
@@ -215,6 +217,25 @@ def positions_to_smpl_body_pose(
         body_pose[j - 1] = local_rot.as_rotvec()
         world_rots[j] = world_rot_j
 
+    # Anatomical override for the left arm: reparameterize the elbow(18) and
+    # wrist(20) slots so the elbow carries the recovered shoulder rotation and
+    # the wrist becomes a pure hinge (zero pronation).  Positions are preserved
+    # because both arm bone directions are reproduced.  See
+    # ``.claude/POSE_REPRESENTATION_AUDIT.md``.
+    upper_len = np.linalg.norm(positions[18] - positions[16])
+    forearm_len = np.linalg.norm(positions[20] - positions[18])
+    if upper_len >= 1e-8 and forearm_len >= 1e-8:
+        elbow_aa, wrist_aa = anatomical_elbow_wrist_slots(
+            positions[16],
+            positions[18],
+            positions[20],
+            world_rots[16],
+            tpose_22[18] - tpose_22[16],
+            tpose_22[20] - tpose_22[18],
+        )
+        body_pose[17] = elbow_aa
+        body_pose[19] = wrist_aa
+
     return body_pose
 
 
@@ -320,7 +341,7 @@ def smpl_body_pose_to_spine3_aa(body_pose: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _import_recover_from_ric():
+def _import_recover_from_ric() -> Callable[..., Any]:
     """Import the MDM submodule's ``recover_from_ric`` with sys.path set up."""
     mdm_dir = Path(__file__).resolve().parent / "motion-diffusion-model"
     if str(mdm_dir) not in sys.path:

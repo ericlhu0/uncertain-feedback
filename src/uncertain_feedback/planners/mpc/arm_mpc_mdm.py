@@ -20,14 +20,15 @@ resumes sampling toward the final queued goal.
 from __future__ import annotations
 
 import argparse
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_mpc import (
+    SmplLeftArmMPC,
     _as_controlled_arm_aa,
     _VisConfig,
-    SmplLeftArmMPC,
 )
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -38,7 +39,6 @@ from uncertain_feedback.planners.mpc.kinematics import (
     _compose_rotvec,
     _rate_limited_step,
 )
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
@@ -94,7 +94,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         advance_threshold: float = 0.1,
-        max_playback_delta: float = 0.1,
+        max_playback_delta: float = 0.05,
         trajectory_fraction: float = 1,
         goals: list[np.ndarray] | None = None,
         goal_threshold: float = 0.1,
@@ -104,6 +104,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         spine3_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
+        seed: int | None = None,
     ) -> None:
         # Base sets up _config, _goals deque, _prev_best, _vis.
         # Pass visualize=False; MDM overrides vis config below.
@@ -119,15 +120,14 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             spine3_aa=spine3_aa,
             body_pos=body_pos,
             extra_costs=extra_costs,
+            seed=seed,
         )
         self.advance_threshold = advance_threshold
         self._max_playback_delta = max_playback_delta
         self.trajectory_fraction = trajectory_fraction
         self.visualize = visualize
         self._mdm_spine3_pos = (
-            np.asarray(spine3_pos, dtype=np.float64)
-            if spine3_pos is not None
-            else None
+            np.asarray(spine3_pos, dtype=np.float64) if spine3_pos is not None else None
         )
         self._mdm_spine3_aa = (
             np.asarray(spine3_aa, dtype=np.float64)
@@ -135,16 +135,12 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             else np.zeros(3, dtype=np.float64)
         )
         self._body_pos = (
-            np.asarray(body_pos, dtype=np.float64)
-            if body_pos is not None
-            else None
+            np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None
         )
         if visualize:
             if fk is None:
                 raise ValueError("visualize=True requires `fk` to be provided.")
-            self._vis_config = _VisConfig(
-                fk, spine3_pos, spine3_aa, body_pos=body_pos
-            )
+            self._vis_config = _VisConfig(fk, spine3_pos, spine3_aa, body_pos=body_pos)
 
         # Last frame of the MDM trajectory, shown as a goal marker.
         self._mdm_goal: np.ndarray | None = None
@@ -180,10 +176,18 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
 
     def _in_playback(self) -> bool:
         """Whether an MDM trajectory is still being followed frame by frame."""
-        return (
-            self._playback_frames is not None
-            and self._playback_idx < len(self._playback_frames)
+        return self._playback_frames is not None and self._playback_idx < len(
+            self._playback_frames
         )
+
+    def remaining_mdm_trajectory(self, current_q: np.ndarray) -> np.ndarray | None:
+        """Return the current pose followed by the unexecuted playback targets."""
+        if not self._in_playback():
+            return None
+        current = _as_controlled_arm_aa(current_q, "current_q")
+        assert self._playback_frames is not None
+        remaining = self._playback_frames[self._playback_idx :]
+        return np.concatenate((current[np.newaxis], remaining.copy()), axis=0)
 
     def validate_trajectory(
         self,
@@ -297,7 +301,9 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         """
         assert self._playback_frames is not None
         target_q = self._playback_frames[self._playback_idx]
-        next_q, reached = _rate_limited_step(current_q, target_q, self._max_playback_delta)
+        next_q, reached = _rate_limited_step(
+            current_q, target_q, self._max_playback_delta
+        )
         if reached:
             self._playback_idx += 1
             if not self._in_playback():
@@ -358,7 +364,9 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         playing = self._in_playback()
         if playing:
             next_q = self._advance_playback(np.asarray(current_q, dtype=np.float64))
-            dist = float(np.linalg.norm(next_q - self._goals[0])) if self._goals else 0.0
+            dist = (
+                float(np.linalg.norm(next_q - self._goals[0])) if self._goals else 0.0
+            )
         elif not self._goals:
             # Playback done and no final goal queued (e.g. a headless rollout
             # that only follows the trajectory): hold the last pose.
@@ -384,7 +392,10 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
                 dist = float(np.linalg.norm(next_q - target_q))
 
         if self._vis_config is not None:
-            from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+            from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+                ArmVisualizer,
+            )
+
             if self._vis is None:
                 vis_goal = self._goals[-1] if self._goals else next_q
                 self._vis = ArmVisualizer(self._vis_config.fk)
@@ -408,7 +419,8 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         return next_q
 
 
-if __name__ == "__main__":
+def _demo() -> None:
+    """Run one MDM-tracking MPC rollout from the CLI arguments."""
     parser = argparse.ArgumentParser(
         description="Run SMPL left arm MPC with live visualization"
     )
@@ -577,3 +589,7 @@ if __name__ == "__main__":
 
     plt.ioff()
     plt.show()
+
+
+if __name__ == "__main__":
+    _demo()

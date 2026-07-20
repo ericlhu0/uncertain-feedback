@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_base import _CartesianGoalsMixin
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, _compose_rotvec
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
@@ -32,6 +33,7 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
         spine3_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
+        seed: int | None = None,
     ) -> None:
         if fk is None:
             raise ValueError("fk is required for ArmMPCCartesianNoMDM.")
@@ -47,10 +49,15 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
             spine3_aa=spine3_aa,
             body_pos=body_pos,
             extra_costs=extra_costs,
+            seed=seed,
         )
         self._init_cartesian(
-            cartesian_goals, initial_arm_aa, cartesian_threshold,
-            fk, spine3_pos, spine3_aa,
+            cartesian_goals,
+            initial_arm_aa,
+            cartesian_threshold,
+            fk,
+            spine3_pos,
+            spine3_aa,
         )
 
     def solve(self, current_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -65,19 +72,22 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
         first_action, _ = self.solve(current_q)
         next_q = _compose_rotvec(np.asarray(current_q, dtype=np.float64), first_action)
 
-        arm_pos = self._fk_inst.fk(
-            next_q, self._spine3_pos, self._spine3_aa
-        )
+        arm_pos = self._fk_inst.fk(next_q, self._spine3_pos, self._spine3_aa)
         wrist_rel = arm_pos[-1] - self._spine3_pos
-        dist = float(np.linalg.norm(wrist_rel - self.current_cartesian_goal))
+        goal = self._cartesian_goals[0]
+        dist = float(np.linalg.norm(wrist_rel - goal))
 
         if dist < self._cartesian_threshold and len(self._cartesian_goals) > 1:
             self._cartesian_goals.popleft()
             self.reset_warmstart()
-            dist = float(np.linalg.norm(wrist_rel - self.current_cartesian_goal))
+            goal = self._cartesian_goals[0]
+            dist = float(np.linalg.norm(wrist_rel - goal))
 
         if self._vis_config is not None:
-            from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+            from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+                ArmVisualizer,
+            )
+
             if self._vis is None:
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
@@ -90,9 +100,7 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
                 )
                 if self._vis_config.capture:
                     self._vis.start_capture()
-            self._vis.update_cartesian_target(
-                self._spine3_pos + self.current_cartesian_goal
-            )
+            self._vis.update_cartesian_target(self._spine3_pos + goal)
             self._vis.update_step(next_q, dist=dist, color=ArmVisualizer.TARGET_COLOR)
 
         return next_q

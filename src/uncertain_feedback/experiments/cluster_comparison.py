@@ -17,6 +17,10 @@ from typing import Any, Callable, cast
 
 import numpy as np
 
+from uncertain_feedback.experiments.experiment_pipeline import (
+    evaluate_cost_conditions,
+    generate_cost_for_cluster,
+)
 from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDM,
     LeftArmMPCCartesian,
@@ -30,13 +34,6 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
     MpcCostContext,
-)
-from uncertain_feedback.experiments.experiment_pipeline import (
-    evaluate_cost_conditions,
-    generate_cost_for_cluster,
-)
-from uncertain_feedback.utils.plot import ArmVisualizer
-from uncertain_feedback.planners.mpc.costs import (
     artifact_run_dir,
 )
 from uncertain_feedback.planners.mpc.costs.cost_generator import _make_llm_model
@@ -45,6 +42,7 @@ from uncertain_feedback.planners.run import (
     run_planning_loop,
 )
 from uncertain_feedback.simulated_users import SimulatedUser
+from uncertain_feedback.utils.plot import ArmVisualizer
 
 
 def _planner_frame_color(planner: SmplLeftArmMPC) -> str:
@@ -78,6 +76,7 @@ def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
         "spine3_aa": spine3_aa,
         "body_pos": body_pos,
         "extra_costs": extra_costs,
+        "seed": cfg.seed,
     }
     if cfg.planner == "arm_mpc_cartesian":
         planner: SmplLeftArmMPC = LeftArmMPCCartesian(
@@ -152,10 +151,15 @@ def _render_rollout_video(
     :func:`run_cluster_comparison` decides whether this is called.
     """
     ArmVisualizer(fk).render_rollout_video(
-        rollout, save_path,
-        spine3_pos=spine3_pos, spine3_aa=spine3_aa,
-        body_pos=body_pos, cartesian_goal=cartesian_goal,
-        frame_colors=frame_colors, mdm_goal_q=mdm_goal_q, fps=fps,
+        rollout,
+        save_path,
+        spine3_pos=spine3_pos,
+        spine3_aa=spine3_aa,
+        body_pos=body_pos,
+        cartesian_goal=cartesian_goal,
+        frame_colors=frame_colors,
+        mdm_goal_q=mdm_goal_q,
+        fps=fps,
     )
 
 
@@ -173,8 +177,15 @@ def _run_cluster_comparison_rollout(  # pylint: disable=too-many-arguments
 ) -> tuple[np.ndarray, dict[str, Any], list[str]]:
     """Run a headless MPC rollout with one cluster's generated cost."""
     comparison_mpc = _build_cluster_rollout_planner(
-        cfg, current_q, cluster_traj, context, base_extra_costs,
-        generated_cost, body_pos, spine3_pos, spine3_aa,
+        cfg,
+        current_q,
+        cluster_traj,
+        context,
+        base_extra_costs,
+        generated_cost,
+        body_pos,
+        spine3_pos,
+        spine3_aa,
     )
     frame_colors = [_planner_frame_color(comparison_mpc)]
 
@@ -182,8 +193,11 @@ def _run_cluster_comparison_rollout(  # pylint: disable=too-many-arguments
         frame_colors.append(_planner_frame_color(comparison_mpc))
 
     result = run_planning_loop(
-        comparison_mpc, current_q, rollout_steps,
-        on_post_step=_collect_color, stop_on_runtime_error=True,
+        comparison_mpc,
+        current_q,
+        rollout_steps,
+        on_post_step=_collect_color,
+        stop_on_runtime_error=True,
     )
     q0 = np.asarray(current_q, dtype=np.float64).copy()
     rollout = np.asarray([q0, *result.q_history], dtype=np.float64)
@@ -222,6 +236,7 @@ def _run_initial_state_rollout(  # pylint: disable=too-many-arguments
         spine3_aa=spine3_aa,
         body_pos=body_pos,
         extra_costs=extra_costs,
+        seed=cfg.seed,
     )
     result = run_planning_loop(
         planner, initial_q, rollout_steps, stop_on_runtime_error=True
@@ -296,7 +311,9 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
     # Phase 1: generate every cluster's LLM cost (sequential). Each generation grounds
     # on all cluster means (overlay highlights the active cluster); the prompt template
     # decides whether to use the other paths.
-    costs_ready: list[tuple[int, np.ndarray, GeneratedPythonCost, Path, dict[str, Any]]] = []
+    costs_ready: list[
+        tuple[int, np.ndarray, GeneratedPythonCost, Path, dict[str, Any]]
+    ] = []
     for label in summary["cluster_ids"]:
         cluster_traj = uq_result.cluster_means[int(label)]
         cluster_dir = root_dir / f"cluster_{label}"
@@ -359,8 +376,16 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
     cartesian_goal = np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian.goals else None
     for label, traj, gen_cost, cdir, entry in costs_ready:
         rollout, metrics, colors = _run_cluster_comparison_rollout(
-            cfg, current_q, traj, context, base_extra_costs, gen_cost,
-            rollout_steps, body_pos, spine3_pos, spine3_aa,
+            cfg,
+            current_q,
+            traj,
+            context,
+            base_extra_costs,
+            gen_cost,
+            rollout_steps,
+            body_pos,
+            spine3_pos,
+            spine3_aa,
         )
         np.save(cdir / "rollout.npy", rollout)
         with open(cdir / "metrics.json", "w", encoding="utf-8") as f:
@@ -387,16 +412,22 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
             n_frames = traj.shape[0]
             cutoff = max(1, round(n_frames * cfg.trajectory_fraction))
             _render_rollout_video(
-                rollout, context.fk, spine3_pos, spine3_aa,
+                rollout,
+                context.fk,
+                spine3_pos,
+                spine3_aa,
                 cdir / "rollout.mp4",
-                body_pos=body_pos, cartesian_goal=cartesian_goal,
-                frame_colors=colors, mdm_goal_q=traj[cutoff - 1],
+                body_pos=body_pos,
+                cartesian_goal=cartesian_goal,
+                frame_colors=colors,
+                mdm_goal_q=traj[cutoff - 1],
             )
         summary["clusters"][str(label)] = entry
         _write_comparison_summary(root_dir, summary)
 
     if initial_q is not None and cfg.planner in (
-        "arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"
+        "arm_mpc_cartesian",
+        "arm_mpc_cartesian_no_mdm",
     ):
         for label in summary["cluster_ids"]:
             initial_state_cost = generated_costs_by_label.get(int(label))
@@ -405,17 +436,28 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
             cdir = root_dir / f"cluster_{label}"
             cluster_entry = summary["clusters"].get(str(label), {})
             is_rollout, is_metrics = _run_initial_state_rollout(
-                cfg, initial_q, context, base_extra_costs, initial_state_cost,
-                rollout_steps, body_pos, spine3_pos, spine3_aa,
+                cfg,
+                initial_q,
+                context,
+                base_extra_costs,
+                initial_state_cost,
+                rollout_steps,
+                body_pos,
+                spine3_pos,
+                spine3_aa,
             )
             np.save(cdir / "initial_state_rollout.npy", is_rollout)
             with open(cdir / "initial_state_metrics.json", "w", encoding="utf-8") as f:
                 json.dump(is_metrics, f, indent=2, sort_keys=True)
             if save_video:
                 _render_rollout_video(
-                    is_rollout, context.fk, spine3_pos, spine3_aa,
+                    is_rollout,
+                    context.fk,
+                    spine3_pos,
+                    spine3_aa,
                     cdir / "initial_state_rollout.mp4",
-                    body_pos=body_pos, cartesian_goal=cartesian_goal,
+                    body_pos=body_pos,
+                    cartesian_goal=cartesian_goal,
                 )
             cluster_entry["initial_state_rollout_path"] = str(
                 cdir / "initial_state_rollout.npy"

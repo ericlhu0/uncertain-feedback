@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,11 +20,10 @@ from uncertain_feedback.planners.mpc.costs import (
     ElbowHeightCost,
 )
 from uncertain_feedback.planners.mpc.kinematics import (
-    SmplLeftArmFK,
     _N_JOINTS,
+    SmplLeftArmFK,
     _compose_rotvec,
 )
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from uncertain_feedback.utils.plot import ArmVisualizer
@@ -87,6 +87,7 @@ class SmplLeftArmMPC:
         spine3_aa:       ``(3,)`` world axis-angle of spine3 (optional).
         body_pos:        ``(22, 3)`` background skeleton joint positions
                          (optional).
+        seed:            Seed for planner-local action sampling (optional).
     """
 
     def __init__(
@@ -102,10 +103,12 @@ class SmplLeftArmMPC:
         spine3_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
+        seed: int | None = None,
     ) -> None:
         self._horizon = horizon
         self._n_mpc_samples = n_mpc_samples
         self._max_angle_delta = max_angle_delta
+        self._rng = np.random.default_rng(seed) if seed is not None else None
         self.visualize = visualize
         self._extra_costs = extra_costs or CompositeTrajectoryCost()
 
@@ -218,6 +221,16 @@ class SmplLeftArmMPC:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _sample_actions(
+        self, mean: np.ndarray, size: tuple[int, int, int, int]
+    ) -> np.ndarray:
+        rng = self._rng if self._rng is not None else np.random
+        return rng.normal(
+            loc=mean,
+            scale=self._max_angle_delta,
+            size=size,
+        )
+
     def _rollout(self, current_q: np.ndarray, actions: np.ndarray) -> np.ndarray:
         """Roll out N trajectories from ``current_q`` using action sequences
         ``actions``.
@@ -289,10 +302,8 @@ class SmplLeftArmMPC:
         else:
             mean = np.zeros((self._horizon, _N_JOINTS, 3), dtype=np.float64)
 
-        actions = np.random.normal(
-            loc=mean,
-            scale=self._max_angle_delta,
-            size=(self._n_mpc_samples, self._horizon, _N_JOINTS, 3),
+        actions = self._sample_actions(
+            mean, (self._n_mpc_samples, self._horizon, _N_JOINTS, 3)
         )
 
         q_trajs = self._rollout(current_q, actions)
@@ -343,7 +354,10 @@ class SmplLeftArmMPC:
 
         if self._vis_config is not None:
             if self._vis is None:
-                from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+                from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+                    ArmVisualizer,
+                )
+
                 self._vis = ArmVisualizer(self._vis_config.fk)
                 self._vis.open_live(
                     self._goals[-1],

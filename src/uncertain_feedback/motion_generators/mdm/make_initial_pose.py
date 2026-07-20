@@ -20,16 +20,22 @@ DEFAULT_STATS_DIR = HERE / "motion-diffusion-model" / "dataset" / "HumanML3D"
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
-    "--motion", required=True, type=Path,
+    "--motion",
+    required=True,
+    type=Path,
     help="Path to a raw (unnormalized) HML263 .npy motion file (N, 263).",
 )
 parser.add_argument(
-    "--frame", type=int, default=0,
+    "--frame",
+    type=int,
+    default=0,
     help="Frame index to extract (supports negative indexing; default: 0).",
 )
 parser.add_argument("--out", required=True, type=Path, help="Output .pt path.")
 parser.add_argument(
-    "--stats_dir", type=Path, default=DEFAULT_STATS_DIR,
+    "--stats_dir",
+    type=Path,
+    default=DEFAULT_STATS_DIR,
     help="Directory containing Mean.npy and Std.npy for normalization.",
 )
 args = parser.parse_args()

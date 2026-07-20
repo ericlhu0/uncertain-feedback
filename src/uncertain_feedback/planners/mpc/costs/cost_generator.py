@@ -34,6 +34,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedPythonCost,
     LlmCostResponse,
     build_joint_angle_series,
+    extract_json_object,
     parse_llm_cost_response,
 )
 from uncertain_feedback.planners.mpc.costs.prompts import (
@@ -47,7 +48,8 @@ _SYSTEM_PROMPT = (
     "Return only the requested JSON object."
 )
 _DEFAULT_LLM_MODEL = "gpt-5.6-luna"
-_DEFAULT_REASONING_EFFORT = "xhigh"
+# Reasoning effort per model; a model absent here is sent without one.
+_REASONING_EFFORT = {"gpt-5.6-luna": "xhigh", "gpt-5.6-sol": "low"}
 
 
 def _make_llm_model(model_name: str) -> Any:
@@ -59,13 +61,10 @@ def _make_llm_model(model_name: str) -> Any:
     return OpenAIModel(
         model=model_name,
         system_prompt=_SYSTEM_PROMPT,
-        temperature=0.2,
-        max_tokens=16000,
-        reasoning_effort=(
-            _DEFAULT_REASONING_EFFORT
-            if model_name == _DEFAULT_LLM_MODEL
-            else None
-        ),
+        temperature=0.0,
+        max_tokens=None,
+        reasoning_effort=_REASONING_EFFORT.get(model_name),
+        stream_reasoning_summary=True,
     )
 
 
@@ -116,11 +115,30 @@ class CostRanking:
     costs: dict[str, float]
 
     @property
+    def improves_original_plan(self) -> bool | None:
+        """Whether the chosen correction costs strictly less than the original plan."""
+        chosen = self.costs.get("chosen_correction")
+        original = self.costs.get("original_plan")
+        if chosen is None or original is None:
+            return None
+        return chosen < original
+
+    @property
     def sort_key(self) -> tuple[float, float]:
         """Lower-is-better selection key: rank accuracy first, margin as tiebreak."""
         if self.inert:
             return (math.inf, math.inf)
         return (1.0 - self.rank_accuracy, -self.normalized_margin)
+
+    def as_json(self) -> dict[str, Any]:
+        """JSON-safe payload for score/rationale artifacts."""
+        return {
+            "rank_accuracy": self.rank_accuracy,
+            "normalized_margin": self.normalized_margin,
+            "inert": self.inert,
+            "improves_original_plan": self.improves_original_plan,
+            "costs": self.costs,
+        }
 
 
 def rank_candidate_cost(
@@ -129,17 +147,17 @@ def rank_candidate_cost(
     """Evaluate a candidate cost by ranking consistency, not trajectory matching.
 
     The cost function itself is applied to the trajectories whose preference order
-    the user revealed: the chosen correction (``mdm_traj``) must cost less than the
-    original plan the user interrupted (``reference_traj``, strict) and no more
-    than the rejected UQ cluster means (weak — the user's pick may be a near-tie).
+    the user revealed: the chosen correction (``mdm_traj``) must cost strictly less
+    than the original plan the user interrupted (``reference_traj``) and every
+    cluster the user explicitly marked undesirable (``rejected_trajs``).
     Any cost that captures the intent satisfies this; recreating the correction
     trajectory is not required. All trajectories are resampled to equidistant
     joint-space points first (timing is a pipeline artifact, not intent) and
     compared after z-normalization (generated costs have arbitrary scale).
 
     Returns ``None`` when the context has no comparison trajectories (no reference
-    rollout and no rejected clusters), in which case callers fall back to the L2
-    rollout score.
+    rollout and no marked-undesirable clusters), in which case callers fall back to
+    the L2 rollout score.
     """
     chosen = np.asarray(context.mdm_traj, dtype=np.float64)
     if chosen.ndim != 3 or chosen.shape[0] == 0:
@@ -167,7 +185,7 @@ def rank_candidate_cost(
         margins.append(float(z["original_plan"] - z_chosen))
     for name in trajs:
         if name.startswith("rejected_cluster_"):
-            pairs.append(bool(z_chosen <= z[name]))
+            pairs.append(bool(z_chosen < z[name]))
             margins.append(float(z[name] - z_chosen))
     return CostRanking(
         rank_accuracy=float(np.mean(pairs)),
@@ -177,9 +195,7 @@ def rank_candidate_cost(
     )
 
 
-def _score_rollout(
-    context: GeneratedCostContext, rollout: np.ndarray
-) -> float:
+def _score_rollout(context: GeneratedCostContext, rollout: np.ndarray) -> float:
     """Mean per-frame FK L2 distance between a rollout and the MDM correction.
 
     Both trajectories are resampled to equidistant joint-space points
@@ -232,26 +248,8 @@ def goal_reach_report(
 
 def parse_goal_conflict(interpret_text: str) -> bool:
     """Read the stage-1 ``goal_conflict`` flag; ``False`` if absent/unparseable."""
-    text = interpret_text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            return False
-        try:
-            data = json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return False
-    return bool(isinstance(data, dict) and data.get("goal_conflict", False))
+    data = extract_json_object(interpret_text)
+    return bool(data is not None and data.get("goal_conflict", False))
 
 
 def evaluate_candidate_cost(
@@ -381,11 +379,10 @@ class CostGenerator(ABC):
         strict: bool = False,
         mpc: Any | None = None,
         llm_model_factory: Callable[[str], Any] = _make_llm_model,
-        rollout_fn: (
-            Callable[[GeneratedPythonCost], np.ndarray | None] | None
-        ) = None,
+        rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
         eval_state: Any | None = None,
         save_candidate_videos: bool = False,
+        corpus_dir: Path | None = None,
     ) -> None:
         self.context = context
         self.instruction = instruction
@@ -400,13 +397,19 @@ class CostGenerator(ABC):
         self.rollout_fn = rollout_fn
         self.eval_state = eval_state
         self.save_candidate_videos = save_candidate_videos
+        self.corpus_dir = corpus_dir
+        self._comfortable_corpus: tuple[np.ndarray, np.ndarray, np.ndarray] | None = (
+            None
+        )
 
     # -- shared helpers -----------------------------------------------------
 
     @property
     def model_name(self) -> str:
         """Resolved model name (config, then env, then default)."""
-        return self.model or os.getenv("OPENAI_MODEL", _DEFAULT_LLM_MODEL)
+        if self.model:
+            return self.model
+        return os.getenv("OPENAI_MODEL", _DEFAULT_LLM_MODEL)
 
     def make_llm(self) -> Any:
         """Construct the cost-generator LLM wrapper for this run's model."""
@@ -459,8 +462,107 @@ class CostGenerator(ABC):
 
     def ground(self, llm: Any, interpretation: str) -> str:
         """Stage two: turn the preference into a concrete numeric spec (full summaries)."""
-        text = build_ground_prompt(interpretation, self.summaries)
+        text = build_ground_prompt(
+            interpretation, self.summaries, self.corpus_grounding_note()
+        )
         return self._run_stage(llm, "ground", text)
+
+    def comfortable_corpus(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return accepted poses and their corpus entry/frame identifiers."""
+        if self._comfortable_corpus is not None:
+            return self._comfortable_corpus
+        if self.corpus_dir is None:
+            return None
+        root = self.corpus_dir.resolve()
+        manifest = root / "manifest.json"
+        if not manifest.exists():
+            return None
+        poses: list[np.ndarray] = []
+        entry_ids: list[np.ndarray] = []
+        frame_ids: list[np.ndarray] = []
+        for entry in json.loads(manifest.read_text(encoding="utf-8")):
+            trajectory_path = (root / entry["traj_file"]).resolve()
+            if not trajectory_path.is_relative_to(root):
+                raise GeneratedCostValidationError(
+                    f"corpus trajectory leaves the corpus directory: {trajectory_path}"
+                )
+            trajectory = np.asarray(np.load(trajectory_path), dtype=np.float64)
+            cutoff = min(
+                int(entry.get("comfortable_until", trajectory.shape[0])),
+                int(trajectory.shape[0]),
+            )
+            if cutoff <= 0:
+                continue
+            poses.append(trajectory[:cutoff])
+            entry_ids.append(np.full(cutoff, int(entry["index"]), dtype=np.int64))
+            frame_ids.append(np.arange(cutoff, dtype=np.int64))
+        if not poses:
+            return None
+        self._comfortable_corpus = (
+            np.concatenate(poses),
+            np.concatenate(entry_ids),
+            np.concatenate(frame_ids),
+        )
+        return self._comfortable_corpus
+
+    def corpus_grounding_note(self) -> str | None:
+        """Summarize accepted-pose feature ranges for in-process LLM backends."""
+        corpus = self.comfortable_corpus()
+        if corpus is None:
+            return None
+        poses, entry_ids, _ = corpus
+        feature_methods = {
+            "elbow_flexion": self.context.elbow_flexion_angles,
+            "shoulder_flexion_extension": (
+                self.context.shoulder_flexion_extension_angles
+            ),
+            "shoulder_abduction_adduction": (
+                self.context.shoulder_abduction_adduction_angles
+            ),
+            "shoulder_elevation": self.context.shoulder_elevation_angles,
+            "shoulder_internal_external_rotation": (
+                self.context.shoulder_internal_external_rotation_angles
+            ),
+        }
+        lines = [
+            "ADDITIONAL GROUNDING EVIDENCE — previously accepted poses. Every pose "
+            "below was executed without a discomfort report. Any generated bound "
+            "must leave every one unpenalized; move thresholds beyond these ranges."
+        ]
+        for entry_id in np.unique(entry_ids):
+            selected = poses[entry_ids == entry_id]
+            ranges = {
+                name: {
+                    "min": float(np.min(method(selected))),
+                    "max": float(np.max(method(selected))),
+                }
+                for name, method in feature_methods.items()
+            }
+            lines.append(
+                f"- corpus entry {entry_id}: {json.dumps(ranges, sort_keys=True)}"
+            )
+        lines.append(
+            "The runtime will reject the authored cost if it assigns positive cost "
+            "to any of these accepted poses."
+        )
+        return "\n".join(lines)
+
+    def require_comfortable_corpus_unpenalized(self, cost: GeneratedPythonCost) -> None:
+        """Fail closed when a generated cost penalizes a previously accepted pose."""
+        corpus = self.comfortable_corpus()
+        if corpus is None:
+            return
+        poses, entry_ids, frame_ids = corpus
+        stationary_rollouts = np.repeat(poses[:, np.newaxis], repeats=2, axis=1)
+        values = cost(stationary_rollouts)
+        worst = int(np.argmax(values))
+        if values[worst] <= 1e-10:
+            return
+        raise GeneratedCostValidationError(
+            "generated cost penalizes a previously accepted pose: corpus entry "
+            f"{entry_ids[worst]}, frame {frame_ids[worst]}, cost {values[worst]:.6g}; "
+            "all frames before comfortable_until must have zero cost"
+        )
 
     def author(
         self, llm: Any, specification: str
@@ -493,10 +595,23 @@ class CostGenerator(ABC):
     def parse_cost(self, raw: str) -> tuple[LlmCostResponse, GeneratedPythonCost]:
         """Parse a JSON LLM response and compile it into a cost."""
         response = parse_llm_cost_response(raw)
-        cost = self.compile_cost(
-            response.code, response.params, response.description
-        )
+        cost = self.compile_cost(response.code, response.params, response.description)
+        self.require_comfortable_corpus_unpenalized(cost)
         return response, cost
+
+    def require_original_plan_improvement(self, ranking: CostRanking | None) -> None:
+        """Reject a cost that does not prefer the correction to the interrupted plan."""
+        if ranking is None or ranking.improves_original_plan is None:
+            return
+        if ranking.improves_original_plan:
+            return
+        chosen = ranking.costs["chosen_correction"]
+        original = ranking.costs["original_plan"]
+        raise GeneratedCostValidationError(
+            "generated cost does not improve on the original plan: "
+            f"chosen_correction cost {chosen:.6g} must be strictly less than "
+            f"original_plan cost {original:.6g}"
+        )
 
     def begin(self) -> None:
         """Create the run dir and persist the prompt inputs."""
@@ -542,17 +657,14 @@ class CostGenerator(ABC):
         out.mkdir(parents=True, exist_ok=True)
         (out / "cost.py").write_text(response.code, encoding="utf-8")
         if response.explanation:
-            (out / "explanation.txt").write_text(
-                response.explanation, encoding="utf-8"
-            )
+            (out / "explanation.txt").write_text(response.explanation, encoding="utf-8")
             print(f"[cost-gen] explanation: {response.explanation}")
         if response.recipient_explanation:
             (out / "recipient_explanation.txt").write_text(
                 response.recipient_explanation, encoding="utf-8"
             )
             print(
-                "[cost-gen] recipient explanation: "
-                f"{response.recipient_explanation}"
+                "[cost-gen] recipient explanation: " f"{response.recipient_explanation}"
             )
         with open(out / "params.json", "w", encoding="utf-8") as f:
             json.dump(
@@ -569,6 +681,47 @@ class CostGenerator(ABC):
                 sort_keys=True,
             )
 
+    def save_rationale(
+        self,
+        response: LlmCostResponse,
+        *,
+        interpret_raw: str | None,
+        ground_raw: str | None,
+        ranking: CostRanking | None,
+    ) -> None:
+        """Write ``rationale.json`` chaining instruction -> interpret -> ground -> final.
+
+        Stage sections are the stage JSONs parsed leniently and dumped verbatim —
+        no key validation, so a malformed or missing stage degrades to ``null``
+        rather than failing the generation.
+        """
+        interpret = extract_json_object(interpret_raw) if interpret_raw else None
+        ground = extract_json_object(ground_raw) if ground_raw else None
+        if isinstance(ground, dict):
+            terms = ground.get("terms", [])
+            for term in terms if isinstance(terms, list) else []:
+                if isinstance(term, dict) and term.get("source"):
+                    print(
+                        f"[cost-gen] grounding source ({term.get('feature')}): "
+                        f"{term['source']}"
+                    )
+        payload = {
+            "instruction": self.instruction,
+            "backend": type(self).__name__,
+            "model": self.model_name,
+            "interpret": interpret,
+            "ground": ground,
+            "final": {
+                "description": response.description,
+                "params": response.params,
+                "explanation": response.explanation,
+                "recipient_explanation": response.recipient_explanation,
+            },
+            "ranking": ranking.as_json() if ranking is not None else None,
+        }
+        with open(self.run_dir / "rationale.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+
     def install(self, cost: GeneratedPythonCost) -> None:
         """Append the generated cost to the planner's extra-cost set."""
         if self.mpc is None:
@@ -578,9 +731,7 @@ class CostGenerator(ABC):
         )
 
         existing = self.mpc._extra_costs  # pylint: disable=protected-access
-        self.mpc.set_extra_costs(
-            CompositeTrajectoryCost([*existing.terms(), cost])
-        )
+        self.mpc.set_extra_costs(CompositeTrajectoryCost([*existing.terms(), cost]))
 
     def _write_validation(self, payload: dict[str, Any]) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -624,6 +775,7 @@ def create_cost_generator(
     rollout_fn: Callable[[GeneratedPythonCost], np.ndarray | None] | None = None,
     eval_state: Any | None = None,
     save_candidate_videos: bool = False,
+    corpus_dir: Path | None = None,
 ) -> CostGenerator:
     """Build the cost generator selected by ``cfg.backend``.
 
@@ -642,21 +794,22 @@ def create_cost_generator(
         TurnsCostGenerator,
     )
 
-    common: dict[str, Any] = dict(
-        context=context,
-        instruction=instruction,
-        summaries=summaries,
-        run_dir=run_dir,
-        images=images,
-        use_images=cfg.use_images,
-        model=cfg.model,
-        strict=cfg.strict,
-        mpc=mpc,
-        llm_model_factory=llm_model_factory,
-        rollout_fn=rollout_fn,
-        eval_state=eval_state,
-        save_candidate_videos=save_candidate_videos,
-    )
+    common: dict[str, Any] = {
+        "context": context,
+        "instruction": instruction,
+        "summaries": summaries,
+        "run_dir": run_dir,
+        "images": images,
+        "use_images": cfg.use_images,
+        "model": cfg.model,
+        "strict": cfg.strict,
+        "mpc": mpc,
+        "llm_model_factory": llm_model_factory,
+        "rollout_fn": rollout_fn,
+        "eval_state": eval_state,
+        "save_candidate_videos": save_candidate_videos,
+        "corpus_dir": corpus_dir,
+    }
     backend = cfg.backend
     if backend == "llm":
         return LlmCostGenerator(**common)

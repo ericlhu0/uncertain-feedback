@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 
@@ -30,7 +31,7 @@ from uncertain_feedback.consts import MDM_ROOT
 _T2M_EXAMPLE_FRAME = Path(__file__).parent / "t2m_example_frame.npy"
 
 
-def _official_motion_process():
+def _official_motion_process() -> ModuleType:
     """Import the MDM submodule's ``motion_process`` with its globals set up.
 
     ``process_file`` reads module-level globals that upstream only defines
@@ -42,10 +43,10 @@ def _official_motion_process():
         sys.path.insert(0, str(mdm_dir))
 
     # pylint: disable=import-outside-toplevel,import-error
-    import torch
     import data_loaders.humanml.scripts.motion_process as mp
-    import data_loaders.humanml.utils.paramUtil as paramUtil
+    import torch
     from data_loaders.humanml.common.skeleton import Skeleton
+    from data_loaders.humanml.utils import paramUtil
 
     if not hasattr(mp, "tgt_offsets"):
         mp.l_idx1, mp.l_idx2 = 5, 8  # lower legs (skeleton scale reference)

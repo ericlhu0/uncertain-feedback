@@ -105,7 +105,9 @@ class MhrToHml263Pipeline:
         self._config = config
         self._estimator = MhrPoseEstimator(config.mhr_estimator_config)
 
-    def run(self, image_folder: Path, source_fps: float = _HML_TARGET_FPS) -> np.ndarray:
+    def run(
+        self, image_folder: Path, source_fps: float = _HML_TARGET_FPS
+    ) -> np.ndarray:
         """Run the full pipeline: images → HML263.
 
         Args:

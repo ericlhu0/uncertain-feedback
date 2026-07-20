@@ -16,6 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+import numpy as np
+
 from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
@@ -31,9 +33,12 @@ from uncertain_feedback.planners.run import (
 
 
 def main() -> None:
+    """Parse CLI arguments and write one cost-prompt overlay per UQ cluster."""
     parser = build_parser()
     parser.add_argument(
-        "--out-dir", default="overlays", dest="out_dir",
+        "--out-dir",
+        default="overlays",
+        dest="out_dir",
         help="Directory for the per-cluster overlay PNGs.",
     )
     args = parser.parse_args()
@@ -44,7 +49,9 @@ def main() -> None:
         raise ValueError("Config must provide an MDM pose to generate from.")
     mpc = cast(LeftArmMPCMDMUQ, setup.mpc)
 
-    effective_text_time = args.text_time if args.text_time is not None else cfg.text_time
+    effective_text_time = (
+        args.text_time if args.text_time is not None else cfg.text_time
+    )
     q = setup.arm_aa.copy()
     q_history: list = []
     if effective_text_time > 0:
@@ -55,22 +62,31 @@ def main() -> None:
 
     mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
     current_pose = setup.gen.build_pose_from_arm_aa(setup.initial_pose, q)
-    mpc.query_mdm_with_uncertainty(
-        setup.gen, args.text, start_pose=current_pose, current_arm_aa=q,
-        auto_cluster=cfg.uq.auto_cluster, mdm_frames=mdm_frames,
+    mpc.query_mdm_with_uncertainty(  # pylint: disable=no-member
+        setup.gen,
+        args.text,
+        start_pose=current_pose,
+        current_arm_aa=q,
+        auto_cluster=cfg.uq.auto_cluster,
+        mdm_frames=mdm_frames,
         frozen_body=args.frozen_body,
     )
-    uqr = mpc.last_uq_result
+    uqr = mpc.last_uq_result  # pylint: disable=no-member
     if uqr is None:
         raise RuntimeError("UQ clustering produced no result.")
 
     # Match what the LLM sees: the same always-on original-goal reference + goal marker.
     reference_traj = _rollout_reference_trajectory(
-        cfg, q, setup.cost_context, mpc._extra_costs,  # pylint: disable=protected-access
-        setup.body_pos, setup.spine3_pos, setup.spine3_aa,
+        cfg,
+        q,
+        setup.cost_context,
+        mpc._extra_costs,  # pylint: disable=protected-access
+        setup.body_pos,
+        setup.spine3_pos,
+        setup.spine3_aa,
     )
     goal_pos = (
-        cfg.cartesian.goals[0]
+        np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
         if reference_traj is not None and cfg.cartesian.goals
         else None
     )
@@ -79,18 +95,27 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for label in sorted(uqr.cluster_means):
         context = build_generated_cost_context(
-            setup.cost_context, q, uqr.cluster_means[label], q_history,
-            window=cfg.preference_window, body_pos=setup.body_pos,
+            setup.cost_context,
+            q,
+            uqr.cluster_means[label],
+            q_history,
+            window=cfg.preference_window,
+            body_pos=setup.body_pos,
             reference_traj=reference_traj,
         )
         images = render_prompt_images(
-            context, out_dir / f"cluster_{label}",
-            candidate_trajs=uqr.cluster_means, highlight_label=label,
-            reference_traj=reference_traj, goal_pos=goal_pos,
+            context,
+            out_dir / f"cluster_{label}",
+            candidate_trajs=uqr.cluster_means,
+            highlight_label=label,
+            reference_traj=reference_traj,
+            goal_pos=goal_pos,
         )
         for key, path in images.items():
             print(f"[overlay] cluster {label} {key} -> {path}")
-    print(f"[overlay] wrote overlays for {len(uqr.cluster_means)} clusters to {out_dir}")
+    print(
+        f"[overlay] wrote overlays for {len(uqr.cluster_means)} clusters to {out_dir}"
+    )
 
 
 if __name__ == "__main__":

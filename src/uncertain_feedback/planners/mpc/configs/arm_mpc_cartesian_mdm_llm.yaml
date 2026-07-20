@@ -6,10 +6,13 @@ max_angle_delta: 0.01
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 goal_threshold: 0.15
 advance_threshold: 0.15
-max_playback_delta: 0.1  # max per-joint rotation (rad) per step while following the MDM trajectory
+max_playback_delta: 0.05  # max per-joint rotation (rad) per step while following the MDM trajectory
 trajectory_fraction: 1
 mdm_frames: 50
 text_time: 10
+
+corrections:
+  trigger_threshold: 0.02
 
 
 uq:
@@ -36,7 +39,7 @@ llm_cost:
   # backend; they let run_backend_experiment.py flip to "turns"/"agent" without a
   # backend-specific config.
   max_turns: 3    # used by the "turns" backend
-  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"  # "agent" backend; no-sandbox required on this host (bwrap loopback blocked)
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"  # "agent" backend; outer bwrap isolation is applied automatically
 
 # costs:
 #   elbow_height:

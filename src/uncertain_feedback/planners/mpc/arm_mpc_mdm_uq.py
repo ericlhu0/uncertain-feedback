@@ -14,19 +14,18 @@ from __future__ import annotations
 import argparse
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-from typing import TYPE_CHECKING
-
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 if TYPE_CHECKING:
     from uncertain_feedback.motion_generators.base import MotionGenerator
+
 from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster,
     pick_cluster_positions,
@@ -93,7 +92,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         advance_threshold: float = 0.1,
-        max_playback_delta: float = 0.1,
+        max_playback_delta: float = 0.05,
         trajectory_fraction: float = LeftArmMPCMDM.TRAJECTORY_FRACTION,
         goals: list[np.ndarray] | None = None,
         goal_threshold: float = 0.1,
@@ -106,6 +105,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         n_clusters: int = 3,
         clusterer: TrajectoryClusterer | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
+        seed: int | None = None,
     ) -> None:
         super().__init__(
             horizon=horizon,
@@ -122,6 +122,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             spine3_aa=spine3_aa,
             body_pos=body_pos,
             extra_costs=extra_costs,
+            seed=seed,
         )
         self._n_diffusion_samples = n_diffusion_samples
         if clusterer is not None:
@@ -184,7 +185,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         """
         print(f"Generating {self._n_diffusion_samples} motion samples for: '{text}' …")
         generation_t0 = time.perf_counter()
-        use_position_uq = hasattr(self._clusterer, "cluster_positions")
+        use_position_uq = getattr(self._clusterer, "supports_positions", False)
         base_spine_aa = self._mdm_spine3_aa
         if use_position_uq:
             positions = gen.generate_left_arm_position_samples(
@@ -260,7 +261,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             )
             picker_t0 = time.perf_counter()
             if positions is not None:
-                chosen_label, scale = pick_cluster_positions(
+                pick_result = pick_cluster_positions(
                     positions,
                     labels,
                     fk=fk,
@@ -270,10 +271,19 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
                     init_scale=default_scale,
+                    recluster=self._clusterer.cluster_positions,  # type: ignore[attr-defined]
+                    n_clusters=self._clusterer.n_clusters,
+                )
+                refined_positions = positions[pick_result.sample_indices].mean(axis=0)
+                cluster_means[pick_result.root_label] = (
+                    gen.smpl_positions_to_left_arm_trajectory(
+                        refined_positions,
+                        spine3_aa=base_spine_aa,
+                    )
                 )
             else:
                 assert trajectories is not None
-                chosen_label, scale = pick_cluster(
+                pick_result = pick_cluster(
                     trajectories,
                     labels,
                     fk=fk,
@@ -283,7 +293,14 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
                     body_pos=body_pos,
                     current_arm_aa=current_arm_aa,
                     init_scale=default_scale,
+                    recluster=self._clusterer.cluster,
+                    n_clusters=self._clusterer.n_clusters,
                 )
+                cluster_means[pick_result.root_label] = trajectories[
+                    pick_result.sample_indices
+                ].mean(axis=0)
+            chosen_label = pick_result.root_label
+            scale = pick_result.scale
             print(
                 f"[timing] cluster picker total: {time.perf_counter() - picker_t0:.3f}s"
             )

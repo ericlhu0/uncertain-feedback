@@ -9,8 +9,9 @@ chosen cluster label.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Callable, Literal, NamedTuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,6 +39,31 @@ _COLOR_CURRENT = "#AAAAAA"  # current MPC arm state
 _SCALE_MIN = 0.0
 _SCALE_MAX = 2.0
 _SCALE_INIT = 1.0
+
+
+@dataclass(frozen=True)
+class ClusterPickResult:
+    """Final selection from a potentially recursive cluster-picker session."""
+
+    root_label: int
+    sample_indices: np.ndarray
+    scale: float
+
+
+@dataclass
+class _ClusterLevel:
+    sample_indices: np.ndarray
+    labels: np.ndarray
+    selected_label: int | None
+    scales: dict[int, float]
+    path: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _LevelPickResult:
+    action: Literal["confirm", "refine", "back"]
+    selected_label: int | None
+    scales: dict[int, float]
 
 
 def scale_trajectory(traj: np.ndarray, scale: float) -> np.ndarray:
@@ -105,7 +131,14 @@ def _draw_bones_2d(
 ) -> None:
     for pi, ci in bone_pairs:
         seg = positions[[pi, ci]]
-        ax.plot(seg[:, hi], seg[:, vi], color=color, alpha=alpha, linewidth=lw, linestyle=linestyle)
+        ax.plot(
+            seg[:, hi],
+            seg[:, vi],
+            color=color,
+            alpha=alpha,
+            linewidth=lw,
+            linestyle=linestyle,
+        )
 
 
 def _merge_arm(arm_full: np.ndarray, body_pos: np.ndarray | None) -> np.ndarray:
@@ -159,9 +192,21 @@ def _draw_body(
 
     Returns (arm_bone_lines, arm_joint_scatter).
     """
-    from uncertain_feedback.utils.plot import ArmVisualizer  # pylint: disable=import-outside-toplevel
+    from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
+        ArmVisualizer,
+    )
+
     # Grey non-arm skeleton
-    _draw_bones_2d(ax, body_pos, ArmVisualizer.BODY_BONES, hi, vi, ArmVisualizer.BODY_COLOR, alpha=0.45, lw=1.2)
+    _draw_bones_2d(
+        ax,
+        body_pos,
+        ArmVisualizer.BODY_BONES,
+        hi,
+        vi,
+        ArmVisualizer.BODY_COLOR,
+        alpha=0.45,
+        lw=1.2,
+    )
     ax.scatter(
         body_pos[ArmVisualizer.BODY_JOINTS, hi],
         body_pos[ArmVisualizer.BODY_JOINTS, vi],
@@ -186,7 +231,7 @@ def _draw_body(
     return arm_lines, arm_scat
 
 
-def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
+def _build_figure(
     unique_labels: list[int],
     cluster_body_cutoffs: list[np.ndarray],  # each (22, 3) — mean arm at cutoff
     cluster_wrist_traces: list[np.ndarray],  # each (n_frames, 3)
@@ -196,7 +241,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
         list[list[np.ndarray]] | None
     ) = None,  # each list of (22, 3)
     current_body: np.ndarray | None = None,  # (22, 3) current MPC arm state
-    init_scale: float = _SCALE_INIT,
+    init_scales: dict[int, float] | None = None,
 ) -> tuple["Figure", list[list], list[list], list[list], list[list], list[Slider]]:
     n_clusters = len(unique_labels)
     n_views = len(_PANEL_VIEWS)
@@ -294,7 +339,9 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
                 )
 
             # Solid mean arm at trajectory-fraction cutoff (the pose that will be enqueued)
-            arm_lines, arm_scat = _draw_body(ax, body_cutoff, _COLOR_ARM, view.hi, view.vi)
+            arm_lines, arm_scat = _draw_body(
+                ax, body_cutoff, _COLOR_ARM, view.hi, view.vi
+            )
             cluster_lines.append(arm_lines)
             cluster_scats.append(arm_scat)
         panel_arm_lines.append(cluster_lines)
@@ -306,15 +353,13 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     col_w = (right - left) / n_clusters
     for idx, k in enumerate(unique_labels):
         col_x0 = left + idx * col_w
-        slider_ax = fig.add_axes(
-            [col_x0 + 0.15 * col_w, 0.085, 0.7 * col_w, 0.025]
-        )
+        slider_ax = fig.add_axes([col_x0 + 0.15 * col_w, 0.085, 0.7 * col_w, 0.025])
         slider = Slider(
             slider_ax,
             "magnitude",
             _SCALE_MIN,
             _SCALE_MAX,
-            valinit=init_scale,
+            valinit=(init_scales or {}).get(k, _SCALE_INIT),
             valfmt="%.2f",
         )
         slider.label.set_fontsize(7)
@@ -331,7 +376,7 @@ def _build_figure(  # pylint: disable=too-many-locals,redefined-outer-name
     )
 
 
-def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
+def _pick_cluster_level(
     trajectories: np.ndarray,
     labels: np.ndarray,
     fk: SmplLeftArmFK | None = None,
@@ -341,9 +386,13 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     spine_aa: np.ndarray | None = None,
     body_pos: np.ndarray | None = None,
     current_arm_aa: np.ndarray | None = None,
-    init_scale: float = _SCALE_INIT,
-) -> tuple[int, float]:
-    """Show a blocking window to let the user pick a trajectory cluster.
+    init_scales: dict[int, float] | None = None,
+    selected_label: int | None = None,
+    can_go_back: bool = False,
+    n_clusters: int = 1,
+    path: tuple[int, ...] = (),
+) -> _LevelPickResult:
+    """Show one blocking trajectory-cluster level.
 
     Each cluster panel shows:
 
@@ -373,11 +422,11 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         current_arm_aa:      ``(3, 3)`` current MPC arm axis-angles.  When
                              provided, the current arm pose is drawn in grey
                              on every cluster panel.
-        init_scale:          Initial magnitude-slider value for every cluster.
-
-    Returns:
-        ``(chosen_label, scale)`` — the integer cluster label chosen by the
-        user and the magnitude scale from that cluster's slider.
+        init_scales:         Initial magnitude-slider values by local label.
+        selected_label:      Local label to restore as selected.
+        can_go_back:         Whether the Back action is available.
+        n_clusters:          Number of clusters used for child refinement.
+        path:                Ancestor labels displayed in the title.
     """
     if fk is None:
         fk = SmplLeftArmFK()
@@ -413,7 +462,9 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         # Per-sample ghost arm body poses at the cutoff frame
         individual_previews = [
             _merge_arm(
-                _full_body_positions_for_arm(fk, traj[preview_idx], spine_pos, spine_aa),
+                _full_body_positions_for_arm(
+                    fk, traj[preview_idx], spine_pos, spine_aa
+                ),
                 body_pos,
             )  # (22, 3)
             for traj in trajectories[mask]
@@ -470,7 +521,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         lims,
         cluster_individual_previews=cluster_individual_previews,
         current_body=current_body,
-        init_scale=init_scale,
+        init_scales=init_scales,
     )
     print(
         f"[timing] cluster picker figure build: {time.perf_counter() - figure_t0:.3f}s"
@@ -479,7 +530,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
     # ------------------------------------------------------------------
     # State + interaction
     # ------------------------------------------------------------------
-    state: dict = {"selected": None}
+    state: dict = {"selected": None, "action": None}
 
     def _rescale(idx: int, scale: float) -> None:
         traj = scale_trajectory(cluster_mean_trajs[idx], scale)
@@ -501,9 +552,9 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
 
     for i, slider in enumerate(sliders):
         slider.on_changed(lambda val, i=i: _rescale(i, val))
-    if init_scale != _SCALE_INIT:
-        for i in range(len(unique_labels)):
-            _rescale(i, init_scale)
+    for i, slider in enumerate(sliders):
+        if slider.val != _SCALE_INIT:
+            _rescale(i, float(slider.val))
 
     def _set_selected(idx: int) -> None:
         state["selected"] = idx
@@ -518,6 +569,7 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
                 arm_scat.set_color(color)
             for ax in axes_by_cluster[i]:
                 ax.set_facecolor("#FFF3E0" if i == idx else "white")
+        refine_btn.set_active(n_clusters >= 2)
         fig.canvas.draw_idle()
 
     def _on_click(event: "matplotlib.backend_bases.MouseEvent") -> None:
@@ -530,17 +582,48 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
 
     fig.canvas.mpl_connect("button_press_event", _on_click)
 
-    btn_ax = fig.add_axes([0.40, 0.02, 0.20, 0.045])
-    btn = Button(btn_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
+    back_ax = fig.add_axes([0.19, 0.02, 0.18, 0.045])
+    back_btn = Button(back_ax, "Back", color="#DDDDDD", hovercolor="#BBBBBB")
+    back_btn.set_active(can_go_back)
+    refine_ax = fig.add_axes([0.41, 0.02, 0.18, 0.045])
+    refine_btn = Button(
+        refine_ax, "Refine selected", color="#DDDDDD", hovercolor="#BBBBBB"
+    )
+    refine_btn.set_active(False)
+    confirm_ax = fig.add_axes([0.63, 0.02, 0.18, 0.045])
+    confirm_btn = Button(confirm_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
+
+    def _finish(action: Literal["confirm", "refine", "back"]) -> None:
+        state["action"] = action
+        plt.close(fig)
 
     def _on_confirm(_event: object) -> None:
         if state["selected"] is None:
             return
-        plt.close(fig)
+        _finish("confirm")
 
-    btn.on_clicked(_on_confirm)
+    def _on_refine(_event: object) -> None:
+        idx = state["selected"]
+        if idx is None or n_clusters < 2:
+            return
+        _finish("refine")
+
+    def _on_back(_event: object) -> None:
+        if can_go_back:
+            _finish("back")
+
+    confirm_btn.on_clicked(_on_confirm)
+    refine_btn.on_clicked(_on_refine)
+    back_btn.on_clicked(_on_back)
+    if selected_label is not None and selected_label in unique_labels:
+        _set_selected(unique_labels.index(selected_label))
+    path_text = (
+        "Root"
+        if not path
+        else "Root > " + " > ".join(f"cluster {label}" for label in path)
+    )
     fig.suptitle(
-        "Click a cluster to select it, adjust its magnitude, then click Confirm",
+        f"{path_text} — select a cluster, refine it, or confirm its mean",
         fontsize=10,
         y=0.97,
     )
@@ -555,14 +638,87 @@ def pick_cluster(  # pylint: disable=too-many-locals,redefined-outer-name,too-ma
         f"{time.perf_counter() - interaction_t0:.3f}s"
     )
 
-    if state["selected"] is None:
-        raise RuntimeError("Window closed without selecting a cluster.")
+    if state["action"] is None:
+        raise RuntimeError("Window closed without confirming or navigating.")
+    chosen_label = (
+        None if state["selected"] is None else unique_labels[int(state["selected"])]
+    )
+    return _LevelPickResult(
+        action=state["action"],
+        selected_label=chosen_label,
+        scales={
+            label: float(slider.val) for label, slider in zip(unique_labels, sliders)
+        },
+    )
 
-    return unique_labels[state["selected"]], float(sliders[state["selected"]].val)
+
+def _navigate_cluster_levels(
+    samples: np.ndarray,
+    labels: np.ndarray,
+    show_level: Callable[[_ClusterLevel], _LevelPickResult],
+    recluster: Callable[[np.ndarray], np.ndarray] | None,
+    init_scale: float,
+    n_clusters: int | None = None,
+) -> ClusterPickResult:
+    """Navigate recursive cluster levels while retaining global sample indices."""
+    unique_labels = sorted(int(value) for value in np.unique(labels))
+    levels = [
+        _ClusterLevel(
+            sample_indices=np.arange(samples.shape[0], dtype=np.intp),
+            labels=np.asarray(labels, dtype=np.intp),
+            selected_label=None,
+            scales={label: init_scale for label in unique_labels},
+            path=(),
+        )
+    ]
+    while levels:
+        level = levels[-1]
+        result = show_level(level)
+        level.scales = result.scales
+        if result.selected_label is not None:
+            level.selected_label = result.selected_label
+
+        if result.action == "back":
+            levels.pop()
+            continue
+        if level.selected_label is None:
+            raise RuntimeError("Choose a cluster before confirming or refining.")
+
+        selected_indices = level.sample_indices[level.labels == level.selected_label]
+        if result.action == "refine":
+            if recluster is None:
+                raise RuntimeError("Recursive clustering is not configured.")
+            child_labels = (
+                np.arange(selected_indices.size, dtype=np.intp)
+                if n_clusters is not None and selected_indices.size < n_clusters
+                else np.asarray(recluster(samples[selected_indices]), dtype=np.intp)
+            )
+            child_unique = sorted(int(value) for value in np.unique(child_labels))
+            child_scale = level.scales[level.selected_label]
+            levels.append(
+                _ClusterLevel(
+                    sample_indices=selected_indices,
+                    labels=child_labels,
+                    selected_label=None,
+                    scales={label: child_scale for label in child_unique},
+                    path=(*level.path, level.selected_label),
+                )
+            )
+            continue
+
+        root_label = levels[0].selected_label
+        if root_label is None:
+            raise RuntimeError("Root cluster selection was lost.")
+        return ClusterPickResult(
+            root_label=root_label,
+            sample_indices=selected_indices,
+            scale=level.scales[level.selected_label],
+        )
+    raise RuntimeError("Cluster navigation ended without a selection.")
 
 
-def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-name,too-many-statements
-    positions: np.ndarray,
+def pick_cluster(
+    trajectories: np.ndarray,
     labels: np.ndarray,
     fk: SmplLeftArmFK | None = None,
     save_path: str | Path | None = None,
@@ -572,18 +728,58 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
     body_pos: np.ndarray | None = None,
     current_arm_aa: np.ndarray | None = None,
     init_scale: float = _SCALE_INIT,
-) -> tuple[int, float]:
-    """Show a blocking cluster picker from precomputed SMPL XYZ positions.
+    recluster: Callable[[np.ndarray], np.ndarray] | None = None,
+    n_clusters: int = 1,
+) -> ClusterPickResult:
+    """Let the user recursively refine and select axis-angle trajectories."""
+    trajectories = np.asarray(trajectories, dtype=np.float64)
+
+    def _show(level: _ClusterLevel) -> _LevelPickResult:
+        return _pick_cluster_level(
+            trajectories[level.sample_indices],
+            level.labels,
+            fk=fk,
+            save_path=save_path if not level.path else None,
+            trajectory_fraction=trajectory_fraction,
+            spine_pos=spine_pos,
+            spine_aa=spine_aa,
+            body_pos=body_pos,
+            current_arm_aa=current_arm_aa,
+            init_scales=level.scales,
+            selected_label=level.selected_label,
+            can_go_back=bool(level.path),
+            n_clusters=n_clusters if recluster is not None else 1,
+            path=level.path,
+        )
+
+    return _navigate_cluster_levels(
+        trajectories, labels, _show, recluster, init_scale, n_clusters
+    )
+
+
+def _pick_cluster_positions_level(
+    positions: np.ndarray,
+    labels: np.ndarray,
+    fk: SmplLeftArmFK | None = None,
+    save_path: str | Path | None = None,
+    trajectory_fraction: float = 0.75,
+    spine_pos: np.ndarray | None = None,
+    spine_aa: np.ndarray | None = None,
+    body_pos: np.ndarray | None = None,
+    current_arm_aa: np.ndarray | None = None,
+    init_scales: dict[int, float] | None = None,
+    selected_label: int | None = None,
+    can_go_back: bool = False,
+    n_clusters: int = 1,
+    path: tuple[int, ...] = (),
+) -> _LevelPickResult:
+    """Show one blocking cluster level from precomputed SMPL XYZ positions.
 
     Args:
         positions: ``(num_samples, n_frames, 22, 3)`` global SMPL joint
             positions.
         labels: ``(num_samples,)`` integer cluster labels.
-        init_scale: Initial magnitude-slider value for every cluster.
-
-    Returns:
-        ``(chosen_label, scale)`` — the integer cluster label chosen by the
-        user and the magnitude scale from that cluster's slider.
+        init_scales: Initial magnitude-slider values by local label.
     """
     if fk is None:
         fk = SmplLeftArmFK()
@@ -640,9 +836,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
             )
             for sample_positions in positions[mask]
         ]
-        wrist_trace = fk.fk_batch(
-            mean_arm_aa, display_spine_pos, spine_aa
-        )[:, -1, :]
+        wrist_trace = fk.fk_batch(mean_arm_aa, display_spine_pos, spine_aa)[:, -1, :]
 
         cluster_body_cutoffs.append(body_cutoff)
         cluster_individual_previews.append(individual_previews)
@@ -688,14 +882,14 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
         lims,
         cluster_individual_previews=cluster_individual_previews,
         current_body=current_body,
-        init_scale=init_scale,
+        init_scales=init_scales,
     )
     print(
         "[timing] position cluster picker figure build: "
         f"{time.perf_counter() - figure_t0:.3f}s"
     )
 
-    state: dict = {"selected": None}
+    state: dict = {"selected": None, "action": None}
 
     def _rescale(idx: int, scale: float) -> None:
         traj = scale_trajectory(cluster_mean_trajs[idx], scale)
@@ -717,9 +911,9 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
 
     for i, slider in enumerate(sliders):
         slider.on_changed(lambda val, i=i: _rescale(i, val))
-    if init_scale != _SCALE_INIT:
-        for i in range(len(unique_labels)):
-            _rescale(i, init_scale)
+    for i, slider in enumerate(sliders):
+        if slider.val != _SCALE_INIT:
+            _rescale(i, float(slider.val))
 
     def _set_selected(idx: int) -> None:
         state["selected"] = idx
@@ -734,6 +928,7 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
                 arm_scat.set_color(color)
             for ax in axes_by_cluster[i]:
                 ax.set_facecolor("#FFF3E0" if i == idx else "white")
+        refine_btn.set_active(n_clusters >= 2)
         fig.canvas.draw_idle()
 
     def _on_click(event: "matplotlib.backend_bases.MouseEvent") -> None:
@@ -746,17 +941,48 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
 
     fig.canvas.mpl_connect("button_press_event", _on_click)
 
-    btn_ax = fig.add_axes([0.40, 0.02, 0.20, 0.045])
-    btn = Button(btn_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
+    back_ax = fig.add_axes([0.19, 0.02, 0.18, 0.045])
+    back_btn = Button(back_ax, "Back", color="#DDDDDD", hovercolor="#BBBBBB")
+    back_btn.set_active(can_go_back)
+    refine_ax = fig.add_axes([0.41, 0.02, 0.18, 0.045])
+    refine_btn = Button(
+        refine_ax, "Refine selected", color="#DDDDDD", hovercolor="#BBBBBB"
+    )
+    refine_btn.set_active(False)
+    confirm_ax = fig.add_axes([0.63, 0.02, 0.18, 0.045])
+    confirm_btn = Button(confirm_ax, "Confirm", color="#DDDDDD", hovercolor="#BBBBBB")
+
+    def _finish(action: Literal["confirm", "refine", "back"]) -> None:
+        state["action"] = action
+        plt.close(fig)
 
     def _on_confirm(_event: object) -> None:
         if state["selected"] is None:
             return
-        plt.close(fig)
+        _finish("confirm")
 
-    btn.on_clicked(_on_confirm)
+    def _on_refine(_event: object) -> None:
+        idx = state["selected"]
+        if idx is None or n_clusters < 2:
+            return
+        _finish("refine")
+
+    def _on_back(_event: object) -> None:
+        if can_go_back:
+            _finish("back")
+
+    confirm_btn.on_clicked(_on_confirm)
+    refine_btn.on_clicked(_on_refine)
+    back_btn.on_clicked(_on_back)
+    if selected_label is not None and selected_label in unique_labels:
+        _set_selected(unique_labels.index(selected_label))
+    path_text = (
+        "Root"
+        if not path
+        else "Root > " + " > ".join(f"cluster {label}" for label in path)
+    )
     fig.suptitle(
-        "Click a cluster to select it, adjust its magnitude, then click Confirm",
+        f"{path_text} — select a cluster, refine it, or confirm its mean",
         fontsize=10,
         y=0.97,
     )
@@ -771,16 +997,65 @@ def pick_cluster_positions(  # pylint: disable=too-many-locals,redefined-outer-n
         f"{time.perf_counter() - interaction_t0:.3f}s"
     )
 
-    if state["selected"] is None:
-        raise RuntimeError("Window closed without selecting a cluster.")
+    if state["action"] is None:
+        raise RuntimeError("Window closed without confirming or navigating.")
+    chosen_label = (
+        None if state["selected"] is None else unique_labels[int(state["selected"])]
+    )
+    return _LevelPickResult(
+        action=state["action"],
+        selected_label=chosen_label,
+        scales={
+            label: float(slider.val) for label, slider in zip(unique_labels, sliders)
+        },
+    )
 
-    return unique_labels[state["selected"]], float(sliders[state["selected"]].val)
+
+def pick_cluster_positions(
+    positions: np.ndarray,
+    labels: np.ndarray,
+    fk: SmplLeftArmFK | None = None,
+    save_path: str | Path | None = None,
+    trajectory_fraction: float = 0.75,
+    spine_pos: np.ndarray | None = None,
+    spine_aa: np.ndarray | None = None,
+    body_pos: np.ndarray | None = None,
+    current_arm_aa: np.ndarray | None = None,
+    init_scale: float = _SCALE_INIT,
+    recluster: Callable[[np.ndarray], np.ndarray] | None = None,
+    n_clusters: int = 1,
+) -> ClusterPickResult:
+    """Let the user recursively refine and select position trajectories."""
+    positions = np.asarray(positions, dtype=np.float64)
+
+    def _show(level: _ClusterLevel) -> _LevelPickResult:
+        return _pick_cluster_positions_level(
+            positions[level.sample_indices],
+            level.labels,
+            fk=fk,
+            save_path=save_path if not level.path else None,
+            trajectory_fraction=trajectory_fraction,
+            spine_pos=spine_pos,
+            spine_aa=spine_aa,
+            body_pos=body_pos,
+            current_arm_aa=current_arm_aa,
+            init_scales=level.scales,
+            selected_label=level.selected_label,
+            can_go_back=bool(level.path),
+            n_clusters=n_clusters if recluster is not None else 1,
+            path=level.path,
+        )
+
+    return _navigate_cluster_levels(
+        positions, labels, _show, recluster, init_scale, n_clusters
+    )
 
 
 # ---------------------------------------------------------------------------
 # Demo / screenshot entry point
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":  # pylint: disable=redefined-outer-name
+def _demo() -> None:
+    """Render a synthetic three-cluster preview, or run the picker interactively."""
     import sys
 
     rng = np.random.default_rng(42)
@@ -806,7 +1081,6 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
     if backend.lower() == "agg":
         fk = SmplLeftArmFK()
         unique_labels = sorted(set(demo_labels.tolist()))
-        n_clusters = len(unique_labels)
 
         cluster_body_finals = []
         cluster_wrist_traces = []
@@ -822,26 +1096,31 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
         all_body = np.stack(cluster_body_finals).reshape(-1, 3)
         all_wrists = np.concatenate(cluster_wrist_traces)
         all_pts = np.vstack([all_body, all_wrists])
-        margin = 0.05  # pylint: disable=invalid-name
+        margin = 0.05
         lims = [
             (float(all_pts[:, d].min()) - margin, float(all_pts[:, d].max()) + margin)
             for d in range(3)
         ]
 
-        fig, axes, _, _, _, _ = _build_figure(
+        fig, _axes, _, _, _, _ = _build_figure(
             unique_labels,
             cluster_body_finals,
             cluster_wrist_traces,
             cluster_counts,
             lims,
         )
-        btn_ax = fig.add_axes([0.40, 0.02, 0.20, 0.045])
-        btn_ax.set_facecolor("#DDDDDD")
-        btn_ax.text(0.5, 0.5, "Confirm", ha="center", va="center", fontsize=10)
-        btn_ax.set_xticks([])
-        btn_ax.set_yticks([])
+        for x, label in (
+            (0.19, "Back"),
+            (0.41, "Refine selected"),
+            (0.63, "Confirm"),
+        ):
+            btn_ax = fig.add_axes([x, 0.02, 0.18, 0.045])
+            btn_ax.set_facecolor("#DDDDDD")
+            btn_ax.text(0.5, 0.5, label, ha="center", va="center", fontsize=10)
+            btn_ax.set_xticks([])
+            btn_ax.set_yticks([])
         fig.suptitle(
-            "Click a cluster to select it, adjust its magnitude, then click Confirm",
+            "Root — select a cluster, refine it, or confirm its mean",
             fontsize=10,
             y=0.97,
         )
@@ -849,5 +1128,12 @@ if __name__ == "__main__":  # pylint: disable=redefined-outer-name
         print(f"Saved → {save.resolve()}")
         sys.exit(0)
 
-    chosen, chosen_scale = pick_cluster(raw, demo_labels, save_path=save)
-    print(f"User chose cluster {chosen} at magnitude {chosen_scale:.2f}")
+    chosen = pick_cluster(raw, demo_labels, save_path=save)
+    print(
+        f"User chose cluster {chosen.root_label} at magnitude {chosen.scale:.2f} "
+        f"from {len(chosen.sample_indices)} samples"
+    )
+
+
+if __name__ == "__main__":
+    _demo()

@@ -7,6 +7,12 @@ device: 0
 cuda: true
 
 # Sampling
+# use_ema in a fine-tune's args.json is a TRAINING flag; loading the EMA
+# ("model_avg") weights at inference is wrong for our short fine-tunes: with
+# avg_model_beta 0.9999 the EMA stays ~95% base model after 500 steps, so
+# samples ignore the fine-tuned behavior (arm swings behind the back, body
+# stands up). Always load the raw fine-tuned weights.
+use_ema: false
 guidance_param: 2.5
 num_samples: 1
 num_repetitions: 1

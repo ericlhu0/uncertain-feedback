@@ -18,7 +18,27 @@ import time
 from abc import ABC, abstractmethod
 
 import numpy as np
-from sklearn.cluster import KMeans
+from sklearn.cluster import AgglomerativeClustering, KMeans
+
+
+def agglomerative_labels(features: np.ndarray, n_clusters: int) -> np.ndarray:
+    """Partition a feature matrix with average-linkage agglomerative clustering.
+
+    Args:
+        features: ``(num_samples, n_features)`` matrix.
+
+    Returns:
+        ``(num_samples,)`` integer labels in ``[0, n_clusters)``.
+    """
+    agglo = AgglomerativeClustering(
+        n_clusters=n_clusters, linkage="average", metric="euclidean"
+    )
+    agglo_t0 = time.perf_counter()
+    labels = agglo.fit_predict(features).astype(np.intp)
+    print(
+        "[timing] Agglomerative fit_predict: " f"{time.perf_counter() - agglo_t0:.3f}s"
+    )
+    return labels
 
 
 class TrajectoryClusterer(ABC):
@@ -38,6 +58,21 @@ class TrajectoryClusterer(ABC):
     def __init__(self, n_clusters: int, random_state: int = 0) -> None:
         self._n_clusters = n_clusters
         self._random_state = random_state
+        self._position_features: np.ndarray | None = None
+
+    @property
+    def n_clusters(self) -> int:
+        """Return the configured number of clusters."""
+        return self._n_clusters
+
+    @property
+    def supports_positions(self) -> bool:
+        """Whether this clusterer implements the position-batch path."""
+        return (
+            type(self)._positions_to_features
+            is not TrajectoryClusterer._positions_to_features
+            or type(self).cluster_positions is not TrajectoryClusterer.cluster_positions
+        )
 
     @abstractmethod
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
@@ -49,6 +84,18 @@ class TrajectoryClusterer(ABC):
         Returns:
             ``(num_samples, n_features)`` float feature matrix.
         """
+
+    def _positions_to_features(self, positions: np.ndarray) -> np.ndarray:
+        """Convert a position batch to a ``(num_samples, n_features)`` matrix.
+
+        Args:
+            positions: ``(num_samples, n_frames, 22, 3)`` global SMPL joint
+                positions.
+
+        Returns:
+            ``(num_samples, n_features)`` float feature matrix.
+        """
+        raise NotImplementedError
 
     def _fit_predict(self, features: np.ndarray) -> np.ndarray:
         """Partition a feature matrix into integer labels.
@@ -104,3 +151,51 @@ class TrajectoryClusterer(ABC):
             f"{time.perf_counter() - feature_t0:.3f}s"
         )
         return self._fit_predict(features)
+
+    def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
+        """Assign integer cluster labels from SMPL XYZ positions.
+
+        Args:
+            positions: ``(num_samples, n_frames, 22, 3)`` global SMPL joint
+                positions.
+
+        Returns:
+            ``(num_samples,)`` integer labels in ``[0, n_clusters)``.
+
+        Raises:
+            ValueError: If ``num_samples < n_clusters``.
+        """
+        positions = np.asarray(positions, dtype=np.float64)
+        self._validate_num_samples(positions.shape[0])
+        feature_t0 = time.perf_counter()
+        features = self._positions_to_features(positions).astype(np.float64)
+        print(
+            "[timing] position clustering feature extraction: "
+            f"{time.perf_counter() - feature_t0:.3f}s"
+        )
+        self._position_features = features
+        return self._fit_predict(features)
+
+    def medoid_indices(self, labels: np.ndarray) -> dict[int, int]:
+        """Return per-cluster medoid sample indices in the clusterer's feature space.
+
+        Uses the features cached by the most recent :meth:`cluster_positions`
+        call, so labels must come from that same call.
+
+        Args:
+            labels: ``(num_samples,)`` integer labels from
+                :meth:`cluster_positions`.
+
+        Returns:
+            Mapping from cluster label to the index (into the clustered batch)
+            of the member minimizing summed distance to its cluster.
+        """
+        if self._position_features is None:
+            raise ValueError("Call cluster_positions before medoid_indices.")
+        medoids: dict[int, int] = {}
+        for label in np.unique(labels):
+            idx = np.flatnonzero(labels == label)
+            members = self._position_features[idx]
+            dists = np.linalg.norm(members[:, None] - members[None, :], axis=-1)
+            medoids[int(label)] = int(idx[dists.sum(axis=1).argmin()])
+        return medoids

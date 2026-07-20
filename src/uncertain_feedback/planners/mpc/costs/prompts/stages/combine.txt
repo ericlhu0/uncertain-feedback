@@ -1,0 +1,56 @@
+You are unifying {round_count} costs learned from separate corrections given by the
+same care recipient at different arm poses. Produce ONE cost that explains every
+round. The new cost replaces all per-round generated costs; never sum or stack them.
+
+Use these joint features:
+- `elbow_flexion`: 0 is straight; larger values are more bent.
+- `shoulder_abduction_adduction`: positive is away from the torso; negative is across it.
+- `shoulder_flexion_extension`: positive is toward +z; negative is toward -z.
+- `shoulder_elevation`: 0 is down at the side, pi/2 is horizontal, pi is overhead.
+- `shoulder_internal_external_rotation`: positive is internal rotation; negative is external.
+
+Each per-round cost is a PROVISIONAL local explanation of one correction at one pose,
+not an established global preference. Decide what single preference is best supported
+across all rounds together. Weigh at least these hypotheses and pick the SIMPLEST one
+the evidence supports:
+- a single CONSTANT preference on one feature that holds at every pose;
+- a POSE-DEPENDENT coupled preference, where a bound on one feature shifts with another
+  feature's value;
+- several INDEPENDENT preferences on different features, one revealed per correction;
+- INSUFFICIENT evidence for any unified global preference (keep the tightest constant
+  bound every correction already agrees on, and leave the rest documented as
+  unresolved).
+
+Do not assume a pose-dependent coupling is the answer, and do not require one to be
+produced. A coupling is justified only when EITHER the recipient explicitly stated a
+relationship between two features (a non-null "relationship" in a round's
+interpretation), OR the per-round thresholds on one feature vary systematically with
+another feature across corrections given at meaningfully different poses. A correlation
+visible in a single round's trajectory is NOT sufficient. When a round carried
+"associated_changes" or "unresolved_explanations", treat them as evidence that may
+support a coupling only if they RECUR across rounds; otherwise leave them documented as
+unresolved rather than forcing them into the cost.
+
+The feedback wording may be identical in every round because simulated personas use a
+canned line. Infer pose variation from trigger poses, trajectories, numeric summaries,
+and images rather than repeated wording. Open every listed image before authoring.
+
+If you conclude a pose-dependent bound, encode it with `cond_feature` and `points`,
+evaluate it with `np.interp`, take one anchor from each pose where a correction pins the
+bound, and hold the first/last threshold outside the anchor range. If you conclude a
+constant bound, choose the tightest value consistent with every correction. Each chosen
+correction endpoint must remain unpenalized so every round's goal can still be reached
+safely. The trajectories already executed in earlier rounds must also stay possible
+under the unified cost, verified against the ACTUAL poses those trajectories visited,
+frame by frame — summary ranges cannot validate a coupled bound. At every frame the
+recipient accepted, evaluate the candidate bound at that frame's joint-feature values;
+for a pose-dependent bound, first interpolate the threshold at that frame's
+conditioning-feature value, then check the bounded feature against it. Use the
+per-frame features of the executed-trajectory corpus when it is provided; without it,
+confirm in the per-round comparison rollouts that the motion the recipient already
+accepted is not blocked or steered away. If any previously visited pose is penalized,
+relax the offending bound and re-check every round. Structure the corrections
+reveal that the cost API cannot express should stay documented as unresolved, not
+forced into a bound.
+
+{rounds}

@@ -62,6 +62,7 @@ def _transfer_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Parse CLI arguments and run the simulated-user transfer experiment."""
     args = _transfer_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
@@ -103,7 +104,9 @@ def main() -> None:
             )
         persona_cfg = apply_persona_goals(cfg, user.name)
         if not persona_cfg.transfer.goals:
-            print("[transfer] warning: no transfer.goals configured — only the original goal is evaluated.")
+            print(
+                "[transfer] warning: no transfer.goals configured — only the original goal is evaluated."
+            )
         print(
             f"[transfer] ===== persona {idx}/{len(persona_names)}: {user.name} "
             f"(transfer_goals={len(persona_cfg.transfer.goals)}, "

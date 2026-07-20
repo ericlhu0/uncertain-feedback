@@ -18,10 +18,7 @@ def _is_missing_smpl_model(exc: BaseException) -> bool:
     return isinstance(exc, FileNotFoundError) and "SMPL_NEUTRAL.pkl" in str(exc)
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_call(item: pytest.Item):  # pylint: disable=unused-argument
-    """Turn a missing-SMPL-model failure into a skip."""
-    outcome = yield
+def _force_skip_if_missing_smpl(outcome) -> None:
     excinfo = outcome.excinfo
     if excinfo is not None and _is_missing_smpl_model(excinfo[1]):
         outcome.force_exception(
@@ -29,3 +26,17 @@ def pytest_runtest_call(item: pytest.Item):  # pylint: disable=unused-argument
                 f"SMPL_NEUTRAL.pkl not available at {_SMPL_PKL_DEFAULT}"
             )
         )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_setup(item: pytest.Item):  # pylint: disable=unused-argument
+    """Turn a missing-SMPL-model failure during fixture setup into a skip."""
+    outcome = yield
+    _force_skip_if_missing_smpl(outcome)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item: pytest.Item):  # pylint: disable=unused-argument
+    """Turn a missing-SMPL-model failure into a skip."""
+    outcome = yield
+    _force_skip_if_missing_smpl(outcome)

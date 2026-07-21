@@ -129,6 +129,7 @@ class MpcRunConfig:
     preference_alpha: float = 0.5
     preference_window: int = 50
     motion_generator: str = "mdm"
+    env: str = "kinematic"
     transfer: TransferConfig = TransferConfig()
     corrections: CorrectionConfig = CorrectionConfig()
     simulated_user: SimulatedUserConfig = SimulatedUserConfig()
@@ -261,6 +262,14 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             "motion_generator must be one of "
             f"{sorted(MOTION_GENERATOR_BUILDERS)}; got {motion_generator!r}."
         )
+
+    from uncertain_feedback.envs import (  # pylint: disable=import-outside-toplevel
+        ENV_BUILDERS,
+    )
+
+    env = str(data.get("env", "kinematic"))
+    if env not in ENV_BUILDERS:
+        raise ValueError(f"env must be one of {sorted(ENV_BUILDERS)}; got {env!r}.")
 
     uq_data = _mapping(data.get("uq"), "uq")
     cartesian_data = _mapping(data.get("cartesian"), "cartesian")
@@ -413,6 +422,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             data.get("preference_window", 50), "preference_window"
         ),
         motion_generator=motion_generator,
+        env=env,
         user=str(data.get("user", "unrestricted")),
         persona_goals=persona_goals,
         transfer=TransferConfig(

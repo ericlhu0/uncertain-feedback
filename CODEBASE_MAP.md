@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-20
+**Last updated:** 2026-07-21
 **Branch:** pose-dependent-users
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -97,6 +97,10 @@ uncertain-feedback/
 │   │       ├── make_initial_pose.py  # Build an HML pose from a body config
 │   │       ├── visualize_sitting_pose.py
 │   │       └── motion-diffusion-model/   # Git submodule (GuyTevet/MDM)
+│   ├── envs/
+│   │   ├── __init__.py               # ENV_BUILDERS registry + make_env
+│   │   ├── base.py                   # ExecutionEnv ABC (execute one commanded q, return achieved q; overridable hold hook for no-motion steps)
+│   │   └── kinematic.py              # KinematicEnv (pass-through, original open-loop behavior)
 │   ├── uncertainty/
 │   │   ├── clustering/               # Trajectory clustering methods (CLUSTERER_BUILDERS registry + make_clusterer)
 │   │   │   ├── base.py               # TrajectoryClusterer (template: _positions_to_features/_to_features + _fit_predict), medoid_indices, agglomerative_labels
@@ -363,6 +367,7 @@ When `llm_cost.enabled: true` in the YAML:
 |------------------------|----------|-------------------------------------------------------|
 | `planner`              | str      | One of the 5 planner choices                         |
 | `motion_generator`     | str      | Text-to-motion backend: `mdm` (default) or `kimodo`  |
+| `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default; sim/real robot envs to come). Passed to the planner constructor (`build_run`, demo runner); every planner's `step` returns the env-achieved q. |
 | `steps`                | int      | Total MPC steps to run                               |
 | `horizon`              | int      | MPC look-ahead steps                                 |
 | `n_mpc_samples`        | int      | Candidate action sequences per step                  |

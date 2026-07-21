@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt
 import numpy as np
 
+from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.planners.mpc.arm_mpc import (
     SmplLeftArmMPC,
     _as_state_q,
@@ -107,6 +108,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
         seed: int | None = None,
+        env: ExecutionEnv | None = None,
     ) -> None:
         # Base sets up _config, _goals deque, _prev_best, _vis.
         # Pass visualize=False; MDM overrides vis config below.
@@ -123,6 +125,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
             body_pos=body_pos,
             extra_costs=extra_costs,
             seed=seed,
+            env=env,
         )
         self.advance_threshold = advance_threshold
         self._max_playback_delta = max_playback_delta
@@ -371,19 +374,23 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         """
         playing = self._in_playback()
         if playing:
-            next_q = self._advance_playback(np.asarray(current_q, dtype=np.float64))
+            next_q = self._env.execute(
+                self._advance_playback(np.asarray(current_q, dtype=np.float64))
+            )
             dist = (
                 float(np.linalg.norm(next_q - self._goals[0])) if self._goals else 0.0
             )
         elif not self._goals:
             # Playback done and no final goal queued (e.g. a headless rollout
             # that only follows the trajectory): hold the last pose.
-            next_q = np.asarray(current_q, dtype=np.float64).copy()
+            next_q = self._env.hold(np.asarray(current_q, dtype=np.float64).copy())
             dist = 0.0
         else:
             target_q = self._goals[0]
             first_action, _ = self.solve(current_q)
-            next_q = _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
+            next_q = self._env.execute(
+                _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
+            )
 
             threshold = (
                 advance_threshold

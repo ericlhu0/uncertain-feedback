@@ -28,6 +28,7 @@ import numpy as np
 import yaml
 
 from uncertain_feedback.consts import MDM_ROOT
+from uncertain_feedback.envs import make_env
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.correction_session import (
@@ -481,6 +482,7 @@ def build_run(
         "body_pos": body_pos,
         "extra_costs": extra_costs,
         "seed": cfg.seed,
+        "env": make_env(cfg.env),
     }
 
     mpc: SmplLeftArmMPC
@@ -601,6 +603,9 @@ def run_planning_loop(
     always running the full ``n_steps`` and idling at the goal. ``n_steps`` is
     therefore an upper bound. ``LoopResult.reached_goal`` records whether the loop
     stopped this way.
+
+    Each ``mpc.step`` realizes its commanded configuration through the
+    planner's execution env, so ``q_history`` records achieved configurations.
     """
     q = np.asarray(q0, dtype=np.float64).copy()
     q_history: list[np.ndarray] = []

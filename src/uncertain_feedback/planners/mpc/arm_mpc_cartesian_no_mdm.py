@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_base import _CartesianGoalsMixin
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
@@ -38,6 +39,7 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
         seed: int | None = None,
+        env: ExecutionEnv | None = None,
     ) -> None:
         if fk is None:
             raise ValueError("fk is required for ArmMPCCartesianNoMDM.")
@@ -54,6 +56,7 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
             body_pos=body_pos,
             extra_costs=extra_costs,
             seed=seed,
+            env=env,
         )
         self._init_cartesian(
             cartesian_goals,
@@ -71,10 +74,12 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
     def step(self, current_q: np.ndarray) -> np.ndarray:
         """Perform one pure Cartesian MPC step."""
         if not self._cartesian_goals:
-            return np.asarray(current_q, dtype=np.float64)
+            return self._env.hold(np.asarray(current_q, dtype=np.float64))
 
         first_action, _ = self.solve(current_q)
-        next_q = _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
+        next_q = self._env.execute(
+            _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
+        )
 
         arm_pos = self._fk_inst.fk(
             q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),

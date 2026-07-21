@@ -14,6 +14,7 @@ import pytest
 import yaml
 from scipy.spatial.transform import Rotation
 
+from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.experiments import cluster_comparison
 from uncertain_feedback.experiments.transfer_experiment import _choose_oracle_cluster
 from uncertain_feedback.planners import run as planner_run
@@ -379,6 +380,26 @@ def test_seeded_mpc_sampling_is_reproducible() -> None:
     np.testing.assert_array_equal(first_plan, second_plan)
 
 
+def test_mpc_step_returns_env_achieved_state() -> None:
+    class FixedResultEnv(ExecutionEnv):
+        def __init__(self) -> None:
+            self.commands: list[np.ndarray] = []
+
+        def execute(self, q_cmd: np.ndarray) -> np.ndarray:
+            self.commands.append(q_cmd)
+            return np.full(Q_DIM, 0.5)
+
+    env = FixedResultEnv()
+    planner = SmplLeftArmMPC(
+        goals=[np.zeros(Q_DIM)], horizon=2, n_mpc_samples=8, seed=17, env=env
+    )
+
+    achieved = planner.step(np.zeros(Q_DIM, dtype=np.float64))
+
+    assert len(env.commands) == 1
+    np.testing.assert_array_equal(achieved, np.full(Q_DIM, 0.5))
+
+
 def test_load_mpc_config_with_elbow_flexion_and_shoulder_abduction(tmp_path) -> None:
     path = _write_config(
         tmp_path,
@@ -455,6 +476,26 @@ costs:
     )
 
     with pytest.raises(ValueError, match="Unknown MPC cost"):
+        load_mpc_config(path)
+
+
+def test_load_mpc_config_env_defaults_to_kinematic(tmp_path) -> None:
+    path = _write_config(tmp_path, _base_yaml())
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.env == "kinematic"
+
+
+def test_load_mpc_config_rejects_unknown_env(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml("""
+env: holodeck
+"""),
+    )
+
+    with pytest.raises(ValueError, match="env must be one of"):
         load_mpc_config(path)
 
 

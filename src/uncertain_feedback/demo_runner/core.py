@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from uncertain_feedback.demo_runner.smpl_mesh import SmplMeshCache
+from uncertain_feedback.envs import make_env
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.planners.mpc import LeftArmMPCCartesian
@@ -366,6 +367,7 @@ class DemoRig:
             trajectory_fraction=self.cfg.trajectory_fraction,
             n_diffusion_samples=self.cfg.uq.diffusion_samples,
             n_clusters=self.cfg.uq.n_clusters,
+            env=make_env(self.cfg.env),
         )
 
     def package_trajectory(

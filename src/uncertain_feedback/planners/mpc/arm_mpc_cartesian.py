@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_base import _CartesianGoalsMixin
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
@@ -84,6 +85,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
         clusterer: TrajectoryClusterer | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
         seed: int | None = None,
+        env: ExecutionEnv | None = None,
     ) -> None:
         if fk is None:
             raise ValueError("fk is required for LeftArmMPCCartesian.")
@@ -106,6 +108,7 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             clusterer=clusterer,
             extra_costs=extra_costs,
             seed=seed,
+            env=env,
         )
         self._init_cartesian(
             cartesian_goals,
@@ -157,7 +160,9 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
 
     def _playback_step(self, current_q: np.ndarray) -> np.ndarray:
         """Take one rate-limited MDM playback step and update the visualiser."""
-        next_q = self._advance_playback(np.asarray(current_q, dtype=np.float64))
+        next_q = self._env.execute(
+            self._advance_playback(np.asarray(current_q, dtype=np.float64))
+        )
         dist = (
             float(np.linalg.norm(next_q - self._preview_q))
             if self._preview_q is not None
@@ -205,10 +210,12 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
     def _cartesian_step(self, current_q: np.ndarray) -> np.ndarray:
         if not self._cartesian_goals:
             # Nothing left to do — hold position.
-            return np.asarray(current_q, dtype=np.float64)
+            return self._env.hold(np.asarray(current_q, dtype=np.float64))
 
         first_action, _ = self.solve(current_q)
-        next_q = _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
+        next_q = self._env.execute(
+            _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
+        )
 
         arm_pos = self._fk_inst.fk(
             q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),

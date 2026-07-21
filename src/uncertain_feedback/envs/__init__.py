@@ -1,0 +1,33 @@
+"""Execution environments and their selection registry.
+
+Mirrors the ``MOTION_GENERATOR_BUILDERS`` pattern in
+``motion_generators/__init__.py``: a name → builder mapping plus a
+:func:`make_env` factory. Builders import their env lazily so importing this
+registry never forces sim or hardware dependencies.
+"""
+
+from __future__ import annotations
+
+from typing import Callable
+
+from uncertain_feedback.envs.base import ExecutionEnv
+
+
+def _build_kinematic() -> ExecutionEnv:
+    from uncertain_feedback.envs.kinematic import (  # pylint: disable=import-outside-toplevel
+        KinematicEnv,
+    )
+
+    return KinematicEnv()
+
+
+ENV_BUILDERS: dict[str, Callable[[], ExecutionEnv]] = {
+    "kinematic": _build_kinematic,
+}
+
+
+def make_env(name: str) -> ExecutionEnv:
+    """Construct the execution env selected by ``name``."""
+    if name not in ENV_BUILDERS:
+        raise ValueError(f"Unknown env '{name}'. Available: {sorted(ENV_BUILDERS)}")
+    return ENV_BUILDERS[name]()

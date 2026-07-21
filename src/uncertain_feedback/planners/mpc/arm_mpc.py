@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt
 import numpy as np
 
+from uncertain_feedback.envs.base import ExecutionEnv
+from uncertain_feedback.envs.kinematic import KinematicEnv
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     ElbowHeightCost,
@@ -84,6 +86,8 @@ class SmplLeftArmMPC:
         body_pos:        ``(22, 3)`` background skeleton joint positions
                          (optional).
         seed:            Seed for planner-local action sampling (optional).
+        env:             Execution environment realizing each commanded step
+                         (default: :class:`KinematicEnv`, exact pass-through).
     """
 
     def __init__(
@@ -100,6 +104,7 @@ class SmplLeftArmMPC:
         body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
         seed: int | None = None,
+        env: ExecutionEnv | None = None,
     ) -> None:
         self._horizon = horizon
         self._n_mpc_samples = n_mpc_samples
@@ -107,6 +112,7 @@ class SmplLeftArmMPC:
         self._rng = np.random.default_rng(seed) if seed is not None else None
         self.visualize = visualize
         self._extra_costs = extra_costs or CompositeTrajectoryCost()
+        self._env: ExecutionEnv = env if env is not None else KinematicEnv()
 
         self._goals: deque[np.ndarray] = deque(
             [_as_state_q(g, "goal") for g in goals] if goals else []
@@ -319,9 +325,10 @@ class SmplLeftArmMPC:
         """Perform one MPC step.
 
         Samples action sequences, applies the best first action to ``current_q``
-        via SO(3) composition, and returns the updated joint angles.  If the
-        current goal is reached (L2 distance < ``goal_threshold``) and more
-        goals remain, the front goal is popped and the warm-start is reset.
+        via SO(3) composition, realizes the result through the execution env,
+        and returns the achieved joint angles.  If the current goal is reached
+        (L2 distance < ``goal_threshold``) and more goals remain, the front
+        goal is popped and the warm-start is reset.
         If ``visualize=True`` was set at construction, the live window is
         updated automatically.
 
@@ -329,10 +336,12 @@ class SmplLeftArmMPC:
             current_q: ``(7,)`` clavicle/shoulder/elbow state.
 
         Returns:
-            ``(7,)`` updated planner state.
+            ``(7,)`` achieved planner state.
         """
         first_action, _ = self.solve(current_q)
-        next_q = _compose_q(_as_state_q(current_q, "current_q"), first_action)
+        next_q = self._env.execute(
+            _compose_q(_as_state_q(current_q, "current_q"), first_action)
+        )
 
         # Advance goal queue when the current goal is reached
         goal = self.current_goal

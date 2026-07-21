@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Callable
 import matplotlib.pyplot as plt
 import numpy as np
 
+from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
@@ -106,6 +107,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
         clusterer: TrajectoryClusterer | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
         seed: int | None = None,
+        env: ExecutionEnv | None = None,
     ) -> None:
         super().__init__(
             horizon=horizon,
@@ -123,6 +125,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             body_pos=body_pos,
             extra_costs=extra_costs,
             seed=seed,
+            env=env,
         )
         self._n_diffusion_samples = n_diffusion_samples
         if clusterer is not None:

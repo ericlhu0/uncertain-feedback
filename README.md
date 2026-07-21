@@ -310,6 +310,18 @@ Both backends expose the same interface, so any MDM-backed planner
 (`arm_mpc_mdm`, `arm_mpc_mdm_uq`, `arm_mpc_cartesian`) works with either by setting
 `motion_generator:` in its config.
 
+### Execution environment (`env`)
+
+The execution environment realizing each commanded MPC step is selected by the
+optional YAML key `env`:
+- `kinematic` (default): the commanded arm configuration is achieved exactly
+  (open-loop kinematic rollout, the original behavior).
+
+Every planner takes the env at construction (defaulting to `kinematic`), and
+`step` returns the configuration the env actually achieved. Sim- and
+real-robot environments (a robot physically moving the user's arm) will be
+added as further `env` values; see `src/uncertain_feedback/envs/`.
+
 ### Simulated user (`user:`)
 
 Every run loads a simulated care recipient alongside the pose, selected by the

@@ -114,6 +114,9 @@ class MpcRunConfig:
     n_mpc_samples: int
     max_angle_delta: float
     pose: Path | None
+    # Optional (3, 3) [shoulder, elbow, wrist] axis-angle override for the
+    # initial left-arm pose (same semantics as the --arm CLI flag, which wins).
+    arm: list[list[float]] | None
     goal_threshold: float
     advance_threshold: float
     max_playback_delta: float
@@ -277,6 +280,14 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     llm_cost_data = _mapping(data.get("llm_cost"), "llm_cost")
 
     normalized_goals = _goal_list(cartesian_data.get("goals", []), "cartesian.goals")
+    arm_data = data.get("arm")
+    arm: list[list[float]] | None = None
+    if arm_data is not None:
+        arm = _goal_list(arm_data, "arm")
+        if len(arm) != 3:
+            raise ValueError(
+                "arm must be a 3x3 list of [shoulder, elbow, wrist] axis-angles."
+            )
     transfer_data = _mapping(data.get("transfer"), "transfer")
     corrections_data = _mapping(data.get("corrections"), "corrections")
     transfer_goals = _goal_list(transfer_data.get("goals", []), "transfer.goals")
@@ -346,6 +357,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         n_mpc_samples=_positive_int(data.get("n_mpc_samples"), "n_mpc_samples"),
         max_angle_delta=_float(data.get("max_angle_delta"), "max_angle_delta"),
         pose=_optional_path(data.get("pose"), "pose"),
+        arm=arm,
         goal_threshold=_float(data.get("goal_threshold", 0.01), "goal_threshold"),
         advance_threshold=_float(
             data.get("advance_threshold", 0.1), "advance_threshold"

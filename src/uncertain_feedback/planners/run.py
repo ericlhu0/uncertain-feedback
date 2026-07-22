@@ -29,6 +29,7 @@ import yaml
 
 from uncertain_feedback.consts import MDM_ROOT
 from uncertain_feedback.envs import make_env
+from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.correction_session import (
@@ -208,6 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save video to this path (.mp4 or .gif). Uses compact 1-panel layout.",
     )
     p.add_argument("--fps", type=int, default=20, help="FPS for saved video")
+    p.add_argument(
+        "--env-video",
+        type=Path,
+        default=None,
+        dest="env_video",
+        help="Save the execution env's rendering of the run (.mp4 or .gif)",
+    )
 
     # --- MDM args (arm_mpc_mdm, arm_mpc_mdm_uq) ---
     p.add_argument(
@@ -420,6 +428,7 @@ class RunSetup:
     visualize: bool
     compact: bool
     user: SimulatedUser
+    env: ExecutionEnv
 
 
 def build_run(
@@ -442,6 +451,8 @@ def build_run(
         num_denoising_steps=cfg.num_denoising_steps,
         seed=cfg.seed,
     )
+    if cfg.arm is not None:
+        initial_state.arm_aa = np.asarray(cfg.arm, dtype=np.float64)
     _apply_arm_override(initial_state, args.arm)
     arm_aa = initial_state.arm_aa
     body_pos = initial_state.body_pos
@@ -470,6 +481,9 @@ def build_run(
     default_goal = q0.copy()
     default_goal[1] += 0.7
 
+    env = make_env(cfg.env)
+    env.set_pose_context(fk, spine3_pos, spine3_aa, body_pos)
+
     common: dict = {
         "horizon": cfg.horizon,
         "n_mpc_samples": cfg.n_mpc_samples,
@@ -482,7 +496,7 @@ def build_run(
         "body_pos": body_pos,
         "extra_costs": extra_costs,
         "seed": cfg.seed,
-        "env": make_env(cfg.env),
+        "env": env,
     }
 
     mpc: SmplLeftArmMPC
@@ -556,6 +570,7 @@ def build_run(
         visualize=visualize,
         compact=compact,
         user=user,
+        env=env,
     )
 
 
@@ -1139,6 +1154,9 @@ def main() -> None:
             if prior_frames:
                 vis.prepend_frames(prior_frames)
             vis.finish_live(str(args.save), fps=args.fps)
+
+    if args.env_video is not None:
+        setup.env.save_video(args.env_video, fps=args.fps)
 
     if args.live:
         plt.ioff()

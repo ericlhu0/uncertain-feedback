@@ -382,12 +382,21 @@ def test_seeded_mpc_sampling_is_reproducible() -> None:
 
 def test_mpc_step_returns_env_achieved_state() -> None:
     class FixedResultEnv(ExecutionEnv):
+        """Env stub that records commands and returns a fixed achieved state."""
+
         def __init__(self) -> None:
+            super().__init__()
             self.commands: list[np.ndarray] = []
 
         def execute(self, q_cmd: np.ndarray) -> np.ndarray:
             self.commands.append(q_cmd)
             return np.full(Q_DIM, 0.5)
+
+        def visualize(self, path: Path | None = None) -> np.ndarray:
+            raise NotImplementedError
+
+        def save_video(self, path: str | Path, fps: int = 20) -> None:
+            raise NotImplementedError
 
     env = FixedResultEnv()
     planner = SmplLeftArmMPC(
@@ -476,6 +485,31 @@ costs:
     )
 
     with pytest.raises(ValueError, match="Unknown MPC cost"):
+        load_mpc_config(path)
+
+
+def test_load_mpc_config_parses_arm_override(tmp_path) -> None:
+    path = _write_config(
+        tmp_path,
+        _base_yaml(
+            "arm:\n"
+            "  - [0.1, 0.2, 0.3]\n"
+            "  - [0.4, 0.5, 0.6]\n"
+            "  - [0.7, 0.8, 0.9]\n"
+        ),
+    )
+
+    cfg = load_mpc_config(path)
+
+    assert cfg.arm == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
+
+
+def test_load_mpc_config_rejects_wrong_shape_arm(tmp_path) -> None:
+    path = _write_config(
+        tmp_path, _base_yaml("arm:\n  - [0.1, 0.2, 0.3]\n  - [0.4, 0.5, 0.6]\n")
+    )
+
+    with pytest.raises(ValueError, match="arm must be a 3x3"):
         load_mpc_config(path)
 
 

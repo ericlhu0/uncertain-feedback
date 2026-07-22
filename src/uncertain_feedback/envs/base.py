@@ -10,12 +10,40 @@ actually achieved, which feeds the next planning step.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 
 class ExecutionEnv(ABC):
     """Abstract base class for execution environments."""
+
+    def __init__(self) -> None:
+        self._fk: SmplLeftArmFK | None = None
+        self._spine3_pos: np.ndarray | None = None
+        self._spine3_aa: np.ndarray | None = None
+        self._body_pos: np.ndarray | None = None
+
+    def set_pose_context(
+        self,
+        fk: SmplLeftArmFK,
+        spine3_pos: np.ndarray | None,
+        spine3_aa: np.ndarray | None,
+        body_pos: np.ndarray | None = None,
+    ) -> None:
+        """Attach the run's kinematics so the env matches the planner's FK.
+
+        ``body_pos`` is the ``(22, 3)`` decoded initial body pose; envs that
+        render the whole body use it, defaulting to the SMPL T-pose.
+        """
+        self._fk = fk
+        self._spine3_pos = spine3_pos
+        self._spine3_aa = spine3_aa
+        self._body_pos = body_pos
 
     @abstractmethod
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
@@ -33,3 +61,19 @@ class ExecutionEnv(ABC):
         controller engaged).
         """
         return q
+
+    @abstractmethod
+    def visualize(self, path: Path | None = None) -> np.ndarray:
+        """Render the last executed configuration as an ``(H, W, 3)`` image.
+
+        Saves the image to ``path`` when given. Requires
+        :meth:`set_pose_context` and at least one :meth:`execute`/:meth:`hold`.
+        """
+
+    @abstractmethod
+    def save_video(self, path: str | Path, fps: int = 20) -> None:
+        """Write a video of every configuration executed or held so far.
+
+        Requires :meth:`set_pose_context` and at least one
+        :meth:`execute`/:meth:`hold`.
+        """

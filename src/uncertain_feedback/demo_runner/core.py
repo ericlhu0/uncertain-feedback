@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from uncertain_feedback.demo_runner.smpl_mesh import SmplMeshCache
 from uncertain_feedback.envs import make_env
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators import make_motion_generator
@@ -58,6 +57,7 @@ from uncertain_feedback.simulated_users.personas import (
     DEFAULT_ARM_JOINT_LIMITS,
     PERSONAS,
 )
+from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 
 if TYPE_CHECKING:
     from uncertain_feedback.demo_runner.session import Session
@@ -347,6 +347,8 @@ class DemoRig:
         goal: np.ndarray,
         extra_costs: CompositeTrajectoryCost,
     ) -> LeftArmMPCCartesian:
+        env = make_env(self.cfg.env)
+        env.set_pose_context(self.fk, self.spine3_pos, self.spine3_aa, self.body_pos)
         return LeftArmMPCCartesian(
             cartesian_goals=[goal.copy()],
             initial_q=start_q,
@@ -367,7 +369,7 @@ class DemoRig:
             trajectory_fraction=self.cfg.trajectory_fraction,
             n_diffusion_samples=self.cfg.uq.diffusion_samples,
             n_clusters=self.cfg.uq.n_clusters,
-            env=make_env(self.cfg.env),
+            env=env,
         )
 
     def package_trajectory(

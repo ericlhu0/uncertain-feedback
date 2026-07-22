@@ -8,6 +8,7 @@ from argparse import Namespace
 
 import numpy as np
 
+from uncertain_feedback.envs.kinematic import KinematicEnv
 from uncertain_feedback.planners import correction_session as session_module
 from uncertain_feedback.planners.correction_session import (
     CorrectionRoundResult,
@@ -209,6 +210,7 @@ corrections:
         visualize=False,
         compact=False,
         user=user,
+        env=KinematicEnv(),
     )
     args = Namespace(
         text=None,

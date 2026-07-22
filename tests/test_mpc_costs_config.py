@@ -382,6 +382,8 @@ def test_seeded_mpc_sampling_is_reproducible() -> None:
 
 def test_mpc_step_returns_env_achieved_state() -> None:
     class FixedResultEnv(ExecutionEnv):
+        """Env stub that records commands and returns a fixed achieved state."""
+
         def __init__(self) -> None:
             super().__init__()
             self.commands: list[np.ndarray] = []

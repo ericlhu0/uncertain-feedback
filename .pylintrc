@@ -7,6 +7,9 @@ ignore-paths = .*mdm_parser_util.*,.*sample_leftarm.*,.*motion-diffusion-model/.
 # cv2 builds its bindings at import time, so pylint cannot see its members.
 generated-members = cv2.*
 
+# pybullet is a C extension; allow pylint to introspect it for member checks.
+extension-pkg-allow-list = pybullet
+
 [MESSAGES CONTROL]
 # The size metrics are disabled because MPC rollouts, HML263 conversion and the
 # demo_runner request handlers are inherently long numeric procedures; splitting

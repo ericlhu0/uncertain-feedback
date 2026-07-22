@@ -63,7 +63,8 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_llm_agent.yaml  # backend: agent (codex CLI)
 │   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
 │   │           ├── arm_mpc_cartesian_mdm_llm_multiround.yaml # pose-dependent multi-round experiment
-│   │           └── arm_mpc_cartesian_no_mdm.yaml
+│   │           ├── arm_mpc_cartesian_no_mdm.yaml
+│   │           └── arm_mpc_cartesian_no_mdm_sim.yaml  # same, with env: sim_robot_visual
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
 │   │   ├── run_experiment.py         # CLI: one persona + one backend on the original goal
@@ -99,8 +100,11 @@ uncertain-feedback/
 │   │       └── motion-diffusion-model/   # Git submodule (GuyTevet/MDM)
 │   ├── envs/
 │   │   ├── __init__.py               # ENV_BUILDERS registry + make_env
-│   │   ├── base.py                   # ExecutionEnv ABC (execute one commanded q, return achieved q; overridable hold hook for no-motion steps)
-│   │   └── kinematic.py              # KinematicEnv (pass-through, original open-loop behavior)
+│   │   ├── base.py                   # ExecutionEnv ABC (execute/hold; set_pose_context attaches the run's FK; abstract visualize/save_video)
+│   │   ├── kinematic.py              # KinematicEnv (pass-through; matplotlib visualize/save_video)
+│   │   ├── grasp.py                  # grasp_pose_fk: human q → gripper grasp pose on the forearm (shared with future real-robot env)
+│   │   ├── sim_robot_visual.py       # SimRobotVisualEnv (no physics: kinematic human rendered as posed SMPL mesh + Panda posed via PyBullet IK)
+│   │   └── assets/panda/             # Franka Panda URDF + meshes (vendored from empriselab/limb-manipulation)
 │   ├── uncertainty/
 │   │   ├── clustering/               # Trajectory clustering methods (CLUSTERER_BUILDERS registry + make_clusterer)
 │   │   │   ├── base.py               # TrajectoryClusterer (template: _positions_to_features/_to_features + _fit_predict), medoid_indices, agglomerative_labels
@@ -133,7 +137,6 @@ uncertain-feedback/
 │   │       ├── server.py             # Flask web UI for hand-authoring trajectories
 │   │       └── hml_decode.py         # HML decode utilities for the editor
 │   ├── demo_runner/                  # Sole browser demo tool: guided pipeline (scenario → language correction → cost generation → apply feedback), demo/dev modes, session replay. Port 6781
-│   │   ├── smpl_mesh.py              # Neutral SMPL vertex generation + binary trajectory mesh cache
 │   │   ├── core.py                   # DemoRig: process-lifetime state (config, personas+CRUD, named start/goal configs, motion gen, pose/FK/mesh/context) + begin/list/resume session
 │   │   ├── session.py                # Session (one persona: corpus + rounds + unified cost, session.json persistence/resume; rounds record root-to-leaf cluster_labels) and Trajectory (live MPC stepping + per-trajectory correction scratch, including per-level explicit undesirable-cluster marks). Replay defers provisional cluster/cost events and records only the final accepted selection path
 │   │   ├── server.py                 # create_app(static_dir) factory holding every pipeline route + boot() (stdout tee + rig) + read-only /api/artifact/<path> rooted at demo artifacts, plus runner-only one-step live MPC routes and /api/replay/<name>[/<i>] (re-mints dead mesh ids from recorded arm_positions)
@@ -142,7 +145,8 @@ uncertain-feedback/
 │   │   ├── base_model.py             # BaseModel ABC (get_full_output)
 │   │   └── openai_model.py           # OpenAI wrapper implementing BaseModel (Chat + Responses APIs)
 │   └── utils/
-│       └── plot.py                   # ArmVisualizer (live MPC window + static drawing)
+│       ├── plot.py                   # ArmVisualizer (live MPC window + static drawing)
+│       └── smpl_mesh.py              # SmplMeshCache: coherent SMPL mesh fitted to decoded body joints, arm re-posed per frame (demo runner UI + sim_robot_visual env)
 ├── README.md                         # Full setup + run instructions
 ├── CODEBASE_MAP.md                   # This file
 ├── CLAUDE.md                         # Instructions for AI assistants
@@ -276,7 +280,7 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 - **`anatomical_elbow_wrist_slots(...)`** (module function) — anatomically-constrained
   elbow + wrist slot rotations for the left arm, shared by the three reconstruction sites
   (`arm_aa_from_positions`, `hml_smpl_conversion.positions_to_smpl_body_pose`,
-  `demo_runner/smpl_mesh._generate`). The elbow slot carries the recovered shoulder
+  `utils/smpl_mesh._generate`). The elbow slot carries the recovered shoulder
   internal/external rotation (twist about the upper arm onto the observed flexion-plane
   normal); the wrist slot is a pure forearm hinge with locked (neutral) pronation,
   referenced to the stable elbow frame. Positions are preserved exactly. See audit §3a.
@@ -367,13 +371,14 @@ When `llm_cost.enabled: true` in the YAML:
 |------------------------|----------|-------------------------------------------------------|
 | `planner`              | str      | One of the 5 planner choices                         |
 | `motion_generator`     | str      | Text-to-motion backend: `mdm` (default) or `kimodo`  |
-| `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default; sim/real robot envs to come). Passed to the planner constructor (`build_run`, demo runner); every planner's `step` returns the env-achieved q. |
+| `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default) or `sim_robot_visual` (no-physics PyBullet scene with a Panda IK'd to a forearm grasp point). Passed to the planner constructor (`build_run`, demo runner) after `set_pose_context`; every planner's `step` returns the env-achieved q. Envs render via `visualize()`/`save_video()` (`run.py --env-video`). |
 | `steps`                | int      | Total MPC steps to run                               |
 | `horizon`              | int      | MPC look-ahead steps                                 |
 | `n_mpc_samples`        | int      | Candidate action sequences per step                  |
 | `seed`                 | int      | MPC action-sampling seed (default 0); also locks each MDM generation request in Demo Runner |
 | `max_angle_delta`      | float    | Sampling std dev (radians)                           |
 | `pose`                 | path?    | HML pose `.pt` file for initial body state           |
+| `arm`                  | 3×3 list? | Initial left-arm `[shoulder, elbow, wrist]` axis-angle override on top of `pose` (same semantics as `--arm`, which wins when both are given) |
 | `goal_threshold`       | float    | L2 dist threshold to pop goal (default 0.01)         |
 | `advance_threshold`    | float    | Goal-advance threshold for the MPC resume phase (default 0.1). MDM frames are now played back directly, so this no longer governs MDM frame advancement. |
 | `max_playback_delta`   | float    | Max per-joint rotation (radians) per step while following the MDM trajectory (default 0.1). Rate limit: caps playback angular speed so the initial jump into the trajectory and any large frame-to-frame jump are eased rather than snapped. |

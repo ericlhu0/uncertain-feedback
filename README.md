@@ -284,9 +284,11 @@ uv run python src/uncertain_feedback/planners/run.py --mpc-config path/to/mpc.ya
 ```
 
 Controller settings live in the required YAML file passed with `--mpc-config`.
-The initial whole-body HML pose can be set with `pose:` in the YAML. Runtime
-inputs still stay on the command line: `--model-path`, `--arm`, `--text`, `--save`, `--live`, and `--frozen-body`.
-`--pose` is still accepted as an override for the YAML pose.
+The initial whole-body HML pose can be set with `pose:` in the YAML, and the
+initial left arm can be overridden with an inline 3×3 `arm:` list of
+`[shoulder, elbow, wrist]` axis-angles. Runtime inputs still stay on the
+command line: `--model-path`, `--arm`, `--text`, `--save`, `--live`, and `--frozen-body`.
+`--pose` and `--arm` are still accepted as overrides for the YAML values.
 
 Supported YAML `planner` values:
 - `arm_mpc`: joint-space MPC only, no MDM.
@@ -316,11 +318,33 @@ The execution environment realizing each commanded MPC step is selected by the
 optional YAML key `env`:
 - `kinematic` (default): the commanded arm configuration is achieved exactly
   (open-loop kinematic rollout, the original behavior).
+- `sim_robot_visual`: same kinematic pass-through for the human arm, plus a
+  visualization-only PyBullet scene (no physics) in which a Franka Panda is
+  posed via IK each step so its end-effector holds a grasp point on the human
+  forearm just distal of the elbow. The human renders as a posed SMPL body
+  mesh fitted to the run's decoded initial body pose (the same fit the demo
+  runner displays — sitting for the demo poses), with the left arm re-posed
+  per step. The robot model is vendored from
+  [limb-manipulation](https://github.com/empriselab/limb-manipulation) under
+  `src/uncertain_feedback/envs/assets/panda/`.
 
 Every planner takes the env at construction (defaulting to `kinematic`), and
-`step` returns the configuration the env actually achieved. Sim- and
-real-robot environments (a robot physically moving the user's arm) will be
-added as further `env` values; see `src/uncertain_feedback/envs/`.
+`step` returns the configuration the env actually achieved. Envs also expose
+`visualize()` (image of the current state) and `save_video()` (video of the
+whole executed trajectory); `sim_robot_visual` frames stack a front view over
+a top-down view. Pass `--env-video out.mp4` to `run.py` to write the env's
+video at the end of a run:
+
+```
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_sim.yaml \
+    --env-video env_rollout.mp4
+```
+
+(`arm_mpc_cartesian_no_mdm_sim.yaml` is the Cartesian no-MDM config with
+`env: sim_robot_visual`; the `--env-video` flag works with any env). A
+real-robot environment will be added as a further `env` value; see
+`src/uncertain_feedback/envs/`.
 
 ### Simulated user (`user:`)
 

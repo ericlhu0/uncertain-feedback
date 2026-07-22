@@ -74,7 +74,11 @@ develop = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-uncertain_feedback = ["py.typed"]
+uncertain_feedback = [
+    "py.typed",
+    "envs/assets/panda/*.urdf",
+    "envs/assets/panda/meshes/*/*",
+]
 
 [tool.black]
 line-length = 88
@@ -139,6 +143,7 @@ module = [
     "train.*",
     "smplx",
     "tqdm.*",
+    "pybullet",
 ]
 ignore_missing_imports = true
 

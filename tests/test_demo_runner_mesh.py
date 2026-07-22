@@ -8,8 +8,9 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.demo_runner import server, smpl_mesh
+from uncertain_feedback.demo_runner import server
 from uncertain_feedback.planners.mpc.kinematics import anatomical_elbow_wrist_slots
+from uncertain_feedback.utils import smpl_mesh
 
 
 class _FakeSmpl:

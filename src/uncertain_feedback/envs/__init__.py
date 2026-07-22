@@ -21,8 +21,17 @@ def _build_kinematic() -> ExecutionEnv:
     return KinematicEnv()
 
 
+def _build_sim_robot_visual() -> ExecutionEnv:
+    from uncertain_feedback.envs.sim_robot_visual import (  # pylint: disable=import-outside-toplevel
+        SimRobotVisualEnv,
+    )
+
+    return SimRobotVisualEnv()
+
+
 ENV_BUILDERS: dict[str, Callable[[], ExecutionEnv]] = {
     "kinematic": _build_kinematic,
+    "sim_robot_visual": _build_sim_robot_visual,
 }
 
 

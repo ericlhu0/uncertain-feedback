@@ -101,7 +101,9 @@ def _run(fn: Callable[[], Any]) -> ResponseReturnValue:
         import traceback
 
         traceback.print_exc()
-        return jsonify({"error": str(exc)}), 400
+        # Fall back to repr: bare exceptions (AssertionError()) stringify to "",
+        # which reaches the browser as an error banner with no text.
+        return jsonify({"error": str(exc) or repr(exc)}), 400
 
 
 def _run_heavy(fn: Callable[[], Any]) -> ResponseReturnValue:
@@ -386,7 +388,7 @@ def create_app(static_dir: Path) -> Flask:
                 import traceback
 
                 traceback.print_exc()
-                combine_job["error"] = str(exc)
+                combine_job["error"] = str(exc) or repr(exc)
 
         thread = threading.Thread(target=work, daemon=True)
         combine_job["thread"] = thread

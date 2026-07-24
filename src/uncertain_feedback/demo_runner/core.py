@@ -347,7 +347,7 @@ class DemoRig:
         goal: np.ndarray,
         extra_costs: CompositeTrajectoryCost,
     ) -> LeftArmMPCCartesian:
-        env = make_env(self.cfg.env)
+        env = make_env(self.cfg.env, **self.cfg.env_params)
         env.set_pose_context(self.fk, self.spine3_pos, self.spine3_aa, self.body_pos)
         return LeftArmMPCCartesian(
             cartesian_goals=[goal.copy()],

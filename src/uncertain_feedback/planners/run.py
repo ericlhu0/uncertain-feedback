@@ -481,7 +481,7 @@ def build_run(
     default_goal = q0.copy()
     default_goal[1] += 0.7
 
-    env = make_env(cfg.env)
+    env = make_env(cfg.env, **cfg.env_params)
     env.set_pose_context(fk, spine3_pos, spine3_aa, body_pos)
 
     common: dict = {

@@ -327,6 +327,27 @@ optional YAML key `env`:
   per step. The robot model is vendored from
   [limb-manipulation](https://github.com/empriselab/limb-manipulation) under
   `src/uncertain_feedback/envs/assets/panda/`.
+- `sim_mannequin`: physics-based real-world proxy. The Panda starts grasping
+  the forearm of the passive 4-DOF articulated mannequin left arm from
+  [limb-manipulation](https://github.com/empriselab/limb-manipulation)
+  (vendored under `src/uncertain_feedback/envs/assets/human/`, along with the
+  torso/head and remaining limbs rendered as static visual context) via a
+  fixed PyBullet constraint, and tracks the same forearm grasp-pose trajectory as
+  `sim_robot_visual` under rate-limited position control with
+  `stepSimulation` and gravity. The achieved arm configuration is measured
+  back from the mannequin's link positions (direction-based retargeting onto
+  the SMPL skeleton), so commanded and achieved configs diverge; the rendered
+  frames overlay the commanded arm pose as a green ghost skeleton
+  (capsules along shoulder→elbow→wrist plus elbow/wrist markers) so the
+  tracking error is visible. The
+  mannequin keeps the real hardware's link lengths, and its shoulder is
+  fixed, so clavicle commands are not realized — runs converge slower than
+  the kinematic envs (use more `steps`, see
+  `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml`). Tunable via the YAML
+  `env_params:` mapping (forwarded to the env constructor):
+  `robot_max_joint_delta` (per-step cap on each robot joint's travel, rad)
+  and `robot_base_offset` (Panda base position relative to spine3, pybullet
+  frame).
 
 Every planner takes the env at construction (defaulting to `kinematic`), and
 `step` returns the configuration the env actually achieved. Envs also expose
@@ -342,8 +363,9 @@ uv run python src/uncertain_feedback/planners/run.py \
 ```
 
 (`arm_mpc_cartesian_no_mdm_sim.yaml` is the Cartesian no-MDM config with
-`env: sim_robot_visual`; the `--env-video` flag works with any env). A
-real-robot environment will be added as a further `env` value; see
+`env: sim_robot_visual`; `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml` is the
+same run with `env: sim_mannequin`; the `--env-video` flag works with any
+env). A real-robot environment will be added as a further `env` value; see
 `src/uncertain_feedback/envs/`.
 
 ### Simulated user (`user:`)

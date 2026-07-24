@@ -133,6 +133,9 @@ class MpcRunConfig:
     preference_window: int = 50
     motion_generator: str = "mdm"
     env: str = "kinematic"
+    # Keyword arguments forwarded to the env constructor via make_env
+    # (e.g. sim_mannequin's robot_base_offset / robot_max_joint_delta).
+    env_params: dict[str, Any] = field(default_factory=dict)
     transfer: TransferConfig = TransferConfig()
     corrections: CorrectionConfig = CorrectionConfig()
     simulated_user: SimulatedUserConfig = SimulatedUserConfig()
@@ -273,6 +276,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     env = str(data.get("env", "kinematic"))
     if env not in ENV_BUILDERS:
         raise ValueError(f"env must be one of {sorted(ENV_BUILDERS)}; got {env!r}.")
+    env_params = _mapping(data.get("env_params"), "env_params")
 
     uq_data = _mapping(data.get("uq"), "uq")
     cartesian_data = _mapping(data.get("cartesian"), "cartesian")
@@ -435,6 +439,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         ),
         motion_generator=motion_generator,
         env=env,
+        env_params=env_params,
         user=str(data.get("user", "unrestricted")),
         persona_goals=persona_goals,
         transfer=TransferConfig(

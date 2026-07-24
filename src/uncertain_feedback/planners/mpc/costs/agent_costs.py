@@ -334,8 +334,10 @@ class AgentCostGenerator(CostGenerator):
         source = _REPO_ROOT / "src" / "uncertain_feedback"
         package = destination / "src" / "uncertain_feedback"
         package.mkdir(parents=True)
-        ignored = shutil.ignore_patterns("__pycache__", "*artifacts*")
-        for directory in ("planners", "uncertainty", "utils"):
+        # ``envs`` is staged because arm_mpc imports ExecutionEnv at module level;
+        # its meshes are skipped since nothing here constructs a sim env.
+        ignored = shutil.ignore_patterns("__pycache__", "*artifacts*", "assets")
+        for directory in ("planners", "uncertainty", "utils", "envs"):
             shutil.copytree(
                 source / directory,
                 package / directory,
@@ -373,6 +375,15 @@ class AgentCostGenerator(CostGenerator):
         sandbox_command = list(command)
         sandbox_command[0] = executable
         extra_mounts: list[str] = []
+        # ``--tmpfs /home`` masks the uv-managed interpreter that .venv/bin/python
+        # symlinks to, leaving the sandbox venv's python dangling. Re-expose the
+        # interpreter root at its own absolute path so the absolute symlink still
+        # resolves; parents[2] is the uv python directory, which also holds the
+        # unversioned symlink the venv actually points at.
+        venv_python = (_REPO_ROOT / ".venv/bin/python").resolve()
+        if venv_python.is_relative_to(Path.home()):
+            interpreter_root = venv_python.parents[2]
+            extra_mounts += ["--ro-bind", str(interpreter_root), str(interpreter_root)]
         sandbox_path = f"{_SANDBOX_VENV}/bin:/usr/local/bin:/usr/bin:/bin"
         executable_source = Path(executable)
         executable_path = executable_source.resolve()
@@ -398,18 +409,20 @@ class AgentCostGenerator(CostGenerator):
             sandbox_command.append(prompt)
 
             if executable_path.is_relative_to(Path.home()):
-                install_root = Path(executable).parent.parent.resolve()
+                # Derive the mount from the *resolved* binary: a standalone
+                # codex install puts a symlink in ~/.local/bin pointing at
+                # ~/.codex/packages/..., so mounting the symlink's grandparent
+                # would leave the real binary outside the sandbox.
+                install_root = executable_path.parent.parent
                 sandbox_install = Path("/tmp/codex-install")
-                extra_mounts = [
+                extra_mounts += [
                     "--dir",
                     str(sandbox_install),
                     "--ro-bind",
                     str(install_root),
                     str(sandbox_install),
                 ]
-                sandbox_command[0] = str(
-                    sandbox_install / "bin" / Path(executable).name
-                )
+                sandbox_command[0] = str(sandbox_install / "bin" / executable_path.name)
                 sandbox_path = f"{sandbox_install}/bin:{sandbox_path}"
 
         environment = {
@@ -435,6 +448,11 @@ class AgentCostGenerator(CostGenerator):
             for argument in ("--setenv", name, value)
         ]
         return [
+            # bubblewrap < 0.5 has no --clearenv; starting it from an already
+            # empty environment is equivalent, since every variable the sandbox
+            # needs is passed explicitly via --setenv.
+            "env",
+            "-i",
             bwrap,
             "--ro-bind",
             "/",
@@ -460,13 +478,19 @@ class AgentCostGenerator(CostGenerator):
             "--ro-bind",
             str((_REPO_ROOT / ".venv").resolve()),
             str(_SANDBOX_VENV),
+            # Mask the checkout itself: it holds the hidden persona definitions
+            # and every prior run's artifacts, which the agent must not read.
+            # ``--tmpfs /home`` alone only achieves this when the repo happens to
+            # live under /home. Everything the agent legitimately needs is
+            # already staged into /tmp/{workspace,runtime,venv} above.
+            "--tmpfs",
+            str(_REPO_ROOT),
             "--dir",
             str(_SANDBOX_CODEX_HOME),
             "--bind",
             str(codex_home),
             str(_SANDBOX_CODEX_HOME),
             *extra_mounts,
-            "--clearenv",
             *environment_args,
             "--unshare-pid",
             "--unshare-ipc",

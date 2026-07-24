@@ -1018,7 +1018,15 @@ class Session:
     def generated_cost_field(self, cost: GeneratedPythonCost) -> dict[str, Any]:
         """Evaluate the compiled cost over a cloud of plausible poses."""
         traj = self.trajectory
-        assert traj is not None
+        active_features = generated_cost_feature_dependencies(cost.code)
+        if traj is None:
+            # Combining between trajectories: no executed or candidate frames
+            # exist to anchor the pose cloud on, so there is no field to sample.
+            return {
+                "features": {},
+                "penalty": [],
+                "active_features": list(active_features),
+            }
         frames = [
             canonical_arm_q(np.asarray(f, dtype=np.float64), self.rig.context).reshape(
                 -1, 7
@@ -1040,7 +1048,6 @@ class Session:
             poses = poses[rng.choice(poses.shape[0], 1500, replace=False)]
         feats = arm_feature_series(poses, self.rig.context)
         batch = np.repeat(poses[:, None, :], 2, axis=1)
-        active_features = generated_cost_feature_dependencies(cost.code)
         try:
             penalty = np.asarray(cost(batch), dtype=np.float64)
         except Exception:  # pylint: disable=broad-exception-caught

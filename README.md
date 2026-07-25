@@ -327,7 +327,10 @@ optional YAML key `env`:
   per step. The robot model is vendored from
   [limb-manipulation](https://github.com/empriselab/limb-manipulation) under
   `src/uncertain_feedback/envs/assets/panda/`.
-- `sim_mannequin`: physics-based real-world proxy. The Panda starts grasping
+- `sim_mannequin`: physics-based real-world proxy. The robot (a Franka Panda
+  by default, or a Kinova Gen3 7-DOF with a Robotiq 2F-85 gripper via
+  `env_params: {robot: kinova_gen3}`, loaded from
+  `/home/emprise/kortex_description`) starts grasping
   the forearm of the passive 4-DOF articulated mannequin left arm from
   [limb-manipulation](https://github.com/empriselab/limb-manipulation)
   (vendored under `src/uncertain_feedback/envs/assets/human/`, along with the
@@ -345,8 +348,9 @@ optional YAML key `env`:
   the kinematic envs (use more `steps`, see
   `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml`). Tunable via the YAML
   `env_params:` mapping (forwarded to the env constructor):
+  `robot` (`panda` or `kinova_gen3`),
   `robot_max_joint_delta` (per-step cap on each robot joint's travel, rad)
-  and `robot_base_offset` (Panda base position relative to spine3, pybullet
+  and `robot_base_offset` (robot base position relative to spine3, pybullet
   frame).
 
 Every planner takes the env at construction (defaulting to `kinematic`), and
@@ -364,7 +368,9 @@ uv run python src/uncertain_feedback/planners/run.py \
 
 (`arm_mpc_cartesian_no_mdm_sim.yaml` is the Cartesian no-MDM config with
 `env: sim_robot_visual`; `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml` is the
-same run with `env: sim_mannequin`; the `--env-video` flag works with any
+same run with `env: sim_mannequin`;
+`arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml` is the mannequin run
+with the Kinova Gen3; the `--env-video` flag works with any
 env). A real-robot environment will be added as a further `env` value; see
 `src/uncertain_feedback/envs/`.
 

@@ -57,6 +57,7 @@ dependencies = [
    "detectron2",
    "flask",
    "openai>=1.0.0",
+   "emprise-gen3-controller",
 ]
 
 [project.optional-dependencies]
@@ -149,6 +150,13 @@ ignore_missing_imports = true
 
 [tool.uv]
 extra-build-dependencies = { chumpy = ["pip"], detectron2 = ["torch", "pip"] }
+# emprise-gen3-controller is used only as a ZMQ client here; pin (pinocchio)
+# and ruckig are server-side deps (and pin forces numpy>=2.0, conflicting with
+# the MDM numpy<1.24 pin), so exclude them from resolution.
+override-dependencies = [
+    "pin; sys_platform == 'never'",
+    "ruckig; sys_platform == 'never'",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -160,6 +168,7 @@ torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 detectron2 = { git = "https://github.com/facebookresearch/detectron2.git" }
+emprise-gen3-controller = { path = "../../../../../home/eric/emprise-gen3-controller", editable = true }
 
 [dependency-groups]
 dev = [

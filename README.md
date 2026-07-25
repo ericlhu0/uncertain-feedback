@@ -349,9 +349,46 @@ optional YAML key `env`:
   `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml`). Tunable via the YAML
   `env_params:` mapping (forwarded to the env constructor):
   `robot` (`panda` or `kinova_gen3`),
-  `robot_max_joint_delta` (per-step cap on each robot joint's travel, rad)
-  and `robot_base_offset` (robot base position relative to spine3, pybullet
-  frame).
+  `robot_max_joint_delta` (per-step cap on each robot joint's travel, rad),
+  `robot_base_offset` (robot base position relative to spine3, pybullet
+  frame), `robot_joint_limit_padding` (rad, default 0; shrinks the robot's
+  joint limits so commanded targets stay clear of them — set it slightly
+  above the real controller's `joint_limit_padding_deg` when mirroring),
+  and — with `robot: kinova_gen3` only — `real_mirror_host` /
+  `real_mirror_confirm_start` (see below).
+
+  **Real-arm mirroring** (`real_mirror_host`): when set, the sim robot's
+  achieved joint configuration is forwarded each MPC step to a real Kinova
+  Gen3 through an [emprise-gen3-controller](https://github.com/empriselab)
+  ZMQ server, which shadows the sim in 1 kHz joint position mode (the
+  server-side OTG interpolates between the sparse targets). The sim remains
+  the source of truth — physics, mannequin read-back, and planning all stay
+  simulated. With mirroring on, the sim robot plans against the controller's
+  enforced joint-limit table (narrower than the kortex URDF's) so every
+  mirrored command passes the controller's safety checks. Start the server
+  first from the controller repo on the machine that reaches the robot:
+
+  ```
+  cd ~/emprise-gen3-controller
+  .venv/bin/python scripts/launch_server.py --config config_tuned.yaml
+  ```
+
+  then run any `sim_mannequin` config with
+  `env_params: {robot: kinova_gen3, real_mirror_host: "127.0.0.1"}` (see
+  `arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml`). At the first
+  MPC step the real arm closes its gripper, zeros its joints (upright
+  reference pose), moves to the sim's grasp configuration, and opens the
+  gripper there; the two moves are streamed slowly through position mode
+  (0.15 rad/s peak joint speed, `_MOVE_SPEED_RAD_S` in
+  `envs/real_mirror.py`) — with `real_mirror_confirm_start: true` (default)
+  the operator must confirm each move and the gripper opening at the
+  terminal; set it to `false` for headless/mock runs. On exit — including Ctrl+C, which is caught to halt the arm before
+  the process dies — the arm is returned to high-level mode, holding its
+  last position. The arm can also be zeroed on its own:
+
+  ```
+  uv run python src/uncertain_feedback/envs/zero_kinova.py [--host HOST] [--yes]
+  ```
 
 Every planner takes the env at construction (defaulting to `kinematic`), and
 `step` returns the configuration the env actually achieved. Envs also expose
@@ -370,9 +407,11 @@ uv run python src/uncertain_feedback/planners/run.py \
 `env: sim_robot_visual`; `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml` is the
 same run with `env: sim_mannequin`;
 `arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml` is the mannequin run
-with the Kinova Gen3; the `--env-video` flag works with any
-env). A real-robot environment will be added as a further `env` value; see
-`src/uncertain_feedback/envs/`.
+with the Kinova Gen3;
+`arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml` additionally
+mirrors the sim robot onto the real Gen3; the `--env-video` flag works with
+any env). A real-robot environment will be added as a further `env` value;
+see `src/uncertain_feedback/envs/`.
 
 ### Simulated user (`user:`)
 

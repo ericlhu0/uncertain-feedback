@@ -177,15 +177,32 @@ class SimMannequinEnv(ExecutionEnv):
         robot: str = "panda",
         robot_base_offset: tuple[float, float, float] = _ROBOT_BASE_OFFSET,
         robot_max_joint_delta: float = _ROBOT_MAX_JOINT_DELTA,
+        robot_joint_limit_padding: float = 0.0,
+        real_mirror_host: str | None = None,
+        real_mirror_confirm_start: bool = True,
     ) -> None:
         super().__init__()
         if robot not in _ROBOT_SPECS:
             raise ValueError(
                 f"Unknown robot '{robot}'. Available: {sorted(_ROBOT_SPECS)}"
             )
+        self._mirror = None
+        if real_mirror_host is not None:
+            if robot != "kinova_gen3":
+                raise ValueError("real_mirror_host requires robot='kinova_gen3'")
+            from uncertain_feedback.envs.real_mirror import (  # pylint: disable=import-outside-toplevel
+                RealArmMirror,
+            )
+
+            self._mirror = RealArmMirror.connect(
+                real_mirror_host, confirm_start=real_mirror_confirm_start
+            )
         self._spec = _ROBOT_SPECS[robot]
         self._robot_base_offset = np.asarray(robot_base_offset, dtype=np.float64)
         self._robot_max_joint_delta = float(robot_max_joint_delta)
+        self._robot_joint_limit_padding = float(robot_joint_limit_padding)
+        self._joint_lower: np.ndarray = np.zeros(0, dtype=np.float64)
+        self._joint_upper: np.ndarray = np.zeros(0, dtype=np.float64)
         self._cid: int = p.connect(p.DIRECT)
         self._history: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         self._ghost_bodies: list[int] = []
@@ -218,6 +235,8 @@ class SimMannequinEnv(ExecutionEnv):
         if not self._attached:
             self._attach(q)
         self._drive(q)
+        if self._mirror is not None:
+            self._mirror.send(self._robot_q())
         self._sync_ghost(q)
         self._record(q)
         return self._read_back_q()
@@ -282,6 +301,35 @@ class SimMannequinEnv(ExecutionEnv):
                 > p.getJointInfo(self._robot, j, physicsClientId=self._cid)[9]
                 for j in self._movable_joints
             ]
+        )
+        # Soft joint limits: URDF limits shrunk by the padding (matching the
+        # real controller's joint_limit_padding_deg); continuous joints stay
+        # unbounded. When mirroring, the real controller's enforced limits
+        # (narrower than the URDF's) replace the URDF limits.
+        if self._mirror is not None:
+            from uncertain_feedback.envs.real_mirror import (  # pylint: disable=import-outside-toplevel
+                GEN3_JOINT_LIMITS,
+            )
+
+            lower, upper = (np.array(x) for x in zip(*GEN3_JOINT_LIMITS))
+        else:
+            lower = np.array(
+                [
+                    p.getJointInfo(self._robot, j, physicsClientId=self._cid)[8]
+                    for j in self._movable_joints
+                ]
+            )
+            upper = np.array(
+                [
+                    p.getJointInfo(self._robot, j, physicsClientId=self._cid)[9]
+                    for j in self._movable_joints
+                ]
+            )
+        self._joint_lower = np.where(
+            self._continuous_joints, -np.inf, lower + self._robot_joint_limit_padding
+        )
+        self._joint_upper = np.where(
+            self._continuous_joints, np.inf, upper - self._robot_joint_limit_padding
         )
         self._ee_index = next(
             j
@@ -352,7 +400,11 @@ class SimMannequinEnv(ExecutionEnv):
             )
         self._load_body_parts(shoulder)
 
-        self._set_joints(self._robot, self._movable_joints, self._ik(q0))
+        self._set_joints(
+            self._robot,
+            self._movable_joints,
+            np.clip(self._ik(q0), self._joint_lower, self._joint_upper),
+        )
 
         # createConstraint frames are relative to link CoM frames, so measure
         # CoM poses ([0:2]), not URDF link frames ([4:6]).
@@ -394,6 +446,8 @@ class SimMannequinEnv(ExecutionEnv):
             forces=[0.0] * len(self._mannequin_joints_idx),
             physicsClientId=self._cid,
         )
+        if self._mirror is not None:
+            self._mirror.start(self._robot_q())
         self._attached = True
 
     def _load_body_parts(self, shoulder: np.ndarray) -> None:
@@ -483,12 +537,7 @@ class SimMannequinEnv(ExecutionEnv):
             [cmd_rot.apply([1.0, 0.0, 0.0])], [ref_rot.apply([1.0, 0.0, 0.0])]
         )
         target_rot = delta_rot * Rotation.from_quat(ee_orn)
-        q_now = np.array(
-            [
-                p.getJointState(self._robot, j, physicsClientId=self._cid)[0]
-                for j in self._movable_joints
-            ]
-        )
+        q_now = self._robot_q()
         delta = self._solve_ik(target_pos, target_rot.as_quat()) - q_now
         # Continuous joints have no limits to anchor the IK solution, so it
         # may come back unwound by full turns; take the short way around.
@@ -497,6 +546,7 @@ class SimMannequinEnv(ExecutionEnv):
         delta = np.clip(
             delta, -self._robot_max_joint_delta, self._robot_max_joint_delta
         )
+        delta = np.clip(q_now + delta, self._joint_lower, self._joint_upper) - q_now
         for k in range(1, _EXECUTE_SUBSTEPS + 1):
             target = q_now + delta * (k / _EXECUTE_SUBSTEPS)
             p.setJointMotorControlArray(
@@ -508,6 +558,14 @@ class SimMannequinEnv(ExecutionEnv):
                 physicsClientId=self._cid,
             )
             p.stepSimulation(physicsClientId=self._cid)
+
+    def _robot_q(self) -> np.ndarray:
+        return np.array(
+            [
+                p.getJointState(self._robot, j, physicsClientId=self._cid)[0]
+                for j in self._movable_joints
+            ]
+        )
 
     def _read_back_q(self) -> np.ndarray:
         assert self._fk is not None
@@ -540,12 +598,7 @@ class SimMannequinEnv(ExecutionEnv):
         return self._fk.arm_aa_to_q(arm_aa, self._spine3_aa)
 
     def _record(self, q_cmd: np.ndarray) -> None:
-        q_robot = np.array(
-            [
-                p.getJointState(self._robot, j, physicsClientId=self._cid)[0]
-                for j in self._movable_joints
-            ]
-        )
+        q_robot = self._robot_q()
         q_mannequin = np.array(
             [
                 p.getJointState(self._mannequin, j, physicsClientId=self._cid)[0]

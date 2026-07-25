@@ -1,7 +1,7 @@
 # uncertain-feedback Codebase Map
 
 **Last updated:** 2026-07-24
-**Branch:** pose-dependent-users
+**Branch:** real-env
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
 
@@ -66,7 +66,8 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_no_mdm.yaml
 │   │           ├── arm_mpc_cartesian_no_mdm_sim.yaml  # same, with env: sim_robot_visual
 │   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin.yaml  # same, with env: sim_mannequin (physics; more steps)
-│   │           └── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml  # same, with robot: kinova_gen3
+│   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml  # same, with robot: kinova_gen3
+│   │           └── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml  # same, mirroring the sim robot onto the real Gen3 (real_mirror_host)
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
 │   │   ├── run_experiment.py         # CLI: one persona + one backend on the original goal
@@ -106,7 +107,9 @@ uncertain-feedback/
 │   │   ├── kinematic.py              # KinematicEnv (pass-through; matplotlib visualize/save_video)
 │   │   ├── grasp.py                  # grasp_pose_fk: human q → gripper grasp pose on the forearm (shared with future real-robot env)
 │   │   ├── sim_robot_visual.py       # SimRobotVisualEnv (no physics: kinematic human rendered as posed SMPL mesh + Panda posed via PyBullet IK)
-│   │   ├── sim_mannequin.py          # SimMannequinEnv (physics proxy: robot drags passive 4-DOF mannequin arm via fixed constraint; achieved q read back from link positions; robot: panda (vendored) or kinova_gen3 (URDF from /home/emprise/kortex_description))
+│   │   ├── sim_mannequin.py          # SimMannequinEnv (physics proxy: robot drags passive 4-DOF mannequin arm via fixed constraint; achieved q read back from link positions; robot: panda (vendored) or kinova_gen3 (URDF from /home/emprise/kortex_description); optional real_mirror_host forwards achieved robot q to the real Gen3)
+│   │   ├── real_mirror.py            # RealArmMirror: streams sim robot joint configs to the real Kinova Gen3 over ZMQ (emprise-gen3-controller); close gripper → zero → slow streamed ramp to grasp config → confirmed gripper open → 1 kHz joint position mode
+│   │   ├── zero_kinova.py            # CLI: zero the real Gen3's joints via the ZMQ server (RealArmMirror.zero)
 │   │   ├── assets/panda/             # Franka Panda URDF + meshes (vendored from empriselab/limb-manipulation)
 │   │   └── assets/human/             # Mannequin URDFs + meshes: articulated 4-DOF left arm, plus torso/head, right arm, legs as visual context (vendored from empriselab/limb-manipulation)
 │   ├── uncertainty/
@@ -376,7 +379,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `planner`              | str      | One of the 5 planner choices                         |
 | `motion_generator`     | str      | Text-to-motion backend: `mdm` (default) or `kimodo`  |
 | `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default), `sim_robot_visual` (no-physics PyBullet scene with a Panda IK'd to a forearm grasp point), or `sim_mannequin` (physics proxy: Panda drags the passive limb-manipulation mannequin arm; achieved q measured back from link positions). Passed to the planner constructor (`build_run`, demo runner) after `set_pose_context`; every planner's `step` returns the env-achieved q. Envs render via `visualize()`/`save_video()` (`run.py --env-video`). |
-| `env_params`           | mapping  | Keyword args forwarded to the env constructor by `make_env` (empty default). `sim_mannequin` accepts `robot` (`panda` default, or `kinova_gen3` — Gen3 7-DOF + Robotiq 2F-85 URDF loaded from `/home/emprise/kortex_description`), `robot_max_joint_delta` (per-step robot joint travel cap, rad) and `robot_base_offset` (robot base position relative to spine3, pybullet frame). |
+| `env_params`           | mapping  | Keyword args forwarded to the env constructor by `make_env` (empty default). `sim_mannequin` accepts `robot` (`panda` default, or `kinova_gen3` — Gen3 7-DOF + Robotiq 2F-85 URDF loaded from `/home/emprise/kortex_description`), `robot_max_joint_delta` (per-step robot joint travel cap, rad), `robot_base_offset` (robot base position relative to spine3, pybullet frame), `robot_joint_limit_padding` (rad; shrinks robot joint limits so commands clear the real controller's soft limits), and — kinova_gen3 only — `real_mirror_host`/`real_mirror_confirm_start` (mirror the sim robot's achieved joint trajectory onto the real Gen3 via an emprise-gen3-controller ZMQ server, planning against the controller's enforced joint-limit table; see `envs/real_mirror.py`). |
 | `steps`                | int      | Total MPC steps to run                               |
 | `horizon`              | int      | MPC look-ahead steps                                 |
 | `n_mpc_samples`        | int      | Candidate action sequences per step                  |

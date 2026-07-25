@@ -107,6 +107,25 @@ def test_sim_mannequin_env_params() -> None:
     assert env._robot_max_joint_delta == 0.05
 
 
+def test_sim_mannequin_joint_limit_padding() -> None:
+    fk = SmplLeftArmFK()
+    env = make_env("sim_mannequin", robot_joint_limit_padding=0.3)
+    assert isinstance(env, SimMannequinEnv)
+    env.set_pose_context(fk, None, None)
+
+    for j, (low, high) in zip(env._movable_joints, zip(env._joint_lower, env._joint_upper)):
+        info = p.getJointInfo(env._robot, j, physicsClientId=env._cid)
+        if info[8] > info[9]:
+            continue
+        assert np.isclose(low, info[8] + 0.3)
+        assert np.isclose(high, info[9] - 0.3)
+
+    env.execute(fk.arm_aa_to_q(_BENT_ARM_AA))
+    # Loose tolerance: commands are clamped, achieved q may overshoot slightly.
+    assert np.all(env._robot_q() >= env._joint_lower - 0.02)
+    assert np.all(env._robot_q() <= env._joint_upper + 0.02)
+
+
 def test_mannequin_joint_mapping_round_trip() -> None:
     from uncertain_feedback.envs.sim_mannequin import _MANNEQUIN_BASE_ROT
 

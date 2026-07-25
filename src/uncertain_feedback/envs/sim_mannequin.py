@@ -1,7 +1,8 @@
-"""Physics-sim env: a Panda physically drags a passive 4-DOF mannequin arm.
+"""Physics-sim env: a robot physically drags a passive 4-DOF mannequin arm.
 
 Real-world proxy built on the articulated mannequin from
-empriselab/limb-manipulation: the Panda starts grasping the mannequin forearm
+empriselab/limb-manipulation: the robot (Franka Panda by default, or a Kinova
+Gen3 7-DOF via ``robot="kinova_gen3"``) starts grasping the mannequin forearm
 (fixed constraint) and tracks the commanded grasp pose under position control
 with ``stepSimulation`` and gravity. Each step targets the grasp-pose *delta*
 between the command and the current read-back, applied to the physical ee pose
@@ -18,6 +19,7 @@ limits are base_x [-1.57, 1.57], base_y [-1.57, 0], base_z [0, 1.57], elbow
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -56,19 +58,59 @@ _MANNEQUIN_BASE_ROT = np.array(
 )
 
 _ROBOT_BASE_OFFSET = (0.6, -0.15, -0.35)
-_ROBOT_BASE_YAW = np.deg2rad(166.0)
-_ROBOT_HOME = (
-    -0.54193711,
-    -1.07197495,
-    -2.70514736,
-    -2.81591873,
-    -1.6951869,
-    2.48184051,
-    -1.43600207,
+
+
+@dataclass(frozen=True)
+class _RobotSpec:
+    """Robot model embedded in the scene: URDF, frames, and control limits."""
+
+    urdf: Path
+    ee_link: bytes
+    home: tuple[float, ...]
+    joint_forces: tuple[float, ...]
+    base_yaw: float
+    # xyzw rotation from the grasp-frame convention (grasp_pose_fk: z =
+    # approach, y = finger-closing) to this robot's ee-link frame.
+    tool_quat: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+    # Root for resolving package:// mesh URIs in the URDF.
+    mesh_search_path: str | None = None
+
+
+_KINOVA_URDF = Path(
+    "/home/emprise/kortex_description/robots/gen3_7dof_no_vision_robotiq_2f_85.urdf"
 )
 
+_ROBOT_SPECS: dict[str, _RobotSpec] = {
+    "panda": _RobotSpec(
+        urdf=_PANDA_URDF,
+        ee_link=b"ee_link",
+        home=(
+            -0.54193711,
+            -1.07197495,
+            -2.70514736,
+            -2.81591873,
+            -1.6951869,
+            2.48184051,
+            -1.43600207,
+        ),
+        joint_forces=(87.0,) * 7,
+        base_yaw=np.deg2rad(166.0),
+    ),
+    # Robotiq fingers close along the tool-frame x-axis (gripper base mounted
+    # at yaw 90 deg), so the tool frame is the grasp frame rolled 90 deg
+    # about the approach axis.
+    "kinova_gen3": _RobotSpec(
+        urdf=_KINOVA_URDF,
+        ee_link=b"tool_frame",
+        home=(0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57),
+        joint_forces=(39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0),
+        base_yaw=np.deg2rad(166.0),
+        tool_quat=(0.0, 0.0, 0.7071067811865476, 0.7071067811865476),
+        mesh_search_path="/home/emprise",
+    ),
+}
+
 _MANNEQUIN_JOINT_DAMPING = 0.2
-_ROBOT_FORCE = 87.0
 _CONSTRAINT_MAX_FORCE = 1000.0
 _EXECUTE_SUBSTEPS = 48
 # Per-execute cap on each robot joint's travel (rad). Keeps the arm on the
@@ -128,14 +170,20 @@ def _quat_z_to(direction: np.ndarray) -> np.ndarray:
 
 
 class SimMannequinEnv(ExecutionEnv):
-    """Panda repositioning a passive mannequin arm under pybullet physics."""
+    """Robot repositioning a passive mannequin arm under pybullet physics."""
 
     def __init__(
         self,
+        robot: str = "panda",
         robot_base_offset: tuple[float, float, float] = _ROBOT_BASE_OFFSET,
         robot_max_joint_delta: float = _ROBOT_MAX_JOINT_DELTA,
     ) -> None:
         super().__init__()
+        if robot not in _ROBOT_SPECS:
+            raise ValueError(
+                f"Unknown robot '{robot}'. Available: {sorted(_ROBOT_SPECS)}"
+            )
+        self._spec = _ROBOT_SPECS[robot]
         self._robot_base_offset = np.asarray(robot_base_offset, dtype=np.float64)
         self._robot_max_joint_delta = float(robot_max_joint_delta)
         self._cid: int = p.connect(p.DIRECT)
@@ -143,6 +191,7 @@ class SimMannequinEnv(ExecutionEnv):
         self._ghost_bodies: list[int] = []
         self._robot: int = -1
         self._movable_joints: list[int] = []
+        self._continuous_joints: np.ndarray = np.zeros(0, dtype=bool)
         self._ee_index: int = -1
         self._spine3_pb: np.ndarray = np.zeros(3, dtype=np.float64)
         self._mannequin: int = -1
@@ -210,10 +259,14 @@ class SimMannequinEnv(ExecutionEnv):
         )
         self._spine3_pb = _SMPL_TO_PB @ spine3
 
+        if self._spec.mesh_search_path is not None:
+            p.setAdditionalSearchPath(
+                self._spec.mesh_search_path, physicsClientId=self._cid
+            )
         self._robot = p.loadURDF(
-            str(_PANDA_URDF),
+            str(self._spec.urdf),
             basePosition=tuple(self._spine3_pb + self._robot_base_offset),
-            baseOrientation=p.getQuaternionFromEuler((0.0, 0.0, _ROBOT_BASE_YAW)),
+            baseOrientation=p.getQuaternionFromEuler((0.0, 0.0, self._spec.base_yaw)),
             useFixedBase=True,
             physicsClientId=self._cid,
         )
@@ -223,14 +276,21 @@ class SimMannequinEnv(ExecutionEnv):
             if p.getJointInfo(self._robot, j, physicsClientId=self._cid)[2]
             != p.JOINT_FIXED
         ]
+        self._continuous_joints = np.array(
+            [
+                p.getJointInfo(self._robot, j, physicsClientId=self._cid)[8]
+                > p.getJointInfo(self._robot, j, physicsClientId=self._cid)[9]
+                for j in self._movable_joints
+            ]
+        )
         self._ee_index = next(
             j
             for j in range(p.getNumJoints(self._robot, physicsClientId=self._cid))
             if p.getJointInfo(self._robot, j, physicsClientId=self._cid)[12]
-            == b"ee_link"
+            == self._spec.ee_link
         )
         self._set_joints(
-            self._robot, self._movable_joints, np.asarray(_ROBOT_HOME, np.float64)
+            self._robot, self._movable_joints, np.asarray(self._spec.home, np.float64)
         )
 
     def _set_joints(self, body: int, joints: list[int], values: np.ndarray) -> None:
@@ -395,6 +455,7 @@ class SimMannequinEnv(ExecutionEnv):
 
     def _ik(self, q: np.ndarray) -> np.ndarray:
         target_pos, target_rot = self._grasp_pose_pb(q)
+        target_rot = target_rot * Rotation.from_quat(self._spec.tool_quat)
         return self._solve_ik(target_pos, target_rot.as_quat())
 
     def _drive(self, q_cmd: np.ndarray) -> None:
@@ -428,10 +489,13 @@ class SimMannequinEnv(ExecutionEnv):
                 for j in self._movable_joints
             ]
         )
+        delta = self._solve_ik(target_pos, target_rot.as_quat()) - q_now
+        # Continuous joints have no limits to anchor the IK solution, so it
+        # may come back unwound by full turns; take the short way around.
+        wrapped = self._continuous_joints
+        delta[wrapped] = np.arctan2(np.sin(delta[wrapped]), np.cos(delta[wrapped]))
         delta = np.clip(
-            self._solve_ik(target_pos, target_rot.as_quat()) - q_now,
-            -self._robot_max_joint_delta,
-            self._robot_max_joint_delta,
+            delta, -self._robot_max_joint_delta, self._robot_max_joint_delta
         )
         for k in range(1, _EXECUTE_SUBSTEPS + 1):
             target = q_now + delta * (k / _EXECUTE_SUBSTEPS)
@@ -440,7 +504,7 @@ class SimMannequinEnv(ExecutionEnv):
                 self._movable_joints,
                 p.POSITION_CONTROL,
                 targetPositions=target.tolist(),
-                forces=[_ROBOT_FORCE] * len(self._movable_joints),
+                forces=list(self._spec.joint_forces),
                 physicsClientId=self._cid,
             )
             p.stepSimulation(physicsClientId=self._cid)

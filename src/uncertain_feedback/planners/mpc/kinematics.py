@@ -646,3 +646,39 @@ class SmplLeftArmFK:
             if global_i < 22:
                 all_pos[global_i] = arm_pos[local_i]
         return all_pos
+
+
+def q_reaching_wrist(
+    fk: SmplLeftArmFK,
+    wrist_target: np.ndarray,
+    q_seed: np.ndarray,
+    spine3_pos: np.ndarray | None = None,
+    spine3_aa: np.ndarray | None = None,
+    posture_weight: float = 0.05,
+) -> np.ndarray:
+    """``(7,)`` arm configuration whose wrist sits at ``wrist_target``.
+
+    Inverse of the Cartesian goal the MPC tracks, for showing a goal *pose*
+    where the goal itself is only a point: a wrist position leaves the arm's
+    posture underdetermined (7 DOF for 3 constraints), so the fit is pulled
+    toward ``q_seed`` by ``posture_weight`` and returns the nearest reaching
+    configuration rather than an arbitrary branch. An out-of-reach target
+    yields the closest the arm can get.
+
+    Args:
+        wrist_target:   ``(3,)`` world wrist position (*not* spine3-relative).
+        q_seed:         ``(7,)`` configuration to stay near — normally the
+                        arm's current one.
+        posture_weight: Pull toward ``q_seed``, in radians per metre of wrist
+                        error.
+    """
+    from scipy.optimize import least_squares  # pylint: disable=import-outside-toplevel
+
+    wrist_target = np.asarray(wrist_target, dtype=np.float64)
+    q_seed = np.asarray(q_seed, dtype=np.float64)
+
+    def residual(q: np.ndarray) -> np.ndarray:
+        wrist = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), spine3_pos, spine3_aa)[4]
+        return np.concatenate([wrist - wrist_target, posture_weight * (q - q_seed)])
+
+    return np.asarray(least_squares(residual, q_seed).x, dtype=np.float64)

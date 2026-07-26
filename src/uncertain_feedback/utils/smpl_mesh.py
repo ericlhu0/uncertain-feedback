@@ -17,6 +17,10 @@ _BODY_MODELS_DIR = (
     / "motion_generators/mdm/motion-diffusion-model/body_models"
 )
 _LEG_BONES = ((1, 4), (4, 7), (7, 10), (2, 5), (5, 8), (8, 11))
+# Left shoulder, elbow, wrist, hand in the SMPL 24-joint skinning order. The
+# collar is left out: its rotation is locked for a run, so those vertices are the
+# same in every pose.
+_LEFT_ARM_LBS_JOINTS = (16, 18, 20, 22)
 
 
 class SmplMeshCache:
@@ -134,6 +138,21 @@ class SmplMeshCache:
     def faces(self) -> np.ndarray:
         """The SMPL body model's triangle indices."""
         return np.asarray(self._model.faces, dtype=np.int32)
+
+    @property
+    def left_arm_faces(self) -> np.ndarray:
+        """Triangles skinned to the left arm, by LBS weight.
+
+        For drawing a *second* body — a goal ghost — over the first: only the
+        left arm is controlled, so a whole-body ghost would coincide with the
+        person's own mesh everywhere else, and coincident surfaces z-fight into
+        speckle. Selecting by skinning weight rather than a hardcoded vertex
+        list keeps this tied to the model actually loaded.
+        """
+        weights = self._model.lbs_weights.detach().cpu().numpy()
+        on_arm = weights[:, list(_LEFT_ARM_LBS_JOINTS)].sum(axis=1) > 0.5
+        faces = np.asarray(self._model.faces, dtype=np.int32)
+        return faces[on_arm[faces].all(axis=1)]
 
     def register(self, arm_positions: np.ndarray, pin: bool = False) -> str:
         """Register a pose sequence and return its id.

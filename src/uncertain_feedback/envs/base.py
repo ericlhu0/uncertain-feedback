@@ -45,6 +45,14 @@ class ExecutionEnv(ABC):
         self._spine3_aa = spine3_aa
         self._body_pos = body_pos
 
+    def show_goal(self, q_goal: np.ndarray) -> None:
+        """Display the ``(7,)`` configuration the run drives toward.
+
+        Called once the goal is known, which is after :meth:`initial_q` — a
+        measured torso anchor moves every spine3-relative goal with it. Default:
+        envs with nothing to draw ignore it.
+        """
+
     @abstractmethod
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
         """Realize one commanded ``(7,)`` arm configuration.

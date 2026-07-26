@@ -284,6 +284,7 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 - Key methods:
   - `fk(arm_aa, spine3_pos, spine3_aa) → (5, 3)` world positions
   - `fk_batch(arm_aa, ...) → (N, 5, 3)` batched
+  - `q_reaching_wrist(fk, wrist_target, q_seed, ...) → (7,)` inverse of a Cartesian goal: nearest configuration whose wrist hits a world point (least squares, pulled toward `q_seed` since 3 constraints leave the posture free) — used to show a Cartesian goal as a *pose*
   - `arm_aa_from_positions(positions, spine3_aa) → (3, 3)` inverse: XYZ → local axis-angles
   - `arm_aa_to_q(arm_aa, spine3_aa) → (7,)` boundary conversion; off-hinge elbow rotation is anatomically decoded
   - `q_to_arm_aa(q, elbow_hinge_axis) → (..., 3, 3)` FK/visualization/cost boundary

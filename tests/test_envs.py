@@ -18,6 +18,7 @@ from uncertain_feedback.planners.mpc.kinematics import (
     SmplLeftArmFK,
     q_to_arm_aa,
 )
+from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 
 
 def test_sim_robot_visual_registered() -> None:
@@ -41,6 +42,28 @@ def test_grasp_pose_fk_geometry() -> None:
     forearm = (wrist - elbow) / np.linalg.norm(wrist - elbow)
     np.testing.assert_allclose(np.abs(float(np.dot(rot[:, 0], forearm))), 1.0)
     assert np.isclose(float(np.dot(rot[:, 2], forearm)), 0.0, atol=1e-10)
+
+
+def test_left_arm_faces_cover_what_the_arm_pose_moves() -> None:
+    """The goal ghost draws the arm alone, so the mask must track the arm."""
+    fk = SmplLeftArmFK()
+    cache = SmplMeshCache(fk.tpose_all_joints)
+    arm_faces = cache.left_arm_faces
+    assert 0 < len(arm_faces) < len(cache.faces)
+
+    q1 = np.array([0.0, 0.0, 0.0, 0.5, -0.6, 0.4, -1.2])
+    verts = [
+        cache.preview(fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), None, None))
+        for q in (np.zeros(Q_DIM), q1)
+    ]
+    moved = np.linalg.norm(verts[1] - verts[0], axis=1)
+    on_arm = np.zeros(len(moved), dtype=bool)
+    on_arm[np.unique(arm_faces)] = True
+
+    # The masked vertices are the ones the arm pose carries; the rest shift only
+    # by the skinning's reach into the shoulder (measured: 134 mm vs 8 mm at p95).
+    assert float(np.median(moved[on_arm])) > 0.05
+    assert float(np.percentile(moved[~on_arm], 95)) < 0.02
 
 
 def test_sim_env_execute_passthrough_and_reaches_grasp() -> None:

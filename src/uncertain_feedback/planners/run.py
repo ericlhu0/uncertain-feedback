@@ -65,7 +65,7 @@ from uncertain_feedback.planners.mpc.costs import (
     replace_generated_costs,
     update_preference_cost,
 )
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.mpc.kinematics import q_reaching_wrist, q_to_arm_aa
 from uncertain_feedback.simulated_users import (
     SimulatedUser,
     choose_cluster,
@@ -555,6 +555,23 @@ def build_run(
         )
 
     mpc.set_visualization_mode(capture=args.save is not None, compact=compact)
+    # Show the goal to envs that can draw it (env: real's live view). A Cartesian
+    # goal pins the wrist only, so the pose shown is the nearest configuration
+    # reaching it — solved against the anchor the env reported, since the goal is
+    # relative to that.
+    if cfg.cartesian.goals:
+        env.show_goal(
+            q_reaching_wrist(
+                fk,
+                (spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos)
+                + np.asarray(cfg.cartesian.goals[0], dtype=np.float64),
+                q0,
+                spine3_pos,
+                spine3_aa,
+            )
+        )
+    else:
+        env.show_goal(default_goal)
 
     return RunSetup(
         mpc=mpc,

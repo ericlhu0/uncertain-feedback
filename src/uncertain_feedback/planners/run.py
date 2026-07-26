@@ -489,9 +489,10 @@ def build_run(
     if user.joint_limits:
         extra_costs = CompositeTrajectoryCost([*extra_costs.terms(), user.limit_cost()])
 
-    # Default goal: arm raised from the initial pose
+    # Default goal: arm raised from the initial pose. Shoulder slot, not
+    # clavicle — the planner's actions cannot move the shoulder girdle.
     default_goal = q0.copy()
-    default_goal[1] += 0.7
+    default_goal[4] += 0.7
 
     common: dict = {
         "horizon": cfg.horizon,

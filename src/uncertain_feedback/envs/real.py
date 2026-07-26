@@ -245,6 +245,18 @@ class RealEnv(ExecutionEnv):
         base = bodies[self._body_ids[_BASE_KEY]]
         keypoints = self._arm_keypoints(bodies)
         assert keypoints is not None
+        # Calibrate the skeleton to the person before anything reads lengths
+        # off it: the fk is the same instance the planner and the grasp FK use,
+        # so scaling it here puts the whole run — measured q, Cartesian costs,
+        # forearm frame — on the person's segment lengths instead of SMPL
+        # neutral's. The lengths are marker distances from this one frame;
+        # segments are rigid, so there is nothing to track live.
+        collar, shoulder, elbow, wrist = keypoints
+        self._fk.scale_arm_lengths(
+            float(np.linalg.norm(shoulder - collar)),
+            float(np.linalg.norm(elbow - shoulder)),
+            float(np.linalg.norm(wrist - elbow)),
+        )
         self._registration = ArmRegistration.calibrate(
             fk=self._fk,
             q0=q_nominal,

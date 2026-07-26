@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-25
+**Last updated:** 2026-07-26
 **Branch:** real-env
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -111,7 +111,7 @@ uncertain-feedback/
 │   │   ├── sim_robot_visual.py       # SimRobotVisualEnv (no physics: kinematic human rendered as posed SMPL mesh + Panda posed via PyBullet IK)
 │   │   ├── sim_mannequin.py          # SimMannequinEnv (physics proxy: robot drags passive 4-DOF mannequin arm via fixed constraint; achieved q read back from link positions; robot: panda (vendored) or kinova_gen3 (URDF from /home/emprise/kortex_description); optional real_mirror_host forwards achieved robot q to the real Gen3)
 │   │   ├── real_mirror.py            # RealArmMirror: streams sim robot joint configs to the real Kinova Gen3 over ZMQ (emprise-gen3-controller); start(): close gripper → zero → slow streamed ramp to grasp config → confirmed gripper open → 1 kHz joint position mode; start_from_grasp(): position mode only, nothing moved (real env, grasp already taken)
-│   │   ├── real.py                   # RealEnv (env: real — human arm measured from OptiTrack rigid bodies via mocap/, including the run's start configuration (initial_q) and the torso anchor, placed on the measured collar and read back via pose_context; grasp *measured* from the real ee pose + forearm frame (MeasuredGrasp) and re-measured every step since the real grasp shifts, never taken or assumed — which absorbs the FK-vs-real bias and so lets `_drive` command an absolute gripper pose, and turns the on-forearm tolerance check into a per-step slip guard; robot commanded through RealArmMirror; PyBullet DIRECT for IK only, no physics — or GUI with `live_view`, drawing the measured person as an SMPL mesh (rate-limited by `live_view_fps`) beside the robot's URDF meshes, plus a translucent green goal-pose arm via `show_goal`)
+│   │   ├── real.py                   # RealEnv (env: real — human arm measured from OptiTrack rigid bodies via mocap/, including the run's start configuration (initial_q), the torso anchor, placed on the measured collar and read back via pose_context, and the skeleton's arm segment lengths (fk.scale_arm_lengths from the calibration frame's marker distances, so the shared FK plans on the person's proportions); grasp *measured* from the real ee pose + forearm frame (MeasuredGrasp) and re-measured every step since the real grasp shifts, never taken or assumed — which absorbs the FK-vs-real bias and so lets `_drive` command an absolute gripper pose, and turns the on-forearm tolerance check into a per-step slip guard; robot commanded through RealArmMirror; PyBullet DIRECT for IK only, no physics — or GUI with `live_view`, drawing the measured person as an SMPL mesh (rate-limited by `live_view_fps`) beside the robot's URDF meshes, plus a translucent green goal-pose arm via `show_goal`)
 │   │   ├── zero_kinova.py            # CLI: zero the real Gen3's joints via the ZMQ server (RealArmMirror.zero)
 │   │   ├── assets/panda/             # Franka Panda URDF + meshes (vendored from empriselab/limb-manipulation)
 │   │   └── assets/human/             # Mannequin URDFs + meshes: articulated 4-DOF left arm, plus torso/head, right arm, legs as visual context (vendored from empriselab/limb-manipulation)
@@ -177,6 +177,9 @@ uncertain-feedback/
 SmplLeftArmMPC (arm_mpc.py)
 │  Core sampling MPC: sample N action sequences, roll out, pick min-cost.
 │  State: (7,) [clavicle rotvec, shoulder rotvec, elbow flexion angle].
+│  Actions only use the shoulder + elbow DOFs — the clavicle slots are zeroed
+│  in _sample_actions (a robot holding the forearm cannot actuate the
+│  shoulder girdle), so the clavicle stays at its (measured) current value.
 │  Warm-start: shifts previous best plan by one step each iteration.
 │
 ├── LeftArmMPCMDM (arm_mpc_mdm.py)
@@ -281,9 +284,9 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 
 ## 5. Kinematics (`kinematics.py`)
 
-- **`SmplLeftArmFK`** — loads SMPL neutral PKL once; stores T-pose bone offsets for the arm chain
+- **`SmplLeftArmFK`** — loads SMPL neutral PKL once; stores T-pose bone offsets for the arm chain. `scale_arm_lengths(clavicle, upper_arm, forearm)` rescales the arm bones to measured segment lengths (directions and hinge axis unchanged, idempotent) — `RealEnv._register` calls it with the calibration frame's marker distances, so real runs plan on the person's proportions
 - Joint chain: `spine3 (9) → left_collar (13) → left_shoulder (16) → left_elbow (18) → left_wrist (20)`
-- MPC controls 7 DOFs: clavicle rotvec (3), shoulder rotvec (3), and elbow flexion (1)
+- MPC controls 7 DOFs: clavicle rotvec (3), shoulder rotvec (3), and elbow flexion (1) — but samples actions only in the shoulder + elbow slots (see Section 3)
 - Key methods:
   - `fk(arm_aa, spine3_pos, spine3_aa) → (5, 3)` world positions
   - `fk_batch(arm_aa, ...) → (N, 5, 3)` batched

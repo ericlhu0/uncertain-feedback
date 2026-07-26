@@ -17,6 +17,7 @@ from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import (
+    Q_CLAVICLE,
     Q_DIM,
     SmplLeftArmFK,
     _rate_limited_step_q,
@@ -198,6 +199,48 @@ def test_rate_limited_q_step_reaches_target() -> None:
 
     assert reached
     np.testing.assert_allclose(current, target, atol=1e-9)
+
+
+def test_scale_arm_lengths_sets_measured_segments() -> None:
+    fk = SmplLeftArmFK()
+    reference = SmplLeftArmFK()
+    lengths = np.array([0.19, 0.33, 0.27])
+
+    fk.scale_arm_lengths(*lengths)
+
+    q = np.random.default_rng(6).uniform(-0.6, 0.6, size=Q_DIM)
+    segments = np.diff(fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis))[1:], axis=0)
+    np.testing.assert_allclose(np.linalg.norm(segments, axis=1), lengths, atol=1e-12)
+    # Directions are untouched: the same q gives parallel bones on both
+    # skeletons, and the hinge axis keeps its meaning.
+    ref_segments = np.diff(
+        reference.fk(q_to_arm_aa(q, reference.elbow_hinge_axis))[1:], axis=0
+    )
+    unit = segments / np.linalg.norm(segments, axis=1, keepdims=True)
+    ref_unit = ref_segments / np.linalg.norm(ref_segments, axis=1, keepdims=True)
+    np.testing.assert_allclose(unit, ref_unit, atol=1e-12)
+    np.testing.assert_allclose(
+        fk.elbow_hinge_axis, reference.elbow_hinge_axis, atol=1e-12
+    )
+    # Lengths are absolute, so re-applying is a no-op.
+    tpose = fk.tpose_joints
+    fk.scale_arm_lengths(*lengths)
+    np.testing.assert_allclose(fk.tpose_joints, tpose, atol=1e-15)
+    np.testing.assert_allclose(fk.tpose_all_joints[[13, 16, 18, 20]], tpose[1:])
+
+
+def test_mpc_actions_never_move_the_clavicle() -> None:
+    """The robot holds the forearm, so plans may not use the clavicle DOFs."""
+    fk = SmplLeftArmFK()
+    target = np.array([0.1, -0.2, 0.1, 0.2, 0.1, -0.1, 0.4])
+    mpc = SmplLeftArmMPC(goals=[target], horizon=3, n_mpc_samples=32, fk=fk, seed=7)
+    q0 = np.array([0.05, -0.1, 0.2, 0.0, 0.0, 0.0, 0.0])
+
+    _, plan = mpc.solve(q0)
+    next_q = mpc.step(q0)
+
+    assert np.all(plan[:, Q_CLAVICLE] == 0.0)
+    np.testing.assert_allclose(next_q[Q_CLAVICLE], q0[Q_CLAVICLE], atol=1e-12)
 
 
 def test_seeded_mpc_step_keeps_scalar_elbow_representation() -> None:

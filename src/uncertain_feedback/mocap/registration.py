@@ -22,10 +22,12 @@ pinned torso. The anchor this yields is frozen for the run (see
 requires; Cartesian goals are spine3-relative, so they follow the person.
 
 Within a run only bone *directions* come from mocap. They are re-anchored at
-the frozen collar and rescaled to SMPL bone lengths. Rescaling is required for
-correctness, not cosmetics — the returned ``q`` is consumed through SMPL FK, so
-it must be a valid SMPL arm configuration whatever the person's real limb
-lengths are.
+the frozen collar and rescaled to the FK skeleton's bone lengths — which
+:class:`~uncertain_feedback.envs.real.RealEnv` has already calibrated to the
+person's measured segments (:meth:`SmplLeftArmFK.scale_arm_lengths`) before
+registering. Rescaling is required for correctness, not cosmetics — the
+returned ``q`` is consumed through that FK, so it must be a valid arm
+configuration for it whatever noise the per-frame marker distances carry.
 """
 
 from __future__ import annotations

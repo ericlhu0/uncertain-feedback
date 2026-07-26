@@ -404,6 +404,27 @@ class SmplLeftArmFK:
         """Canonical elbow-flexion axis in the shoulder-local frame."""
         return self._hinge_axis.copy()
 
+    def scale_arm_lengths(
+        self, clavicle: float, upper_arm: float, forearm: float
+    ) -> None:
+        """Rescale the arm bones to measured segment lengths (metres).
+
+        Bone directions are unchanged (so the elbow hinge axis and all joint
+        angles keep their meaning); only the lengths move, and the T-pose joint
+        positions are recomputed to stay consistent. Idempotent — lengths are
+        absolute, not relative scales. Used by envs that measure the person, so
+        the whole run plans on their proportions instead of SMPL neutral's.
+        """
+        for i, length in zip((1, 2, 3), (clavicle, upper_arm, forearm)):
+            self._bone_offsets[i] *= length / float(
+                np.linalg.norm(self._bone_offsets[i])
+            )
+        self._tpose_joints[1:] = self._tpose_joints[0] + np.cumsum(
+            self._bone_offsets, axis=0
+        )
+        for local_i, global_i in enumerate(LEFT_ARM_CHAIN_INDICES):
+            self._tpose_22[global_i] = self._tpose_joints[local_i]
+
     # ------------------------------------------------------------------
     # FK — arm only
     # ------------------------------------------------------------------

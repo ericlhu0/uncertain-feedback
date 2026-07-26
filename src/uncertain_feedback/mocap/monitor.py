@@ -5,15 +5,16 @@ Prints per-rigid-body tracking validity, the effective frame rate, the derived
 registration can be checked before anything moves::
 
     uv run python src/uncertain_feedback/mocap/monitor.py --host 192.168.2.243 \
-        --base-id 1 --collar-id 2 --shoulder-id 3 --elbow-id 4 --wrist-id 5
+        --base-id 1 --collar-id 2 --collar-right-id 6 --shoulder-id 3 \
+        --elbow-id 4 --wrist-id 5
     ... --video mocap_check.mp4   # also render the measured arm
 
 The torso's *shape* comes from the SMPL zero configuration rather than a run
 config (its position, as in a run, is the measured collar). The registration yaw
-is solved against that pose's clavicle, so both it and the printed ``q`` are
-indicative only — the run's own yaw comes out of its start pose. What this checks
-is that all bodies stay tracked, that the rate matches Motive, and that the
-rendered arm follows the real one.
+is solved from the measured collar-to-collar axis against an identity torso
+orientation, so a run config with a nonzero ``spine3_aa`` shifts it. What this
+checks is that all bodies stay tracked, that the rate matches Motive, and that
+the rendered arm follows the real one.
 """
 
 from __future__ import annotations
@@ -25,11 +26,7 @@ import numpy as np
 
 from uncertain_feedback.mocap.natnet import NatNetReceiver
 from uncertain_feedback.mocap.registration import ArmRegistration, arm_keypoints
-from uncertain_feedback.planners.mpc.kinematics import (
-    Q_DIM,
-    SmplLeftArmFK,
-    q_to_arm_aa,
-)
+from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
 
 _WAIT_TIMEOUT_S = 20.0
 _PRINT_PERIOD_S = 0.5
@@ -41,6 +38,7 @@ def main() -> None:
     parser.add_argument("--host", required=True, help="OptiTrack PC address")
     parser.add_argument("--base-id", type=int, required=True)
     parser.add_argument("--collar-id", type=int, required=True)
+    parser.add_argument("--collar-right-id", type=int, required=True)
     parser.add_argument("--shoulder-id", type=int, required=True)
     parser.add_argument("--elbow-id", type=int, required=True)
     parser.add_argument("--wrist-id", type=int, required=True)
@@ -55,6 +53,7 @@ def main() -> None:
     body_ids = [
         args.base_id,
         args.collar_id,
+        args.collar_right_id,
         args.shoulder_id,
         args.elbow_id,
         args.wrist_id,
@@ -67,18 +66,17 @@ def main() -> None:
     assert keypoints is not None
     registration = ArmRegistration.calibrate(
         fk=fk,
-        q0=np.zeros(Q_DIM),
         spine3_pos=None,
         spine3_aa=None,
         base_position=base.position,
         base_orientation=base.orientation,
         collar_mocap=keypoints[0],
-        shoulder_mocap=keypoints[1],
+        collar_right_mocap=bodies[args.collar_right_id].position,
     )
     print(
         f"solved registration yaw: {registration.robot_base_yaw:+.4f} rad "
         f"({np.rad2deg(registration.robot_base_yaw):+.2f} deg) "
-        "— against the zero pose's clavicle, not the run config's"
+        "— for an identity torso orientation, not the run config's"
     )
     print(f"robot base in pybullet frame: {np.round(registration.base_pb, 4)}")
 

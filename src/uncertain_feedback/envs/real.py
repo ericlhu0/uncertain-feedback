@@ -8,8 +8,9 @@ shoulder, elbow, and wrist are streamed in over NatNet and converted to the
 planner's ``(7,)`` configuration — so the MPC closes the loop on the actual
 person. That includes the configuration the run *starts* from
 (:meth:`RealEnv.initial_q`), so the person does not have to match the config's
-start pose. The collar body also makes the registration yaw measurable rather
-than assumed, and fixes *where* the person is: the torso anchor is the measured
+start pose. A right-collar body (read at calibration only) makes the
+registration yaw — the person's facing — measurable rather than assumed, and
+the left collar fixes *where* the person is: the torso anchor is the measured
 collar, not the config pose's, so the scene tracks a person who sits somewhere
 different between runs (see :mod:`uncertain_feedback.mocap.registration`). The
 run must therefore read the anchor back through :meth:`ExecutionEnv.pose_context`
@@ -60,11 +61,13 @@ from uncertain_feedback.mocap.registration import ArmRegistration, arm_keypoints
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 
-# Rigid-body roles the config must supply streaming ids for. The collar body is
-# what makes the registration yaw measurable rather than assumed (see
-# `mocap.registration`), so it is required, not optional.
+# Rigid-body roles the config must supply streaming ids for. The right-collar
+# body is what makes the registration yaw measurable rather than assumed (see
+# `mocap.registration`), so it is required, not optional — but it is read only
+# at calibration, so it is not part of the live arm chain.
 _ARM_KEYS = ("collar", "shoulder", "elbow", "wrist")
 _BASE_KEY = "robot_base"
+_COLLAR_RIGHT_KEY = "collar_right"
 # The person must be tracked before the scene can be built at all, so allow a
 # generous window for markers to come into view.
 _CALIBRATION_TIMEOUT_S = 20.0
@@ -104,7 +107,7 @@ class RealEnv(ExecutionEnv):
             raise ValueError(
                 f"Unknown robot '{robot}'. Available: {sorted(_ROBOT_SPECS)}"
             )
-        missing = {_BASE_KEY, *_ARM_KEYS} - set(mocap_rigid_bodies)
+        missing = {_BASE_KEY, _COLLAR_RIGHT_KEY, *_ARM_KEYS} - set(mocap_rigid_bodies)
         if missing:
             raise ValueError(f"mocap_rigid_bodies is missing {sorted(missing)}")
         self._spec = _ROBOT_SPECS[robot]
@@ -155,14 +158,12 @@ class RealEnv(ExecutionEnv):
         once the planner (which may load a diffusion model) is built and about to
         command something.
 
-        ``q_nominal`` is the run config's start pose. Only its clavicle slot
-        survives — the registration yaw is solved by matching the measured
-        collar->shoulder direction against the one that slot implies, so the
-        clavicle and the yaw cannot both be measured (see
-        :meth:`ArmRegistration.calibrate`). The elbow and wrist slots come
-        from the person.
+        ``q_nominal`` is ignored: the registration yaw comes from the measured
+        collar-to-collar axis (see :meth:`ArmRegistration.calibrate`), so every
+        slot of the returned configuration — clavicle included — is the
+        person's.
         """
-        self._register(np.asarray(q_nominal, dtype=np.float64))
+        self._register()
         return self._last_q.copy()
 
     def show_goal(self, q_goal: np.ndarray) -> None:
@@ -179,7 +180,7 @@ class RealEnv(ExecutionEnv):
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
         q = np.asarray(q_cmd, dtype=np.float64)
         if self._registration is None:
-            self._register(q)
+            self._register()
         q_meas = self._read_back_q()
         if self._grasp is None:
             self._establish_grasp(q_meas)
@@ -229,7 +230,7 @@ class RealEnv(ExecutionEnv):
     # Calibration and scene
     # ------------------------------------------------------------------
 
-    def _register(self, q_nominal: np.ndarray) -> None:
+    def _register(self) -> None:
         """Solve the mocap registration, build the scene, and measure the arm.
 
         Runs from :meth:`initial_q` before planning, because the robot base
@@ -239,10 +240,11 @@ class RealEnv(ExecutionEnv):
         """
         assert self._fk is not None
         bodies = self._receiver.wait_for(
-            [self._body_ids[key] for key in (_BASE_KEY, *_ARM_KEYS)],
+            [self._body_ids[key] for key in (_BASE_KEY, _COLLAR_RIGHT_KEY, *_ARM_KEYS)],
             _CALIBRATION_TIMEOUT_S,
         )
         base = bodies[self._body_ids[_BASE_KEY]]
+        collar_right = bodies[self._body_ids[_COLLAR_RIGHT_KEY]]
         keypoints = self._arm_keypoints(bodies)
         assert keypoints is not None
         # Calibrate the skeleton to the person before anything reads lengths
@@ -259,13 +261,12 @@ class RealEnv(ExecutionEnv):
         )
         self._registration = ArmRegistration.calibrate(
             fk=self._fk,
-            q0=q_nominal,
             spine3_pos=self._spine3_pos,
             spine3_aa=self._spine3_aa,
             base_position=base.position,
             base_orientation=base.orientation,
             collar_mocap=keypoints[0],
-            shoulder_mocap=keypoints[1],
+            collar_right_mocap=collar_right.position,
         )
         # The registration puts the person on their measured collar, so the
         # config's torso anchor is superseded. Everything downstream — the

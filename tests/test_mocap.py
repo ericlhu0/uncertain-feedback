@@ -17,7 +17,11 @@ from uncertain_feedback.mocap.natnet import (
     decode_frame,
     require_fresh,
 )
-from uncertain_feedback.mocap.registration import ArmRegistration
+from uncertain_feedback.mocap.registration import (
+    _LEFT_COLLAR_22,
+    _RIGHT_COLLAR_22,
+    ArmRegistration,
+)
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
 
 _TRUE_YAW = 0.83
@@ -92,15 +96,17 @@ def _canonical_q(fk: SmplLeftArmFK, arm_aa: np.ndarray) -> np.ndarray:
 
 
 def test_registration_solves_yaw_and_recovers_q() -> None:
-    """The clavicle pins the yaw, and q then round-trips through mocap.
+    """The collar-to-collar axis pins the yaw, and q then round-trips through mocap.
 
     Synthesizes a mocap frame under a random base orientation, an arbitrary
     mocap origin, an unknown yaw, and deliberately non-SMPL limb lengths — only
     bone directions may survive, and the yaw must be recovered from the
-    measured clavicle rather than supplied.
+    measured left->right collar axis rather than supplied. No slot of a nominal
+    startup q enters at all: the whole configuration, clavicle included, is
+    measured.
     """
     fk = SmplLeftArmFK()
-    q0 = _canonical_q(
+    q_true = _canonical_q(
         fk,
         np.array(
             [
@@ -111,11 +117,6 @@ def test_registration_solves_yaw_and_recovers_q() -> None:
         ),
     )
     rng = np.random.default_rng(0)
-    # The measured arm differs from the startup pose only in the blocks below
-    # the clavicle; the clavicle is what the yaw solve keys on.
-    q_true = q0.copy()
-    q_true[3:6] += np.array([0.21, -0.35, 0.17])
-    q_true[6] -= 0.42
 
     # The base body's orientation affects only the robot's scene facing, never
     # the measured bone directions, so the mapping is a pure yaw.
@@ -126,9 +127,12 @@ def test_registration_solves_yaw_and_recovers_q() -> None:
     collar_pb, shoulder_pb, elbow_pb, wrist_pb = (
         _SMPL_TO_PB @ pos for pos in positions[1:5]
     )
+    tpose = fk.tpose_all_joints
+    across_pb = _SMPL_TO_PB @ (tpose[_RIGHT_COLLAR_22] - tpose[_LEFT_COLLAR_22])
 
     collar_mocap = rng.normal(size=3)
     to_mocap = rotation.inv().apply
+    collar_right_mocap = collar_mocap + to_mocap(across_pb) * 0.9
     shoulder_mocap = collar_mocap + to_mocap(shoulder_pb - collar_pb) * 1.15
     elbow_mocap = shoulder_mocap + to_mocap(elbow_pb - shoulder_pb) * 1.3
     wrist_mocap = elbow_mocap + to_mocap(wrist_pb - elbow_pb) * 0.7
@@ -137,13 +141,12 @@ def test_registration_solves_yaw_and_recovers_q() -> None:
 
     registration = ArmRegistration.calibrate(
         fk=fk,
-        q0=q0,
         spine3_pos=None,
         spine3_aa=None,
         base_position=base_position,
         base_orientation=base_orientation,
         collar_mocap=collar_mocap,
-        shoulder_mocap=shoulder_mocap,
+        collar_right_mocap=collar_right_mocap,
     )
 
     np.testing.assert_allclose(
@@ -169,42 +172,35 @@ def test_registration_solves_yaw_and_recovers_q() -> None:
         _SMPL_TO_PB.T @ registration.collar_pb,
         atol=1e-9,
     )
-    # This is the run's start configuration (`RealEnv.initial_q`): the nominal
-    # q0's elbow and wrist slots are replaced by the person's, while its
-    # clavicle slot survives because that is what the yaw was solved against.
-    np.testing.assert_allclose(q_start[:3], q0[:3], atol=1e-6)
-    assert not np.allclose(q_start[3:], q0[3:], atol=1e-3)
 
 
-def test_vertical_clavicle_is_rejected() -> None:
-    """A vertical clavicle leaves the yaw undetermined, so it must not be guessed."""
+def test_vertical_collar_axis_is_rejected() -> None:
+    """A vertical collar-to-collar axis leaves the yaw undetermined, so it must not be guessed."""
     fk = SmplLeftArmFK()
     collar = np.array([0.0, 0.0, 1.2])
     with pytest.raises(ValueError, match="undetermined"):
         ArmRegistration.calibrate(
             fk=fk,
-            q0=np.zeros(7),
             spine3_pos=None,
             spine3_aa=None,
             base_position=np.array([1.0, 0.5, 0.0]),
             base_orientation=np.array([0.0, 0.0, 0.0, 1.0]),
             collar_mocap=collar,
-            shoulder_mocap=collar + np.array([0.0, 0.0, 0.1]),
+            collar_right_mocap=collar + np.array([0.0, 0.0, 0.1]),
         )
 
 
 def _calibrate_at(
-    fk: SmplLeftArmFK, q0: np.ndarray, collar: np.ndarray, shoulder: np.ndarray
+    fk: SmplLeftArmFK, collar: np.ndarray, collar_right: np.ndarray
 ) -> ArmRegistration:
     return ArmRegistration.calibrate(
         fk=fk,
-        q0=q0,
         spine3_pos=None,
         spine3_aa=None,
         base_position=np.array([1.0, 0.5, 0.0]),
         base_orientation=np.array([0.0, 0.0, 0.0, 1.0]),
         collar_mocap=collar,
-        shoulder_mocap=shoulder,
+        collar_right_mocap=collar_right,
     )
 
 
@@ -216,15 +212,14 @@ def test_torso_anchor_follows_the_person_between_runs() -> None:
     that differ by exactly where they moved.
     """
     fk = SmplLeftArmFK()
-    q0 = _canonical_q(fk, np.zeros((3, 3)))
     collar = np.array([0.0, 0.0, 1.2])
-    shoulder = collar + np.array([0.10, 0.02, 0.01])
+    collar_right = collar + np.array([-0.10, 0.24, 0.01])
     shift = np.array([0.4, -0.9, 0.15])
 
-    first = _calibrate_at(fk, q0, collar, shoulder)
-    second = _calibrate_at(fk, q0, collar + shift, shoulder + shift)
+    first = _calibrate_at(fk, collar, collar_right)
+    second = _calibrate_at(fk, collar + shift, collar_right + shift)
 
-    # Same clavicle direction both times, so the same yaw — the person only moved.
+    # Same collar axis both times, so the same yaw — the person only moved.
     np.testing.assert_allclose(
         second.rotation.as_matrix(), first.rotation.as_matrix(), atol=1e-12
     )
@@ -244,12 +239,12 @@ def test_registration_ignores_mocap_translation() -> None:
     (:func:`test_torso_anchor_follows_the_person_between_runs`).
     """
     fk = SmplLeftArmFK()
-    q0 = _canonical_q(fk, np.zeros((3, 3)))
     collar = np.array([0.0, 0.0, 1.2])
+    collar_right = collar + np.array([-0.10, 0.24, 0.01])
     shoulder = collar + np.array([0.10, 0.02, 0.01])
     elbow = shoulder + np.array([0.30, 0.05, -0.10])
     wrist = elbow + np.array([0.22, -0.08, -0.12])
-    registration = _calibrate_at(fk, q0, collar, shoulder)
+    registration = _calibrate_at(fk, collar, collar_right)
 
     shift = np.array([0.4, -0.9, 0.15])
     np.testing.assert_allclose(

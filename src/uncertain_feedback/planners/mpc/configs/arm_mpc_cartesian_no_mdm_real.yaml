@@ -18,12 +18,13 @@ env_params:
   # LAN address, not loopback, or no packets leave that machine.
   mocap_host: "192.168.2.243"
   # Motive rigid-body streaming ids. robot_base fixes where the robot stands;
-  # collar closes the last DOF — the locked collar rotation makes the measured
-  # collar->shoulder direction determine the registration yaw, so the person's
-  # orientation relative to the robot is measured rather than assumed.
+  # collar_right closes the last DOF — the measured left->right collar axis is
+  # the torso's facing, so the person's orientation relative to the robot is
+  # measured rather than assumed. It is read at calibration only.
   mocap_rigid_bodies:
     robot_base: 1
     collar: 2
+    collar_right: 6
     shoulder: 3
     elbow: 4
     wrist: 5
@@ -48,10 +49,9 @@ goal_threshold: 0.15
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 
 # Demo-runner "base1" initial pose ([shoulder, elbow, wrist] axis-angles).
-# The run starts from the *measured* arm configuration, so only the first row
-# matters here: the shoulder slot carries the collar->shoulder (clavicle) bone,
-# which is the reference the registration yaw is solved against and so cannot
-# itself be measured. The elbow and wrist rows are overwritten by mocap.
+# The run starts from the *measured* arm configuration — every row is
+# overwritten by mocap (the registration yaw comes from the collar-to-collar
+# axis, not from any slot here).
 arm:
   - [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783]
   - [0.6868865380518193, -0.18, -0.11006289820501858]

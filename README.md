@@ -394,10 +394,11 @@ optional YAML key `env`:
   simulated: OptiTrack rigid bodies on the shoulder, elbow, and wrist are
   streamed in over NatNet (multicast) and converted to the planner's `(7,)`
   configuration each step, so the MPC closes the loop on the actual person.
-  Two more rigid bodies supply the registration: one on the **robot base**,
+  Three more rigid bodies supply the registration: one on the **robot base**,
   whose position fixes where the robot stands (replacing `sim_mannequin`'s
-  hardcoded `robot_base_offset`), and one on the **collar**, which closes the
-  last degree of freedom *and* fixes where the person is (see below).
+  hardcoded `robot_base_offset`); one on the **collar**, which fixes where the
+  person is; and one on the **right collar** (read at calibration only), which
+  closes the last degree of freedom — the person's facing (see below).
   PyBullet runs in `DIRECT` for IK only (no physics, no cameras); the robot is
   commanded through the same `real_mirror_host` ZMQ path as above. Unlike the
   `sim_mannequin` mirror, the first MPC step moves nothing and touches no
@@ -405,7 +406,7 @@ optional YAML key `env`:
   *measured* rather than assumed (see below). `env_params:`
   `mocap_host` (the OptiTrack PC),
   `mocap_rigid_bodies` (Motive streaming ids for `robot_base`, `collar`,
-  `shoulder`, `elbow`, `wrist`),
+  `collar_right`, `shoulder`, `elbow`, `wrist`),
   `mocap_hold_timeout` (s, default 0.5 — how long a tracking dropout is
   covered by holding the last valid pose before the run raises and halts),
   `live_view` / `live_view_fps` (live mesh window — see below),
@@ -479,19 +480,22 @@ optional YAML key `env`:
   `live_view_fps` buys smoother human motion at the cost of a slower control loop
   — and above ~10 it starts tripping `MocapStaleError`.
 
-  **Why the collar body matters.** The person's orientation relative to the
-  robot is one unmeasured degree of freedom, and getting it wrong rotates every
-  measured bone direction (with `sim_mannequin`'s `166 deg` base yaw carried
-  over, the *left* arm landed on the person's right). The collar rotation is
-  locked for a run (`fk.collar_aa`, decoded from the start pose), so the
-  collar→shoulder direction in the torso frame is known — requiring the measured
-  direction to match it *solves* the registration yaw instead of assuming it.
-  The robot is then loaded into the scene at that solved yaw, so the scene and
-  the measured directions share one frame. Only the yaw is fitted: mocap, the
-  Kinova base, and PyBullet are all Z-up, and any leftover angle is the person's
-  real clavicle elevation differing from the start pose's, which must not tilt
-  the world. `mocap/monitor.py` prints the solved yaw, and a near-vertical
-  clavicle (which would leave the yaw undetermined) is rejected outright.
+  **Why the right-collar body matters.** The person's orientation relative to
+  the robot is one unmeasured degree of freedom, and getting it wrong rotates
+  every measured bone direction (with `sim_mannequin`'s `166 deg` base yaw
+  carried over, the *left* arm landed on the person's right). The left→right
+  collar line is the torso's mediolateral axis — requiring its measured
+  direction to match the start pose's *solves* the registration yaw instead of
+  assuming it, with no assumption about the arm. The robot is then loaded into
+  the scene at that solved yaw, so the scene and the measured directions share
+  one frame. Only the yaw is fitted: mocap, the Kinova base, and PyBullet are
+  all Z-up, and any leftover angle is measurement noise in the collar bodies'
+  heights, which must not tilt the world. `mocap/monitor.py` prints the solved
+  yaw, and a near-vertical collar axis (which would leave the yaw undetermined)
+  is rejected outright. Mount the two collar bodies so their pivots straddle
+  the sternum symmetrically: the line between them *is* the measured facing,
+  so a right body sitting forward or back of the left biases the yaw by that
+  offset angle.
 
   **Where the person is, is measured too.** The registered PyBullet frame *is*
   the mocap world turned by the solved yaw, so the person's torso is anchored on
@@ -514,9 +518,7 @@ optional YAML key `env`:
   **The run starts from the measured arm configuration.** `RealEnv.initial_q`
   registers against the person before planning and hands the planner the pose
   they are actually in, so the arm they start with need not match the config's
-  `arm:` — only its first row still matters, since the shoulder slot carries
-  the collar→shoulder (clavicle) bone that the yaw is solved against and so
-  cannot itself be measured. The elbow and wrist rows are overwritten by mocap.
+  `arm:` — every slot, clavicle included, is overwritten by mocap.
   Registration moves nothing; the robot still takes its grasp on the first MPC
   step, at the forearm's measured position.
 
@@ -534,8 +536,8 @@ optional YAML key `env`:
   frame). It is used *only* for the robot's facing in the scene, never for the
   measured bone directions, so a misaligned plate leaves the person correctly
   placed while the robot is loaded rotated away from reality — IK then solves
-  against the wrong pose and the startup check below trips. Create the four rigid
-  five bodies and put their streaming ids in `mocap_rigid_bodies`. NatNet 3 or
+  against the wrong pose and the startup check below trips. Create the six rigid
+  bodies and put their streaming ids in `mocap_rigid_bodies`. NatNet 3 or
   newer is required (verified against Motive 3.0.3.1 / NatNet 4.0).
 
   **Verify before anything moves**, in this order:
@@ -543,8 +545,8 @@ optional YAML key `env`:
   ```
   # 1. mocap only, no robot: validity, frame rate, derived q, rendered arm
   uv run python src/uncertain_feedback/mocap/monitor.py --host 192.168.2.243 \
-      --base-id 1 --collar-id 2 --shoulder-id 3 --elbow-id 4 --wrist-id 5 \
-      --video mocap_check.mp4
+      --base-id 1 --collar-id 2 --collar-right-id 6 --shoulder-id 3 \
+      --elbow-id 4 --wrist-id 5 --video mocap_check.mp4
 
   # 2. full loop on the live person with real_mirror_host: null — IK is solved
   #    but no command reaches the arm

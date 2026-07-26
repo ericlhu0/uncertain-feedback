@@ -1,16 +1,16 @@
 """Map mocap keypoints into the planner's arm configuration.
 
-Registration is *measured*, not assumed. Two rigid bodies do the work:
+Registration is *measured*, not assumed. Three rigid bodies do the work:
 
 - The **robot base** body gives its own orientation and position, so the robot's
   place in the scene is measured rather than the hardcoded guess
   ``SimMannequinEnv`` uses.
-- The **collar** body closes the last degree of freedom. The collar rotation is
-  locked for a run (``fk.collar_aa``, decoded from the start pose), so the
-  collar->shoulder bone direction in the torso frame is *known*; matching it
-  against the measured direction pins the mocap->pybullet yaw. Without it the
-  person's orientation relative to the robot is unobservable and has to be
-  assumed, which silently rotates every measured bone direction.
+- The two **collar** bodies (left and right) close the last degree of freedom.
+  The line between them is the torso's mediolateral axis, so matching its
+  measured direction against the startup pose's pins the mocap->pybullet yaw —
+  the person's facing is measured directly, with no assumption about the arm.
+  Without it the person's orientation relative to the robot is unobservable and
+  has to be assumed, which silently rotates every measured bone direction.
 
 Both the person and the robot are placed where they were *measured*: pybullet
 is the mocap world turned by the solved yaw, so the collar sits at the measured
@@ -39,11 +39,17 @@ from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.envs.sim_mannequin import _SMPL_TO_PB
 from uncertain_feedback.mocap.natnet import RigidBodyPose
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
+from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
-# A clavicle pointing straight up or down has no horizontal component to take a
-# yaw from. Anatomically it never should, so this is a wiring/mounting error.
+# A collar-to-collar axis pointing straight up or down has no horizontal
+# component to take a yaw from. Anatomically it never should, so this is a
+# wiring/mounting error.
 _MIN_HORIZONTAL = 1e-3
+
+# 22-joint SMPL indices of the two collar joints; the line between them is the
+# torso's mediolateral axis the registration yaw is solved from.
+_LEFT_COLLAR_22 = 13
+_RIGHT_COLLAR_22 = 14
 
 
 def _unit(vector: np.ndarray) -> np.ndarray:
@@ -54,8 +60,8 @@ def _horizontal_angle(vector: np.ndarray, what: str) -> float:
     if float(np.hypot(vector[0], vector[1])) < _MIN_HORIZONTAL:
         raise ValueError(
             f"{what} is vertical ({np.round(vector, 4)}), so the registration yaw "
-            "is undetermined. Check the collar and shoulder rigid-body ids and "
-            "their marker placement."
+            "is undetermined. Check the collar rigid-body ids and their marker "
+            "placement."
         )
     return float(np.arctan2(vector[1], vector[0]))
 
@@ -107,25 +113,25 @@ class ArmRegistration:
     def calibrate(
         cls,
         fk: SmplLeftArmFK,
-        q0: np.ndarray,
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,
         base_position: np.ndarray,
         base_orientation: np.ndarray,
         collar_mocap: np.ndarray,
-        shoulder_mocap: np.ndarray,
+        collar_right_mocap: np.ndarray,
     ) -> "ArmRegistration":
-        """Register the mocap world against the startup configuration ``q0``.
+        """Register the mocap world against the startup torso pose.
 
-        The mocap->pybullet rotation is *solved*, not configured: the locked
-        collar rotation fixes the clavicle's direction in the torso frame, so
-        requiring the measured clavicle to match it determines the yaw exactly.
-        Mocap, the Kinova base, and pybullet are all Z-up, so the fit stays a
-        rotation about the shared vertical — any leftover angle is the person's
-        real clavicle elevation differing from the start pose's, which must
-        *not* tilt the world. Keep Motive streaming Z-up for that reason: a
-        Y-up stream would need an extra fixed conversion and would stop sharing
-        an "up" axis with the robot base and pybullet.
+        The mocap->pybullet rotation is *solved*, not configured: the
+        left->right collar line is the torso's mediolateral axis, so requiring
+        its measured direction to match the startup pose's determines the yaw
+        exactly — the person's facing is measured, with no assumption about the
+        arm. Mocap, the Kinova base, and pybullet are all Z-up, so the fit
+        stays a rotation about the shared vertical — any leftover angle is
+        measurement noise in the collar bodies' heights, which must *not* tilt
+        the world. Keep Motive streaming Z-up for that reason: a Y-up stream
+        would need an extra fixed conversion and would stop sharing an "up"
+        axis with the robot base and pybullet.
 
         The base body's orientation is used *only* for the robot's facing in the
         scene, never for the measured bone directions — so it must be aligned in
@@ -133,13 +139,6 @@ class ArmRegistration:
         robot is loaded rotated away from reality and IK solves against the
         wrong pose, while the person's placement stays correct, which makes the
         error hard to see.
-
-        Only ``q0``'s clavicle slot (``arm_aa[0]``, the collar->shoulder bone)
-        is read. Its elbow and wrist slots are irrelevant: the caller gets the
-        person's real ones back from :meth:`q_from_keypoints`. The clavicle
-        cannot be measured the same way — it is the reference the yaw is
-        solved against, so at startup :meth:`q_from_keypoints` returns ``q0``'s
-        clavicle slot by construction.
 
         The caller must build its scene with :attr:`robot_base_yaw`, or the
         scene and the measured directions will disagree, and must plan against
@@ -149,24 +148,37 @@ class ArmRegistration:
         where the startup pose puts them (i.e. always).
 
         Args:
-            base_position:    ``(3,)`` base rigid-body position in mocap world.
-            base_orientation: ``(4,)`` base rigid-body xyzw quaternion, aligned
-                              to the Kinova base frame.
-            collar_mocap:     ``(3,)`` startup collar position in mocap world.
-            shoulder_mocap:   ``(3,)`` startup shoulder position in mocap world.
+            base_position:      ``(3,)`` base rigid-body position in mocap world.
+            base_orientation:   ``(4,)`` base rigid-body xyzw quaternion, aligned
+                                to the Kinova base frame.
+            collar_mocap:       ``(3,)`` startup left-collar position in mocap
+                                world.
+            collar_right_mocap: ``(3,)`` startup right-collar position in mocap
+                                world.
         """
-        positions = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), spine3_pos, spine3_aa)
-        clavicle_start = _unit(_SMPL_TO_PB @ (positions[2] - positions[1]))
+        # Only the spine3 and collar rows are consumed, and neither depends on
+        # the arm slots, so the FK runs on a zero arm.
+        positions = fk.fk(np.zeros((3, 3)), spine3_pos, spine3_aa)
+        torso_rot = Rotation.from_rotvec(
+            np.asarray(spine3_aa, dtype=np.float64)
+            if spine3_aa is not None
+            else np.zeros(3)
+        )
+        tpose_22 = fk.tpose_all_joints
+        across_start = _unit(
+            _SMPL_TO_PB
+            @ torso_rot.apply(tpose_22[_RIGHT_COLLAR_22] - tpose_22[_LEFT_COLLAR_22])
+        )
 
         # Mocap -> pybullet is a pure yaw about the shared vertical, solved from
-        # the clavicle. The base body's own orientation plays no part: it
-        # describes the marker plate, not the person, so a plate that was never
-        # aligned cannot corrupt the measured bone directions.
-        clavicle_measured = _unit(
-            np.asarray(shoulder_mocap, dtype=np.float64) - collar_mocap
+        # the collar-to-collar axis. The base body's own orientation plays no
+        # part: it describes the marker plate, not the person, so a plate that
+        # was never aligned cannot corrupt the measured bone directions.
+        across_measured = _unit(
+            np.asarray(collar_right_mocap, dtype=np.float64) - collar_mocap
         )
-        yaw = _horizontal_angle(clavicle_start, "start-pose clavicle") - (
-            _horizontal_angle(clavicle_measured, "measured clavicle")
+        yaw = _horizontal_angle(across_start, "start-pose collar-to-collar axis") - (
+            _horizontal_angle(across_measured, "measured collar-to-collar axis")
         )
         yaw = float((yaw + np.pi) % (2.0 * np.pi) - np.pi)
         rotation = Rotation.from_euler("z", yaw)

@@ -112,6 +112,10 @@ uncertain-feedback/
 │   │   ├── zero_kinova.py            # CLI: zero the real Gen3's joints via the ZMQ server (RealArmMirror.zero)
 │   │   ├── assets/panda/             # Franka Panda URDF + meshes (vendored from empriselab/limb-manipulation)
 │   │   └── assets/human/             # Mannequin URDFs + meshes: articulated 4-DOF left arm, plus torso/head, right arm, legs as visual context (vendored from empriselab/limb-manipulation)
+│   ├── mocap/
+│   │   ├── natnet.py                 # Minimal NatNet 3+/4 client: multicast receiver thread + rigid-body frame decoder (no PyPI dep); MocapStaleError, require_fresh
+│   │   ├── registration.py           # ArmRegistration: mocap→pybullet rotation solved from the measured clavicle + locked collar_aa (yaw-only fit), so pybullet = the mocap world turned by that yaw — torso anchored on the *measured* collar (`spine3_smpl`/`translation_smpl`, frozen for the run, moves between runs) and robot on its measured base; bone directions → planner q; arm_keypoints
+│   │   └── monitor.py                # CLI: verify the live stream (validity, frame rate, derived q, rollout video) with no robot involved
 │   ├── uncertainty/
 │   │   ├── clustering/               # Trajectory clustering methods (CLUSTERER_BUILDERS registry + make_clusterer)
 │   │   │   ├── base.py               # TrajectoryClusterer (template: _positions_to_features/_to_features + _fit_predict), medoid_indices, agglomerative_labels

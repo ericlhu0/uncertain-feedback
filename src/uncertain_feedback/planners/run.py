@@ -461,7 +461,19 @@ def build_run(
 
     fk = SmplLeftArmFK()
     fk.collar_aa = initial_state.fixed_collar_aa
-    q0 = fk.arm_aa_to_q(arm_aa, spine3_aa)
+
+    env = make_env(cfg.env, **cfg.env_params)
+    env.set_pose_context(fk, spine3_pos, spine3_aa, body_pos)
+    # Envs that measure the person (env: real) report where the arm actually
+    # is; the config's start pose is then only an assumption about the
+    # clavicle, which is what pins the mocap registration yaw.
+    q0 = env.initial_q(fk.arm_aa_to_q(arm_aa, spine3_aa))
+    arm_aa = q_to_arm_aa(q0, fk.elbow_hinge_axis)
+    # Those envs also place the person where they measured them, which moves the
+    # torso anchor off the config's. Goals and costs are spine3-relative, so
+    # plan against the anchor the env ended up with, not the one we assumed.
+    spine3_pos, spine3_aa, body_pos = env.pose_context()
+
     cost_context = MpcCostContext(
         fk=fk,
         spine3_pos=np.asarray(
@@ -480,9 +492,6 @@ def build_run(
     # Default goal: arm raised from the initial pose
     default_goal = q0.copy()
     default_goal[1] += 0.7
-
-    env = make_env(cfg.env, **cfg.env_params)
-    env.set_pose_context(fk, spine3_pos, spine3_aa, body_pos)
 
     common: dict = {
         "horizon": cfg.horizon,

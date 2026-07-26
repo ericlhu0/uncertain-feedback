@@ -168,7 +168,7 @@ torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 detectron2 = { git = "https://github.com/facebookresearch/detectron2.git" }
-emprise-gen3-controller = { path = "../../../../../home/eric/emprise-gen3-controller", editable = true }
+emprise-gen3-controller = { path = "/home/eric/emprise-gen3-controller", editable = true }
 
 [dependency-groups]
 dev = [

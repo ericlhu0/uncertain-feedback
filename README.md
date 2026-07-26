@@ -390,6 +390,186 @@ optional YAML key `env`:
   uv run python src/uncertain_feedback/envs/zero_kinova.py [--host HOST] [--yes]
   ```
 
+- `real`: the real world. The human arm state is *measured* rather than
+  simulated: OptiTrack rigid bodies on the shoulder, elbow, and wrist are
+  streamed in over NatNet (multicast) and converted to the planner's `(7,)`
+  configuration each step, so the MPC closes the loop on the actual person.
+  Two more rigid bodies supply the registration: one on the **robot base**,
+  whose position fixes where the robot stands (replacing `sim_mannequin`'s
+  hardcoded `robot_base_offset`), and one on the **collar**, which closes the
+  last degree of freedom *and* fixes where the person is (see below).
+  PyBullet runs in `DIRECT` for IK only (no physics, no cameras); the robot is
+  commanded through the same `real_mirror_host` ZMQ path as above. Unlike the
+  `sim_mannequin` mirror, the first MPC step moves nothing and touches no
+  gripper: **the grasp must already be established** before the run, and it is
+  *measured* rather than assumed (see below). `env_params:`
+  `mocap_host` (the OptiTrack PC),
+  `mocap_rigid_bodies` (Motive streaming ids for `robot_base`, `collar`,
+  `shoulder`, `elbow`, `wrist`),
+  `mocap_hold_timeout` (s, default 0.5 — how long a tracking dropout is
+  covered by holding the last valid pose before the run raises and halts),
+  `live_view` / `live_view_fps` (live mesh window — see below),
+  plus `robot`, `robot_max_joint_delta`, `robot_joint_limit_padding`, and
+  `real_mirror_host` as above; `real_mirror_confirm_start` here only prompts
+  once before the arm starts tracking (there is no move to confirm). See
+  `arm_mpc_cartesian_no_mdm_real.yaml`.
+
+  **The grasp is measured, not assumed — and re-measured every step.** Put the
+  gripper on the person's forearm and close it *before* starting the run — jog the
+  arm there however you normally would. At each MPC step the env reads the real
+  arm's joint configuration, computes the gripper pose from it, and stores the
+  rigid transform between that pose and the measured forearm frame
+  (`MeasuredGrasp` in `envs/grasp.py`); the commanded arm configuration is then
+  mapped through *that* transform. So the MPC tracks where the gripper actually is
+  on the limb, instead of the nominal 15%-along-the-forearm, top-down grasp the
+  simulated envs place their robot at. The reference frame is the FK's forearm
+  bone rotation, which carries its own roll and cannot flip when the forearm
+  passes through vertical — so the gripper takes the forearm's full rotation each
+  step rather than only its direction change.
+
+  Re-measuring rather than capturing once matters because the physical grasp is
+  not rigid over a trajectory: the forearm turns and slides a little inside the
+  fingers, and sleeve and skin move over the bone. The transform is the lever arm
+  the gripper is swung on, so a stale one converts the commanded forearm motion
+  into the wrong gripper motion. Two consequences:
+
+  - The command can be an **absolute** gripper pose. A transform captured once
+    could not afford that — SMPL FK and the tracked limb disagree on segment
+    lengths, so an absolute target re-anchors on that read-back bias every step
+    and integrates it into drift, which is why `sim_mannequin` (and this env,
+    before) commands a target relative to the read-back. Re-measuring absorbs the
+    bias into the transform instead, which makes the pose implied by the measured
+    configuration *exactly* the current end-effector pose — the relative form
+    reduces to the absolute one identically.
+  - The **on-forearm check below runs every step**, so it doubles as a slip
+    guard: a grasp that creeps along the forearm or off it walks the offset out of
+    tolerance and halts the run.
+
+  With `real_mirror_host: null` there is no real gripper to read, so the dry run
+  puts the IK robot on the nominal grasp and calibrates from that; the plumbing
+  is otherwise identical.
+
+  **Live view** (`live_view: true`, the default in the real config). Opens a
+  PyBullet GUI window showing the scene the MPC is solving in: the measured
+  person as a posed SMPL **mesh** (same fit the demo runner shows) and the
+  **robot's own URDF meshes**, both in the registered frame. It comes up right
+  after registration — before any command is sent — so a bad registration (person
+  or robot in the wrong place, arm on the wrong side) is visible while nothing is
+  moving. Requires a display; set `live_view: false` when running headless over
+  ssh.
+
+  **Goal ghost.** The configuration the run drives toward is drawn in the same
+  window as a **translucent green arm** (`env.show_goal`, wired up in
+  `build_run`), so the gap between the person's own mesh and the ghost *is* the
+  remaining error. Only the arm is drawn: it is all the MPC controls, so a
+  whole-body ghost would coincide with the person's mesh everywhere else and
+  z-fight into speckle. A Cartesian goal fixes the wrist alone, so the posture
+  shown is the nearest configuration reaching it (`q_reaching_wrist` in
+  `kinematics.py`, a wrist-position least-squares fit pulled toward the arm's
+  current configuration); joint-space configs pass their goal `q` straight
+  through. It is set once, from the first goal, and does not follow later queued
+  goals or MDM corrections. Transparency only renders in the GUI window — the
+  offscreen TinyRenderer used by `getCameraImage` ignores alpha.
+
+  PyBullet cannot update a mesh's vertices, so each human pose replaces the whole
+  6890-vertex body — ~140 ms in the GUI, during which the MPC step is blocked and
+  the mocap receive thread is delayed toward `mocap_hold_timeout`. The mesh is
+  therefore rate-limited by `live_view_fps` (default 5); the robot is re-posed
+  every step regardless, since `resetJointState` costs nothing. Raising
+  `live_view_fps` buys smoother human motion at the cost of a slower control loop
+  — and above ~10 it starts tripping `MocapStaleError`.
+
+  **Why the collar body matters.** The person's orientation relative to the
+  robot is one unmeasured degree of freedom, and getting it wrong rotates every
+  measured bone direction (with `sim_mannequin`'s `166 deg` base yaw carried
+  over, the *left* arm landed on the person's right). The collar rotation is
+  locked for a run (`fk.collar_aa`, decoded from the start pose), so the
+  collar→shoulder direction in the torso frame is known — requiring the measured
+  direction to match it *solves* the registration yaw instead of assuming it.
+  The robot is then loaded into the scene at that solved yaw, so the scene and
+  the measured directions share one frame. Only the yaw is fitted: mocap, the
+  Kinova base, and PyBullet are all Z-up, and any leftover angle is the person's
+  real clavicle elevation differing from the start pose's, which must not tilt
+  the world. `mocap/monitor.py` prints the solved yaw, and a near-vertical
+  clavicle (which would leave the yaw undetermined) is rejected outright.
+
+  **Where the person is, is measured too.** The registered PyBullet frame *is*
+  the mocap world turned by the solved yaw, so the person's torso is anchored on
+  their **measured collar** and the robot on its measured base. Neither is a
+  constant of the config: sit somewhere else next run and the whole body moves
+  there, while the bolted-down robot stays put. The config's start pose supplies
+  the torso's shape and orientation only — its position is discarded. Cartesian
+  goals are spine3-relative, so they follow the person, and the anchor is frozen
+  for the run, which is what `MpcCostContext` requires. A run must therefore read
+  the anchor back from `env.pose_context()` after `initial_q` (`planners/run.py`
+  does); planning against the config's `spine3_pos` would put the goals on a
+  torso that is not where the person is.
+
+  Within a run, only bone *directions* come from mocap: they are re-anchored at
+  the frozen collar and rescaled to SMPL bone lengths, so mid-run torso
+  translation is deliberately not tracked — the registration yaw is likewise
+  solved once, so a person who rotates in their seat drifts out of registration
+  silently.
+
+  **The run starts from the measured arm configuration.** `RealEnv.initial_q`
+  registers against the person before planning and hands the planner the pose
+  they are actually in, so the arm they start with need not match the config's
+  `arm:` — only its first row still matters, since the shoulder slot carries
+  the collar→shoulder (clavicle) bone that the yaw is solved against and so
+  cannot itself be measured. The elbow and wrist rows are overwritten by mocap.
+  Registration moves nothing; the robot still takes its grasp on the first MPC
+  step, at the forearm's measured position.
+
+  **Motive setup.** In Motive's Streaming pane set **Local Interface** to the
+  OptiTrack PC's LAN address (on loopback the stream never leaves that
+  machine), transmission `Multicast` on `239.255.42.99`, command port `1510`,
+  data port `1511`, **Z-up**, and enable **Rigid Bodies**. Keep the up axis Z:
+  mocap, the Kinova base, and PyBullet then share one vertical, which is what
+  lets the registration be a single yaw; a Y-up stream would only add a fixed
+  conversion and another place for a sign to be wrong.
+
+  The **robot base body's orientation must be aligned to the Kinova base frame**
+  (`+x` forward, `+z` up — `+x` is the Gen3's reach direction: at the repo's
+  home configuration the gripper sits at `(0.576, 0.002, 0.434)` in the base
+  frame). It is used *only* for the robot's facing in the scene, never for the
+  measured bone directions, so a misaligned plate leaves the person correctly
+  placed while the robot is loaded rotated away from reality — IK then solves
+  against the wrong pose and the startup check below trips. Create the four rigid
+  five bodies and put their streaming ids in `mocap_rigid_bodies`. NatNet 3 or
+  newer is required (verified against Motive 3.0.3.1 / NatNet 4.0).
+
+  **Verify before anything moves**, in this order:
+
+  ```
+  # 1. mocap only, no robot: validity, frame rate, derived q, rendered arm
+  uv run python src/uncertain_feedback/mocap/monitor.py --host 192.168.2.243 \
+      --base-id 1 --collar-id 2 --shoulder-id 3 --elbow-id 4 --wrist-id 5 \
+      --video mocap_check.mp4
+
+  # 2. full loop on the live person with real_mirror_host: null — IK is solved
+  #    but no command reaches the arm
+  uv run python src/uncertain_feedback/planners/run.py \
+      --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_real.yaml \
+      --env-video real_rollout.mp4
+
+  # 3. the same with real_mirror_host set, after taking the grasp by hand and
+  #    launching the controller server
+  ```
+
+  `--env-video` renders the *measured* arm trajectory through
+  `ArmVisualizer.render_rollout_video()`.
+
+  Before the real arm is allowed to move, step 1 checks that the measured grasp
+  actually landed on the forearm — the gripper origin must be within 15 cm of the
+  elbow→wrist segment (`_GRASP_OFFSET_TOLERANCE_M`) — and raises otherwise. A
+  wrong registration yaw or a base plate misaligned in Motive puts the person
+  somewhere else in the scene, and the measurement would then bake that error
+  into a long lever arm that the MPC swings the real arm through. At step 1 the
+  usual cause is a registration error or a grasp that was never taken. The check
+  then repeats every step against the freshly measured transform, so it also
+  catches a grasp slipping off the forearm mid-run; the error message says which
+  step tripped it.
+
 Every planner takes the env at construction (defaulting to `kinematic`), and
 `step` returns the configuration the env actually achieved. Envs also expose
 `visualize()` (image of the current state) and `save_video()` (video of the
@@ -409,9 +589,9 @@ same run with `env: sim_mannequin`;
 `arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml` is the mannequin run
 with the Kinova Gen3;
 `arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml` additionally
-mirrors the sim robot onto the real Gen3; the `--env-video` flag works with
-any env). A real-robot environment will be added as a further `env` value;
-see `src/uncertain_feedback/envs/`.
+mirrors the sim robot onto the real Gen3;
+`arm_mpc_cartesian_no_mdm_real.yaml` is the mocap-closed-loop real run; the
+`--env-video` flag works with any env).
 
 ### Simulated user (`user:`)
 

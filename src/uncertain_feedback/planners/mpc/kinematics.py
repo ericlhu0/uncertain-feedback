@@ -446,18 +446,46 @@ class SmplLeftArmFK:
             else np.zeros(3)
         )
 
-        # Build full 4-joint array: [collar, shoulder, elbow, wrist]
-        full_aa = np.concatenate([self.collar_aa[None], arm_aa], axis=0)
-
         positions = np.empty((5, 3), dtype=np.float64)
         positions[0] = spine3_pos
 
+        rotations = self.bone_world_rotations(arm_aa, spine3_aa)
+        for i in range(4):
+            positions[i + 1] = positions[i] + rotations[i].apply(self._bone_offsets[i])
+
+        return positions
+
+    def bone_world_rotations(
+        self,
+        arm_aa: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+    ) -> list[Rotation]:
+        """World rotations transforming each arm-chain bone, in FK convention.
+
+        Entry *i* is the accumulated rotation applied to ``bone_offsets[i]``, so
+        the four entries carry the [spine3→collar, clavicle, upper-arm, forearm]
+        bones. Unlike a frame built from joint positions, these have no
+        up-reference to flip and carry the bone's roll about its own axis.
+
+        Args:
+            arm_aa:    ``(3, 3)`` axis-angle for [shoulder, elbow, wrist].
+            spine3_aa: ``(3,)`` world axis-angle of spine3 (default identity).
+        """
+        arm_aa = np.asarray(arm_aa, dtype=np.float64)
+        spine3_aa = (
+            np.asarray(spine3_aa, dtype=np.float64)
+            if spine3_aa is not None
+            else np.zeros(3)
+        )
+        # Build full 4-joint array: [collar, shoulder, elbow, wrist]
+        full_aa = np.concatenate([self.collar_aa[None], arm_aa], axis=0)
+
+        rotations: list[Rotation] = []
         t_rot = Rotation.from_rotvec(spine3_aa)
         for i in range(4):
             t_rot = t_rot * Rotation.from_rotvec(full_aa[i])
-            positions[i + 1] = positions[i] + t_rot.apply(self._bone_offsets[i])
-
-        return positions
+            rotations.append(t_rot)
+        return rotations
 
     def fk_batch(
         self,

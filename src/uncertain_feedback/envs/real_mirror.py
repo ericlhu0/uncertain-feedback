@@ -132,6 +132,18 @@ class RealArmMirror:
         time.sleep(_GRIPPER_SETTLE_S)
         self._ctrl.switch_mode(ControlMode.POSITION_JOINT)
 
+    def start_from_grasp(self) -> None:
+        """Enter position mode without moving, for an already-taken grasp.
+
+        What :class:`~uncertain_feedback.envs.real.RealEnv` uses: the gripper is
+        already closed on the person's forearm, so there is nothing to approach
+        and the gripper must not be touched. Unlike :meth:`start` this only hands
+        control to position mode, ready for :meth:`send`.
+        """
+        if self._confirm_start:
+            input("\n[mirror] Grasp already taken. Press Enter to start tracking: ")
+        self._ctrl.switch_mode(ControlMode.POSITION_JOINT)
+
     def zero(self) -> None:
         """Move every joint to zero (the upright reference pose)."""
         self._move_and_wait(np.zeros(len(GEN3_JOINT_LIMITS)))
@@ -141,6 +153,10 @@ class RealArmMirror:
         self._ctrl.execute(
             JointCommand(self._nearest_branch(np.asarray(q, dtype=np.float64)))
         )
+
+    def current_q(self) -> np.ndarray:
+        """The arm's measured joint configuration."""
+        return np.asarray(self._ctrl.get_state().joint_positions, dtype=np.float64)
 
     def stop(self) -> None:
         """Return the arm to high-level mode (holds position via servoing)."""

@@ -37,10 +37,19 @@ def _build_sim_mannequin(**params: Any) -> ExecutionEnv:
     return SimMannequinEnv(**params)
 
 
+def _build_real(**params: Any) -> ExecutionEnv:
+    from uncertain_feedback.envs.real import (  # pylint: disable=import-outside-toplevel
+        RealEnv,
+    )
+
+    return RealEnv(**params)
+
+
 ENV_BUILDERS: dict[str, Callable[..., ExecutionEnv]] = {
     "kinematic": _build_kinematic,
     "sim_robot_visual": _build_sim_robot_visual,
     "sim_mannequin": _build_sim_mannequin,
+    "real": _build_real,
 }
 
 

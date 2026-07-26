@@ -45,6 +45,28 @@ class ExecutionEnv(ABC):
         self._spine3_aa = spine3_aa
         self._body_pos = body_pos
 
+    def pose_context(
+        self,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        """The ``(spine3_pos, spine3_aa, body_pos)`` the run should plan against.
+
+        Read *after* :meth:`initial_q`. Default: whatever
+        :meth:`set_pose_context` was given. Envs that measure the person place
+        the torso where they measured it, so the anchor they end up with is not
+        the one the config assumed — and every Cartesian goal is relative to it.
+        """
+        return self._spine3_pos, self._spine3_aa, self._body_pos
+
+    def initial_q(self, q_nominal: np.ndarray) -> np.ndarray:
+        """Return the ``(7,)`` configuration the arm actually starts in.
+
+        Called once before planning, after :meth:`set_pose_context`. Default:
+        the nominal configuration from the run config. Envs that *measure* the
+        person override this to report where the arm really is, so the planner
+        starts from the truth rather than from what the config assumed.
+        """
+        return q_nominal
+
     def show_goal(self, q_goal: np.ndarray) -> None:
         """Display the ``(7,)`` configuration the run drives toward.
 

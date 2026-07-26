@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-24
+**Last updated:** 2026-07-25
 **Branch:** real-env
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -67,7 +67,8 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_no_mdm_sim.yaml  # same, with env: sim_robot_visual
 │   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin.yaml  # same, with env: sim_mannequin (physics; more steps)
 │   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml  # same, with robot: kinova_gen3
-│   │           └── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml  # same, mirroring the sim robot onto the real Gen3 (real_mirror_host)
+│   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml  # same, mirroring the sim robot onto the real Gen3 (real_mirror_host)
+│   │           └── arm_mpc_cartesian_no_mdm_real.yaml  # env: real (OptiTrack-measured human arm + real Gen3)
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
 │   │   ├── run_experiment.py         # CLI: one persona + one backend on the original goal
@@ -103,12 +104,14 @@ uncertain-feedback/
 │   │       └── motion-diffusion-model/   # Git submodule (GuyTevet/MDM)
 │   ├── envs/
 │   │   ├── __init__.py               # ENV_BUILDERS registry + make_env
-│   │   ├── base.py                   # ExecutionEnv ABC (execute/hold; set_pose_context attaches the run's FK; abstract visualize/save_video)
+│   │   ├── base.py                   # ExecutionEnv ABC (execute/hold; show_goal displays the goal config for envs that can draw it; set_pose_context attaches the run's FK; initial_q reports the arm's real start config and pose_context the torso anchor to plan against — defaults: the config's, both overridden by envs that measure the person; abstract visualize/save_video)
 │   │   ├── kinematic.py              # KinematicEnv (pass-through; matplotlib visualize/save_video)
-│   │   ├── grasp.py                  # grasp_pose_fk: human q → gripper grasp pose on the forearm (shared with future real-robot env)
+│   │   ├── grasp.py                  # grasp_pose_fk: human q → *nominal* gripper grasp pose on the forearm (sim envs); forearm_frame_fk + MeasuredGrasp: gripper-on-forearm transform measured from an ee pose + forearm pose, rigid over one step and re-measured each step by the real env
+│   │   ├── human_mesh.py             # HumanMeshBody: posed SMPL body mesh as a pybullet visual body (remove+recreate per pose — no vertex-update API); shared by sim_robot_visual (offscreen) and real (live GUI); `arm_only` draws just the left arm, for the translucent green goal ghost drawn over the person
 │   │   ├── sim_robot_visual.py       # SimRobotVisualEnv (no physics: kinematic human rendered as posed SMPL mesh + Panda posed via PyBullet IK)
 │   │   ├── sim_mannequin.py          # SimMannequinEnv (physics proxy: robot drags passive 4-DOF mannequin arm via fixed constraint; achieved q read back from link positions; robot: panda (vendored) or kinova_gen3 (URDF from /home/emprise/kortex_description); optional real_mirror_host forwards achieved robot q to the real Gen3)
-│   │   ├── real_mirror.py            # RealArmMirror: streams sim robot joint configs to the real Kinova Gen3 over ZMQ (emprise-gen3-controller); close gripper → zero → slow streamed ramp to grasp config → confirmed gripper open → 1 kHz joint position mode
+│   │   ├── real_mirror.py            # RealArmMirror: streams sim robot joint configs to the real Kinova Gen3 over ZMQ (emprise-gen3-controller); start(): close gripper → zero → slow streamed ramp to grasp config → confirmed gripper open → 1 kHz joint position mode; start_from_grasp(): position mode only, nothing moved (real env, grasp already taken)
+│   │   ├── real.py                   # RealEnv (env: real — human arm measured from OptiTrack rigid bodies via mocap/, including the run's start configuration (initial_q) and the torso anchor, placed on the measured collar and read back via pose_context; grasp *measured* from the real ee pose + forearm frame (MeasuredGrasp) and re-measured every step since the real grasp shifts, never taken or assumed — which absorbs the FK-vs-real bias and so lets `_drive` command an absolute gripper pose, and turns the on-forearm tolerance check into a per-step slip guard; robot commanded through RealArmMirror; PyBullet DIRECT for IK only, no physics — or GUI with `live_view`, drawing the measured person as an SMPL mesh (rate-limited by `live_view_fps`) beside the robot's URDF meshes, plus a translucent green goal-pose arm via `show_goal`)
 │   │   ├── zero_kinova.py            # CLI: zero the real Gen3's joints via the ZMQ server (RealArmMirror.zero)
 │   │   ├── assets/panda/             # Franka Panda URDF + meshes (vendored from empriselab/limb-manipulation)
 │   │   └── assets/human/             # Mannequin URDFs + meshes: articulated 4-DOF left arm, plus torso/head, right arm, legs as visual context (vendored from empriselab/limb-manipulation)
@@ -285,6 +288,7 @@ ArmVisualizer.update_step()                          [utils/plot.py]
   - `fk(arm_aa, spine3_pos, spine3_aa) → (5, 3)` world positions
   - `fk_batch(arm_aa, ...) → (N, 5, 3)` batched
   - `q_reaching_wrist(fk, wrist_target, q_seed, ...) → (7,)` inverse of a Cartesian goal: nearest configuration whose wrist hits a world point (least squares, pulled toward `q_seed` since 3 constraints leave the posture free) — used to show a Cartesian goal as a *pose*
+  - `bone_world_rotations(arm_aa, spine3_aa) → [Rotation] * 4` the rotations `fk` applies to each bone ([spine3→collar, clavicle, upper arm, forearm]); the forearm entry is the frame a measured grasp rides (`envs/grasp.py`), flip-free unlike a positions-plus-world-up frame
   - `arm_aa_from_positions(positions, spine3_aa) → (3, 3)` inverse: XYZ → local axis-angles
   - `arm_aa_to_q(arm_aa, spine3_aa) → (7,)` boundary conversion; off-hinge elbow rotation is anatomically decoded
   - `q_to_arm_aa(q, elbow_hinge_axis) → (..., 3, 3)` FK/visualization/cost boundary
@@ -383,8 +387,8 @@ When `llm_cost.enabled: true` in the YAML:
 |------------------------|----------|-------------------------------------------------------|
 | `planner`              | str      | One of the 5 planner choices                         |
 | `motion_generator`     | str      | Text-to-motion backend: `mdm` (default) or `kimodo`  |
-| `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default), `sim_robot_visual` (no-physics PyBullet scene with a Panda IK'd to a forearm grasp point), or `sim_mannequin` (physics proxy: Panda drags the passive limb-manipulation mannequin arm; achieved q measured back from link positions). Passed to the planner constructor (`build_run`, demo runner) after `set_pose_context`; every planner's `step` returns the env-achieved q. Envs render via `visualize()`/`save_video()` (`run.py --env-video`). |
-| `env_params`           | mapping  | Keyword args forwarded to the env constructor by `make_env` (empty default). `sim_mannequin` accepts `robot` (`panda` default, or `kinova_gen3` — Gen3 7-DOF + Robotiq 2F-85 URDF loaded from `/home/emprise/kortex_description`), `robot_max_joint_delta` (per-step robot joint travel cap, rad), `robot_base_offset` (robot base position relative to spine3, pybullet frame), `robot_joint_limit_padding` (rad; shrinks robot joint limits so commands clear the real controller's soft limits), and — kinova_gen3 only — `real_mirror_host`/`real_mirror_confirm_start` (mirror the sim robot's achieved joint trajectory onto the real Gen3 via an emprise-gen3-controller ZMQ server, planning against the controller's enforced joint-limit table; see `envs/real_mirror.py`). |
+| `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default), `sim_robot_visual` (no-physics PyBullet scene with a Panda IK'd to a forearm grasp point), `sim_mannequin` (physics proxy: Panda drags the passive limb-manipulation mannequin arm; achieved q measured back from link positions), or `real` (real world: human arm measured from OptiTrack rigid bodies, real Gen3 commanded over ZMQ). Passed to the planner constructor (`build_run`, demo runner) after `set_pose_context`; every planner's `step` returns the env-achieved q. Envs render via `visualize()`/`save_video()` (`run.py --env-video`). |
+| `env_params`           | mapping  | Keyword args forwarded to the env constructor by `make_env` (empty default). `sim_mannequin` accepts `robot` (`panda` default, or `kinova_gen3` — Gen3 7-DOF + Robotiq 2F-85 URDF loaded from `/home/emprise/kortex_description`), `robot_max_joint_delta` (per-step robot joint travel cap, rad), `robot_base_offset` (robot base position relative to spine3, pybullet frame), `robot_joint_limit_padding` (rad; shrinks robot joint limits so commands clear the real controller's soft limits), and — kinova_gen3 only — `real_mirror_host`/`real_mirror_confirm_start` (mirror the sim robot's achieved joint trajectory onto the real Gen3 via an emprise-gen3-controller ZMQ server, planning against the controller's enforced joint-limit table; see `envs/real_mirror.py`). `real` accepts `mocap_host` (OptiTrack PC address), `mocap_rigid_bodies` (Motive streaming ids for `robot_base`/`collar`/`shoulder`/`elbow`/`wrist`; the collar body makes the registration yaw measurable — the locked `collar_aa` fixes the clavicle direction in the torso frame, so the measured collar→shoulder direction solves the yaw, and the robot is loaded at that solved yaw), `mocap_hold_timeout` (s, default 0.5 — dropout hold before raising `MocapStaleError`), plus `robot`, `robot_max_joint_delta`, `robot_joint_limit_padding`, `real_mirror_host` (null = mocap-only dry run, no command reaches the arm), `real_mirror_confirm_start` (one prompt before tracking starts — the real env moves nothing at startup, since the grasp must already be taken and is measured from the real ee pose), and `live_view`/`live_view_fps` (PyBullet GUI window with the measured person as an SMPL mesh next to the robot's meshes; needs a display, mesh refresh rate-limited because each refresh replaces the whole mesh). |
 | `steps`                | int      | Total MPC steps to run                               |
 | `horizon`              | int      | MPC look-ahead steps                                 |
 | `n_mpc_samples`        | int      | Candidate action sequences per step                  |

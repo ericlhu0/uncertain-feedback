@@ -1,0 +1,120 @@
+# The full method on the real rig: mocap-measured person, MDM/UQ corrections
+# typed by the operator mid-run, and one LLM cost per correction. Run it with
+# --interactive (see README) — without that flag the correction is injected at
+# text_time below, which is not what a live person wants.
+env: real
+env_params:
+  robot: kinova_gen3
+  robot_max_joint_delta: 0.01
+  # Keep IK solutions inside the real controller's soft joint limits
+  # (joint_limit_padding_deg: 15.0 = 0.262 rad in config_tuned.yaml) with a
+  # small margin — commands in the padding band are rejected by its checks.
+  robot_joint_limit_padding: 0.27
+  # emprise-gen3-controller ZMQ server (launch_server.py) on this host. Set to
+  # null to close the loop on the live person without commanding the arm — do
+  # that dry run first.
+  real_mirror_host: "127.0.0.1"
+  # Prompt the operator once before the arm starts tracking. Nothing is moved at
+  # startup — the grasp must already be taken. Set false only for headless/mock
+  # runs.
+  real_mirror_confirm_start: true
+  # OptiTrack PC running Motive. Its streaming Local Interface must be this
+  # LAN address, not loopback, or no packets leave that machine.
+  mocap_host: "192.168.2.243"
+  # Motive rigid-body streaming ids. robot_base fixes where the robot stands;
+  # collar_right closes the last DOF — the measured left->right collar axis is
+  # the torso's facing, so the person's orientation relative to the robot is
+  # measured rather than assumed. It is read at calibration only.
+  mocap_rigid_bodies:
+    robot_base: 1
+    collar: 2
+    collar_right: 6
+    shoulder: 3
+    elbow: 4
+    wrist: 5
+  # Hold the last valid pose through tracking dropouts up to this long (s),
+  # then raise and halt.
+  mocap_hold_timeout: 0.5
+  # Live pybullet window: the measured person as an SMPL mesh next to the robot,
+  # both in the registered frame. Needs a display — set false when running
+  # headless (over ssh without X).
+  live_view: true
+  # Human-mesh refresh rate. Each refresh replaces the whole mesh (~140 ms in the
+  # GUI) and blocks the MPC step, so keep it low; the robot still animates every
+  # step.
+  live_view_fps: 5
+  # Draw each planned step in the live view as it is solved and wait for approval
+  # before the first command. Only the pre-correction plan to the Cartesian goal
+  # exists this early — the MDM correction has not been spoken yet.
+  preview_plan: false
+planner: arm_mpc_cartesian_robot
+# Robot-action sampling: per-step inf-norm cap on robot joint deltas (rad),
+# the sampling-noise std around the warm-started mean (keep it well below the
+# cap or the uniform rescale drowns the warm start in noise; null = cap / 3),
+# and the weight on the grasp-transmission (projection) residual. The env's
+# robot_max_joint_delta stays as the hardware backstop, applied with uniform
+# scaling rather than per-joint clipping.
+max_robot_joint_delta: 0.03
+robot_joint_delta_std: 0.01
+robot_infeasibility_weight: 1.0
+# Rollouts whose first grasp_residual_frames frames exceed this residual
+# (metres of elbow displacement + radians of untransmitted roll) are
+# discarded outright - they would move the grasp in a way the arm cannot
+# follow. The tail of the horizon is only soft-penalized; it is re-solved
+# every step.
+max_grasp_residual: 0.02
+grasp_residual_frames: 3
+# The real rig's conservative step caps, as in arm_mpc_cartesian_no_mdm_real.yaml.
+horizon: 10
+n_mpc_samples: 1000
+max_angle_delta: 0.001
+# Correction playback is rate-limited against the *measured* arm and advances a
+# frame only once the arm reaches it, so this bounds how far the command may lead
+# the person; the env's own robot_max_joint_delta is the hard per-step bound.
+max_playback_delta: 0.02
+# Every correction is played back at those caps, so a run holds far more steps
+# than a kinematic one — this is the budget for the whole session, not one reach.
+steps: 3000
+goal_threshold: 0.15
+advance_threshold: 0.15
+trajectory_fraction: 1
+mdm_frames: 50
+# Ignored with --interactive; kept so this config also runs scripted.
+text_time: 300
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
+
+corrections:
+  trigger_threshold: 0.02
+
+uq:
+  diffusion_samples: 500
+  n_clusters: 3
+  # No auto_cluster: each correction opens the cluster picker so the person's
+  # intent — and its magnitude — is chosen rather than assumed.
+  scale: 1.0
+
+# Demo-runner "base1" initial pose ([shoulder, elbow, wrist] axis-angles).
+# The run starts from the *measured* arm configuration — every row is
+# overwritten by mocap (the registration yaw comes from the collar-to-collar
+# axis, not from any slot here).
+arm:
+  - [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783]
+  - [0.6868865380518193, -0.18, -0.11006289820501858]
+  - [0.035651850950680734, -1.23, 0.7515284911778386]
+
+cartesian:
+  # Demo-runner "hits limit 1" goal, spine3-relative, so it follows the measured
+  # person rather than sitting at a fixed point in the room.
+  goals:
+    - [0.35, 0.3, 0.18]
+  threshold: 0.05
+
+preference_learning: false
+preference_alpha: 0
+
+llm_cost:
+  enabled: true
+  model: gpt-5.6-luna
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true

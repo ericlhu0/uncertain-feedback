@@ -27,7 +27,13 @@ import pybullet as p
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.envs.base import ExecutionEnv
-from uncertain_feedback.envs.grasp import GRASP_FRACTION, grasp_pose_fk
+from uncertain_feedback.envs.grasp import (
+    GRASP_FRACTION,
+    MeasuredGrasp,
+    forearm_frame_fk,
+    grasp_pose_fk,
+)
+from uncertain_feedback.envs.robot_fk import RobotChainFK
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
 
 _PANDA_URDF = Path(__file__).parent / "assets" / "panda" / "panda.urdf"
@@ -219,6 +225,7 @@ class SimMannequinEnv(ExecutionEnv):
         self._spine3_smpl: np.ndarray = np.zeros(3, dtype=np.float64)
         self._collar_smpl: np.ndarray = np.zeros(3, dtype=np.float64)
         self._attached = False
+        self._robot_chain: RobotChainFK | None = None
 
     def set_pose_context(
         self,
@@ -243,6 +250,76 @@ class SimMannequinEnv(ExecutionEnv):
 
     def hold(self, q: np.ndarray) -> np.ndarray:
         return self.execute(q)
+
+    def robot_fk(self) -> RobotChainFK:
+        assert self._robot != -1, "scene not built; set_pose_context first"
+        if self._robot_chain is None:
+            self._robot_chain = RobotChainFK.from_pybullet(
+                self._robot, self._ee_index, self._cid
+            )
+        return self._robot_chain
+
+    def current_robot_q(self) -> np.ndarray:
+        return self._robot_q()
+
+    def robot_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._joint_lower.copy(), self._joint_upper.copy()
+
+    def solve_robot_ik_exact(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> np.ndarray | None:
+        q_seed = np.asarray(q_seed, dtype=np.float64)
+        lower = np.where(self._continuous_joints, q_seed - np.pi, self._joint_lower)
+        upper = np.where(self._continuous_joints, q_seed + np.pi, self._joint_upper)
+        solution = p.calculateInverseKinematics(
+            self._robot,
+            self._ee_index,
+            tuple(target_pos),
+            tuple(target_quat),
+            lowerLimits=lower.tolist(),
+            upperLimits=upper.tolist(),
+            jointRanges=(upper - lower).tolist(),
+            restPoses=q_seed.tolist(),
+            maxNumIterations=200,
+            residualThreshold=1e-5,
+            physicsClientId=self._cid,
+        )
+        return np.clip(np.asarray(solution, dtype=np.float64), lower, upper)
+
+    def current_grasp(self, q: np.ndarray) -> MeasuredGrasp:
+        q = np.asarray(q, dtype=np.float64)
+        if not self._attached:
+            self._attach(q)
+        return MeasuredGrasp.measure(
+            *self._forearm_frame_pb(q), *self._ee_pose_pb()
+        )
+
+    def execute_robot(self, target: np.ndarray) -> np.ndarray:
+        if not self._attached:
+            raise RuntimeError(
+                "execute_robot before the grasp exists; call current_grasp first"
+            )
+        target = np.asarray(target, dtype=np.float64)
+        q_now = self._robot_q()
+        delta = target - q_now
+        wrapped = self._continuous_joints
+        delta[wrapped] = np.arctan2(np.sin(delta[wrapped]), np.cos(delta[wrapped]))
+        # Uniform scaling keeps the commanded ee direction when one joint
+        # saturates, unlike the per-joint clip of the IK path.
+        largest = float(np.max(np.abs(delta)))
+        if largest > self._robot_max_joint_delta:
+            delta *= self._robot_max_joint_delta / largest
+        target = np.clip(q_now + delta, self._joint_lower, self._joint_upper)
+        self._drive_joints(target)
+        if self._mirror is not None:
+            self._mirror.send(self._robot_q())
+        q_meas = self._read_back_q()
+        self._sync_ghost(q_meas)
+        self._record(q_meas)
+        return q_meas
 
     def visualize(self, path: Path | None = None) -> np.ndarray:
         frame = self._frame()
@@ -495,17 +572,28 @@ class SimMannequinEnv(ExecutionEnv):
             Rotation.from_matrix(_SMPL_TO_PB) * Rotation.from_quat(grasp_quat),
         )
 
-    def _solve_ik(self, target_pos: np.ndarray, target_quat: np.ndarray) -> np.ndarray:
-        solution = p.calculateInverseKinematics(
+    def _forearm_frame_pb(self, q: np.ndarray) -> tuple[np.ndarray, Rotation]:
+        """The frame a measured grasp is expressed in, in pybullet coords."""
+        assert self._fk is not None
+        pos, rot = forearm_frame_fk(self._fk, q, self._spine3_pos, self._spine3_aa)
+        return _SMPL_TO_PB @ pos, Rotation.from_matrix(_SMPL_TO_PB) * rot
+
+    def _ee_pose_pb(self) -> tuple[np.ndarray, Rotation]:
+        """The robot's current end-effector pose."""
+        ee_pos, ee_orn = p.getLinkState(
             self._robot,
             self._ee_index,
-            tuple(target_pos),
-            tuple(target_quat),
-            maxNumIterations=200,
-            residualThreshold=1e-5,
+            computeForwardKinematics=True,
             physicsClientId=self._cid,
+        )[4:6]
+        return np.asarray(ee_pos, dtype=np.float64), Rotation.from_quat(ee_orn)
+
+    def _solve_ik(self, target_pos: np.ndarray, target_quat: np.ndarray) -> np.ndarray:
+        solution = self.solve_robot_ik_exact(
+            target_pos, target_quat, self._robot_q()
         )
-        return np.asarray(solution, dtype=np.float64)
+        assert solution is not None
+        return solution
 
     def _ik(self, q: np.ndarray) -> np.ndarray:
         target_pos, target_rot = self._grasp_pose_pb(q)
@@ -547,13 +635,19 @@ class SimMannequinEnv(ExecutionEnv):
             delta, -self._robot_max_joint_delta, self._robot_max_joint_delta
         )
         delta = np.clip(q_now + delta, self._joint_lower, self._joint_upper) - q_now
+        self._drive_joints(q_now + delta)
+
+    def _drive_joints(self, target: np.ndarray) -> None:
+        """Ramp the robot to a joint target under position control."""
+        q_now = self._robot_q()
+        delta = target - q_now
         for k in range(1, _EXECUTE_SUBSTEPS + 1):
-            target = q_now + delta * (k / _EXECUTE_SUBSTEPS)
+            step_target = q_now + delta * (k / _EXECUTE_SUBSTEPS)
             p.setJointMotorControlArray(
                 self._robot,
                 self._movable_joints,
                 p.POSITION_CONTROL,
-                targetPositions=target.tolist(),
+                targetPositions=step_target.tolist(),
                 forces=list(self._spec.joint_forces),
                 physicsClientId=self._cid,
             )

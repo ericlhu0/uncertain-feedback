@@ -168,7 +168,10 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             if self._preview_q is not None
             else 0.0
         )
+        self._update_playback_vis(next_q, dist)
+        return next_q
 
+    def _update_playback_vis(self, next_q: np.ndarray, dist: float) -> None:
         if self._vis_config is not None:
             from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
                 ArmVisualizer,
@@ -205,8 +208,6 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                 color=ArmVisualizer.MDM_COLOR,
             )
 
-        return next_q
-
     def _cartesian_step(self, current_q: np.ndarray) -> np.ndarray:
         if not self._cartesian_goals:
             # Nothing left to do — hold position.
@@ -217,22 +218,13 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
             _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
         )
 
-        arm_pos = self._fk_inst.fk(
-            q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),
-            self._spine3_pos,
-            self._spine3_aa,
-        )
-        wrist_rel = arm_pos[-1] - self._spine3_pos
-        goal = self._cartesian_goals[0]
-        dist = float(np.linalg.norm(wrist_rel - goal))
+        goal, dist = self._cartesian_progress(next_q)
+        self._update_cartesian_vis(next_q, dist, goal)
+        return next_q
 
-        # Advance to next Cartesian goal when current one is reached.
-        if dist < self._cartesian_threshold and len(self._cartesian_goals) > 1:
-            self._cartesian_goals.popleft()
-            self.reset_warmstart()
-            goal = self._cartesian_goals[0]
-            dist = float(np.linalg.norm(wrist_rel - goal))
-
+    def _update_cartesian_vis(
+        self, next_q: np.ndarray, dist: float, goal: np.ndarray
+    ) -> None:
         if self._vis_config is not None:
             from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
                 ArmVisualizer,
@@ -261,5 +253,3 @@ class LeftArmMPCCartesian(_CartesianGoalsMixin, LeftArmMPCMDMUQ):
                 dist=dist,
                 color=ArmVisualizer.TARGET_COLOR,
             )
-
-        return next_q

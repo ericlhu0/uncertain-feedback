@@ -17,7 +17,10 @@ from uncertain_feedback.planners.correction_session import (
 )
 from uncertain_feedback.planners.mpc import LeftArmMPCMDM, SmplLeftArmFK
 from uncertain_feedback.planners.mpc.config import load_mpc_config
-from uncertain_feedback.planners.mpc.costs import MpcCostContext
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    MpcCostContext,
+)
 from uncertain_feedback.planners.run import RunSetup, run_repeated_correction_session
 from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
 
@@ -211,6 +214,7 @@ corrections:
         compact=False,
         user=user,
         env=KinematicEnv(),
+        extra_costs=CompositeTrajectoryCost([]),
     )
     args = Namespace(
         text=None,

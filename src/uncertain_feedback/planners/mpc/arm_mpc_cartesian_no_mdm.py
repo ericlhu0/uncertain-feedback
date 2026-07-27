@@ -81,21 +81,13 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
             _compose_q(np.asarray(current_q, dtype=np.float64), first_action)
         )
 
-        arm_pos = self._fk_inst.fk(
-            q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),
-            self._spine3_pos,
-            self._spine3_aa,
-        )
-        wrist_rel = arm_pos[-1] - self._spine3_pos
-        goal = self._cartesian_goals[0]
-        dist = float(np.linalg.norm(wrist_rel - goal))
+        goal, dist = self._cartesian_progress(next_q)
+        self._update_cartesian_vis(next_q, dist, goal)
+        return next_q
 
-        if dist < self._cartesian_threshold and len(self._cartesian_goals) > 1:
-            self._cartesian_goals.popleft()
-            self.reset_warmstart()
-            goal = self._cartesian_goals[0]
-            dist = float(np.linalg.norm(wrist_rel - goal))
-
+    def _update_cartesian_vis(
+        self, next_q: np.ndarray, dist: float, goal: np.ndarray
+    ) -> None:
         if self._vis_config is not None:
             from uncertain_feedback.utils.plot import (  # pylint: disable=import-outside-toplevel
                 ArmVisualizer,
@@ -119,5 +111,3 @@ class ArmMPCCartesianNoMDM(_CartesianGoalsMixin, SmplLeftArmMPC):
                 dist=dist,
                 color=ArmVisualizer.TARGET_COLOR,
             )
-
-        return next_q

@@ -320,6 +320,34 @@ def _gripper_offset_from_forearm(env, q: np.ndarray) -> float:
     return float(np.linalg.norm(gripper - (elbow + along * bone)))
 
 
+def test_batched_gen3_seed_tracking_reaches_exact_targets() -> None:
+    from ssik.prebuilt import gen3_ik
+
+    from uncertain_feedback.envs.real import _gen3_seeded_track_batch
+
+    rng = np.random.default_rng(4)
+    seeds = rng.normal(0.0, 0.3, (64, 7))
+    targets = np.stack(
+        [gen3_ik.fk(q) for q in seeds + rng.normal(0.0, 0.001, seeds.shape)]
+    )
+    solutions, feasible = _gen3_seeded_track_batch(
+        targets,
+        seeds,
+        np.full(7, -10.0),
+        np.full(7, 10.0),
+        np.zeros(7, dtype=bool),
+    )
+
+    assert np.all(feasible)
+    residuals = np.array(
+        [
+            np.linalg.norm(gen3_ik.fk(q) - target)
+            for q, target in zip(solutions, targets)
+        ]
+    )
+    assert np.max(residuals) < 1e-10
+
+
 @pytest.mark.parametrize(
     "base_offset_pb", [(0.6, -0.35, -0.35), (0.7, -0.2, -0.4), (0.8, 0.0, -0.45)]
 )
@@ -448,6 +476,68 @@ def test_ik_holds_position_when_the_pose_is_infeasible(monkeypatch) -> None:
         )
     assert worst_offset < 0.05
     assert worst_attitude < np.deg2rad(5.0)
+
+
+def test_closed_live_view_window_continues_headless(monkeypatch, capsys) -> None:
+    """Closing the viz window must drop to headless, not end the process.
+
+    The GUI window is the pybullet client, and that client also holds the IK
+    robot — a close makes every later pybullet call raise. The env must
+    reconnect DIRECT, restore the robot's joint state, and keep stepping.
+    Simulated by disconnecting the client, which is what the close does to
+    the connection.
+    """
+    pytest.importorskip("pybullet")
+    import pybullet as p
+
+    from uncertain_feedback.envs import real as real_module
+
+    if not real_module._ROBOT_SPECS["kinova_gen3"].urdf.exists():
+        pytest.skip("kortex_description URDF not available")
+
+    fk = SmplLeftArmFK()
+    arm_aa = np.array(
+        [
+            [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783],
+            [0.6868865380518193, -0.18, -0.11006289820501858],
+            [0.035651850950680734, -1.23, 0.7515284911778386],
+        ]
+    )
+    bodies = _mocap_frame(fk, arm_aa, np.array([0.7, -0.2, -0.4]))
+    monkeypatch.setattr(
+        real_module.NatNetReceiver,
+        "connect",
+        staticmethod(lambda *a, **k: _StubReceiver(bodies)),
+    )
+
+    env = real_module.RealEnv(
+        mocap_host="stub",
+        mocap_rigid_bodies={
+            "robot_base": 1,
+            "collar": 2,
+            "collar_right": 6,
+            "shoulder": 3,
+            "elbow": 4,
+            "wrist": 5,
+        },
+        real_mirror_host=None,
+        live_view=False,
+    )
+    env.set_pose_context(fk, None, None, fk.tpose_all_joints.copy())
+    q0 = env.initial_q(fk.arm_aa_to_q(arm_aa, None))
+    env._capture_grasp(q0)  # pylint: disable=protected-access
+    robot_q = env._current_q()  # pylint: disable=protected-access
+
+    p.disconnect(env._cid)  # pylint: disable=protected-access
+    achieved = env.execute_robot(robot_q)
+
+    assert "continuing headless" in capsys.readouterr().out
+    cid = env._cid  # pylint: disable=protected-access
+    assert p.getConnectionInfo(physicsClientId=cid)["isConnected"]
+    np.testing.assert_allclose(
+        env._current_q(), robot_q, atol=1e-9  # pylint: disable=protected-access
+    )
+    np.testing.assert_allclose(achieved, q0, atol=1e-9)
 
 
 def test_preview_reports_the_grasp_error(monkeypatch, capsys) -> None:

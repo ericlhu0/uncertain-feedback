@@ -30,6 +30,7 @@ import yaml
 from uncertain_feedback.consts import MDM_ROOT
 from uncertain_feedback.envs import make_env
 from uncertain_feedback.envs.base import ExecutionEnv
+from uncertain_feedback.envs.robot_preview import RobotPlanPreviewEnv
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.correction_session import (
@@ -40,7 +41,9 @@ from uncertain_feedback.planners.correction_session import (
 )
 from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDM,
+    ArmMPCCartesianNoMDMRobot,
     LeftArmMPCCartesian,
+    LeftArmMPCCartesianRobot,
     LeftArmMPCMDM,
     LeftArmMPCMDMUQ,
     SmplLeftArmFK,
@@ -73,7 +76,22 @@ from uncertain_feedback.simulated_users import (
 )
 from uncertain_feedback.utils.plot import ArmVisualizer
 
-_MDM_PLANNERS = {"arm_mpc_mdm", "arm_mpc_mdm_uq", "arm_mpc_cartesian"}
+_MDM_PLANNERS = {
+    "arm_mpc_mdm",
+    "arm_mpc_mdm_uq",
+    "arm_mpc_cartesian",
+    "arm_mpc_cartesian_robot",
+}
+# Planners carrying a persistent Cartesian goal, so a plan to the goal exists
+# before the run starts.
+_CARTESIAN_PLANNERS = (
+    "arm_mpc_cartesian",
+    "arm_mpc_cartesian_no_mdm",
+    "arm_mpc_cartesian_robot",
+    "arm_mpc_cartesian_no_mdm_robot",
+)
+# Planners that sample robot joint actions, so they need an env with a robot.
+_ROBOT_ACTION_PLANNERS = ("arm_mpc_cartesian_robot", "arm_mpc_cartesian_no_mdm_robot")
 
 
 @dataclass
@@ -429,6 +447,7 @@ class RunSetup:
     compact: bool
     user: SimulatedUser
     env: ExecutionEnv
+    extra_costs: CompositeTrajectoryCost
 
 
 def build_run(
@@ -509,6 +528,15 @@ def build_run(
         "env": env,
     }
 
+    if cfg.planner in _ROBOT_ACTION_PLANNERS and cfg.env not in (
+        "real",
+        "sim_mannequin",
+    ):
+        raise ValueError(
+            f"planner {cfg.planner} needs an env with a robot "
+            f"('real' or 'sim_mannequin'), got '{cfg.env}'."
+        )
+
     mpc: SmplLeftArmMPC
     if cfg.planner == "arm_mpc":
         mpc = SmplLeftArmMPC(**common, goals=[default_goal])
@@ -534,19 +562,51 @@ def build_run(
             cartesian_threshold=cfg.cartesian.threshold,
             **common,
         )
-    elif cfg.planner == "arm_mpc_cartesian":
+    elif cfg.planner == "arm_mpc_cartesian_no_mdm_robot":
         if not cfg.cartesian.goals:
             raise ValueError(
-                "cartesian.goals is required when planner is arm_mpc_cartesian."
+                "cartesian.goals is required when planner is "
+                "arm_mpc_cartesian_no_mdm_robot."
             )
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
         init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
-        mpc = LeftArmMPCCartesian(
+        mpc = ArmMPCCartesianNoMDMRobot(
+            cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
+            initial_q=q0,
+            cartesian_threshold=cfg.cartesian.threshold,
+            max_robot_joint_delta=cfg.max_robot_joint_delta,
+            robot_joint_delta_std=cfg.robot_joint_delta_std,
+            robot_infeasibility_weight=cfg.robot_infeasibility_weight,
+            max_grasp_residual=cfg.max_grasp_residual,
+            grasp_residual_frames=cfg.grasp_residual_frames,
+            **common,
+        )
+    elif cfg.planner in ("arm_mpc_cartesian", "arm_mpc_cartesian_robot"):
+        if not cfg.cartesian.goals:
+            raise ValueError(
+                f"cartesian.goals is required when planner is {cfg.planner}."
+            )
+        _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
+        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
+        print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
+        cartesian_kwargs: dict = {}
+        cartesian_cls: type[LeftArmMPCCartesian] = LeftArmMPCCartesian
+        if cfg.planner == "arm_mpc_cartesian_robot":
+            cartesian_cls = LeftArmMPCCartesianRobot
+            cartesian_kwargs = {
+                "max_robot_joint_delta": cfg.max_robot_joint_delta,
+                "robot_joint_delta_std": cfg.robot_joint_delta_std,
+                "robot_infeasibility_weight": cfg.robot_infeasibility_weight,
+                "max_grasp_residual": cfg.max_grasp_residual,
+                "grasp_residual_frames": cfg.grasp_residual_frames,
+            }
+        mpc = cartesian_cls(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
             initial_q=q0,
             cartesian_threshold=cfg.cartesian.threshold,
             **common,
+            **cartesian_kwargs,
             advance_threshold=cfg.advance_threshold,
             max_playback_delta=cfg.max_playback_delta,
             trajectory_fraction=cfg.trajectory_fraction,
@@ -598,6 +658,7 @@ def build_run(
         compact=compact,
         user=user,
         env=env,
+        extra_costs=extra_costs,
     )
 
 
@@ -689,6 +750,7 @@ def _rollout_reference_trajectory(
     body_pos: np.ndarray | None,
     spine3_pos: np.ndarray | None,
     spine3_aa: np.ndarray | None,
+    on_step: Callable[[np.ndarray, np.ndarray | None], None] | None = None,
 ) -> np.ndarray | None:
     """Roll the MPC toward its original Cartesian goal, ignoring the correction.
 
@@ -701,7 +763,7 @@ def _rollout_reference_trajectory(
     full ``cfg.steps``. Returns ``(T, 7)``, or ``None`` for planners without a
     persistent Cartesian goal.
     """
-    if cfg.planner not in ("arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"):
+    if cfg.planner not in _CARTESIAN_PLANNERS:
         return None
     if not cfg.cartesian.goals:
         return None
@@ -724,9 +786,126 @@ def _rollout_reference_trajectory(
     )
     q0 = np.asarray(current_q, dtype=np.float64).copy()
     result = run_planning_loop(
-        planner, q0, max(1, cfg.steps), stop_on_runtime_error=True
+        planner,
+        q0,
+        max(1, cfg.steps),
+        on_post_step=(
+            None
+            if on_step is None
+            else lambda _step, q, _history: on_step(q, None)
+        ),
+        stop_on_runtime_error=True,
     )
     return np.asarray([q0, *result.q_history], dtype=np.float64)
+
+
+def _rollout_robot_reference_trajectory(
+    cfg: MpcRunConfig,
+    setup: RunSetup,
+    on_step: Callable[[np.ndarray, np.ndarray | None], None],
+) -> None:
+    """Roll the robot-action planner offline against a kinematic stand-in.
+
+    The stand-in (:class:`RobotPlanPreviewEnv`) snapshots the real env's robot
+    chain, measured grasp, joint state, and limits, so the rollout is the
+    actual robot-space solve about to run — the previewed robot and arm stay
+    consistent by construction instead of the robot chasing a human-space plan
+    through IK. The env's grasp must already be measured (the preview captures
+    it before calling the plan). Each planned step is reported through
+    ``on_step(q, robot_q)`` as its solve finishes, so the env can draw the
+    rollout while it is being planned.
+    """
+    env = setup.env
+    q0 = np.asarray(setup.q0, dtype=np.float64).copy()
+    preview_env = RobotPlanPreviewEnv(
+        fk=setup.cost_context.fk,
+        chain=env.robot_fk(),
+        grasp=env.current_grasp(q0),
+        robot_q=env.current_robot_q(),
+        joint_limits=env.robot_joint_limits(),
+        q_ref=q0,
+        spine3_pos=setup.spine3_pos,
+        spine3_aa=setup.spine3_aa,
+    )
+    planner = ArmMPCCartesianNoMDMRobot(
+        cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
+        initial_q=q0,
+        cartesian_threshold=cfg.cartesian.threshold,
+        horizon=cfg.horizon,
+        n_mpc_samples=cfg.n_mpc_samples,
+        max_angle_delta=cfg.max_angle_delta,
+        max_robot_joint_delta=cfg.max_robot_joint_delta,
+        robot_joint_delta_std=cfg.robot_joint_delta_std,
+        robot_infeasibility_weight=cfg.robot_infeasibility_weight,
+        max_grasp_residual=cfg.max_grasp_residual,
+        grasp_residual_frames=cfg.grasp_residual_frames,
+        goal_threshold=cfg.goal_threshold,
+        visualize=False,
+        fk=setup.cost_context.fk,
+        spine3_pos=setup.spine3_pos,
+        spine3_aa=setup.spine3_aa,
+        body_pos=setup.body_pos,
+        extra_costs=setup.extra_costs,
+        seed=cfg.seed,
+        env=preview_env,
+    )
+    def report(_step: int, q: np.ndarray, _history: list[np.ndarray]) -> None:
+        on_step(q, preview_env.robot_trajectory[-1])
+
+    run_planning_loop(
+        planner,
+        q0,
+        max(1, cfg.steps),
+        on_post_step=report,
+        stop_on_runtime_error=True,
+    )
+
+
+def preview_planned_trajectory(cfg: MpcRunConfig, setup: RunSetup) -> bool:
+    """Show the env the plan before it is executed; ``False`` means abort the run.
+
+    The plan is a headless rollout of the same planner, goals, and costs from the
+    run's start configuration — for ``env: real`` that start configuration and
+    every goal are the *measured* ones, so what the env is handed is the
+    trajectory it is about to run on the person (see :meth:`RealEnv.preview`).
+    Kinematic execution means it assumes perfect tracking; the real loop will
+    drift from it.
+
+    Planners whose trajectory is not known before the run have nothing to
+    preview: an MDM correction only exists once the user has spoken, and the
+    pre-correction phase of the plain joint-goal planners is not what the run is
+    for. The rollout is deferred to the env because it costs a full MPC solve per
+    step, and only envs that show it need it — each planned step streams through
+    the env's ``on_step`` callback as its solve finishes, so the env draws the
+    rollout live while it is being planned. The robot-action planners preview
+    their own robot-space rollout (human q + planned robot joints per step), so
+    the animation shows the planned robot motion rather than an IK chase.
+    """
+    if cfg.planner not in _CARTESIAN_PLANNERS or not cfg.cartesian.goals:
+        return True
+
+    if cfg.planner in _ROBOT_ACTION_PLANNERS:
+
+        def robot_plan(
+            on_step: Callable[[np.ndarray, np.ndarray | None], None],
+        ) -> None:
+            _rollout_robot_reference_trajectory(cfg, setup, on_step)
+
+        return setup.env.preview(robot_plan)
+
+    def plan(on_step: Callable[[np.ndarray, np.ndarray | None], None]) -> None:
+        _rollout_reference_trajectory(
+            cfg,
+            setup.q0,
+            setup.cost_context,
+            setup.extra_costs,
+            setup.body_pos,
+            setup.spine3_pos,
+            setup.spine3_aa,
+            on_step=on_step,
+        )
+
+    return setup.env.preview(plan)
 
 
 def _assemble_full_correction_traj(
@@ -1155,6 +1334,10 @@ def main() -> None:
     preference_output_path = args.preference_output or _default_preference_output_path(
         args.mpc_config
     )
+
+    if not preview_planned_trajectory(cfg, setup):
+        print("aborted at the plan preview; nothing was executed")
+        return
 
     closed_visualizers: list[ArmVisualizer] = []
     if setup.uses_mdm:

@@ -45,6 +45,7 @@ import pybullet as p
 from scipy.optimize import OptimizeResult, least_squares
 from scipy.spatial.transform import Rotation
 from ssik.prebuilt import gen3_ik
+from ssik.refinement import kinbody_fk_jacobian_batch
 
 from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.envs.grasp import (
@@ -59,6 +60,7 @@ from uncertain_feedback.envs.human_mesh import (
     ArmSkeletonBody,
     HumanMeshBody,
 )
+from uncertain_feedback.envs.robot_fk import RobotChainFK
 from uncertain_feedback.envs.sim_mannequin import _ROBOT_SPECS, _SMPL_TO_PB
 from uncertain_feedback.mocap.natnet import (
     NatNetReceiver,
@@ -91,6 +93,9 @@ _IK_ORIENTATION_WEIGHT_M_PER_RAD = 0.02
 # the ones past the first few are branches the arm would have to cross itself to
 # reach.
 _IK_SEEDS = 2
+_IK_TRACK_ATOL = 1e-10
+_IK_TRACK_MAX_ITERS = 20
+_IK_TRACK_MAX_DIST = 0.5
 # Live-view camera, framed on the person's collar (where the registration is
 # anchored) with the robot in shot.
 _LIVE_CAMERA_DISTANCE = 2.0
@@ -106,6 +111,66 @@ def _pose_matrix(position: np.ndarray, quaternion: np.ndarray) -> np.ndarray:
     matrix[:3, :3] = Rotation.from_quat(quaternion).as_matrix()
     matrix[:3, 3] = position
     return matrix
+
+
+def _gen3_seeded_track_batch(
+    targets: np.ndarray,
+    q_seeds: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    continuous: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized equivalent of ssik's seeded Gen3 continuation fast path."""
+    targets = np.asarray(targets, dtype=np.float64)
+    q_seeds = np.asarray(q_seeds, dtype=np.float64)
+    q = q_seeds.copy()
+    active = np.ones(q.shape[0], dtype=bool)
+    eye = np.eye(q.shape[1])
+
+    for _ in range(_IK_TRACK_MAX_ITERS):
+        indices = np.flatnonzero(active)
+        if indices.size == 0:
+            break
+        # ssik exposes the batched chain walk but not a prebuilt batch-solve
+        # wrapper, so bind it to this artifact's baked KinBody here.
+        fk, jac = kinbody_fk_jacobian_batch(
+            gen3_ik._KB, q[indices]  # pylint: disable=protected-access
+        )
+        residual = np.linalg.norm(
+            (fk - targets[indices]).reshape(indices.size, -1), axis=1
+        )
+        converged = residual < _IK_TRACK_ATOL
+        active[indices[converged]] = False
+        step_indices = indices[~converged]
+        if step_indices.size == 0:
+            continue
+        fk_step = fk[~converged]
+        jac_step = jac[~converged]
+        error = targets[step_indices] @ np.linalg.inv(fk_step)
+        twist = np.concatenate(
+            [error[:, :3, 3], Rotation.from_matrix(error[:, :3, :3]).as_rotvec()],
+            axis=1,
+        )
+        jac_t = np.swapaxes(jac_step, -1, -2)
+        delta = np.linalg.solve(
+            jac_t @ jac_step + 1e-9 * eye,
+            (jac_t @ twist[..., None])[..., 0],
+        )
+        q[step_indices] += np.clip(delta, -0.5, 0.5)
+
+    fk, _ = kinbody_fk_jacobian_batch(
+        gen3_ik._KB, q  # pylint: disable=protected-access
+    )
+    residual = np.linalg.norm((fk - targets).reshape(q.shape[0], -1), axis=1)
+    wrapped_delta = np.arctan2(np.sin(q - q_seeds), np.cos(q - q_seeds))
+    q[:, continuous] = q_seeds[:, continuous] + wrapped_delta[:, continuous]
+    feasible = (
+        (residual < _IK_TRACK_ATOL)
+        & (np.max(np.abs(wrapped_delta), axis=1) <= _IK_TRACK_MAX_DIST)
+        & np.all(q >= lower, axis=1)
+        & np.all(q <= upper, axis=1)
+    )
+    return q, feasible
 
 
 class RealEnv(ExecutionEnv):
@@ -173,9 +238,11 @@ class RealEnv(ExecutionEnv):
         self._world_to_base: np.ndarray = np.eye(4)
         self._tool_to_ee: np.ndarray = np.eye(4)
         self._last_q: np.ndarray = np.zeros(0, dtype=np.float64)
+        self._last_joints: np.ndarray | None = None
         self._last_valid_s: float = 0.0
         self._grasp: MeasuredGrasp | None = None
         self._measured: list[np.ndarray] = []
+        self._robot_chain: RobotChainFK | None = None
 
     def initial_q(self, q_nominal: np.ndarray) -> np.ndarray:
         """Register against the person and report their *measured* arm config.
@@ -203,8 +270,11 @@ class RealEnv(ExecutionEnv):
         if self._mesh_cache is not None:
             self._draw_goal_ghost()
 
-    def preview(self, plan: Callable[[], np.ndarray]) -> bool:
-        """Play the whole planned trajectory in the live scene, then ask.
+    def preview(
+        self,
+        plan: Callable[[Callable[[np.ndarray, np.ndarray | None], None]], None],
+    ) -> bool:
+        """Draw each planned step in the live scene as it is solved, then ask.
 
         Everything in the window is the measured world: the person's mesh at the
         registered anchor on their own segment lengths, the Gen3 at its measured
@@ -217,9 +287,20 @@ class RealEnv(ExecutionEnv):
 
         The plan comes from a kinematic rollout, so it assumes the arm tracks
         each command exactly; the real run closes the loop on mocap and will
-        drift from it. The mesh is re-posed every frame (~140 ms each, so a long
-        plan takes a minute), which starves the mocap receive thread — hence the
-        :meth:`_resync` before handing back.
+        drift from it. Each step is drawn the moment its MPC solve finishes, so
+        the animation *is* the planning progress — a plan going somewhere
+        unacceptable is visible without waiting for the rest of the rollout.
+        Drawing goes through the same rate limit as the run's live view: the
+        robot and the arm chain move every step, the mesh (~140 ms per re-pose)
+        refreshes at ``live_view_fps``. The rollout still starves the mocap
+        receive thread — hence the :meth:`_resync` before handing back.
+
+        A human-space plan reports ``on_step(q, None)`` and is animated by
+        driving the IK robot after each command, the way :meth:`execute` would.
+        A robot-action plan reports its own planned joints — the robot is posed
+        at exactly those, so what the window shows *is* the planned robot
+        motion, not an IK chase of the arm. The grasp is measured before the
+        rollout starts, so a robot-space rollout can read it off this env.
 
         The grasp error over the plan is reported before the prompt, since how
         far the gripper strays from the grasp is the part of "can the arm
@@ -227,6 +308,7 @@ class RealEnv(ExecutionEnv):
         """
         if not self._preview_plan:
             return True
+        self._ensure_backend()
         if self._registration is None:
             self._register()
         if not self._live_view:
@@ -236,21 +318,27 @@ class RealEnv(ExecutionEnv):
                 flush=True,
             )
             return True
-        print("[real] planning the trajectory to preview", flush=True)
-        traj = np.asarray(plan(), dtype=np.float64)
         q_meas = self._read_back_q()
         self._capture_grasp(q_meas)
         print(
-            f"[real] previewing {len(traj)} planned steps in the live view "
-            "(full mesh, ~140 ms/frame)",
+            "[real] planning the preview — each step is drawn in the live view "
+            "as it is solved (robot + arm chain every step, mesh at "
+            "live_view_fps)",
             flush=True,
         )
-        errors = []
-        for q in traj:
-            self._drive(q, mirror=False)
+        errors: list[tuple[float, float]] = []
+
+        def show(q: np.ndarray, robot_q: np.ndarray | None) -> None:
+            self._ensure_backend()
+            if robot_q is not None:
+                self._set_joints(robot_q)
+            else:
+                self._drive(q, mirror=False)
             errors.append(self._grasp_error(q))
-            self._pose_arm_skeleton(q)
-            self._pose_human_mesh(q)
+            if self._human_mesh is not None:
+                self._update_live_view(q)
+
+        plan(show)
         self._print_grasp_error(np.asarray(errors))
         answer = input("[real] preview done. Enter = run on the robot, n = abort: ")
         # The grasp measured above was for the animation only. Dropping it sends
@@ -258,14 +346,17 @@ class RealEnv(ExecutionEnv):
         # the controller's position mode is first-step work the preview must not
         # do or skip.
         self._grasp = None
+        self._ensure_backend()
         self._set_joints(self._current_q())
         self._resync()
-        self._pose_arm_skeleton(self._last_q)
-        self._pose_human_mesh(self._last_q)
+        if self._human_mesh is not None:
+            self._pose_arm_skeleton(self._last_q)
+            self._pose_human_mesh(self._last_q)
         return not answer.strip().lower().startswith("n")
 
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
         q = np.asarray(q_cmd, dtype=np.float64)
+        self._ensure_backend()
         if self._registration is None:
             self._register()
         q_meas = self._read_back_q()
@@ -281,6 +372,114 @@ class RealEnv(ExecutionEnv):
 
     def hold(self, q: np.ndarray) -> np.ndarray:
         return self.execute(q)
+
+    def robot_fk(self) -> RobotChainFK:
+        if self._registration is None:
+            self._register()
+        if self._robot_chain is None:
+            self._robot_chain = RobotChainFK.from_pybullet(
+                self._robot, self._ee_index, self._cid
+            )
+        return self._robot_chain
+
+    def current_robot_q(self) -> np.ndarray:
+        return self._current_q()
+
+    def robot_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._joint_lower.copy(), self._joint_upper.copy()
+
+    def solve_robot_ik_exact(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> np.ndarray | None:
+        """Find an analytical branch inside the padded controller joint box."""
+        rest = np.asarray(q_seed, dtype=np.float64)
+        target = self._ee_target_in_base(target_pos, target_quat)
+        for track in (True, False):
+            reachable = [
+                solution
+                for solution in self._ik_solutions(target, rest, track=track)
+                if np.all(solution >= self._joint_lower)
+                and np.all(solution <= self._joint_upper)
+            ]
+            if reachable:
+                return reachable[0]
+        return None
+
+    def solve_robot_ik_exact_batch(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        targets = np.stack(
+            [
+                self._ee_target_in_base(position, quaternion)
+                for position, quaternion in zip(target_pos, target_quat)
+            ]
+        )
+        solutions, feasible = _gen3_seeded_track_batch(
+            targets,
+            q_seed,
+            self._joint_lower,
+            self._joint_upper,
+            self._continuous_joints,
+        )
+        for i in np.flatnonzero(~feasible):
+            solution = self.solve_robot_ik_exact(
+                target_pos[i], target_quat[i], q_seed[i]
+            )
+            if solution is not None:
+                solutions[i] = solution
+                feasible[i] = True
+        solutions[~feasible] = q_seed[~feasible]
+        return solutions, feasible
+
+    def current_grasp(self, q: np.ndarray) -> MeasuredGrasp:
+        """This step's measured grasp; establishes it on the first call."""
+        self._ensure_backend()
+        if self._registration is None:
+            self._register()
+        q = np.asarray(q, dtype=np.float64)
+        if self._grasp is None:
+            self._establish_grasp(q)
+        else:
+            self._measure_grasp(q)
+        assert self._grasp is not None
+        return self._grasp
+
+    def execute_robot(self, target: np.ndarray) -> np.ndarray:
+        """Send a robot joint target directly — no grasp FK, no IK.
+
+        The delta cap is scaled uniformly rather than clipped per joint, so a
+        saturating joint slows the whole motion instead of bending its
+        direction; the sampler's action scale should sit well below the cap,
+        which is only the hardware backstop here.
+        """
+        self._ensure_backend()
+        if self._registration is None:
+            self._register()
+        q_meas = self._read_back_q()
+        if self._grasp is None:
+            self._establish_grasp(q_meas)
+        target = np.asarray(target, dtype=np.float64)
+        q_now = self._current_q()
+        delta = target - q_now
+        wrapped = self._continuous_joints
+        delta[wrapped] = np.arctan2(np.sin(delta[wrapped]), np.cos(delta[wrapped]))
+        largest = float(np.max(np.abs(delta)))
+        if largest > self._robot_max_joint_delta:
+            delta *= self._robot_max_joint_delta / largest
+        target = np.clip(q_now + delta, self._joint_lower, self._joint_upper)
+        self._set_joints(target)
+        if self._mirror is not None:
+            self._mirror.send(target)
+        if self._human_mesh is not None:
+            self._update_live_view(q_meas)
+        self._measured.append(q_meas.copy())
+        return q_meas
 
     def visualize(self, path: Path | None = None) -> np.ndarray:
         """Render the last measured arm configuration."""
@@ -580,30 +779,67 @@ class RealEnv(ExecutionEnv):
             )
         )
 
+    def _ensure_backend(self) -> None:
+        """Survive the operator closing the live-view window mid-run.
+
+        The GUI window *is* the pybullet client, and that client also holds
+        the IK robot — closing it would make every later pybullet call raise
+        and end the process. Detected here (called at the top of each step
+        entry point), the env reconnects ``DIRECT``, reloads the robot at the
+        registered base, restores its joint state from the shadow copy, and
+        drops the drawing bodies: the run continues on the real robot, only
+        the window is gone.
+        """
+        if p.getConnectionInfo(physicsClientId=self._cid)["isConnected"]:
+            return
+        print(
+            "[real] live view window closed — continuing headless on the " "real robot",
+            flush=True,
+        )
+        self._live_view = False
+        self._mesh_cache = None
+        self._human_mesh = None
+        self._arm_skeleton = None
+        self._goal_mesh = None
+        joints = self._last_joints
+        self._cid = p.connect(p.DIRECT)
+        if self._registration is not None:
+            self._build_scene()
+            if joints is not None:
+                self._set_joints(joints)
+
     def _update_live_view(self, q_meas: np.ndarray) -> None:
-        """Redraw the person at the measured configuration; mesh rate-limited.
+        """Redraw the person at a configuration; mesh rate-limited.
 
         Replacing the 6890-vertex body in the GUI costs ~140 ms (measured) —
         pybullet has no vertex-update call, and it holds the GIL across the
-        remove/create pair, which stalls the MPC step *and* delays the mocap
-        receive thread toward ``mocap_hold_timeout``. So the person's mesh
-        refreshes at ``live_view_fps``; the planner's arm chain and the robot are
-        redrawn every step, since debug lines and ``resetJointState`` are free by
+        remove/create pair, which stalls the MPC step (live run and preview
+        alike) *and* delays the mocap receive thread toward
+        ``mocap_hold_timeout``. So the person's mesh refreshes at
+        ``live_view_fps``; the planner's arm chain and the robot are redrawn
+        every step, since debug lines and ``resetJointState`` are free by
         comparison — the numbers the MPC is working from stay live even when the
         body around them lags.
         """
-        self._pose_arm_skeleton(q_meas)
-        now = time.monotonic()
-        if now - self._last_live_mesh_s < self._live_mesh_period:
+        try:
+            self._pose_arm_skeleton(q_meas)
+            now = time.monotonic()
+            if now - self._last_live_mesh_s < self._live_mesh_period:
+                return
+            self._last_live_mesh_s = now
+            self._pose_human_mesh(q_meas)
+        except p.error:
+            # The window can close mid-redraw — the mesh re-pose is the longest
+            # pybullet call in a step, so a close is likely to land inside it.
+            # Drawing is expendable; the next step's _ensure_backend rebuilds.
             return
-        self._last_live_mesh_s = now
-        self._pose_human_mesh(q_meas)
 
     def _pose_human_mesh(self, q: np.ndarray) -> None:
         """Re-pose the human mesh to an arm configuration, unconditionally.
 
-        The rate limit belongs to the live view during a run, where each rebuild
-        stalls an MPC step; a preview has no step to stall.
+        For final redraws (end of the preview) where the latest pose must land
+        regardless of the ``live_view_fps`` limiter; everything per-step goes
+        through :meth:`_update_live_view`.
         """
         assert self._human_mesh is not None
         self._human_mesh.update(self._arm_positions(q))
@@ -623,6 +859,9 @@ class RealEnv(ExecutionEnv):
         )
 
     def _set_joints(self, values: np.ndarray) -> None:
+        # Shadow copy: the joint state lives in pybullet, which dies with the
+        # live-view window — _ensure_backend restores from here.
+        self._last_joints = np.asarray(values, dtype=np.float64).copy()
         for joint, value in zip(self._movable_joints, values):
             p.resetJointState(
                 self._robot, joint, float(value), physicsClientId=self._cid
@@ -743,16 +982,10 @@ class RealEnv(ExecutionEnv):
         basin. Only when nothing exact fits does anything numerical run.
         """
         rest = self._sim_q()
+        solution = self.solve_robot_ik_exact(target_pos, target_quat, rest)
+        if solution is not None:
+            return solution
         target = self._ee_target_in_base(target_pos, target_quat)
-        for track in (True, False):
-            reachable = [
-                solution
-                for solution in self._ik_solutions(target, rest, track=track)
-                if np.all(solution >= self._joint_lower)
-                and np.all(solution <= self._joint_upper)
-            ]
-            if reachable:
-                return reachable[0]
         return self._nearest_infeasible_ik(target, rest)
 
     def _ee_target_in_base(

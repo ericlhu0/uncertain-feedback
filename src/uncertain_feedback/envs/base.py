@@ -11,11 +11,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
 if TYPE_CHECKING:
+    from uncertain_feedback.envs.grasp import MeasuredGrasp
+    from uncertain_feedback.envs.robot_fk import RobotChainFK
     from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 
@@ -75,6 +77,26 @@ class ExecutionEnv(ABC):
         envs with nothing to draw ignore it.
         """
 
+    def preview(
+        self,
+        plan: Callable[[Callable[[np.ndarray, np.ndarray | None], None]], None],
+    ) -> bool:
+        """Show the planned trajectory before executing any of it.
+
+        Called once after :meth:`show_goal`. ``plan(on_step)`` rolls the same
+        planner and costs forward from :meth:`initial_q` offline, calling
+        ``on_step(q, robot_q)`` after each planned step — the ``(7,)`` human
+        configuration and, for robot-action planners, the planned ``(7,)``
+        robot joints (``None`` otherwise) — so the env can draw the rollout
+        live while it is being planned. It is a full MPC rollout, so it is
+        passed as a callable and only envs that actually show something pay
+        for it. Envs that move a real person override this to let the operator
+        watch the plan and approve it; returning ``False`` aborts the run
+        before anything moves. Default: nothing to show, so proceed without
+        rolling anything out.
+        """
+        return True
+
     @abstractmethod
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
         """Realize one commanded ``(7,)`` arm configuration.
@@ -91,6 +113,74 @@ class ExecutionEnv(ABC):
         controller engaged).
         """
         return q
+
+    # ------------------------------------------------------------------
+    # Robot-action interface (envs with a robot only)
+    # ------------------------------------------------------------------
+    #
+    # A robot-action planner samples robot joint targets instead of human
+    # configurations, so it needs the robot's kinematics, state, and grasp —
+    # and an execute that takes joint targets directly, bypassing the
+    # human-q → grasp FK → IK pipeline of :meth:`execute`.
+
+    def robot_fk(self) -> RobotChainFK:
+        """Batched ee-chain FK of this env's robot, in the env's world frame."""
+        raise NotImplementedError(f"{type(self).__name__} has no robot")
+
+    def current_robot_q(self) -> np.ndarray:
+        """The robot's current ``(7,)`` joint configuration."""
+        raise NotImplementedError(f"{type(self).__name__} has no robot")
+
+    def robot_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
+        """Padded ``(lower, upper)`` joint boxes the robot must stay in."""
+        raise NotImplementedError(f"{type(self).__name__} has no robot")
+
+    def solve_robot_ik_exact(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> np.ndarray | None:
+        """Solve an exact world-frame gripper pose inside the padded joint box."""
+        raise NotImplementedError(f"{type(self).__name__} has no robot IK")
+
+    def solve_robot_ik_exact_batch(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Batch form of :meth:`solve_robot_ik_exact`.
+
+        Returns candidate joints and a boolean exact-solution mask. Robot envs
+        with a vectorized solver override this scalar default.
+        """
+        solutions = np.asarray(q_seed, dtype=np.float64).copy()
+        feasible = np.zeros(solutions.shape[0], dtype=bool)
+        for i in range(solutions.shape[0]):
+            solution = self.solve_robot_ik_exact(
+                target_pos[i], target_quat[i], solutions[i]
+            )
+            if solution is not None:
+                solutions[i] = solution
+                feasible[i] = True
+        return solutions, feasible
+
+    def current_grasp(self, q: np.ndarray) -> MeasuredGrasp:
+        """This step's gripper-on-forearm transform, in the env's world frame.
+
+        ``q`` is the current measured human configuration; envs that have not
+        grasped yet use it to establish the grasp first.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no robot")
+
+    def execute_robot(self, target: np.ndarray) -> np.ndarray:
+        """Realize one commanded ``(7,)`` robot joint configuration.
+
+        Blocks until the step has been executed and returns the ``(7,)``
+        *human* arm configuration actually achieved.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no robot")
 
     @abstractmethod
     def visualize(self, path: Path | None = None) -> np.ndarray:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 import pybullet as p
+import pytest
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.envs import ENV_BUILDERS, make_env
@@ -373,6 +374,37 @@ def test_sim_mannequin_hold_stable_with_vertical_forearm() -> None:
         q = env.execute(q_hold)
     end = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis))[-1]
     assert float(np.linalg.norm(end - start)) < 0.01
+
+
+def test_sim_mannequin_robot_action_interface() -> None:
+    fk = SmplLeftArmFK()
+    env = make_env("sim_mannequin")
+    assert isinstance(env, SimMannequinEnv)
+    env.set_pose_context(fk, None, None)
+    q0 = fk.arm_aa_to_q(_BENT_ARM_AA)
+
+    with pytest.raises(RuntimeError):
+        env.execute_robot(np.zeros(7))
+
+    grasp = env.current_grasp(q0)
+    q_robot = env.current_robot_q()
+    pos, _rot = env.robot_fk().ee_pose(q_robot)
+    ee_pos, _ee_rot = env._ee_pose_pb()
+    np.testing.assert_allclose(pos, ee_pos, atol=1e-6)
+    g_pos, _g_rot = grasp.gripper_pose(*env._forearm_frame_pb(q0))
+    np.testing.assert_allclose(g_pos, ee_pos, atol=1e-9)
+
+    lower, upper = env.robot_joint_limits()
+    assert lower.shape == upper.shape == q_robot.shape
+
+    wrist_before = fk.fk(q_to_arm_aa(env._read_back_q(), fk.elbow_hinge_axis))[-1]
+    target = q_robot.copy()
+    target[1] += 0.15
+    for _ in range(5):
+        q_meas = env.execute_robot(target)
+    assert q_meas.shape == (Q_DIM,)
+    wrist_after = fk.fk(q_to_arm_aa(q_meas, fk.elbow_hinge_axis))[-1]
+    assert float(np.linalg.norm(wrist_after - wrist_before)) > 0.01
 
 
 def test_sim_mannequin_visualize_and_save_video(tmp_path) -> None:

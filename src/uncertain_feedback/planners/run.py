@@ -39,6 +39,7 @@ from uncertain_feedback.planners.correction_session import (
     CorrectionTrajectoryResult,
     TriggerReason,
 )
+from uncertain_feedback.planners.interactive import OperatorPause
 from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDM,
     ArmMPCCartesianNoMDMIKGated,
@@ -257,6 +258,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         dest="text_time",
         help="MPC step at which MDM generation is triggered (overrides YAML text_time)",
+    )
+    p.add_argument(
+        "--interactive",
+        action="store_true",
+        help=(
+            "Pause when the operator presses enter and read that round's "
+            "correction from stdin, instead of injecting --text at text_time "
+            "(which is then ignored). For live runs with a real person."
+        ),
     )
     p.add_argument(
         "--save-motion",
@@ -1019,8 +1029,13 @@ def run_repeated_correction_session(
     assert setup.gen is not None and setup.initial_pose is not None
     gen = setup.gen
     feedback_text = resolve_feedback_text(args.text, setup.user)
+    # Interactive runs take the words from whoever is being moved, so the
+    # scripted step trigger would only inject a correction nobody asked for.
+    operator = OperatorPause() if args.interactive else None
     effective_text_time = (
-        args.text_time if args.text_time is not None else cfg.text_time
+        None
+        if operator is not None
+        else (args.text_time if args.text_time is not None else cfg.text_time)
     )
     configured_base_costs = replace_generated_costs(
         mpc._extra_costs, None  # pylint: disable=protected-access
@@ -1043,6 +1058,9 @@ def run_repeated_correction_session(
         violation: float | None,
         local_index: int,
     ) -> CorrectionRoundResult:
+        nonlocal feedback_text
+        if operator is not None:
+            feedback_text = operator.feedback(step)
         old_suffix = mpc.remaining_mdm_trajectory(q)
         closed = mpc.close_visualizer()
         if closed is not None:
@@ -1317,6 +1335,7 @@ def run_repeated_correction_session(
         trajectory_index=trajectory_index,
         prior_rounds=prior_rounds,
         prior_unified_cost=prior_unified_cost,
+        operator_requested=operator.requested if operator is not None else None,
     )
     result = session.run_trajectory(
         setup.q0.copy(), cfg.steps, progress=True, progress_desc="MPC"
@@ -1352,6 +1371,12 @@ def main() -> None:
     args = build_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
+    # Checked before build_run, which on env: real already talks to the hardware.
+    if args.interactive and cfg.planner not in _MDM_PLANNERS:
+        raise ValueError(
+            "--interactive needs an MDM-backed planner to turn the typed "
+            f"feedback into a correction; planner is {cfg.planner}."
+        )
     setup = build_run(args, cfg)
     preference_output_path = args.preference_output or _default_preference_output_path(
         args.mpc_config

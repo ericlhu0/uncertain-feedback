@@ -288,7 +288,9 @@ The initial whole-body HML pose can be set with `pose:` in the YAML, and the
 initial left arm can be overridden with an inline 3×3 `arm:` list of
 `[shoulder, elbow, wrist]` axis-angles. Runtime inputs still stay on the
 command line: `--model-path`, `--arm`, `--text`, `--save`, `--live`,
-`--frozen-body`.
+`--frozen-body`, and `--interactive` (take each correction from the operator
+mid-run instead of `--text` at `text_time` — see
+[Interactive corrections with a live person](#interactive-corrections-with-a-live-person---interactive)).
 `--pose` and `--arm` are still accepted as overrides for the YAML values.
 
 Supported YAML `planner` values:
@@ -701,8 +703,9 @@ same run with `env: sim_mannequin`;
 with the Kinova Gen3;
 `arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml` additionally
 mirrors the sim robot onto the real Gen3;
-`arm_mpc_cartesian_no_mdm_real.yaml` is the mocap-closed-loop real run; the
-`--env-video` flag works with any env).
+`arm_mpc_cartesian_no_mdm_real.yaml` is the mocap-closed-loop real run;
+`arm_mpc_cartesian_mdm_llm_real.yaml` is the *full method* on that rig (see
+below); the `--env-video` flag works with any env).
 
 ### IK-gated human-action planner
 
@@ -765,7 +768,7 @@ uv run python src/uncertain_feedback/planners/run.py \
 # full method (MDM/UQ/LLM corrections) with the robot-action sampler
 uv run python src/uncertain_feedback/planners/run.py \
     --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_robot_mdm_llm_real.yaml \
-    --env-video robot_action_full_method.mp4
+    --interactive --env-video robot_action_full_method.mp4
 ```
 
 MDM playback under `arm_mpc_cartesian_robot` keeps its rate-limited cursor, but
@@ -780,6 +783,58 @@ joint state — see `envs/robot_preview.py`), so the animation poses the robot a
 its planned joints and the robot and arm stay consistent by construction. The
 human-action planners keep the previous preview, whose robot chases the
 human-space plan through IK and can visibly lag it.
+
+### Interactive corrections with a live person (`--interactive`)
+
+`env` is orthogonal to `planner`, so the full method — MDM correction, UQ
+clustering, one LLM cost per round — runs on the real rig by config alone:
+`arm_mpc_cartesian_mdm_llm_real.yaml` is `arm_mpc_cartesian_no_mdm_real.yaml`'s
+env with `planner: arm_mpc_cartesian` and the correction/UQ/LLM-cost keys.
+
+What a config cannot supply is *when* a real person wants a correction and *what
+they say*: a scripted run injects one preset `--text` at `text_time`. Pass
+`--interactive` and both come from the operator instead:
+
+```
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_real.yaml \
+    --interactive --env-video real_full_method.mp4
+```
+
+Press **enter** at any point to pause at the next MPC step, then type what the
+person asked for (typing the correction directly and pressing enter does both at
+once). The run then does exactly what it does in a scripted round — MDM samples
+from the arm's *current* pose, the cluster picker opens, an LLM cost is generated
+and stacked — and resumes tracking the chosen correction. Repeat as often as the
+person speaks; `steps` bounds the whole session. `text_time` is ignored, and
+`--text` with it.
+
+While paused nothing is commanded, so the arm stays where the controller last put
+it — the person is held, not released. Enter pressed during the pause queues the
+*next* pause rather than being swallowed, so an accidental double-press costs one
+extra round. `--interactive` requires an MDM-backed planner and is rejected
+before the env is built, i.e. before anything touches the hardware.
+
+Two knobs matter more here than in sim:
+
+- **`uq.auto_cluster` must stay unset** for the person to choose among the
+  clusters — that is the point of sampling several. With it set, the round takes
+  that cluster silently.
+- **`max_playback_delta`** (0.002 in the real config, against `max_angle_delta`
+  0.001) bounds how far the commanded configuration may lead the *measured* arm
+  while the correction plays back. Playback advances a frame only once the arm
+  reaches it, and the env's `robot_max_joint_delta` clips every robot joint
+  besides, so raising it makes corrections finish sooner rather than making the
+  robot lunge — but it is the first thing to re-tune on the rig, together with
+  `steps` (3000, since every correction is traversed at those caps).
+
+Stage it exactly like the no-MDM real run: mocap monitor first, then the whole
+loop with `real_mirror_host: null` so MDM, the picker, and cost generation all
+run against the live person while no command reaches the arm, then set the host.
+The generation stalls are worth knowing before someone is in the gripper: 500
+diffusion samples plus an LLM round pause the loop for tens of seconds with the
+arm held. Lower `uq.diffusion_samples` or set `llm_cost.enabled: false` to
+shorten them.
 
 ### Simulated user (`user:`)
 

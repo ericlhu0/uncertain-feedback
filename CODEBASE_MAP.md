@@ -29,6 +29,7 @@ uncertain-feedback/
 │   ├── planners/
 │   │   ├── run.py                    # Single-run CLI + repeated-correction callbacks/artifacts
 │   │   ├── correction_session.py     # Edge-triggered repeated correction session state machine
+│   │   ├── interactive.py           # OperatorPause: stdin watcher for --interactive live runs
 │   │   └── mpc/
 │   │       ├── __init__.py           # Public exports
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
@@ -66,6 +67,7 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_llm_agent.yaml  # backend: agent (codex CLI)
 │   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
 │   │           ├── arm_mpc_cartesian_mdm_llm_multiround.yaml # pose-dependent multi-round experiment
+│   │           ├── arm_mpc_cartesian_mdm_llm_real.yaml  # full method on env: real, for --interactive live corrections
 │   │           ├── arm_mpc_cartesian_no_mdm.yaml
 │   │           ├── arm_mpc_cartesian_no_mdm_sim.yaml  # same, with env: sim_robot_visual
 │   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin.yaml  # same, with env: sim_mannequin (physics; more steps)
@@ -308,7 +310,9 @@ SmplLeftArmMPC / subclass
     │   playback the MPC samples toward the final goal.
     │   CorrectionSession monitors each executed pose. The first text-time or
     │   discomfort event starts MDM; later discomfort threshold crossings replace
-    │   the active suffix and start MDM again from the actual pose. Per-correction
+    │   the active suffix and start MDM again from the actual pose. With
+    │   --interactive an operator request (interactive.OperatorPause) triggers
+    │   instead, supplying that round's text and outranking both. Per-correction
     │   generated costs stack during execution and are unified at trajectory end.
     │   Each MPC step: sample N×H action sequences, rollout, compute cost, take best
     │
@@ -573,6 +577,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | Command / Script                                      | Purpose                              |
 |-------------------------------------------------------|--------------------------------------|
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
+| `uv run python src/.../planners/run.py --mpc-config <yaml> --interactive` | Same run, but each correction's trigger and text come from the operator mid-run (`OperatorPause`); `text_time`/`--text` ignored. Full method on the real rig: `arm_mpc_cartesian_mdm_llm_real.yaml` |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml> [--persona <name>] [--backend agent]` | One simulated-user persona/backend experiment on the original goal |
 | `uv run python src/.../experiments/run_cluster_experiment.py --mpc-config <yaml>` | Per-cluster cost comparison with base/oracle/generated hidden-cost evaluation for Cartesian goals |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison with base/oracle/generated hidden-cost evaluation |

@@ -41,6 +41,7 @@ from uncertain_feedback.planners.correction_session import (
 )
 from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDM,
+    ArmMPCCartesianNoMDMIKGated,
     ArmMPCCartesianNoMDMRobot,
     LeftArmMPCCartesian,
     LeftArmMPCCartesianRobot,
@@ -87,11 +88,15 @@ _MDM_PLANNERS = {
 _CARTESIAN_PLANNERS = (
     "arm_mpc_cartesian",
     "arm_mpc_cartesian_no_mdm",
+    "arm_mpc_cartesian_no_mdm_ik_gated",
     "arm_mpc_cartesian_robot",
     "arm_mpc_cartesian_no_mdm_robot",
 )
 # Planners that sample robot joint actions, so they need an env with a robot.
 _ROBOT_ACTION_PLANNERS = ("arm_mpc_cartesian_robot", "arm_mpc_cartesian_no_mdm_robot")
+# Planners that need the env's robot interface (grasp/joints/FK) at solve time,
+# whether they sample robot actions or gate human actions on robot feasibility.
+_ROBOT_ENV_PLANNERS = _ROBOT_ACTION_PLANNERS + ("arm_mpc_cartesian_no_mdm_ik_gated",)
 
 
 @dataclass
@@ -528,7 +533,7 @@ def build_run(
         "env": env,
     }
 
-    if cfg.planner in _ROBOT_ACTION_PLANNERS and cfg.env not in (
+    if cfg.planner in _ROBOT_ENV_PLANNERS and cfg.env not in (
         "real",
         "sim_mannequin",
     ):
@@ -560,6 +565,23 @@ def build_run(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
             initial_q=q0,
             cartesian_threshold=cfg.cartesian.threshold,
+            **common,
+        )
+    elif cfg.planner == "arm_mpc_cartesian_no_mdm_ik_gated":
+        if not cfg.cartesian.goals:
+            raise ValueError(
+                "cartesian.goals is required when planner is "
+                "arm_mpc_cartesian_no_mdm_ik_gated."
+            )
+        _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
+        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
+        print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
+        mpc = ArmMPCCartesianNoMDMIKGated(
+            cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
+            initial_q=q0,
+            cartesian_threshold=cfg.cartesian.threshold,
+            max_grasp_ik_residual=cfg.max_grasp_ik_residual,
+            grasp_residual_frames=cfg.grasp_residual_frames,
             **common,
         )
     elif cfg.planner == "arm_mpc_cartesian_no_mdm_robot":

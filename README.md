@@ -704,6 +704,30 @@ mirrors the sim robot onto the real Gen3;
 `arm_mpc_cartesian_no_mdm_real.yaml` is the mocap-closed-loop real run; the
 `--env-video` flag works with any env).
 
+### IK-gated human-action planner
+
+`arm_mpc_cartesian_no_mdm_ik_gated` keeps sampling human-arm deltas, but gates
+each rollout's first `grasp_residual_frames` frames with the robot environment's
+own IK. On `env: real`, this is the same analytical Gen3 branch-continuation and
+enumeration solver used for execution, seeded sequentially through each
+rollout and filtered against the controller's padded joint-limit box. Nearby
+branches are Newton-continued as one vectorized batch; candidates that do not
+converge exactly fall back to analytical enumeration individually. A rollout
+is discarded when its remaining gripper pose error exceeds
+`max_grasp_ik_residual` (metres + radians). Each sample set includes a
+zero-motion hold, so an all-infeasible draw holds instead of selecting the
+least-infeasible motion.
+
+The gate does not apply `robot_max_joint_delta`; that remains an execution-rate
+cap rather than an IK joint limit. Consequently, a joint-limit-feasible plan can
+still show transient robot lag in the preview if it asks for faster motion than
+that cap permits.
+
+```
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_ik_gated_real.yaml
+```
+
 ### Robot-action planners (`*_robot`)
 
 `arm_mpc_cartesian_no_mdm_robot` and `arm_mpc_cartesian_robot` are the same two

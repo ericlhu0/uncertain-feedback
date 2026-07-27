@@ -8,6 +8,9 @@ from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_robot import (
     LeftArmMPCCartesianRobot,
 )
+from uncertain_feedback.planners.mpc.arm_mpc_ik_gated import (
+    ArmMPCCartesianNoMDMIKGated,
+)
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.arm_mpc_robot import ArmMPCCartesianNoMDMRobot
@@ -18,6 +21,7 @@ __all__ = [
     "LeftArmMPCCartesian",
     "LeftArmMPCCartesianRobot",
     "ArmMPCCartesianNoMDM",
+    "ArmMPCCartesianNoMDMIKGated",
     "ArmMPCCartesianNoMDMRobot",
     "LeftArmMPCMDM",
     "LeftArmMPCMDMUQ",

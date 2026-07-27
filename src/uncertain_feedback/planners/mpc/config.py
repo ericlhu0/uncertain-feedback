@@ -16,6 +16,7 @@ PLANNER_CHOICES = {
     "arm_mpc_mdm_uq",
     "arm_mpc_cartesian",
     "arm_mpc_cartesian_no_mdm",
+    "arm_mpc_cartesian_no_mdm_ik_gated",
     "arm_mpc_cartesian_robot",
     "arm_mpc_cartesian_no_mdm_robot",
 }
@@ -137,6 +138,10 @@ class MpcRunConfig:
     robot_infeasibility_weight: float = 1.0
     max_grasp_residual: float = 0.02
     grasp_residual_frames: int = 3
+    # IK-gated human-action planner only: per-frame IK pose error (metres +
+    # radians) above which a rollout's leading frames count as breaking the
+    # grasp. Shares grasp_residual_frames with the robot-action gate.
+    max_grasp_ik_residual: float = 0.001
     mdm_frames: int | None = None
     num_denoising_steps: int | None = None  # kimodo DDIM steps; None = backend default
     text_time: int = 0
@@ -388,6 +393,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         ),
         grasp_residual_frames=_positive_int(
             data.get("grasp_residual_frames", 3), "grasp_residual_frames"
+        ),
+        max_grasp_ik_residual=_float(
+            data.get("max_grasp_ik_residual", 0.001), "max_grasp_ik_residual"
         ),
         pose=_optional_path(data.get("pose"), "pose"),
         arm=arm,

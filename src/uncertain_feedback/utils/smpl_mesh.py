@@ -21,6 +21,9 @@ _LEG_BONES = ((1, 4), (4, 7), (7, 10), (2, 5), (5, 8), (8, 11))
 # collar is left out: its rotation is locked for a run, so those vertices are the
 # same in every pose.
 _LEFT_ARM_LBS_JOINTS = (16, 18, 20, 22)
+# Left clavicle, upper arm, forearm as SMPL joint pairs — the three segments
+# `SmplLeftArmFK.scale_arm_lengths` rescales, in the same order.
+_LEFT_ARM_BONES = ((13, 16), (16, 18), (18, 20))
 
 
 class SmplMeshCache:
@@ -34,19 +37,44 @@ class SmplMeshCache:
     positions (bone directions are convention-free and the two skeletons are
     identical), so the mesh arm tracks the skeleton drawn in the UI up to the
     torso fit residual at the collar.
+
+    Only the *directions* of those bones are recoverable that way, so the drawn
+    arm is as long as whatever body the model is running. That is exact while the
+    planner is on the SMPL neutral skeleton, and wrong by the difference once
+    ``SmplLeftArmFK.scale_arm_lengths`` has put it on a measured person's — a few
+    centimetres at the wrist, next to a 5 cm Cartesian goal threshold. Passing
+    ``arm_lengths`` fits ``betas`` to those three measured segments so the mesh is
+    the body the planner is planning for.
+
+    Args:
+        body_positions: ``(22, 3)`` joint positions of the pose to fit the torso to.
+        max_entries:    Registered pose sequences to keep before evicting.
+        arm_lengths:    Measured ``(clavicle, upper_arm, forearm)`` lengths in
+                        metres, in :meth:`SmplLeftArmFK.scale_arm_lengths` order.
+                        Default: leave the model at neutral shape.
     """
 
-    def __init__(self, body_positions: np.ndarray, max_entries: int = 64) -> None:
+    def __init__(
+        self,
+        body_positions: np.ndarray,
+        max_entries: int = 64,
+        arm_lengths: tuple[float, float, float] | None = None,
+    ) -> None:
         self._model = create(
             str(_BODY_MODELS_DIR), model_type="smpl", gender="neutral", ext="pkl"
         )
         self._model.eval()
+        self._betas = (
+            torch.zeros((1, 10), dtype=torch.float32)
+            if arm_lengths is None
+            else self._fit_betas(arm_lengths)
+        )
         with torch.no_grad():
             self._rest = (
                 self._model(
                     body_pose=torch.zeros(1, 69),
                     global_orient=torch.zeros(1, 3),
-                    betas=torch.zeros((1, 10), dtype=torch.float32),
+                    betas=self._betas,
                     transl=torch.zeros(1, 3),
                 )
                 .joints[0, :24]
@@ -62,6 +90,39 @@ class SmplMeshCache:
         self._poses: OrderedDict[str, np.ndarray] = OrderedDict()
         self._vertices: dict[str, np.ndarray] = {}
         self._pinned: set[str] = set()
+
+    def _fit_betas(self, arm_lengths: tuple[float, float, float]) -> torch.Tensor:
+        """Fit shape coefficients to the measured left-arm segment lengths.
+
+        Rest-pose bone lengths only, so it is independent of the pose fit that
+        follows and of the arm pose drawn each frame. The shape space is shared
+        across the body, so a fit that lengthens the arm also lengthens the rest
+        of the person — which is the intent: it is one body, and the arm is the
+        only part of it that was measured.
+        """
+        target = torch.tensor(arm_lengths, dtype=torch.float32)
+        betas = torch.zeros((1, 10), requires_grad=True)
+        optimizer = torch.optim.Adam([betas], lr=0.05)
+        for _ in range(300):
+            optimizer.zero_grad()
+            joints = self._model(
+                body_pose=torch.zeros(1, 69),
+                global_orient=torch.zeros(1, 3),
+                betas=betas,
+                transl=torch.zeros(1, 3),
+            ).joints[0, :24]
+            lengths = torch.stack(
+                [torch.linalg.norm(joints[c] - joints[j]) for j, c in _LEFT_ARM_BONES]
+            )
+            error = lengths - target
+            # Shape stays as close to neutral as the lengths allow: the arm pins
+            # three numbers, and the remaining freedom should not invent a body.
+            # The weight has to be tiny because the data term is in metres² — at
+            # 1e-4 the prior outweighs 6 mm of arm and quietly wins.
+            loss = (error * error).sum() + 1e-6 * (betas * betas).mean()
+            loss.backward()
+            optimizer.step()
+        return betas.detach()
 
     def _fit_demo_pose(
         self, target_positions: np.ndarray
@@ -79,7 +140,7 @@ class SmplMeshCache:
             output = self._model(
                 global_orient=global_orient,
                 body_pose=body_pose,
-                betas=torch.zeros((1, 10), dtype=torch.float32),
+                betas=self._betas,
                 transl=translation,
             )
             joint_error = output.joints[0, :22] - target
@@ -240,10 +301,20 @@ class SmplMeshCache:
                 global_orient=torch.from_numpy(
                     np.repeat(self._global_orient[None], n_frames, axis=0)
                 ),
-                betas=torch.zeros((n_frames, 10), dtype=torch.float32),
+                betas=self._betas.expand(n_frames, 10),
                 transl=torch.from_numpy(
                     np.repeat(self._translation[None], n_frames, axis=0)
                 ),
             )
         vertices = output.vertices.detach().cpu().numpy().astype("<f4")
-        return np.ascontiguousarray(vertices)
+        # Land the mesh's shoulder on the FK's. The arm's *rotations* come from
+        # the FK chain but its root position comes from the torso fit, so any
+        # residual there — and a shape fit changes the torso, so there is one —
+        # offsets the whole drawn arm from the joints the planner is costing. The
+        # shoulder is where the controlled chain starts, and with the arm bones
+        # shaped to match, anchoring it puts collar through wrist on the FK too.
+        # The clavicle is frozen for a run, so this shift is constant and the
+        # torso does not drift as the arm moves.
+        joints = output.joints.detach().cpu().numpy()[:, :24]
+        shift = (arm_positions[:, 2] - joints[:, 16]).astype("<f4")
+        return np.ascontiguousarray(vertices + shift[:, None, :])

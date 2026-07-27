@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import struct
+import time
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from uncertain_feedback.envs.sim_mannequin import _SMPL_TO_PB
 from uncertain_feedback.mocap.natnet import (
     NAT_FRAMEOFDATA,
     MocapStaleError,
+    RigidBodyPose,
     decode_frame,
     require_fresh,
 )
@@ -254,3 +256,256 @@ def test_registration_ignores_mocap_translation() -> None:
         ),
         atol=1e-12,
     )
+
+
+class _StubReceiver:
+    """One frozen mocap frame, standing in for a live NatNet stream."""
+
+    def __init__(self, bodies: dict[int, RigidBodyPose]) -> None:
+        self._bodies = bodies
+
+    def latest(self) -> tuple[float, dict[int, RigidBodyPose]]:
+        return time.monotonic(), self._bodies
+
+    def wait_for(
+        self, body_ids, timeout: float  # pylint: disable=unused-argument
+    ) -> dict[int, RigidBodyPose]:
+        return self._bodies
+
+
+def _mocap_frame(
+    fk: SmplLeftArmFK, arm_aa: np.ndarray, base_offset_pb: np.ndarray
+) -> dict[int, RigidBodyPose]:
+    """Synthesize the six rigid bodies `RealEnv` registers against.
+
+    The person is built from `arm_aa` so the measured configuration is known,
+    and the robot base is placed at a chosen offset from their collar — the one
+    thing a real setup varies run to run, and what the IK branch turns on.
+    """
+    rotation = Rotation.from_euler("z", _TRUE_YAW)
+    to_mocap = rotation.inv().apply
+    collar_pb, shoulder_pb, elbow_pb, wrist_pb = (
+        _SMPL_TO_PB @ pos for pos in fk.fk(arm_aa)[1:5]
+    )
+    tpose = fk.tpose_all_joints
+    across_pb = _SMPL_TO_PB @ (tpose[_RIGHT_COLLAR_22] - tpose[_LEFT_COLLAR_22])
+    collar = np.array([0.3, -1.1, 0.0])
+    identity = np.array([0.0, 0.0, 0.0, 1.0])
+    points = {
+        1: collar + to_mocap(base_offset_pb),
+        2: collar,
+        6: collar + to_mocap(across_pb),
+        3: collar + to_mocap(shoulder_pb - collar_pb),
+        4: collar + to_mocap(elbow_pb - collar_pb),
+        5: collar + to_mocap(wrist_pb - collar_pb),
+    }
+    return {i: RigidBodyPose(pos, identity, True) for i, pos in points.items()}
+
+
+def _gripper_offset_from_forearm(env, q: np.ndarray) -> float:
+    """Distance from the IK robot's gripper to the forearm segment, in metres."""
+    elbow, wrist = (
+        _SMPL_TO_PB @ pos
+        for pos in env._fk.fk(  # pylint: disable=protected-access
+            q_to_arm_aa(
+                q, env._fk.elbow_hinge_axis
+            ),  # pylint: disable=protected-access
+            env._spine3_pos,  # pylint: disable=protected-access
+            env._spine3_aa,  # pylint: disable=protected-access
+        )[3:5]
+    )
+    gripper, _ = env._ee_pose_pb()  # pylint: disable=protected-access
+    bone = wrist - elbow
+    along = float(np.clip(np.dot(gripper - elbow, bone) / np.dot(bone, bone), 0.0, 1.0))
+    return float(np.linalg.norm(gripper - (elbow + along * bone)))
+
+
+@pytest.mark.parametrize(
+    "base_offset_pb", [(0.6, -0.35, -0.35), (0.7, -0.2, -0.4), (0.8, 0.0, -0.45)]
+)
+def test_ik_keeps_the_gripper_on_the_forearm(monkeypatch, base_offset_pb) -> None:
+    """The plan preview's robot must hold the forearm, not float away from it.
+
+    `_solve_ik` only accepts a configuration inside the controller's joint
+    limits. Solving without them and clipping afterwards instead moves the end
+    effector by however far the clip travelled with nothing re-solving, which
+    for these ordinary base placements put the gripper up to 0.9 m off the arm —
+    visible in the preview as a robot reaching somewhere the person is not.
+    """
+    pytest.importorskip("pybullet")
+    from uncertain_feedback.envs import real as real_module
+
+    if not real_module._ROBOT_SPECS["kinova_gen3"].urdf.exists():
+        pytest.skip("kortex_description URDF not available")
+
+    fk = SmplLeftArmFK()
+    arm_aa = np.array(
+        [
+            [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783],
+            [0.6868865380518193, -0.18, -0.11006289820501858],
+            [0.035651850950680734, -1.23, 0.7515284911778386],
+        ]
+    )
+    bodies = _mocap_frame(fk, arm_aa, np.asarray(base_offset_pb, dtype=np.float64))
+    monkeypatch.setattr(
+        real_module.NatNetReceiver,
+        "connect",
+        staticmethod(lambda *a, **k: _StubReceiver(bodies)),
+    )
+
+    env = real_module.RealEnv(
+        mocap_host="stub",
+        mocap_rigid_bodies={
+            "robot_base": 1,
+            "collar": 2,
+            "collar_right": 6,
+            "shoulder": 3,
+            "elbow": 4,
+            "wrist": 5,
+        },
+        real_mirror_host=None,
+        live_view=False,
+    )
+    env.set_pose_context(fk, None, None, fk.tpose_all_joints.copy())
+    q = env.initial_q(fk.arm_aa_to_q(arm_aa, None))
+    env._capture_grasp(q)  # pylint: disable=protected-access
+
+    assert _gripper_offset_from_forearm(env, q) < 0.05
+
+    # And it stays there as the plan sweeps the arm, which is what the preview
+    # animates: a solution pinned against a limit walks the gripper off instead.
+    for _ in range(400):
+        q = q.copy()
+        q[6] += 0.001
+        env._drive(q, mirror=False)  # pylint: disable=protected-access
+    assert _gripper_offset_from_forearm(env, q) < 0.1
+
+
+def test_ik_holds_position_when_the_pose_is_infeasible(monkeypatch) -> None:
+    """A reach that rotates the shoulder must not walk the gripper off the arm.
+
+    The grasp is rigid, so a reach that rotates the forearm demands a gripper
+    attitude along with the position — and pybullet's null-space solver gave up
+    *position* to keep chasing orientation, drawing a preview whose robot was
+    right at the start configuration and drifted off the forearm as the plan
+    played (15 cm by the end of this sweep). Continuing the analytical branch
+    tracks the whole rigid pose while it is reachable — which, with the
+    controller's URDF-derived joint limits, is this entire sweep — and the
+    weighted fallback keeps the gripper on the forearm, attitude carrying the
+    miss, when it is not.
+    """
+    pytest.importorskip("pybullet")
+    from uncertain_feedback.envs import real as real_module
+
+    if not real_module._ROBOT_SPECS["kinova_gen3"].urdf.exists():
+        pytest.skip("kortex_description URDF not available")
+
+    fk = SmplLeftArmFK()
+    arm_aa = np.array(
+        [
+            [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783],
+            [0.6868865380518193, -0.18, -0.11006289820501858],
+            [0.035651850950680734, -1.23, 0.7515284911778386],
+        ]
+    )
+    bodies = _mocap_frame(fk, arm_aa, np.array([0.7, -0.2, -0.4]))
+    monkeypatch.setattr(
+        real_module.NatNetReceiver,
+        "connect",
+        staticmethod(lambda *a, **k: _StubReceiver(bodies)),
+    )
+
+    env = real_module.RealEnv(
+        mocap_host="stub",
+        mocap_rigid_bodies={
+            "robot_base": 1,
+            "collar": 2,
+            "collar_right": 6,
+            "shoulder": 3,
+            "elbow": 4,
+            "wrist": 5,
+        },
+        real_mirror_host=None,
+        live_view=False,
+    )
+    env.set_pose_context(fk, None, None, fk.tpose_all_joints.copy())
+    q0 = env.initial_q(fk.arm_aa_to_q(arm_aa, None))
+    env._capture_grasp(q0)  # pylint: disable=protected-access
+
+    q_goal = q0.copy()
+    q_goal[3:6] += np.array([0.35, -0.45, 0.3])
+    q_goal[6] -= 0.5
+    worst_offset = 0.0
+    worst_attitude = 0.0
+    for i in range(1, 601):
+        q = q0 + (q_goal - q0) * (i / 600)
+        env._drive(q, mirror=False)  # pylint: disable=protected-access
+        worst_offset = max(worst_offset, _gripper_offset_from_forearm(env, q))
+        _, target_rot = env._grasp_pose_pb(q)  # pylint: disable=protected-access
+        _, ee_rot = env._ee_pose_pb()  # pylint: disable=protected-access
+        worst_attitude = max(
+            worst_attitude, float((ee_rot * target_rot.inv()).magnitude())
+        )
+    assert worst_offset < 0.05
+    assert worst_attitude < np.deg2rad(5.0)
+
+
+def test_preview_reports_the_grasp_error(monkeypatch, capsys) -> None:
+    """The preview must report how far the gripper strays, not just animate.
+
+    Driven past what `robot_max_joint_delta` can keep up with, so the reported
+    error is a real miss rather than the zero an exactly-tracked plan gives —
+    otherwise the line could print zeros forever and nobody would notice.
+    """
+    pytest.importorskip("pybullet")
+    from uncertain_feedback.envs import real as real_module
+
+    if not real_module._ROBOT_SPECS["kinova_gen3"].urdf.exists():
+        pytest.skip("kortex_description URDF not available")
+
+    fk = SmplLeftArmFK()
+    arm_aa = np.array(
+        [
+            [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783],
+            [0.6868865380518193, -0.18, -0.11006289820501858],
+            [0.035651850950680734, -1.23, 0.7515284911778386],
+        ]
+    )
+    bodies = _mocap_frame(fk, arm_aa, np.array([0.7, -0.2, -0.4]))
+    monkeypatch.setattr(
+        real_module.NatNetReceiver,
+        "connect",
+        staticmethod(lambda *a, **k: _StubReceiver(bodies)),
+    )
+
+    env = real_module.RealEnv(
+        mocap_host="stub",
+        mocap_rigid_bodies={
+            "robot_base": 1,
+            "collar": 2,
+            "collar_right": 6,
+            "shoulder": 3,
+            "elbow": 4,
+            "wrist": 5,
+        },
+        real_mirror_host=None,
+        live_view=False,
+    )
+    env.set_pose_context(fk, None, None, fk.tpose_all_joints.copy())
+    q0 = env.initial_q(fk.arm_aa_to_q(arm_aa, None))
+    env._capture_grasp(q0)  # pylint: disable=protected-access
+
+    # One stride of the sweep the infeasibility test walks in 600 steps, so the
+    # delta clip cannot absorb it and the gripper is left behind the grasp.
+    q_far = q0.copy()
+    q_far[3:6] += np.array([0.35, -0.45, 0.3])
+    env._drive(q_far, mirror=False)  # pylint: disable=protected-access
+    position, attitude = env._grasp_error(q_far)  # pylint: disable=protected-access
+    assert position > 0.01
+
+    env._print_grasp_error(  # pylint: disable=protected-access
+        np.array([[0.0, 0.0], [position, attitude]])
+    )
+    line = capsys.readouterr().out
+    assert "grasp error over the plan" in line
+    assert f"max {1e3 * position:.1f} mm at step 1" in line

@@ -39,6 +39,11 @@ env_params:
   # GUI) and blocks the MPC step, so keep it low; the robot still animates every
   # step.
   live_view_fps: 5
+  # Play the whole planned trajectory in the live view — measured person,
+  # measured robot base, measured grasp — and wait for approval before the first
+  # command reaches the arm. Needs live_view. The mesh is re-posed every frame,
+  # so the preview takes ~0.14 s per planned step.
+  preview_plan: true
 planner: arm_mpc_cartesian_no_mdm
 # Planner knobs match arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml.
 steps: 1000
@@ -60,5 +65,5 @@ arm:
 cartesian:
   # Demo-runner "hits limit 1" goal.
   goals:
-    - [0.25, 0.3, 0.18]
+    - [0.35, 0.3, 0.18]
   threshold: 0.05

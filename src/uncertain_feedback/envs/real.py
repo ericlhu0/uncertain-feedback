@@ -38,10 +38,13 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pybullet as p
+from scipy.optimize import OptimizeResult, least_squares
 from scipy.spatial.transform import Rotation
+from ssik.prebuilt import gen3_ik
 
 from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.envs.grasp import (
@@ -50,7 +53,12 @@ from uncertain_feedback.envs.grasp import (
     forearm_frame_fk,
     grasp_pose_fk,
 )
-from uncertain_feedback.envs.human_mesh import GOAL_COLOR, HumanMeshBody
+from uncertain_feedback.envs.human_mesh import (
+    BODY_XRAY_COLOR,
+    GOAL_COLOR,
+    ArmSkeletonBody,
+    HumanMeshBody,
+)
 from uncertain_feedback.envs.sim_mannequin import _ROBOT_SPECS, _SMPL_TO_PB
 from uncertain_feedback.mocap.natnet import (
     NatNetReceiver,
@@ -74,16 +82,30 @@ _CALIBRATION_TIMEOUT_S = 20.0
 # Re-reading tracking after the scene build should succeed on the first poll;
 # anything longer means markers were lost while the scene came up.
 _RESYNC_TIMEOUT_S = 2.0
-# How far the measured gripper origin may sit from the forearm segment. The Gen3
-# `tool_frame` is 12 cm past the flange, i.e. between the 2F-85's fingers, so a
-# real grasp puts it within a few centimetres of the forearm axis; the slack is
-# for SMPL bone lengths differing from the person's.
-_GRASP_OFFSET_TOLERANCE_M = 0.15
+# How the IK trades gripper orientation error against position error when the
+# exact pose is infeasible (metres of position per radian of orientation).
+# Small, so the gripper stays on the forearm and the wrist absorbs the error —
+# the same compromise the physical grasp forces.
+_IK_ORIENTATION_WEIGHT_M_PER_RAD = 0.02
+# How many analytical branches to refine from. They are ranked nearest-first, so
+# the ones past the first few are branches the arm would have to cross itself to
+# reach.
+_IK_SEEDS = 2
 # Live-view camera, framed on the person's collar (where the registration is
 # anchored) with the robot in shot.
 _LIVE_CAMERA_DISTANCE = 2.0
 _LIVE_CAMERA_YAW = -30.0
 _LIVE_CAMERA_PITCH = -12.0
+# The link `gen3_ik` solves for, which is not the one the grasp is measured at.
+_SSIK_EE_LINK = b"end_effector_link"
+
+
+def _pose_matrix(position: np.ndarray, quaternion: np.ndarray) -> np.ndarray:
+    """A ``(4, 4)`` homogeneous transform from a position and an xyzw quat."""
+    matrix = np.eye(4)
+    matrix[:3, :3] = Rotation.from_quat(quaternion).as_matrix()
+    matrix[:3, 3] = position
+    return matrix
 
 
 class RealEnv(ExecutionEnv):
@@ -101,12 +123,12 @@ class RealEnv(ExecutionEnv):
         mocap_hold_timeout: float = 0.5,
         live_view: bool = False,
         live_view_fps: float = 5.0,
+        preview_plan: bool = True,
     ) -> None:
         super().__init__()
-        if robot not in _ROBOT_SPECS:
-            raise ValueError(
-                f"Unknown robot '{robot}'. Available: {sorted(_ROBOT_SPECS)}"
-            )
+        # The IK is `ssik`'s Gen3 artifact, baked against that arm's geometry.
+        if robot != "kinova_gen3":
+            raise ValueError(f"RealEnv solves IK for kinova_gen3 only, not '{robot}'")
         missing = {_BASE_KEY, _COLLAR_RIGHT_KEY, *_ARM_KEYS} - set(mocap_rigid_bodies)
         if missing:
             raise ValueError(f"mocap_rigid_bodies is missing {sorted(missing)}")
@@ -128,6 +150,7 @@ class RealEnv(ExecutionEnv):
         self._robot_max_joint_delta = float(robot_max_joint_delta)
         self._robot_joint_limit_padding = float(robot_joint_limit_padding)
         self._live_view = bool(live_view)
+        self._preview_plan = bool(preview_plan)
         self._live_mesh_period = 1.0 / live_view_fps if live_view_fps > 0.0 else 0.0
         self._last_live_mesh_s = 0.0
         self._cid: int = p.connect(p.GUI if self._live_view else p.DIRECT)
@@ -137,6 +160,7 @@ class RealEnv(ExecutionEnv):
             p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=self._cid)
         self._mesh_cache: SmplMeshCache | None = None
         self._human_mesh: HumanMeshBody | None = None
+        self._arm_skeleton: ArmSkeletonBody | None = None
         self._goal_mesh: HumanMeshBody | None = None
         self._goal_q: np.ndarray | None = None
         self._registration: ArmRegistration | None = None
@@ -146,6 +170,8 @@ class RealEnv(ExecutionEnv):
         self._joint_lower: np.ndarray = np.zeros(0, dtype=np.float64)
         self._joint_upper: np.ndarray = np.zeros(0, dtype=np.float64)
         self._ee_index: int = -1
+        self._world_to_base: np.ndarray = np.eye(4)
+        self._tool_to_ee: np.ndarray = np.eye(4)
         self._last_q: np.ndarray = np.zeros(0, dtype=np.float64)
         self._last_valid_s: float = 0.0
         self._grasp: MeasuredGrasp | None = None
@@ -176,6 +202,67 @@ class RealEnv(ExecutionEnv):
         self._goal_q = np.asarray(q_goal, dtype=np.float64)
         if self._mesh_cache is not None:
             self._draw_goal_ghost()
+
+    def preview(self, plan: Callable[[], np.ndarray]) -> bool:
+        """Play the whole planned trajectory in the live scene, then ask.
+
+        Everything in the window is the measured world: the person's mesh at the
+        registered anchor on their own segment lengths, the Gen3 at its measured
+        base, and the gripper carried by the grasp measured off the real arm — so
+        the operator sees the trajectory that is about to be run on the person,
+        against the geometry it will be run against, while nothing is moving. A
+        registration error, an unreachable stretch, or a plan that drags the arm
+        somewhere unacceptable is visible here and answering ``n`` ends the run
+        before the first command.
+
+        The plan comes from a kinematic rollout, so it assumes the arm tracks
+        each command exactly; the real run closes the loop on mocap and will
+        drift from it. The mesh is re-posed every frame (~140 ms each, so a long
+        plan takes a minute), which starves the mocap receive thread — hence the
+        :meth:`_resync` before handing back.
+
+        The grasp error over the plan is reported before the prompt, since how
+        far the gripper strays from the grasp is the part of "can the arm
+        actually do this" that is hard to see in the window.
+        """
+        if not self._preview_plan:
+            return True
+        if self._registration is None:
+            self._register()
+        if not self._live_view:
+            print(
+                "[real] plan preview skipped: needs live_view for a window to "
+                "draw it in",
+                flush=True,
+            )
+            return True
+        print("[real] planning the trajectory to preview", flush=True)
+        traj = np.asarray(plan(), dtype=np.float64)
+        q_meas = self._read_back_q()
+        self._capture_grasp(q_meas)
+        print(
+            f"[real] previewing {len(traj)} planned steps in the live view "
+            "(full mesh, ~140 ms/frame)",
+            flush=True,
+        )
+        errors = []
+        for q in traj:
+            self._drive(q, mirror=False)
+            errors.append(self._grasp_error(q))
+            self._pose_arm_skeleton(q)
+            self._pose_human_mesh(q)
+        self._print_grasp_error(np.asarray(errors))
+        answer = input("[real] preview done. Enter = run on the robot, n = abort: ")
+        # The grasp measured above was for the animation only. Dropping it sends
+        # the first real step back through `_establish_grasp`, whose handover to
+        # the controller's position mode is first-step work the preview must not
+        # do or skip.
+        self._grasp = None
+        self._set_joints(self._current_q())
+        self._resync()
+        self._pose_arm_skeleton(self._last_q)
+        self._pose_human_mesh(self._last_q)
+        return not answer.strip().lower().startswith("n")
 
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
         q = np.asarray(q_cmd, dtype=np.float64)
@@ -239,10 +326,15 @@ class RealEnv(ExecutionEnv):
         plan without asking for a start configuration.
         """
         assert self._fk is not None
-        bodies = self._receiver.wait_for(
-            [self._body_ids[key] for key in (_BASE_KEY, _COLLAR_RIGHT_KEY, *_ARM_KEYS)],
-            _CALIBRATION_TIMEOUT_S,
+        wanted = [
+            self._body_ids[key] for key in (_BASE_KEY, _COLLAR_RIGHT_KEY, *_ARM_KEYS)
+        ]
+        print(
+            f"[real] waiting for mocap rigid bodies {wanted} "
+            f"(up to {_CALIBRATION_TIMEOUT_S:.0f}s)",
+            flush=True,
         )
+        bodies = self._receiver.wait_for(wanted, _CALIBRATION_TIMEOUT_S)
         base = bodies[self._body_ids[_BASE_KEY]]
         collar_right = bodies[self._body_ids[_COLLAR_RIGHT_KEY]]
         keypoints = self._arm_keypoints(bodies)
@@ -313,11 +405,15 @@ class RealEnv(ExecutionEnv):
         position mode is first-step work — the transform itself is re-read every
         step by :meth:`_measure_grasp`.
         """
+        self._capture_grasp(q_meas)
+        if self._mirror is not None:
+            self._mirror.start_from_grasp()
+
+    def _capture_grasp(self, q_meas: np.ndarray) -> None:
+        """Measure the grasp without the handover — also what a preview needs."""
         if self._mirror is None:
             self._pose_robot_at_nominal_grasp(q_meas)
         self._measure_grasp(q_meas)
-        if self._mirror is not None:
-            self._mirror.start_from_grasp()
 
     def _measure_grasp(self, q_meas: np.ndarray) -> None:
         """Re-read the gripper-on-forearm transform, every step.
@@ -339,67 +435,23 @@ class RealEnv(ExecutionEnv):
         self._grasp = MeasuredGrasp.measure(
             *self._forearm_frame_pb(q_meas), *self._ee_pose_pb()
         )
-        self._check_grasp_on_forearm(q_meas)
 
     def _pose_robot_at_nominal_grasp(self, q_meas: np.ndarray) -> None:
         """Dry run only: there is no real gripper pose to measure.
 
         Placing the IK robot at :func:`grasp_pose_fk`'s nominal grasp on the
         measured forearm gives the calibration something to read, so the
-        mocap-only run exercises the same code path as the live one. The solution
-        is clipped to the controller's joint limits and may miss the nominal
-        point by centimetres; nothing moves, and a miss large enough to matter
-        shows up as a grasp off the forearm in :meth:`_check_grasp_on_forearm`.
+        mocap-only run exercises the same code path as the live one. The solve is
+        bounded by the controller's joint limits, so a nominal grasp the robot
+        cannot reach from where it stands is missed rather than faked; nothing
+        moves.
         """
-        # Seed the IK from the arm's actual configuration. `calculateInverseKinematics`
-        # seeds from the current joint state, and with 7 DOF the branch it returns
-        # depends strongly on that seed: from `_RobotSpec.home` (tuned for
-        # `sim_mannequin`'s hardcoded base offset) it can land on a branch that
-        # needs clipping and so never reaches, while from the real arm's own
-        # configuration it solves exactly.
-        self._set_joints(self._current_q())
         target_pos, target_rot = self._nominal_grasp_pose_pb(q_meas)
         solution = self._solve_ik(
             target_pos,
             (target_rot * Rotation.from_quat(self._spec.tool_quat)).as_quat(),
         )
         self._set_joints(np.clip(solution, self._joint_lower, self._joint_upper))
-
-    def _check_grasp_on_forearm(self, q_meas: np.ndarray) -> None:
-        """Reject a measured grasp that did not land on the forearm.
-
-        The measurement is only as good as the registration: a wrong yaw or a
-        robot-base plate misaligned in Motive puts the person somewhere else in
-        the scene, and the offset then bakes that error into a long lever arm
-        that the MPC would swing the real arm through. A gripper actually holding
-        the forearm sits within centimetres of the elbow→wrist segment.
-
-        Running every step (with :meth:`_measure_grasp`) also makes this the slip
-        guard: a grasp that creeps along the forearm or off it — or an arm the
-        gripper is pushing past without carrying — walks the offset out of
-        tolerance and halts the run instead of continuing on a lever arm that no
-        longer describes anything physical.
-        """
-        assert self._registration is not None
-        elbow, wrist = self._forearm_segment_pb(q_meas)
-        gripper, _ = self._grasp_pose_pb(q_meas)
-        bone = wrist - elbow
-        along = float(
-            np.clip(np.dot(gripper - elbow, bone) / float(np.dot(bone, bone)), 0.0, 1.0)
-        )
-        distance = float(np.linalg.norm(gripper - (elbow + along * bone)))
-        if distance > _GRASP_OFFSET_TOLERANCE_M:
-            raise RuntimeError(
-                f"Measured grasp is {distance:.3f} m off the forearm (tolerance "
-                f"{_GRASP_OFFSET_TOLERANCE_M} m), {along:.2f} of the way along it. "
-                f"Gripper {np.round(gripper, 3)}, elbow {np.round(elbow, 3)}, wrist "
-                f"{np.round(wrist, 3)}, robot base "
-                f"{np.round(self._registration.base_pb, 3)}, solved yaw "
-                f"{self._registration.robot_base_yaw:+.3f} rad, step "
-                f"{len(self._measured)}. At step 0: the grasp was not taken before "
-                "the run, or the mocap registration is wrong. Later: the grasp has "
-                "slipped off the forearm."
-            )
 
     def _build_scene(self) -> None:
         """Load the robot at the measured base pose.
@@ -446,7 +498,35 @@ class RealEnv(ExecutionEnv):
         self._ee_index = next(
             info[0] for info in infos if info[12] == self._spec.ee_link
         )
+        # `gen3_ik` solves in the robot's own base frame while every target is
+        # built in the pybullet world, so cache the inverse of where the robot
+        # was just measured to stand.
+        self._world_to_base = np.linalg.inv(
+            _pose_matrix(
+                self._registration.base_pb,
+                p.getQuaternionFromEuler((0.0, 0.0, self._registration.robot_base_yaw)),
+            )
+        )
+        # It also solves for `end_effector_link`, while every pose here is the
+        # `tool_frame` between the gripper's fingers that the grasp is measured
+        # at — 12 cm apart on this arm. Read the offset off the URDF, since it is
+        # a property of the loaded gripper rather than of the arm.
+        ee_frame_index = next(info[0] for info in infos if info[12] == _SSIK_EE_LINK)
+        self._tool_to_ee = np.linalg.inv(self._link_pose_pb(self._ee_index)) @ (
+            self._link_pose_pb(ee_frame_index)
+        )
         self._set_joints(np.asarray(self._spec.home, dtype=np.float64))
+
+    def _link_pose_pb(self, link_index: int) -> np.ndarray:
+        """A link's world pose as a ``(4, 4)`` transform."""
+        return _pose_matrix(
+            *p.getLinkState(
+                self._robot,
+                link_index,
+                computeForwardKinematics=True,
+                physicsClientId=self._cid,
+            )[4:6]
+        )
 
     def _start_live_view(self) -> None:
         """Open the live scene: the measured person as a mesh, plus the robot.
@@ -456,11 +536,24 @@ class RealEnv(ExecutionEnv):
         the window shows the geometry the MPC is actually solving against — a
         registration that put the person or the robot in the wrong place is
         visible here before the numbers say anything.
+
+        The mesh is shaped to the arm the planner is planning for: only bone
+        directions survive into a mesh pose, so a neutral-shape body would draw a
+        neutral-length arm while the FK is on the person's measured segments, and
+        the drawn wrist would miss the wrist the Cartesian cost measures. Handing
+        the calibrated lengths to the cache fits ``betas`` to them instead.
         """
         assert self._fk is not None and self._body_pos is not None
         assert self._registration is not None
-        self._mesh_cache = SmplMeshCache(np.asarray(self._body_pos, dtype=np.float64))
-        self._human_mesh = HumanMeshBody(self._cid, self._mesh_cache)
+        clavicle, upper_arm, forearm = np.linalg.norm(
+            np.diff(self._fk.tpose_joints, axis=0), axis=1
+        )[1:]
+        self._mesh_cache = SmplMeshCache(
+            np.asarray(self._body_pos, dtype=np.float64),
+            arm_lengths=(float(clavicle), float(upper_arm), float(forearm)),
+        )
+        self._human_mesh = HumanMeshBody(self._cid, self._mesh_cache, BODY_XRAY_COLOR)
+        self._arm_skeleton = ArmSkeletonBody(self._cid)
         if self._goal_q is not None:
             self._draw_goal_ghost()
         p.resetDebugVisualizerCamera(
@@ -488,26 +581,45 @@ class RealEnv(ExecutionEnv):
         )
 
     def _update_live_view(self, q_meas: np.ndarray) -> None:
-        """Re-pose the human mesh to the measured configuration, rate-limited.
+        """Redraw the person at the measured configuration; mesh rate-limited.
 
         Replacing the 6890-vertex body in the GUI costs ~140 ms (measured) —
         pybullet has no vertex-update call, and it holds the GIL across the
         remove/create pair, which stalls the MPC step *and* delays the mocap
         receive thread toward ``mocap_hold_timeout``. So the person's mesh
-        refreshes at ``live_view_fps``; the robot is re-posed every step
-        regardless, since ``resetJointState`` is free by comparison.
+        refreshes at ``live_view_fps``; the planner's arm chain and the robot are
+        redrawn every step, since debug lines and ``resetJointState`` are free by
+        comparison — the numbers the MPC is working from stay live even when the
+        body around them lags.
         """
-        assert self._fk is not None and self._human_mesh is not None
+        self._pose_arm_skeleton(q_meas)
         now = time.monotonic()
         if now - self._last_live_mesh_s < self._live_mesh_period:
             return
         self._last_live_mesh_s = now
-        self._human_mesh.update(
-            self._fk.fk(
-                q_to_arm_aa(q_meas, self._fk.elbow_hinge_axis),
-                self._spine3_pos,
-                self._spine3_aa,
-            )
+        self._pose_human_mesh(q_meas)
+
+    def _pose_human_mesh(self, q: np.ndarray) -> None:
+        """Re-pose the human mesh to an arm configuration, unconditionally.
+
+        The rate limit belongs to the live view during a run, where each rebuild
+        stalls an MPC step; a preview has no step to stall.
+        """
+        assert self._human_mesh is not None
+        self._human_mesh.update(self._arm_positions(q))
+
+    def _pose_arm_skeleton(self, q: np.ndarray) -> None:
+        """Redraw the planner's arm chain at ``q``."""
+        assert self._arm_skeleton is not None
+        self._arm_skeleton.update(self._arm_positions(q))
+
+    def _arm_positions(self, q: np.ndarray) -> np.ndarray:
+        """The ``(5, 3)`` arm chain the planner's FK gives for ``q``."""
+        assert self._fk is not None
+        return self._fk.fk(
+            q_to_arm_aa(q, self._fk.elbow_hinge_axis),
+            self._spine3_pos,
+            self._spine3_aa,
         )
 
     def _set_joints(self, values: np.ndarray) -> None:
@@ -553,14 +665,6 @@ class RealEnv(ExecutionEnv):
         to_pb = Rotation.from_matrix(_SMPL_TO_PB)
         return _SMPL_TO_PB @ pos, to_pb * rot
 
-    def _forearm_segment_pb(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Elbow and wrist positions in pybullet coords."""
-        assert self._fk is not None
-        positions = self._fk.fk(
-            q_to_arm_aa(q, self._fk.elbow_hinge_axis), self._spine3_pos, self._spine3_aa
-        )
-        return _SMPL_TO_PB @ positions[3], _SMPL_TO_PB @ positions[4]
-
     def _nominal_grasp_pose_pb(self, q: np.ndarray) -> tuple[np.ndarray, Rotation]:
         """The assumed grasp the simulated envs use — dry run only."""
         assert self._fk is not None
@@ -587,20 +691,180 @@ class RealEnv(ExecutionEnv):
         )[4:6]
         return np.asarray(ee_pos, dtype=np.float64), Rotation.from_quat(ee_orn)
 
-    def _solve_ik(self, target_pos: np.ndarray, target_quat: np.ndarray) -> np.ndarray:
-        solution = p.calculateInverseKinematics(
-            self._robot,
-            self._ee_index,
-            tuple(target_pos),
-            tuple(target_quat),
-            maxNumIterations=200,
-            residualThreshold=1e-5,
-            physicsClientId=self._cid,
-        )
-        return np.asarray(solution, dtype=np.float64)
+    def _grasp_error(self, q_cmd: np.ndarray) -> tuple[float, float]:
+        """How far the gripper ended up from the grasp ``q_cmd`` asked for.
 
-    def _drive(self, q_cmd: np.ndarray) -> None:
+        Position in metres and attitude in radians, read after :meth:`_drive`
+        has moved the robot. Two things put error here and both matter to a
+        preview: a pose outside the padded joint box, where
+        :meth:`_nearest_infeasible_ik` deliberately spends attitude to keep
+        position; and ``robot_max_joint_delta``, which rate-limits the step and
+        so shows up as the arm lagging a plan that moves faster than it may.
+        """
+        target_pos, target_rot = self._grasp_pose_pb(q_cmd)
+        ee_pos, ee_rot = self._ee_pose_pb()
+        return (
+            float(np.linalg.norm(ee_pos - target_pos)),
+            float((ee_rot * target_rot.inv()).magnitude()),
+        )
+
+    @staticmethod
+    def _print_grasp_error(errors: np.ndarray) -> None:
+        """Summarise a plan's worth of :meth:`_grasp_error` for the operator."""
+        position, attitude = errors[:, 0], np.rad2deg(errors[:, 1])
+        print(
+            f"[real] grasp error over the plan: position mean "
+            f"{1e3 * position.mean():.1f} mm, max {1e3 * position.max():.1f} mm "
+            f"at step {int(np.argmax(position))}; attitude mean "
+            f"{attitude.mean():.1f} deg, max {attitude.max():.1f} deg at step "
+            f"{int(np.argmax(attitude))}",
+            flush=True,
+        )
+
+    def _solve_ik(self, target_pos: np.ndarray, target_quat: np.ndarray) -> np.ndarray:
+        """Continue the branch the arm is on; enumerate only if it cannot reach.
+
+        Continuation first, because this arm is redundant: its exact solutions
+        for a pose form a self-motion manifold, so any number of far-apart
+        configurations hit the target just as exactly and *which* one a solver
+        returns is not pinned down by the pose. Taking whichever scores best
+        walks the gripper across the person for nothing — over one plan that
+        moved the solution up to 1.5 rad in a step against a
+        ``robot_max_joint_delta`` of 0.01, which the arm then spends tens of
+        steps chasing with the pose wrong the whole way. Following the branch
+        the arm is already on removes the choice instead of making it well.
+
+        Enumeration is the fallback, for when continuation genuinely cannot
+        reach — the pose left the current branch, or left the controller's
+        padded box. ``ssik`` returns *every* analytical branch ranked against
+        the current configuration, so the nearest reachable one is known
+        outright rather than searched for; that is what the previous solve could
+        only approach heuristically, from three seeds chosen to bait the right
+        basin. Only when nothing exact fits does anything numerical run.
+        """
+        rest = self._sim_q()
+        target = self._ee_target_in_base(target_pos, target_quat)
+        for track in (True, False):
+            reachable = [
+                solution
+                for solution in self._ik_solutions(target, rest, track=track)
+                if np.all(solution >= self._joint_lower)
+                and np.all(solution <= self._joint_upper)
+            ]
+            if reachable:
+                return reachable[0]
+        return self._nearest_infeasible_ik(target, rest)
+
+    def _ee_target_in_base(
+        self, target_pos: np.ndarray, target_quat: np.ndarray
+    ) -> np.ndarray:
+        """Move a world-frame ``tool_frame`` pose into ``gen3_ik``'s frames.
+
+        The artifact is baked against the nominal kortex chain and works in
+        ``end_effector_link`` relative to ``base_link``, so a target has to leave
+        both frames it arrives in: the pybullet world the scene is built in (the
+        robot stands at its *measured* base pose) and the ``tool_frame`` between
+        the gripper's fingers that the grasp is measured at.
+        """
+        return (
+            self._world_to_base
+            @ _pose_matrix(np.asarray(target_pos, dtype=np.float64), target_quat)
+            @ self._tool_to_ee
+        )
+
+    def _ik_solutions(
+        self, target: np.ndarray, q_seed: np.ndarray, *, track: bool
+    ) -> list[np.ndarray]:
+        """Exact configurations for a base-frame ee pose, nearest ``q_seed`` first.
+
+        With ``track`` this asks only for the Newton continuation from
+        ``q_seed`` — the artifact takes that fast path when a seed is given and a
+        single solution wanted, and it rejects its own step if it lands on a
+        different branch, which is the continuity the trajectory needs and a
+        tenth the cost of resolving the redundancy. Without it, every analytical
+        branch comes back, which is what a genuine branch change needs.
+
+        ``respect_limits`` is off throughout because the artifact filters against
+        the URDF's limits, which are not the ones the arm has to satisfy.
+        Solutions come back on whatever winding the algebra produced, so the
+        continuous joints are re-branched onto the half-turn either side of
+        ``q_seed`` — the same configuration, expressed as the move the arm would
+        actually make to reach it.
+        """
+        solutions = []
+        for solution in gen3_ik.solve(
+            target,
+            q_seed=q_seed,
+            max_solutions=1 if track else None,
+            respect_limits=False,
+        ):
+            joints = np.asarray(solution.q, dtype=np.float64)
+            delta = joints[self._continuous_joints] - q_seed[self._continuous_joints]
+            joints[self._continuous_joints] = q_seed[self._continuous_joints] + (
+                np.arctan2(np.sin(delta), np.cos(delta))
+            )
+            solutions.append(joints)
+        return solutions
+
+    def _nearest_infeasible_ik(
+        self, target: np.ndarray, rest: np.ndarray
+    ) -> np.ndarray:
+        """Miss the pose as gently as the physical grasp would.
+
+        Reached only when no exact solution fits the controller's padded box:
+        the grasp pose is rigid within a step and comes from FK on the *measured*
+        forearm, so when the person moves their arm somewhere the padded Gen3
+        cannot follow rigidly, there is nothing exact to find. Physically the
+        grasp stays clamped and the wrist is what compromises, so
+        ``_IK_ORIENTATION_WEIGHT_M_PER_RAD`` makes orientation the cheap term of
+        a bounded least-squares: position holds until it is itself infeasible,
+        and the attitude carries the miss.
+
+        The residual is built on ``gen3_ik``'s forward kinematics rather than
+        pybullet's. Pybullet holds link state in single precision, so
+        differencing it over the optimiser's ~1e-8 step returns a Jacobian that
+        is mostly rounding — measured against the analytical one, a first column
+        of ``[-0.375, 0, 0]`` where the truth is ``[-0.304, 0.022, 0]``. Every
+        numerical solve here used to run on that.
+        """
+        target_position = target[:3, 3]
+        target_rotation = Rotation.from_matrix(target[:3, :3])
+        lower = np.where(self._continuous_joints, rest - np.pi, self._joint_lower)
+        upper = np.where(self._continuous_joints, rest + np.pi, self._joint_upper)
+
+        def pose_error(joints: np.ndarray) -> np.ndarray:
+            pose = gen3_ik.fk(joints)
+            return np.concatenate(
+                (
+                    pose[:3, 3] - target_position,
+                    _IK_ORIENTATION_WEIGHT_M_PER_RAD
+                    * (
+                        Rotation.from_matrix(pose[:3, :3]) * target_rotation.inv()
+                    ).as_rotvec(),
+                )
+            )
+
+        best: OptimizeResult | None = None
+        seeds = self._ik_solutions(target, rest, track=False)[:_IK_SEEDS]
+        for seed in (rest, *seeds):
+            result = least_squares(
+                pose_error,
+                np.clip(seed, lower, upper),
+                bounds=(lower, upper),
+                max_nfev=200,
+            )
+            if best is None or result.cost < best.cost:
+                best = result
+        assert best is not None
+        return np.asarray(best.x, dtype=np.float64)
+
+    def _drive(self, q_cmd: np.ndarray, *, mirror: bool = True) -> None:
         """Command the gripper pose this step's grasp puts on the commanded arm.
+
+        With ``mirror=False`` the same solve runs on the IK robot alone and
+        nothing is sent, which is what animates a :meth:`preview`: the robot then
+        integrates on its own previous pose instead of the real arm's, since the
+        real arm is standing still while the preview plays.
 
         :meth:`SimMannequinEnv._drive` cannot target a grasp pose absolutely, and
         neither could this method while the grasp was captured once: SMPL FK and
@@ -618,22 +882,20 @@ class RealEnv(ExecutionEnv):
         The gripper takes the forearm's whole rotation, not just its direction:
         the grasp is rigid within a step, and the forearm frame comes from the FK
         chain, so it carries its own roll and has no up-reference to flip near a
-        vertical forearm.
+        vertical forearm. Where that rigid pose leaves the reachable set,
+        :meth:`_solve_ik`'s position-priority weighting keeps the gripper on the
+        forearm and lets the orientation carry the miss.
         """
-        q_now = self._current_q()
+        q_now = self._current_q() if mirror else self._sim_q()
         self._set_joints(q_now)
         target_pos, target_rot = self._grasp_pose_pb(q_cmd)
         delta = self._solve_ik(target_pos, target_rot.as_quat()) - q_now
-        # Continuous joints have no limits to anchor the IK solution, so it may
-        # come back unwound by full turns; take the short way around.
-        wrapped = self._continuous_joints
-        delta[wrapped] = np.arctan2(np.sin(delta[wrapped]), np.cos(delta[wrapped]))
         delta = np.clip(
             delta, -self._robot_max_joint_delta, self._robot_max_joint_delta
         )
         target = np.clip(q_now + delta, self._joint_lower, self._joint_upper)
         self._set_joints(target)
-        if self._mirror is not None:
+        if mirror and self._mirror is not None:
             self._mirror.send(target)
 
     def _sim_q(self) -> np.ndarray:

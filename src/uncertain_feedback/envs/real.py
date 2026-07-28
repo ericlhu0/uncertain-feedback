@@ -744,8 +744,30 @@ class RealEnv(ExecutionEnv):
         step by :meth:`_measure_grasp`.
         """
         self._capture_grasp(q_meas)
+        self._warn_if_outside_joint_box()
         if self._mirror is not None:
             self._mirror.start_from_grasp()
+
+    def _warn_if_outside_joint_box(self) -> None:
+        """Flag a start configuration the planner's own IK can never accept.
+
+        Continuation feasibility includes the padded joint box, so an arm
+        positioned (by hand, taking the grasp) with any joint inside the
+        padding band fails every solve — including the identity solve at the
+        current pose. The gate then holds forever and every MDM frame screens
+        as unreachable, with nothing printed to say why.
+        """
+        q_now = self.current_robot_q()
+        bad = np.flatnonzero((q_now < self._joint_lower) | (q_now > self._joint_upper))
+        for i in bad:
+            print(
+                f"[real] WARNING: robot joint {i + 1} at {q_now[i]:+.3f} rad is "
+                f"outside the padded joint box "
+                f"[{self._joint_lower[i]:+.3f}, {self._joint_upper[i]:+.3f}] — "
+                "every IK feasibility check fails from this configuration; "
+                "reposition the arm clear of its limits before taking the grasp.",
+                flush=True,
+            )
 
     def _capture_grasp(self, q_meas: np.ndarray) -> None:
         """Measure the grasp without the handover — also what a preview needs."""

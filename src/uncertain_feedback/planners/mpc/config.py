@@ -15,6 +15,7 @@ PLANNER_CHOICES = {
     "arm_mpc_mdm",
     "arm_mpc_mdm_uq",
     "arm_mpc_cartesian",
+    "arm_mpc_cartesian_ik_gated",
     "arm_mpc_cartesian_no_mdm",
     "arm_mpc_cartesian_no_mdm_ik_gated",
     "arm_mpc_cartesian_robot",
@@ -102,6 +103,7 @@ class LlmCostConfig:
     # this command in a fail-closed Bubblewrap filesystem namespace, so an inner
     # danger-full-access flag does not expose the repository or simulator oracle.
     codex_cmd: str = "codex exec --skip-git-repo-check"
+    reasoning_effort: str | None = None
 
 
 COST_BACKENDS = {"llm", "turns", "agent"}
@@ -138,10 +140,13 @@ class MpcRunConfig:
     robot_infeasibility_weight: float = 1.0
     max_grasp_residual: float = 0.02
     grasp_residual_frames: int = 3
-    # IK-gated human-action planner only: per-frame IK pose error (metres +
+    # IK-gated human-action planners only: per-frame IK pose error (metres +
     # radians) above which a rollout's leading frames count as breaking the
     # grasp. Shares grasp_residual_frames with the robot-action gate.
     max_grasp_ik_residual: float = 0.001
+    # Gated MDM playback only: consecutive steps without closest-approach
+    # progress on the current playback frame before the cursor skips it.
+    playback_stall_steps: int = 40
     mdm_frames: int | None = None
     num_denoising_steps: int | None = None  # kimodo DDIM steps; None = backend default
     text_time: int = 0
@@ -396,6 +401,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         ),
         max_grasp_ik_residual=_float(
             data.get("max_grasp_ik_residual", 0.001), "max_grasp_ik_residual"
+        ),
+        playback_stall_steps=_positive_int(
+            data.get("playback_stall_steps", 40), "playback_stall_steps"
         ),
         pose=_optional_path(data.get("pose"), "pose"),
         arm=arm,

@@ -56,7 +56,7 @@ uncertain-feedback/
 │   │       ├── arm_mpc_cartesian_base.py  # _CartesianGoalsMixin (shared Cartesian logic)
 │   │       ├── arm_mpc_cartesian.py  # LeftArmMPCCartesian (MDM then Cartesian)
 │   │       ├── arm_mpc_cartesian_no_mdm.py  # ArmMPCCartesianNoMDM (pure Cartesian)
-│   │       ├── arm_mpc_ik_gated.py   # ArmMPCCartesianNoMDMIKGated (human-action MPC gated by the env's robot IK)
+│   │       ├── arm_mpc_ik_gated.py   # _IKGateMixin + ArmMPCCartesianNoMDMIKGated + LeftArmMPCCartesianIKGated (human-action MPC gated by the env's robot IK; MDM variant screens playback too)
 │   │       ├── arm_mpc_robot.py      # _RobotActionsMixin + ArmMPCCartesianNoMDMRobot (sample robot joint deltas, cost the human arm)
 │   │       ├── arm_mpc_cartesian_robot.py  # LeftArmMPCCartesianRobot (MDM+UQ in robot joint space)
 │   │       └── configs/              # Example YAML config files
@@ -68,6 +68,7 @@ uncertain-feedback/
 │   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
 │   │           ├── arm_mpc_cartesian_mdm_llm_multiround.yaml # pose-dependent multi-round experiment
 │   │           ├── arm_mpc_cartesian_mdm_llm_real.yaml  # full method on env: real, for --interactive live corrections
+│   │           ├── arm_mpc_cartesian_mdm_ik_gated_real.yaml  # full method on env: real with every robot-facing step IK-screened + compliant_joint
 │   │           ├── arm_mpc_cartesian_no_mdm.yaml
 │   │           ├── arm_mpc_cartesian_no_mdm_sim.yaml  # same, with env: sim_robot_visual
 │   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin.yaml  # same, with env: sim_mannequin (physics; more steps)
@@ -225,12 +226,25 @@ SmplLeftArmMPC (arm_mpc.py)
     │     Inherits LeftArmMPCMDMUQ + _CartesianGoalsMixin.
     │     First tracks MDM/UQ trajectory, then switches to Cartesian wrist goals.
     │
-    │   └── LeftArmMPCCartesianRobot (arm_mpc_cartesian_robot.py)
-    │         + _RobotActionsMixin. Same corrections/UQ/LLM machinery, but both
-    │         phases sample robot joint deltas and command the robot directly
-    │         (env.execute_robot). Playback keeps its rate-limited cursor; each
-    │         frame becomes the target of a robot-space tracking solve (geodesic
-    │         shoulder error — measured rotvecs sit near the ±pi boundary).
+    │   ├── LeftArmMPCCartesianRobot (arm_mpc_cartesian_robot.py)
+    │   │     + _RobotActionsMixin. Same corrections/UQ/LLM machinery, but both
+    │   │     phases sample robot joint deltas and command the robot directly
+    │   │     (env.execute_robot). Playback keeps its rate-limited cursor; each
+    │   │     frame becomes the target of a robot-space tracking solve (geodesic
+    │   │     shoulder error — measured rotvecs sit near the ±pi boundary).
+    │   │
+    │   └── LeftArmMPCCartesianIKGated (arm_mpc_ik_gated.py)
+    │         + _IKGateMixin. Same corrections/UQ/LLM machinery; the goal phase
+    │         is the gated sampling of ArmMPCCartesianNoMDMIKGated, and MDM
+    │         playback stays direct but is IK-screened at three points so
+    │         execution's enumeration fallback / graceful miss never fire:
+    │         push_trajectory drops frames continuation IK cannot reach from
+    │         the live robot state (walked sequentially through kept frames),
+    │         each rate-limited step is checked and held when unreachable, and
+    │         a frame the arm stops progressing toward (closest-approach, so
+    │         jitter cannot reset the counter) is skipped after
+    │         playback_stall_steps steps — playback follows the trajectory's
+    │         reachable shadow. Requires env: real or sim_mannequin.
     │
     └── ArmMPCCartesianNoMDM (arm_mpc_cartesian_no_mdm.py)
           Cartesian MPC only — no MDM, no UQ.
@@ -281,6 +295,7 @@ SmplLeftArmMPC (arm_mpc.py)
 | `arm_mpc_mdm_uq`                   | `LeftArmMPCMDMUQ`           |
 | `arm_mpc_cartesian`                | `LeftArmMPCCartesian`       |
 | `arm_mpc_cartesian_no_mdm`         | `ArmMPCCartesianNoMDM`      |
+| `arm_mpc_cartesian_ik_gated`       | `LeftArmMPCCartesianIKGated` |
 | `arm_mpc_cartesian_no_mdm_ik_gated` | `ArmMPCCartesianNoMDMIKGated` |
 | `arm_mpc_cartesian_robot`          | `LeftArmMPCCartesianRobot`  |
 | `arm_mpc_cartesian_no_mdm_robot`   | `ArmMPCCartesianNoMDMRobot` |
@@ -460,7 +475,7 @@ When `llm_cost.enabled: true` in the YAML:
 
 | Key                    | Type     | Purpose                                               |
 |------------------------|----------|-------------------------------------------------------|
-| `planner`              | str      | One of the 8 planner choices                         |
+| `planner`              | str      | One of the 9 planner choices                         |
 | `motion_generator`     | str      | Text-to-motion backend: `mdm` (default) or `kimodo`  |
 | `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default), `sim_robot_visual` (no-physics PyBullet scene with a Panda IK'd to a forearm grasp point), `sim_mannequin` (physics proxy: Panda drags the passive limb-manipulation mannequin arm; achieved q measured back from link positions), or `real` (real world: human arm measured from OptiTrack rigid bodies, real Gen3 commanded over ZMQ). Passed to the planner constructor (`build_run`, demo runner) after `set_pose_context`; every planner's `step` returns the env-achieved q. Envs render via `visualize()`/`save_video()` (`run.py --env-video`). |
 | `env_params`           | mapping  | Keyword args forwarded to the env constructor by `make_env` (empty default). `sim_mannequin` accepts `robot` (`panda` default, or `kinova_gen3` — Gen3 7-DOF + Robotiq 2F-85 URDF loaded from `~/kortex_description`), `robot_max_joint_delta` (per-step robot joint travel cap, rad), `robot_base_offset` (robot base position relative to spine3, pybullet frame), `robot_joint_limit_padding` (rad; shrinks robot joint limits so commands clear the real controller's soft limits), and — kinova_gen3 only — `real_mirror_host`/`real_mirror_confirm_start` (mirror the sim robot's achieved joint trajectory onto the real Gen3 via an emprise-gen3-controller ZMQ server, planning against the controller's enforced joint-limit table; see `envs/real_mirror.py`). `real` accepts `mocap_host` (OptiTrack PC address), `mocap_rigid_bodies` (Motive streaming ids for `robot_base`/`collar`/`collar_right`/`shoulder`/`elbow`/`wrist`; the right-collar body — read at calibration only — makes the registration yaw measurable: the left→right collar axis is the torso's facing, so its measured direction solves the yaw with no arm assumption, and the robot is loaded at that solved yaw), `mocap_hold_timeout` (s, default 0.5 — dropout hold before raising `MocapStaleError`), `recording` (path to a `RealRecording` .npz — replays both sensed channels instead of the live streams; set this *or* `mocap_host`, not both; `real_mirror_host` then only says whether a robot is in the loop at all, not what it talks to), plus `robot`, `robot_max_joint_delta`, `robot_joint_limit_padding`, `real_mirror_host` (null = mocap-only dry run, no command reaches the arm), `real_mirror_confirm_start` (one prompt before tracking starts — the real env moves nothing at startup, since the grasp must already be taken and is measured from the real ee pose), `control_mode` (default `position_joint`; `compliant_joint` tracks targets with the emprise controller's joint-space impedance so the arm yields to the person — gains are server-side), `live_view`/`live_view_fps` (PyBullet GUI window with the measured person as an SMPL mesh next to the robot's meshes; needs a display, mesh refresh rate-limited because each refresh replaces the whole mesh), and `preview_plan` (default true; draw each planned step in the live view as it is solved and wait for operator approval before the first command — needs `live_view`). |
@@ -473,7 +488,8 @@ When `llm_cost.enabled: true` in the YAML:
 | `robot_joint_delta_std` | float \| null | Robot-action planners only: std of the joint-delta sampling noise around the warm-started previous plan (rad, default null = a third of the cap). Keep it well below `max_robot_joint_delta` — at std == cap nearly every sample saturates the inf-norm cap and the uniform rescale drowns the warm-started mean in noise. |
 | `robot_infeasibility_weight` | float | Robot-action planners only: weight on the squared grasp-transmission residual from `project_forearm_frames` (default 1.0) — penalizes sampled robot motions the arm cannot follow (elbow off the upper-arm sphere, forearm roll a parallel-jaw grasp cannot transmit). |
 | `max_grasp_residual` / `grasp_residual_frames` | float / int | Robot-action planners only: hard gate — rollouts whose first `grasp_residual_frames` frames (default 3) exceed `max_grasp_residual` per frame (default 0.02; m + rad) are discarded before the argmin (fallback: least-violating sample if none pass). Only the leading frames are gated since only they get executed; the tail stays soft-penalized. The residual floor scales with `max_robot_joint_delta`; tighter = stricter grasp preservation, slower progress. |
-| `max_grasp_ik_residual` | float | IK-gated human-action planner only: maximum gripper pose error (metres + radians, default 0.001) over the leading `grasp_residual_frames`. The real env evaluates it with the same analytical IK and padded joint-limit box as execution. |
+| `max_grasp_ik_residual` | float | IK-gated human-action planners only: maximum gripper pose error (metres + radians, default 0.001) over the leading `grasp_residual_frames`. The real env evaluates it with the same analytical IK and padded joint-limit box as execution. Also the threshold for `arm_mpc_cartesian_ik_gated`'s push and per-step playback screens. |
+| `playback_stall_steps` | int | `arm_mpc_cartesian_ik_gated` only: consecutive playback steps without closest-approach progress on the current MDM frame before the cursor skips it (default 40). Bounds how long an unreachable frame — or a person actively resisting — can hold the run. |
 | `pose`                 | path?    | HML pose `.pt` file for initial body state           |
 | `arm`                  | 3×3 list? | Initial left-arm `[shoulder, elbow, wrist]` axis-angle override on top of `pose` (same semantics as `--arm`, which wins when both are given) |
 | `goal_threshold`       | float    | L2 dist threshold to pop goal (default 0.01)         |

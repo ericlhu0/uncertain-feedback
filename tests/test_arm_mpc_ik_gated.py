@@ -22,6 +22,7 @@ from uncertain_feedback.envs.robot_fk import RobotChainFK
 from uncertain_feedback.envs.sim_mannequin import _PANDA_URDF, _SMPL_TO_PB
 from uncertain_feedback.planners.mpc.arm_mpc_ik_gated import (
     ArmMPCCartesianNoMDMIKGated,
+    LeftArmMPCCartesianIKGated,
 )
 from uncertain_feedback.planners.mpc.kinematics import Q_DIM, SmplLeftArmFK, q_to_arm_aa
 
@@ -313,6 +314,10 @@ def test_preview_rollout_table_covers_every_cartesian_planner() -> None:
         run_module._PREVIEW_ROLLOUTS["arm_mpc_cartesian_no_mdm_ik_gated"]
         is run_module._rollout_gated_reference_trajectory
     )
+    assert (
+        run_module._PREVIEW_ROLLOUTS["arm_mpc_cartesian_ik_gated"]
+        is run_module._rollout_gated_reference_trajectory
+    )
 
 
 def test_continuation_refuses_the_branch_change_enumeration_would_take() -> None:
@@ -370,3 +375,166 @@ def test_ik_gated_yaml_config_loads() -> None:
     assert cfg.max_grasp_ik_residual > 0.0
     assert cfg.grasp_residual_frames >= 1
     assert cfg.env in ("real", "sim_mannequin")
+
+
+def _make_mdm_gated(
+    fk: SmplLeftArmFK,
+    env: _KinematicGraspEnv,
+    q0: np.ndarray,
+    goal: np.ndarray,
+    **overrides,
+) -> LeftArmMPCCartesianIKGated:
+    kwargs = dict(
+        cartesian_goals=[goal],
+        initial_q=q0,
+        horizon=5,
+        n_mpc_samples=128,
+        max_angle_delta=0.02,
+        max_playback_delta=0.1,
+        fk=fk,
+        seed=0,
+        env=env,
+    )
+    kwargs.update(overrides)
+    return LeftArmMPCCartesianIKGated(**kwargs)
+
+
+def test_ik_gated_mdm_planner_tracks_playback_then_reaches_goal() -> None:
+    fk = SmplLeftArmFK()
+    env, q0 = _make_env_and_start(fk)
+    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
+    spine3 = fk.tpose_spine3_pos
+    goal = (wrist0 - spine3) + np.array([0.0, 0.06, -0.04])
+    mpc = _make_mdm_gated(fk, env, q0, goal)
+
+    frames = np.tile(q0, (8, 1))
+    frames[:, 6] = q0[6] + np.linspace(0.0, -0.3, 8)
+    mpc.push_trajectory(frames, current_q=q0)
+    assert mpc._in_playback()
+    assert len(mpc._playback_frames) == 8  # nothing dropped: all reachable
+
+    q = q0
+    for _ in range(80):
+        q = mpc.step(q)
+        if mpc.mdm_ready_to_terminate:
+            break
+    assert mpc.mdm_ready_to_terminate
+    assert abs(float(q[6]) - float(frames[-1, 6])) < 0.15
+
+    for _ in range(100):
+        q = mpc.step(q)
+        if mpc.goal_reached(q):
+            break
+    wrist = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), None, None)[4]
+    assert float(np.linalg.norm((wrist - spine3) - goal)) < 0.05
+
+
+def test_push_screen_drops_unreachable_frames(capsys) -> None:
+    """With the robot pinned, only the frame it already sits at survives."""
+    fk = SmplLeftArmFK()
+    env, q0 = _make_env_and_start(fk)
+    env._lower = env._robot_q.copy()
+    env._upper = env._robot_q.copy()
+    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
+    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    mpc = _make_mdm_gated(fk, env, q0, goal)
+
+    frames = np.tile(q0, (2, 1))
+    frames[1, 6] = q0[6] - 0.4
+    mpc.push_trajectory(frames, current_q=q0)
+
+    out = capsys.readouterr().out
+    assert "[push] dropped 1/2" in out
+    assert mpc._in_playback()
+    assert len(mpc._playback_frames) == 1
+    np.testing.assert_allclose(mpc._playback_frames[0], q0)
+    # The goal marker is re-pointed at the last *kept* frame.
+    np.testing.assert_allclose(mpc._mdm_goal, q0)
+
+
+def test_push_screen_all_unreachable_queues_nothing(capsys) -> None:
+    fk = SmplLeftArmFK()
+    env, q0 = _make_env_and_start(fk)
+    env._lower = env._robot_q.copy()
+    env._upper = env._robot_q.copy()
+    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
+    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    mpc = _make_mdm_gated(fk, env, q0, goal)
+
+    frames = np.tile(q0, (2, 1))
+    frames[0, 6] = q0[6] - 0.4
+    frames[1, 6] = q0[6] - 0.5
+    mpc.push_trajectory(frames, current_q=q0)
+
+    assert "nothing queued" in capsys.readouterr().out
+    assert not mpc._in_playback()
+
+
+def test_ik_gated_playback_pinned_robot_holds_then_skips(capsys) -> None:
+    """The guard holds every step and the stall-skip still finishes playback.
+
+    Pushed without ``current_q`` so the push screen is bypassed — this is the
+    runtime path an unreachable frame takes when it slips past the screen
+    (the screen walks the planned path; the live one can differ).
+    """
+    fk = SmplLeftArmFK()
+    env, q0 = _make_env_and_start(fk)
+    env._lower = env._robot_q.copy()
+    env._upper = env._robot_q.copy()
+    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
+    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    mpc = _make_mdm_gated(fk, env, q0, goal, playback_stall_steps=3)
+
+    frames = np.tile(q0, (2, 1))
+    frames[0, 6] = q0[6] - 0.4
+    frames[1, 6] = q0[6] - 0.5
+    mpc.push_trajectory(frames)
+    assert mpc._in_playback()
+
+    q = q0
+    for _ in range(20):
+        q = mpc.step(q)
+        np.testing.assert_allclose(q, q0, atol=1e-9)
+        if mpc.mdm_ready_to_terminate:
+            break
+    assert mpc.mdm_ready_to_terminate
+    out = capsys.readouterr().out
+    assert out.count("skipping") == 2
+
+
+def test_stall_state_resets_on_new_trajectory() -> None:
+    fk = SmplLeftArmFK()
+    env, q0 = _make_env_and_start(fk)
+    env._lower = env._robot_q.copy()
+    env._upper = env._robot_q.copy()
+    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
+    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    mpc = _make_mdm_gated(fk, env, q0, goal, playback_stall_steps=10)
+
+    frames = np.tile(q0, (1, 1))
+    frames[0, 6] = q0[6] - 0.4
+    mpc.push_trajectory(frames)
+    q = q0
+    for _ in range(3):
+        q = mpc.step(q)
+    assert mpc._stall_steps > 0
+
+    mpc.push_trajectory(frames)
+    assert mpc._stall_steps == 0
+    assert mpc._stall_best_dist == np.inf
+    assert mpc._playback_idx == 0
+
+
+def test_mdm_ik_gated_yaml_config_loads() -> None:
+    from uncertain_feedback.planners.mpc.config import load_mpc_config
+
+    cfg = load_mpc_config(
+        Path("src/uncertain_feedback/planners/mpc/configs")
+        / "arm_mpc_cartesian_mdm_ik_gated_real.yaml"
+    )
+    assert cfg.planner == "arm_mpc_cartesian_ik_gated"
+    assert cfg.max_grasp_ik_residual > 0.0
+    assert cfg.grasp_residual_frames >= 1
+    assert cfg.playback_stall_steps >= 1
+    assert cfg.env == "real"
+    assert cfg.env_params["control_mode"] == "compliant_joint"

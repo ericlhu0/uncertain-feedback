@@ -348,7 +348,7 @@ class LeftArmMPCMDMUQ(LeftArmMPCMDM):
             f" ({self.trajectory_fraction:.0%})."
         )
         self.set_mdm_goal(self._fk.arm_aa_to_q(chosen_mean[cutoff - 1], base_spine_aa))
-        self.push_trajectory(chosen_mean[:cutoff])
+        self.push_trajectory(chosen_mean[:cutoff], current_q=current_q)
         return chosen_mean
 
 

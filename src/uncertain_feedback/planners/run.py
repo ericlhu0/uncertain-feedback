@@ -45,6 +45,7 @@ from uncertain_feedback.planners.mpc import (
     ArmMPCCartesianNoMDMIKGated,
     ArmMPCCartesianNoMDMRobot,
     LeftArmMPCCartesian,
+    LeftArmMPCCartesianIKGated,
     LeftArmMPCCartesianRobot,
     LeftArmMPCMDM,
     LeftArmMPCMDMUQ,
@@ -82,12 +83,14 @@ _MDM_PLANNERS = {
     "arm_mpc_mdm",
     "arm_mpc_mdm_uq",
     "arm_mpc_cartesian",
+    "arm_mpc_cartesian_ik_gated",
     "arm_mpc_cartesian_robot",
 }
 # Planners carrying a persistent Cartesian goal, so a plan to the goal exists
 # before the run starts.
 _CARTESIAN_PLANNERS = (
     "arm_mpc_cartesian",
+    "arm_mpc_cartesian_ik_gated",
     "arm_mpc_cartesian_no_mdm",
     "arm_mpc_cartesian_no_mdm_ik_gated",
     "arm_mpc_cartesian_robot",
@@ -97,7 +100,10 @@ _CARTESIAN_PLANNERS = (
 _ROBOT_ACTION_PLANNERS = ("arm_mpc_cartesian_robot", "arm_mpc_cartesian_no_mdm_robot")
 # Planners that need the env's robot interface (grasp/joints/FK) at solve time,
 # whether they sample robot actions or gate human actions on robot feasibility.
-_ROBOT_ENV_PLANNERS = _ROBOT_ACTION_PLANNERS + ("arm_mpc_cartesian_no_mdm_ik_gated",)
+_ROBOT_ENV_PLANNERS = _ROBOT_ACTION_PLANNERS + (
+    "arm_mpc_cartesian_no_mdm_ik_gated",
+    "arm_mpc_cartesian_ik_gated",
+)
 
 
 @dataclass
@@ -614,7 +620,11 @@ def build_run(
             grasp_residual_frames=cfg.grasp_residual_frames,
             **common,
         )
-    elif cfg.planner in ("arm_mpc_cartesian", "arm_mpc_cartesian_robot"):
+    elif cfg.planner in (
+        "arm_mpc_cartesian",
+        "arm_mpc_cartesian_ik_gated",
+        "arm_mpc_cartesian_robot",
+    ):
         if not cfg.cartesian.goals:
             raise ValueError(
                 f"cartesian.goals is required when planner is {cfg.planner}."
@@ -632,6 +642,13 @@ def build_run(
                 "robot_infeasibility_weight": cfg.robot_infeasibility_weight,
                 "max_grasp_residual": cfg.max_grasp_residual,
                 "grasp_residual_frames": cfg.grasp_residual_frames,
+            }
+        elif cfg.planner == "arm_mpc_cartesian_ik_gated":
+            cartesian_cls = LeftArmMPCCartesianIKGated
+            cartesian_kwargs = {
+                "max_grasp_ik_residual": cfg.max_grasp_ik_residual,
+                "grasp_residual_frames": cfg.grasp_residual_frames,
+                "playback_stall_steps": cfg.playback_stall_steps,
             }
         mpc = cartesian_cls(
             cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
@@ -986,6 +1003,7 @@ _PreviewRollout = Callable[
 # spoken — only the Cartesian-goal phase can be previewed at all.
 _PREVIEW_ROLLOUTS: dict[str, _PreviewRollout] = {
     "arm_mpc_cartesian": _rollout_human_reference_trajectory,
+    "arm_mpc_cartesian_ik_gated": _rollout_gated_reference_trajectory,
     "arm_mpc_cartesian_no_mdm": _rollout_human_reference_trajectory,
     "arm_mpc_cartesian_no_mdm_ik_gated": _rollout_gated_reference_trajectory,
     "arm_mpc_cartesian_robot": _rollout_robot_reference_trajectory,

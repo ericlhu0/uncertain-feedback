@@ -254,6 +254,7 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
     def push_trajectory(
         self,
         frames: np.ndarray,
+        current_q: np.ndarray | None = None,
     ) -> None:
         """Validate an MDM-generated trajectory and queue it for direct playback.
 
@@ -267,7 +268,11 @@ class LeftArmMPCMDM(SmplLeftArmMPC):
         Args:
             frames: ``(n_frames, 7)`` canonical arm trajectory or
                     ``(n_frames, 3, 3)`` decoded axis-angle trajectory.
+            current_q: Live measured configuration at push time; unused here,
+                    consumed by subclasses that screen the trajectory against
+                    the robot before queueing it.
         """
+        _ = current_q
         frames = np.asarray(frames, dtype=np.float64)
 
         q_frames = (

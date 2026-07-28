@@ -860,6 +860,60 @@ more than under `position_joint`; `_drive` re-solves from the measured state
 each step, so the loop self-corrects, but the per-step grasp-error report reads
 slightly optimistic.
 
+### Full method with the IK screens (`arm_mpc_cartesian_ik_gated`)
+
+`arm_mpc_cartesian_ik_gated` adds MDM/UQ/LLM corrections to the gated planner.
+The goal phase is the gated sampling above, unchanged. MDM playback stays
+direct — rate-limited frames, no sampling — but MDM knows nothing about the
+robot, so an unreachable frame would otherwise land in execution's IK
+fallbacks: the branch enumeration (an exact solution up to ~1.5 rad away that
+the arm then chases for tens of steps with the grasp wrong throughout) or the
+position-priority miss (attitude twisted against the forearm). Playback is
+therefore screened with the same continuation IK at three points, all against
+the live measured grasp and robot state:
+
+- **Push**: when a correction is queued, its frames are walked sequentially
+  through continuation IK from the current robot joints; unreachable frames
+  are dropped with a `[push] dropped n/m ...` report, and playback follows the
+  reachable ones. (The walk advances only through kept frames — the ones
+  playback will actually visit.)
+- **Step**: each rate-limited playback step is checked before it is commanded
+  (~0.3 ms) and held when continuation cannot place it, so `_drive`'s own solve
+  is guaranteed to succeed by continuation — neither fallback ever fires
+  during playback.
+- **Stall**: the cursor normally advances only once the measured arm reaches
+  the frame, so a frame the arm cannot reach — or settle on, under compliant
+  control — would hold the run forever. Closest approach to the frame is
+  tracked instead (monotone, so mocap jitter cannot reset the counter), and
+  after `playback_stall_steps` steps without progress the frame is skipped
+  with a `[playback] frame i stalled ...` log. A person actively resisting
+  reads as a stall too — the arm yields and moves on rather than pressing.
+
+The executed motion is the trajectory's *reachable shadow*: exact tracking
+wherever the correction is feasible, decelerate-hold-skip across the stretches
+it is not. `arm_mpc_cartesian_mdm_ik_gated_real.yaml` is
+`arm_mpc_cartesian_mdm_llm_real.yaml` with this planner, the gate keys, and
+`control_mode: compliant_joint` (any residual model mismatch becomes a bounded
+gentle pull, not a wrench — verify the server-side gains in
+`emprise-gen3-controller`'s `config_tuned.yaml` with the mannequin held before
+a live run):
+
+```
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_ik_gated_real.yaml \
+    --interactive --env-video real_gated_full_method.mp4
+```
+
+Stage it like every real run: mocap monitor, then the whole loop with
+`real_mirror_host: null` (type a correction and check the `[push]` and
+`[playback]` reports with nothing commanding the arm), then live — a
+trivially-reachable correction first, then a deliberately over-extended one to
+watch drop → hold → skip. Two rig-tuning notes: under `compliant_joint` the
+measured arm settles short of commands, so if steady-state deflection under
+load exceeds `max_playback_delta` (0.002) every frame finishes by stall-skip —
+loosen it if the skip logs say so; and a fully-unreachable correction costs at
+worst `mdm_frames × playback_stall_steps` steps of the session's `steps`
+budget.
 
 ### Robot-action planners (`*_robot`)
 
@@ -920,6 +974,10 @@ human-space plan through IK and can visibly lag it.
 clustering, one LLM cost per round — runs on the real rig by config alone:
 `arm_mpc_cartesian_mdm_llm_real.yaml` is `arm_mpc_cartesian_no_mdm_real.yaml`'s
 env with `planner: arm_mpc_cartesian` and the correction/UQ/LLM-cost keys.
+Prefer `arm_mpc_cartesian_mdm_ik_gated_real.yaml` (previous section) when the
+robot is in the loop — same method, but every robot-facing step is IK-screened
+so unreachable MDM frames are dropped, held, or skipped instead of handed to
+execution's IK fallbacks.
 
 What a config cannot supply is *when* a real person wants a correction and *what
 they say*: a scripted run injects one preset `--text` at `text_time`. Pass

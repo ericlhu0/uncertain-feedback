@@ -6,10 +6,10 @@ robot cannot actually track, and the executed motion then bends away from the
 plan while wrestling the grasp. Here the sample space stays the human arm, but
 every rollout's *leading* frames (the ones about to be executed) are checked
 against the robot: each frame's forearm pose implies a gripper pose through
-the rigid measured grasp, the environment's execution IK solves it from the
-rollout's current robot joints against the same padded joint limits, and
-rollouts whose remaining pose error exceeds ``max_grasp_ik_residual`` are
-discarded outright. Every sample set includes a zero-motion hold, so the planner
+the rigid measured grasp, the environment continues its current IK branch to
+that pose from the rollout's current robot joints against the same padded
+joint limits, and rollouts whose remaining pose error exceeds
+``max_grasp_ik_residual`` are discarded outright. Every sample set includes a zero-motion hold, so the planner
 never has to execute an infeasible fallback. Execution is the normal
 human-action path (``env.execute``).
 """
@@ -94,10 +94,17 @@ class ArmMPCCartesianNoMDMIKGated(ArmMPCCartesianNoMDM):
         """Worst leading-frame IK pose error per rollout, metres + radians.
 
         Each frame's gripper target follows from the forearm frame through the
-        rigid measured grasp; the environment's execution IK tracks the frames
-        sequentially from its current joints against its padded joint box, so
-        the error is what the selected IK branch cannot remove — a limit
-        binding, a singularity, or a pose outside the workspace.
+        rigid measured grasp; the environment tracks the frames sequentially
+        from its current joints against its padded joint box, so the error is
+        what continuation cannot remove — a limit binding, a singularity, or a
+        pose outside the workspace.
+
+        Continuation only (:meth:`ExecutionEnv.track_robot_ik_batch`), never
+        execution's enumeration fallback. A pose reachable solely by changing
+        branch is exact but tens of steps away at the execution rate cap, so
+        gating it in would pass a rollout the arm cannot follow — and paying
+        enumeration's serial cost to decide that dominates the solve as soon as
+        the samples stop being reachable.
         """
         # Deferred: envs.grasp/envs.sim_mannequin import this package back —
         # a module-level import here closes that cycle.
@@ -131,7 +138,7 @@ class ArmMPCCartesianNoMDMIKGated(ArmMPCCartesianNoMDM):
                 target_rot[i] = grip_rot.as_matrix()
             active = np.isfinite(residuals)
             target_quat = Rotation.from_matrix(target_rot).as_quat()
-            solutions, feasible = self._env.solve_robot_ik_exact_batch(
+            solutions, feasible = self._env.track_robot_ik_batch(
                 target_pos[active], target_quat[active], robot_q[active]
             )
             robot_q[active] = solutions

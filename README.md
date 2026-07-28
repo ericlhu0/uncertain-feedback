@@ -711,15 +711,36 @@ below); the `--env-video` flag works with any env).
 
 `arm_mpc_cartesian_no_mdm_ik_gated` keeps sampling human-arm deltas, but gates
 each rollout's first `grasp_residual_frames` frames with the robot environment's
-own IK. On `env: real`, this is the same analytical Gen3 branch-continuation and
-enumeration solver used for execution, seeded sequentially through each
-rollout and filtered against the controller's padded joint-limit box. Nearby
-branches are Newton-continued as one vectorized batch; candidates that do not
-converge exactly fall back to analytical enumeration individually. A rollout
-is discarded when its remaining gripper pose error exceeds
-`max_grasp_ik_residual` (metres + radians). Each sample set includes a
+own IK. On `env: real`, this is the same analytical Gen3 branch continuation
+used for execution — one vectorized Newton batch over every sample, seeded
+sequentially through each rollout and filtered against the controller's padded
+joint-limit box. A rollout is discarded when its remaining gripper pose error
+exceeds `max_grasp_ik_residual` (metres + radians). Each sample set includes a
 zero-motion hold, so an all-infeasible draw holds instead of selecting the
 least-infeasible motion.
+
+**The gate continues; it does not enumerate.** Execution's
+`solve_robot_ik_exact_batch` falls back to enumerating every analytical branch
+for candidates continuation cannot place, because execution has to command
+something and the nearest reachable branch is the best available. The gate uses
+`track_robot_ik_batch` instead, which stops at continuation, for two reasons. A
+branch change is an *exact* solution, so the residual check cannot fault it, yet
+it sits far enough away that the arm spends tens of steps at
+`robot_max_joint_delta` reaching it with the grasp wrong the whole way — a
+measured case needed 0.78 rad, or 78 steps at the default cap. And enumeration
+is serial: one call costs about as much as the entire vectorized continuation
+over all 1000 samples, and it is paid on exactly the candidates about to be
+discarded. Gating on the enumerating solve made the cost scale with
+*infeasibility*, so a plan pressed against a limit went from 16 ms to tens of
+seconds per frame and stayed there, since the resulting hold keeps the arm in
+the region that caused it:
+
+| samples continuation rejects | gate cost (continuation) | gate cost (with enumeration) |
+| --- | --- | --- |
+| 0 / 1000 | 16 ms | 16 ms |
+| 62 / 1000 | 21 ms | 1.6 s |
+| 814 / 1000 | 32 ms | 26 s |
+| 983 / 1000 | 78 ms | 41 s |
 
 The gate does not apply `robot_max_joint_delta`; that remains an execution-rate
 cap rather than an IK joint limit. Consequently, a joint-limit-feasible plan can

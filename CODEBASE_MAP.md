@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-07-28
 **Branch:** real-env
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -112,7 +112,7 @@ uncertain-feedback/
 │   │       └── motion-diffusion-model/   # Git submodule (GuyTevet/MDM)
 │   ├── envs/
 │   │   ├── __init__.py               # ENV_BUILDERS registry + make_env
-│   │   ├── base.py                   # ExecutionEnv ABC (execute/hold; show_goal displays the goal config for envs that can draw it; preview(plan) rolls the plan out before any of it executes — plan(on_step) streams each step through the env's on_step callback as its solve finishes so the env draws the rollout live while it is planned — and returns False to abort the run, the plan passed as a lazy callable so only envs that show it pay for the rollout; set_pose_context attaches the run's FK; initial_q reports the arm's real start config and pose_context the torso anchor to plan against — defaults: the config's, both overridden by envs that measure the person; abstract visualize/save_video; robot-action interface for the robot-action planners — robot_fk/current_robot_q/robot_joint_limits/current_grasp/execute_robot, NotImplementedError by default, implemented by sim_mannequin and real: execute_robot takes a (7,) robot joint target directly (no grasp FK, no IK; delta capped by uniform scaling so a saturating joint slows the motion instead of bending its direction) and returns the achieved *human* q)
+│   │   ├── base.py                   # ExecutionEnv ABC (execute/hold; show_goal displays the goal config for envs that can draw it; preview(plan) rolls the plan out before any of it executes — plan(on_step) streams each step through the env's on_step callback as its solve finishes so the env draws the rollout live while it is planned — and returns False to abort the run, the plan passed as a lazy callable so only envs that show it pay for the rollout; set_pose_context attaches the run's FK; initial_q reports the arm's real start config and pose_context the torso anchor to plan against — defaults: the config's, both overridden by envs that measure the person; abstract visualize/save_video; robot-action interface for the robot-action planners — robot_fk/current_robot_q/robot_joint_limits/current_grasp/execute_robot, NotImplementedError by default, plus two IK entry points that differ on purpose: solve_robot_ik_exact_batch (execution: continuation, then enumerate every branch and take the nearest reachable) and track_robot_ik_batch (feasibility gating: continuation only — an off-branch solution is exact but unreachable within a step, and enumerating to find it is serial and dominates the solve), implemented by sim_mannequin and real: execute_robot takes a (7,) robot joint target directly (no grasp FK, no IK; delta capped by uniform scaling so a saturating joint slows the motion instead of bending its direction) and returns the achieved *human* q)
 │   │   ├── kinematic.py              # KinematicEnv (pass-through; matplotlib visualize/save_video)
 │   │   ├── grasp.py                  # grasp_pose_fk: human q → *nominal* gripper grasp pose on the forearm (sim envs); forearm_frame_fk + MeasuredGrasp: gripper-on-forearm transform measured from an ee pose + forearm pose, rigid over one step and re-measured each step by the real env
 │   │   ├── human_mesh.py             # HumanMeshBody: posed SMPL body mesh as a pybullet visual body (remove+recreate per pose — no vertex-update API); shared by sim_robot_visual (offscreen) and real (live GUI); `arm_only` draws just the left arm, for the translucent green goal ghost drawn over the person. `ArmSkeletonBody`: the planner's own 5-joint arm chain as bones + joint balls (real geometry, not debug lines, so it survives into `getCameraImage` screenshots and videos; bones built once at their rigid lengths, then only repositioned, so it can refresh every step while the mesh cannot). `BODY_XRAY_COLOR` is the translucent person the real env draws when the chain is inside them
@@ -235,12 +235,17 @@ SmplLeftArmMPC (arm_mpc.py)
 
         ├── ArmMPCCartesianNoMDMIKGated (arm_mpc_ik_gated.py)
         │     Samples human-arm deltas, but checks each rollout's leading
-        │     gripper poses with the environment's execution IK. RealEnv uses
-        │     the same analytical Gen3 branch continuation/enumeration and
-        │     padded controller joint box as execution, seeded sequentially
-        │     through the rollout. Continuation across all MPC samples is a
-        │     vectorized Gen3 FK/Jacobian solve; failures fall back individually
-        │     to analytical enumeration. Residuals above max_grasp_ik_residual
+        │     gripper poses with the environment's IK. RealEnv uses the same
+        │     analytical Gen3 branch continuation and padded controller joint
+        │     box as execution, seeded sequentially through the rollout, as one
+        │     vectorized Gen3 FK/Jacobian solve over all MPC samples. Gating
+        │     goes through track_robot_ik_batch (continuation only), NOT
+        │     execution's solve_robot_ik_exact_batch: its enumeration fallback
+        │     would pass off-branch solutions the arm needs tens of steps to
+        │     reach, and costs ~1 vectorized-batch-equivalent per rejected
+        │     candidate, making the solve scale with infeasibility (16 ms ->
+        │     tens of seconds per frame near a limit).
+        │     Residuals above max_grasp_ik_residual
         │     are gated; an explicit zero-motion sample makes hold the safe
         │     fallback. The execution-rate cap is deliberately not part of IK.
         │

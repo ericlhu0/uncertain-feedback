@@ -65,6 +65,7 @@ class _KinematicGraspEnv(ExecutionEnv):
         self._chain, self._lower, self._upper = _panda_chain()
         self._robot_q = _PANDA_HOME.copy()
         self.batch_calls = 0
+        self.track_calls = 0
         forearm_pos, forearm_rot = forearm_frame_fk(fk, q0, None, None)
         ee_pos, ee_rot = self._chain.ee_pose(self._robot_q)
         self._grasp = MeasuredGrasp.measure(
@@ -108,6 +109,15 @@ class _KinematicGraspEnv(ExecutionEnv):
     ) -> tuple[np.ndarray, np.ndarray]:
         self.batch_calls += 1
         return super().solve_robot_ik_exact_batch(target_pos, target_quat, q_seed)
+
+    def track_robot_ik_batch(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        self.track_calls += 1
+        return super().track_robot_ik_batch(target_pos, target_quat, q_seed)
 
     def current_grasp(self, q: np.ndarray) -> MeasuredGrasp:
         return self._grasp
@@ -188,7 +198,10 @@ def test_ik_gated_solve_keeps_first_steps_reachable() -> None:
     best_traj = mpc._rollout(np.asarray(q0, dtype=np.float64), plan[np.newaxis])
     residual = float(mpc._grasp_ik_residuals(best_traj)[0])
     assert residual <= mpc._max_grasp_ik_residual + 1e-9
-    assert env.batch_calls == 2 * mpc._grasp_ik_frames
+    # The gate goes through the continuation path, never execution's enumerating
+    # solve; this double has no such split, so track forwards to the batch.
+    assert env.track_calls == 2 * mpc._grasp_ik_frames
+    assert env.batch_calls == env.track_calls
 
 
 def test_ik_gated_pinned_robot_rejects_all_motion() -> None:
@@ -221,6 +234,50 @@ def test_ik_gated_pinned_robot_rejects_all_motion() -> None:
     assert np.all(np.isinf(costs[1:]))
     q = mpc.step(q0)
     np.testing.assert_allclose(q, q0, atol=1e-12)
+
+
+def test_continuation_refuses_the_branch_change_enumeration_would_take() -> None:
+    """The gate's solver must not answer with a pose only a branch change reaches.
+
+    Such a solution is exact, so the residual check cannot see anything wrong
+    with it, but it sits far enough away that the arm spends tens of steps at
+    ``robot_max_joint_delta`` getting there with the grasp wrong throughout.
+    Execution's enumerating solve offers exactly that; continuation refuses it.
+    """
+    from ssik.prebuilt import gen3_ik
+
+    from uncertain_feedback.envs.real import (
+        _IK_TRACK_MAX_DIST,
+        _gen3_seeded_track_batch,
+    )
+
+    seed = np.array([0.0, 0.26, 0.0, -2.27, 0.0, 0.96, 1.57])
+    far = seed.copy()
+    far[0] += 1.5
+    target = gen3_ik.fk(far)
+    lower, upper = np.full(7, -3.05), np.full(7, 3.05)
+
+    _solutions, feasible = _gen3_seeded_track_batch(
+        target[np.newaxis],
+        seed[np.newaxis],
+        lower,
+        upper,
+        np.zeros(7, dtype=bool),
+    )
+    assert not feasible[0]
+
+    # The pose is reachable — enumeration finds it — but only off-branch, which
+    # is why gating on the enumerating solve passed rollouts the arm could not
+    # follow.
+    in_box = [
+        np.asarray(s.q)
+        for s in gen3_ik.solve(
+            target, q_seed=seed, max_solutions=None, respect_limits=False
+        )
+        if np.all(np.asarray(s.q) >= lower) and np.all(np.asarray(s.q) <= upper)
+    ]
+    assert in_box
+    assert min(np.max(np.abs(q - seed)) for q in in_box) > _IK_TRACK_MAX_DIST
 
 
 def test_ik_gated_yaml_config_loads() -> None:

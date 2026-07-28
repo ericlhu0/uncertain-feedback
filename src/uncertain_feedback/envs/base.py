@@ -166,6 +166,31 @@ class ExecutionEnv(ABC):
                 feasible[i] = True
         return solutions, feasible
 
+    def track_robot_ik_batch(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Continuation-only batch IK: solutions on each seed's own branch.
+
+        What a *feasibility gate* wants, where
+        :meth:`solve_robot_ik_exact_batch` is what *execution* wants. Execution
+        has to command something, so when continuation cannot place a target it
+        falls back to enumerating every analytical branch and taking the
+        nearest reachable one. A gate is only asking a yes/no question, and that
+        fallback answers it wrongly and expensively: wrongly, because a branch
+        change is an exact solution the robot cannot actually get to within a
+        step, so the gate would pass a rollout the arm then spends tens of
+        steps chasing; expensively, because enumeration is serial and one call
+        costs about as much as the whole vectorized continuation over every
+        sample, paid on exactly the candidates the gate is about to discard.
+
+        Envs whose solver has no continuation/enumeration split fall back to
+        the exact solve, which for them is the same answer.
+        """
+        return self.solve_robot_ik_exact_batch(target_pos, target_quat, q_seed)
+
     def current_grasp(self, q: np.ndarray) -> MeasuredGrasp:
         """This step's gripper-on-forearm transform, in the env's world frame.
 

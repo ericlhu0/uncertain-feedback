@@ -437,6 +437,29 @@ class RealEnv(ExecutionEnv):
         solutions[~feasible] = q_seed[~feasible]
         return solutions, feasible
 
+    def track_robot_ik_batch(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The vectorized continuation alone — no enumeration fallback."""
+        targets = np.stack(
+            [
+                self._ee_target_in_base(position, quaternion)
+                for position, quaternion in zip(target_pos, target_quat)
+            ]
+        )
+        solutions, feasible = _gen3_seeded_track_batch(
+            targets,
+            q_seed,
+            self._joint_lower,
+            self._joint_upper,
+            self._continuous_joints,
+        )
+        solutions[~feasible] = q_seed[~feasible]
+        return solutions, feasible
+
     def current_grasp(self, q: np.ndarray) -> MeasuredGrasp:
         """This step's measured grasp; establishes it on the first call."""
         self._ensure_backend()

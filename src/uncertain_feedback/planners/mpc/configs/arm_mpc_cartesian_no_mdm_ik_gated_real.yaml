@@ -1,7 +1,7 @@
 env: real
 env_params:
   robot: kinova_gen3
-  robot_max_joint_delta: 0.01
+  robot_max_joint_delta: 0.2
   # Keep IK solutions inside the real controller's soft joint limits
   # (joint_limit_padding_deg: 15.0 = 0.262 rad in config_tuned.yaml) with a
   # small margin — commands in the padding band are rejected by its checks.
@@ -10,10 +10,15 @@ env_params:
   # null to close the loop on the live person without commanding the arm — do
   # that dry run first.
   real_mirror_host: "127.0.0.1"
+  # real_mirror_host: "192.168.2.68"
   # Prompt the operator once before the arm starts tracking. Nothing is moved at
   # startup — the grasp must already be taken. Set false only for headless/mock
   # runs.
   real_mirror_confirm_start: true
+  # Track targets with joint-space impedance instead of stiff position control —
+  # the arm yields to the person. Gains live server-side in config_tuned.yaml.
+  # Set to position_joint (the default) for stiff tracking.
+  control_mode: compliant_joint
   # OptiTrack PC running Motive. Its streaming Local Interface must be this
   # LAN address, not loopback, or no packets leave that machine.
   mocap_host: "192.168.2.243"
@@ -57,7 +62,7 @@ grasp_residual_frames: 3
 steps: 1000
 horizon: 10
 n_mpc_samples: 1000
-max_angle_delta: 0.001
+max_angle_delta: 0.01
 goal_threshold: 0.15
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 
@@ -73,5 +78,5 @@ arm:
 cartesian:
   # Demo-runner "hits limit 1" goal.
   goals:
-    - [0.35, 0.3, 0.18]
+    - [-0.10, 0.05, 0.15]
   threshold: 0.05

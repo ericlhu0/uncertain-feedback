@@ -419,8 +419,12 @@ optional YAML key `env`:
   `live_view` / `live_view_fps` (live mesh window — see below),
   plus `robot`, `robot_max_joint_delta`, `robot_joint_limit_padding`, and
   `real_mirror_host` as above; `real_mirror_confirm_start` here only prompts
-  once before the arm starts tracking (there is no move to confirm). See
-  `arm_mpc_cartesian_no_mdm_real.yaml`.
+  once before the arm starts tracking (there is no move to confirm);
+  `control_mode` (default `position_joint` — the emprise controller mode the
+  arm tracks targets in. Set `compliant_joint` for joint-space impedance: the
+  arm yields to the person instead of tracking stiffly, taking the same
+  sparse joint targets. Stiffness gains are the server's, from its
+  `config_tuned.yaml`). See `arm_mpc_cartesian_no_mdm_real.yaml`.
 
   **The grasp is measured, not assumed — and re-measured every step.** Put the
   gripper on the person's forearm and close it *before* starting the run — jog the
@@ -768,6 +772,14 @@ trajectory the run would never take.
 uv run python src/uncertain_feedback/planners/run.py \
     --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_ik_gated_real.yaml
 ```
+
+This config sets `control_mode: compliant_joint`, so the arm tracks the plan
+with joint-space impedance — it yields when the person resists rather than
+wrestling the grasp. Expect the measured joints to lag the commanded targets
+more than under `position_joint`; `_drive` re-solves from the measured state
+each step, so the loop self-corrects, but the per-step grasp-error report reads
+slightly optimistic.
+
 
 ### Robot-action planners (`*_robot`)
 

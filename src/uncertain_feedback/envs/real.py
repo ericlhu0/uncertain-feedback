@@ -185,6 +185,7 @@ class RealEnv(ExecutionEnv):
         robot_joint_limit_padding: float = 0.27,
         real_mirror_host: str | None = None,
         real_mirror_confirm_start: bool = True,
+        control_mode: str = "position_joint",
         mocap_hold_timeout: float = 0.5,
         live_view: bool = False,
         live_view_fps: float = 5.0,
@@ -207,7 +208,9 @@ class RealEnv(ExecutionEnv):
             )
 
             self._mirror = RealArmMirror.connect(
-                real_mirror_host, confirm_start=real_mirror_confirm_start
+                real_mirror_host,
+                confirm_start=real_mirror_confirm_start,
+                control_mode=control_mode,
             )
         self._body_ids = {key: int(v) for key, v in mocap_rigid_bodies.items()}
         self._receiver = NatNetReceiver.connect(mocap_host)

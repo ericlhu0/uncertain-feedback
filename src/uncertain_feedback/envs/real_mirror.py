@@ -4,8 +4,9 @@ The sim (:class:`~uncertain_feedback.envs.sim_mannequin.SimMannequinEnv` with
 ``robot="kinova_gen3"``) stays the source of truth — physics, mannequin
 read-back, and planning all happen in sim. Each MPC step the achieved sim
 joint configuration is forwarded to the real arm over ZMQ, which shadows it
-in 1 kHz joint position mode: the server-side OTG interpolates between the
-sparse targets and holds the last one, so no streaming rate is required.
+in a 1 kHz joint tracking mode (position by default, joint impedance via
+``control_mode="compliant_joint"``): the server-side OTG interpolates between
+the sparse targets and holds the last one, so no streaming rate is required.
 
 Requires a running ``emprise-gen3-controller`` ZMQ server (see
 ``scripts/launch_server.py`` in that repo) driving the arm.
@@ -72,9 +73,15 @@ _GRIPPER_SETTLE_S = 2.0
 class RealArmMirror:
     """Streams joint configurations from the sim robot to the real arm."""
 
-    def __init__(self, ctrl: ArmController, confirm_start: bool = True) -> None:
+    def __init__(
+        self,
+        ctrl: ArmController,
+        confirm_start: bool = True,
+        control_mode: str = "position_joint",
+    ) -> None:
         self._ctrl = ctrl
         self._confirm_start = confirm_start
+        self._track_mode = ControlMode[control_mode.upper()]
         atexit.register(self.stop)
         # Halt the arm on Ctrl+C before the exception unwinds — atexit alone
         # is not enough if the application catches KeyboardInterrupt.
@@ -103,14 +110,16 @@ class RealArmMirror:
         state_port: int = 5555,
         cmd_port: int = 5556,
         confirm_start: bool = True,
+        control_mode: str = "position_joint",
     ) -> "RealArmMirror":
         return cls(
             ArmController.connect(host, state_port=state_port, cmd_port=cmd_port),
             confirm_start=confirm_start,
+            control_mode=control_mode,
         )
 
     def start(self, q: np.ndarray) -> None:
-        """Zero, move to the grasp configuration, open, enter position mode.
+        """Zero, move to the grasp configuration, open, enter tracking mode.
 
         The gripper closes first so the arm approaches compactly; zeroing
         makes every start move begin from the same upright reference pose.
@@ -119,7 +128,8 @@ class RealArmMirror:
         operator must confirm each at the terminal, and confirm opening the
         gripper once the grasp configuration is reached (gripper commands
         need high-level mode, so the open happens between mode switches).
-        The arm is left in position mode, ready for :meth:`send`.
+        The arm is left in the configured tracking mode, ready for
+        :meth:`send`.
         """
         self._ctrl.execute(CloseGripperCommand())
         time.sleep(_GRIPPER_SETTLE_S)
@@ -130,19 +140,19 @@ class RealArmMirror:
             input("[mirror] At the grasp pose. Press Enter to open the gripper: ")
         self._ctrl.execute(OpenGripperCommand())
         time.sleep(_GRIPPER_SETTLE_S)
-        self._ctrl.switch_mode(ControlMode.POSITION_JOINT)
+        self._ctrl.switch_mode(self._track_mode)
 
     def start_from_grasp(self) -> None:
-        """Enter position mode without moving, for an already-taken grasp.
+        """Enter tracking mode without moving, for an already-taken grasp.
 
         What :class:`~uncertain_feedback.envs.real.RealEnv` uses: the gripper is
         already closed on the person's forearm, so there is nothing to approach
         and the gripper must not be touched. Unlike :meth:`start` this only hands
-        control to position mode, ready for :meth:`send`.
+        control to the tracking mode, ready for :meth:`send`.
         """
         if self._confirm_start:
             input("\n[mirror] Grasp already taken. Press Enter to start tracking: ")
-        self._ctrl.switch_mode(ControlMode.POSITION_JOINT)
+        self._ctrl.switch_mode(self._track_mode)
 
     def zero(self) -> None:
         """Move every joint to zero (the upright reference pose)."""
@@ -180,6 +190,8 @@ class RealArmMirror:
             )
             if response.strip().lower() != "y":
                 raise RuntimeError("Repositioning move aborted by operator")
+        # Repositioning ramps always run stiff: the reach-target check below
+        # assumes accurate tracking, which a compliant mode does not provide.
         self._ctrl.switch_mode(ControlMode.POSITION_JOINT)
         n_steps = max(
             1, int(np.ceil(distance / (_MOVE_SPEED_RAD_S * _MOVE_CMD_PERIOD_S)))

@@ -301,6 +301,8 @@ def test_robot_plan_preview_env_rollout_is_consistent() -> None:
         q_ref=q0,
         spine3_pos=None,
         spine3_aa=None,
+        ik_env=env,
+        max_joint_delta=0.02,
     )
     wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
     goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.05, -0.03])

@@ -236,6 +236,85 @@ def test_ik_gated_pinned_robot_rejects_all_motion() -> None:
     np.testing.assert_allclose(q, q0, atol=1e-12)
 
 
+def _preview_env_for(fk: SmplLeftArmFK, env: _KinematicGraspEnv, q0: np.ndarray):
+    from uncertain_feedback.envs.robot_preview import RobotPlanPreviewEnv
+
+    return RobotPlanPreviewEnv(
+        fk=fk,
+        chain=env.robot_fk(),
+        grasp=env.current_grasp(q0),
+        robot_q=env.current_robot_q(),
+        joint_limits=env.robot_joint_limits(),
+        q_ref=q0,
+        spine3_pos=None,
+        spine3_aa=None,
+        ik_env=env,
+        max_joint_delta=0.05,
+    )
+
+
+def test_preview_stand_in_gates_a_human_action_rollout() -> None:
+    """The offline preview stand-in enforces the gate the live run will.
+
+    It used to refuse ``execute`` outright, so an IK-gated run was previewed
+    with the ungated planner — the drawn plan walked into poses the run itself
+    discards, and the grasp diverged at the end of the preview. With the robot
+    pinned, nothing but the hold is reachable: the gated rollout must stand
+    still where the ungated one drives the gripper off the forearm.
+    """
+    from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
+        ArmMPCCartesianNoMDM,
+    )
+
+    fk = SmplLeftArmFK()
+    env, q0 = _make_env_and_start(fk)
+    env._lower = env._robot_q.copy()
+    env._upper = env._robot_q.copy()
+    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
+    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    kwargs = dict(
+        cartesian_goals=[goal],
+        initial_q=q0,
+        horizon=5,
+        n_mpc_samples=64,
+        max_angle_delta=0.02,
+        fk=fk,
+        seed=0,
+    )
+
+    gated_env = _preview_env_for(fk, env, q0)
+    gated = ArmMPCCartesianNoMDMIKGated(**kwargs, env=gated_env)
+    q = q0
+    for _ in range(10):
+        q = gated.step(q)
+    np.testing.assert_allclose(q, q0, atol=1e-12)
+    assert len(gated_env.robot_trajectory) == 11
+
+    ungated_env = _preview_env_for(fk, env, q0)
+    ungated = ArmMPCCartesianNoMDM(**kwargs, env=ungated_env)
+    q_ungated = q0
+    for _ in range(10):
+        q_ungated = ungated.step(q_ungated)
+
+    def grasp_gap(preview_env, q_frame: np.ndarray) -> float:
+        target_pos, _ = preview_env._gripper_pose(q_frame)
+        ee_pos, _ = preview_env.robot_fk().ee_pose(preview_env.current_robot_q())
+        return float(np.linalg.norm(target_pos - ee_pos))
+
+    assert grasp_gap(gated_env, q) < 1e-9 < 0.01 < grasp_gap(ungated_env, q_ungated)
+
+
+def test_preview_rollout_table_covers_every_cartesian_planner() -> None:
+    """Every previewable planner picks its rollout; none falls through ungated."""
+    from uncertain_feedback.planners import run as run_module
+
+    assert set(run_module._PREVIEW_ROLLOUTS) == set(run_module._CARTESIAN_PLANNERS)
+    assert (
+        run_module._PREVIEW_ROLLOUTS["arm_mpc_cartesian_no_mdm_ik_gated"]
+        is run_module._rollout_gated_reference_trajectory
+    )
+
+
 def test_continuation_refuses_the_branch_change_enumeration_would_take() -> None:
     """The gate's solver must not answer with a pose only a branch change reaches.
 

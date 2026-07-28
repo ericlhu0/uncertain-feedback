@@ -1,21 +1,37 @@
-"""Kinematic stand-in env for previewing a robot-action plan offline.
+"""Kinematic stand-in env for previewing a plan offline.
 
-Snapshots the real env's robot chain, measured grasp, joint state, and limits,
-then lets a robot-action planner roll out against them without commanding
-anything: ``execute_robot`` just stores the joint target and reports the human
-configuration the grasp projection implies — the same forward model the
-planner samples with, so the previewed robot and arm stay consistent by
-construction. The executed joint targets are kept in
-:attr:`robot_trajectory` so the preview can animate the actual planned robot
-motion instead of chasing the arm through IK.
+Snapshots the real env's robot chain, measured grasp, joint state, limits, and
+step cap, then lets a planner roll out against them without commanding
+anything. Both action spaces are served, because a preview is only worth
+watching if it runs the planner that is about to run live:
+
+* ``execute_robot`` (robot-action planners) stores the joint target and reports
+  the human configuration the grasp projection implies — the same forward model
+  the planner samples with.
+* ``execute`` (human-action planners) drives the robot the way
+  :meth:`RealEnv._drive` does: the grasp on the commanded arm gives a gripper
+  pose, the source env's own IK solves it from the previewed robot's previous
+  configuration, and the step is rate-capped and clipped to the joint box. The
+  arm itself tracks the command exactly, which is the preview's standing
+  assumption.
+
+Either way the previewed robot and arm stay consistent by construction instead
+of the robot chasing a human-space plan through a *second* IK, and the executed
+joint targets are kept in :attr:`robot_trajectory` so the preview can animate
+the actual planned robot motion.
+
+Exact IK is delegated to the source env rather than reimplemented: a planner
+gated on robot reachability is only meaningful against the solver and padded
+joint box that will run the plan.
 """
 
 from __future__ import annotations
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.envs.base import ExecutionEnv
-from uncertain_feedback.envs.grasp import MeasuredGrasp
+from uncertain_feedback.envs.grasp import MeasuredGrasp, forearm_frame_fk
 from uncertain_feedback.envs.robot_fk import RobotChainFK
 from uncertain_feedback.envs.sim_mannequin import _SMPL_TO_PB
 from uncertain_feedback.planners.mpc.kinematics import (
@@ -37,6 +53,8 @@ class RobotPlanPreviewEnv(ExecutionEnv):
         q_ref: np.ndarray,
         spine3_pos: np.ndarray | None,
         spine3_aa: np.ndarray | None,
+        ik_env: ExecutionEnv,
+        max_joint_delta: float,
     ) -> None:
         super().__init__()
         self._fk_arm = fk
@@ -47,6 +65,8 @@ class RobotPlanPreviewEnv(ExecutionEnv):
         self._q_ref = np.asarray(q_ref, dtype=np.float64)
         self._preview_spine3_pos = spine3_pos
         self._preview_spine3_aa = spine3_aa
+        self._ik_env = ik_env
+        self._max_joint_delta = float(max_joint_delta)
         self.robot_trajectory: list[np.ndarray] = [self._robot_q.copy()]
 
     def robot_fk(self) -> RobotChainFK:
@@ -57,6 +77,33 @@ class RobotPlanPreviewEnv(ExecutionEnv):
 
     def robot_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
         return self._lower.copy(), self._upper.copy()
+
+    def robot_max_joint_delta(self) -> float:
+        return self._max_joint_delta
+
+    def solve_robot_ik_exact(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> np.ndarray | None:
+        return self._ik_env.solve_robot_ik_exact(target_pos, target_quat, q_seed)
+
+    def solve_robot_ik_exact_batch(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self._ik_env.solve_robot_ik_exact_batch(target_pos, target_quat, q_seed)
+
+    def track_robot_ik_batch(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        q_seed: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self._ik_env.track_robot_ik_batch(target_pos, target_quat, q_seed)
 
     def current_grasp(self, q: np.ndarray) -> MeasuredGrasp:
         return self._grasp
@@ -84,7 +131,35 @@ class RobotPlanPreviewEnv(ExecutionEnv):
         return np.concatenate((arm_aa[0], arm_aa[1], [float(arm_aa[2] @ hinge)]))
 
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
-        raise NotImplementedError("preview stand-in only executes robot actions")
+        """Carry the robot along a human-action plan; the arm tracks exactly.
+
+        The robot advances only to an *exact* solution. A planner gated on
+        reachability never commands a frame without one, so missing the pose
+        gently the way the live env does (position kept, attitude spent) would
+        only hide a gate that has failed — holding instead leaves it visible as
+        the gripper coming off the forearm.
+        """
+        q_cmd = np.asarray(q_cmd, dtype=np.float64)
+        target_pos, target_rot = self._gripper_pose(q_cmd)
+        solution = self._ik_env.solve_robot_ik_exact(
+            target_pos, target_rot.as_quat(), self._robot_q
+        )
+        if solution is not None:
+            delta = np.clip(
+                solution - self._robot_q, -self._max_joint_delta, self._max_joint_delta
+            )
+            self._robot_q = np.clip(self._robot_q + delta, self._lower, self._upper)
+        self.robot_trajectory.append(self._robot_q.copy())
+        return q_cmd
+
+    def _gripper_pose(self, q: np.ndarray) -> tuple[np.ndarray, Rotation]:
+        """The pose the rigid grasp puts on the gripper for arm configuration ``q``."""
+        forearm_pos, forearm_rot = forearm_frame_fk(
+            self._fk_arm, q, self._preview_spine3_pos, self._preview_spine3_aa
+        )
+        return self._grasp.gripper_pose(
+            _SMPL_TO_PB @ forearm_pos, Rotation.from_matrix(_SMPL_TO_PB) * forearm_rot
+        )
 
     def visualize(self, path=None) -> np.ndarray:
         raise NotImplementedError("preview stand-in has nothing to render")

@@ -135,6 +135,10 @@ class ExecutionEnv(ABC):
         """Padded ``(lower, upper)`` joint boxes the robot must stay in."""
         raise NotImplementedError(f"{type(self).__name__} has no robot")
 
+    def robot_max_joint_delta(self) -> float:
+        """Per-step joint-motion cap this env's execution applies."""
+        raise NotImplementedError(f"{type(self).__name__} has no robot")
+
     def solve_robot_ik_exact(
         self,
         target_pos: np.ndarray,

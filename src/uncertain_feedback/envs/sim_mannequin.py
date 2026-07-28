@@ -265,6 +265,9 @@ class SimMannequinEnv(ExecutionEnv):
     def robot_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
         return self._joint_lower.copy(), self._joint_upper.copy()
 
+    def robot_max_joint_delta(self) -> float:
+        return self._robot_max_joint_delta
+
     def solve_robot_ik_exact(
         self,
         target_pos: np.ndarray,

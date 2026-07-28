@@ -831,25 +831,17 @@ def _rollout_reference_trajectory(
     return np.asarray([q0, *result.q_history], dtype=np.float64)
 
 
-def _rollout_robot_reference_trajectory(
-    cfg: MpcRunConfig,
-    setup: RunSetup,
-    on_step: Callable[[np.ndarray, np.ndarray | None], None],
-) -> None:
-    """Roll the robot-action planner offline against a kinematic stand-in.
+def _preview_env(setup: RunSetup) -> RobotPlanPreviewEnv:
+    """Kinematic double of the run's robot env, frozen at the measured state.
 
-    The stand-in (:class:`RobotPlanPreviewEnv`) snapshots the real env's robot
-    chain, measured grasp, joint state, and limits, so the rollout is the
-    actual robot-space solve about to run — the previewed robot and arm stay
-    consistent by construction instead of the robot chasing a human-space plan
-    through IK. The env's grasp must already be measured (the preview captures
-    it before calling the plan). Each planned step is reported through
-    ``on_step(q, robot_q)`` as its solve finishes, so the env can draw the
-    rollout while it is being planned.
+    Snapshots the robot chain, measured grasp, joint state, limits, and step
+    cap, and delegates exact IK back to the env itself, so a rollout against it
+    is the solve about to run. The env's grasp must already be measured — the
+    preview captures it before calling the plan.
     """
     env = setup.env
-    q0 = np.asarray(setup.q0, dtype=np.float64).copy()
-    preview_env = RobotPlanPreviewEnv(
+    q0 = np.asarray(setup.q0, dtype=np.float64)
+    return RobotPlanPreviewEnv(
         fk=setup.cost_context.fk,
         chain=env.robot_fk(),
         grasp=env.current_grasp(q0),
@@ -858,7 +850,26 @@ def _rollout_robot_reference_trajectory(
         q_ref=q0,
         spine3_pos=setup.spine3_pos,
         spine3_aa=setup.spine3_aa,
+        ik_env=env,
+        max_joint_delta=env.robot_max_joint_delta(),
     )
+
+
+def _rollout_robot_reference_trajectory(
+    cfg: MpcRunConfig,
+    setup: RunSetup,
+    on_step: Callable[[np.ndarray, np.ndarray | None], None],
+) -> None:
+    """Roll the robot-action planner offline against a kinematic stand-in.
+
+    The rollout is the actual robot-space solve about to run — the previewed
+    robot and arm stay consistent by construction instead of the robot chasing
+    a human-space plan through IK. Each planned step is reported through
+    ``on_step(q, robot_q)`` as its solve finishes, so the env can draw the
+    rollout while it is being planned.
+    """
+    q0 = np.asarray(setup.q0, dtype=np.float64).copy()
+    preview_env = _preview_env(setup)
     planner = ArmMPCCartesianNoMDMRobot(
         cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
         initial_q=q0,
@@ -881,6 +892,7 @@ def _rollout_robot_reference_trajectory(
         seed=cfg.seed,
         env=preview_env,
     )
+
     def report(_step: int, q: np.ndarray, _history: list[np.ndarray]) -> None:
         on_step(q, preview_env.robot_trajectory[-1])
 
@@ -891,6 +903,95 @@ def _rollout_robot_reference_trajectory(
         on_post_step=report,
         stop_on_runtime_error=True,
     )
+
+
+def _rollout_gated_reference_trajectory(
+    cfg: MpcRunConfig,
+    setup: RunSetup,
+    on_step: Callable[[np.ndarray, np.ndarray | None], None],
+) -> None:
+    """Roll the IK-gated planner offline, gate included.
+
+    The gate *is* the planner: previewing the ungated planner instead shows a
+    trajectory the run will not take, and — since the gate refuses exactly the
+    frames whose grasp the robot cannot hold — shows it diverging at the poses
+    the run is built to refuse. The stand-in delegates exact IK to the env, so
+    the reachability enforced here is the one execution will enforce, and the
+    robot reported to ``on_step`` is the one the gate reasoned against rather
+    than a second IK chasing the arm.
+    """
+    q0 = np.asarray(setup.q0, dtype=np.float64).copy()
+    preview_env = _preview_env(setup)
+    planner = ArmMPCCartesianNoMDMIKGated(
+        cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
+        initial_q=q0,
+        cartesian_threshold=cfg.cartesian.threshold,
+        horizon=cfg.horizon,
+        n_mpc_samples=cfg.n_mpc_samples,
+        max_angle_delta=cfg.max_angle_delta,
+        max_grasp_ik_residual=cfg.max_grasp_ik_residual,
+        grasp_residual_frames=cfg.grasp_residual_frames,
+        goal_threshold=cfg.goal_threshold,
+        visualize=False,
+        fk=setup.cost_context.fk,
+        spine3_pos=setup.spine3_pos,
+        spine3_aa=setup.spine3_aa,
+        body_pos=setup.body_pos,
+        extra_costs=setup.extra_costs,
+        seed=cfg.seed,
+        env=preview_env,
+    )
+
+    def report(_step: int, q: np.ndarray, _history: list[np.ndarray]) -> None:
+        on_step(q, preview_env.robot_trajectory[-1])
+
+    run_planning_loop(
+        planner,
+        q0,
+        max(1, cfg.steps),
+        on_post_step=report,
+        stop_on_runtime_error=True,
+    )
+
+
+def _rollout_human_reference_trajectory(
+    cfg: MpcRunConfig,
+    setup: RunSetup,
+    on_step: Callable[[np.ndarray, np.ndarray | None], None],
+) -> None:
+    """Roll a plain human-action Cartesian planner offline, kinematically."""
+    _rollout_reference_trajectory(
+        cfg,
+        setup.q0,
+        setup.cost_context,
+        setup.extra_costs,
+        setup.body_pos,
+        setup.spine3_pos,
+        setup.spine3_aa,
+        on_step=on_step,
+    )
+
+
+_PreviewRollout = Callable[
+    [MpcRunConfig, RunSetup, Callable[[np.ndarray, np.ndarray | None], None]], None
+]
+
+# Which offline rollout previews each planner. A preview is only worth watching
+# if it runs the planner that is about to run live, so every Cartesian planner
+# picks its rollout explicitly and the assert refuses a new one that forgot to:
+# falling through to the plain human-action rollout is how the IK-gated planner
+# came to be previewed ungated, which drew the run walking into exactly the
+# unreachable poses the gate exists to discard. The MDM planners map to their
+# no-MDM counterpart because their correction does not exist until the user has
+# spoken — only the Cartesian-goal phase can be previewed at all.
+_PREVIEW_ROLLOUTS: dict[str, _PreviewRollout] = {
+    "arm_mpc_cartesian": _rollout_human_reference_trajectory,
+    "arm_mpc_cartesian_no_mdm": _rollout_human_reference_trajectory,
+    "arm_mpc_cartesian_no_mdm_ik_gated": _rollout_gated_reference_trajectory,
+    "arm_mpc_cartesian_robot": _rollout_robot_reference_trajectory,
+    "arm_mpc_cartesian_no_mdm_robot": _rollout_robot_reference_trajectory,
+}
+assert set(_PREVIEW_ROLLOUTS) == set(_CARTESIAN_PLANNERS)
 
 
 def preview_planned_trajectory(cfg: MpcRunConfig, setup: RunSetup) -> bool:
@@ -909,33 +1010,20 @@ def preview_planned_trajectory(cfg: MpcRunConfig, setup: RunSetup) -> bool:
     for. The rollout is deferred to the env because it costs a full MPC solve per
     step, and only envs that show it need it — each planned step streams through
     the env's ``on_step`` callback as its solve finishes, so the env draws the
-    rollout live while it is being planned. The robot-action planners preview
-    their own robot-space rollout (human q + planned robot joints per step), so
-    the animation shows the planned robot motion rather than an IK chase.
+    rollout live while it is being planned. Which rollout runs is
+    ``_PREVIEW_ROLLOUTS``: the planner previewed is the planner that will run,
+    including whatever feasibility gate it carries and the robot state that
+    gate reasons against, so a plan the run would refuse is never drawn as one
+    it would take. The planners with a robot report their own robot joints per
+    step, so the animation shows the planned robot motion rather than an IK
+    chase.
     """
-    if cfg.planner not in _CARTESIAN_PLANNERS or not cfg.cartesian.goals:
+    if cfg.planner not in _PREVIEW_ROLLOUTS or not cfg.cartesian.goals:
         return True
-
-    if cfg.planner in _ROBOT_ACTION_PLANNERS:
-
-        def robot_plan(
-            on_step: Callable[[np.ndarray, np.ndarray | None], None],
-        ) -> None:
-            _rollout_robot_reference_trajectory(cfg, setup, on_step)
-
-        return setup.env.preview(robot_plan)
+    rollout = _PREVIEW_ROLLOUTS[cfg.planner]
 
     def plan(on_step: Callable[[np.ndarray, np.ndarray | None], None]) -> None:
-        _rollout_reference_trajectory(
-            cfg,
-            setup.q0,
-            setup.cost_context,
-            setup.extra_costs,
-            setup.body_pos,
-            setup.spine3_pos,
-            setup.spine3_aa,
-            on_step=on_step,
-        )
+        rollout(cfg, setup, on_step)
 
     return setup.env.preview(plan)
 

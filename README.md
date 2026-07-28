@@ -636,9 +636,11 @@ optional YAML key `env`:
   `ArmVisualizer.render_rollout_video()`.
 
   **The plan is previewed before anything moves** (`preview_plan: true`, the
-  default; needs `live_view`). After registration the run rolls the same planner,
-  goals, and costs out kinematically from the *measured* start configuration,
-  drawing each step in the live view the moment its MPC solve finishes — the
+  default; needs `live_view`). After registration the run rolls the same planner
+  — same action space, same feasibility gate, against the same robot IK and
+  padded joint box — with the same goals and costs, kinematically from the
+  *measured* start configuration, drawing each step in the live view the moment
+  its MPC solve finishes — the
   person's mesh at the registered anchor, posed by the same FK the planner costs
   against, the Gen3 at its measured base, the gripper carried by the grasp
   measured off the real arm — then asks:
@@ -664,9 +666,19 @@ optional YAML key `env`:
   ~4 cm at the wrist before the shape fit, against a 0.05 m
   `cartesian.threshold`). Its *torso*, legs, and head are still the config
   `pose:`: nothing measures them, the MPC does not use them, and the shape fit
-  leaves them about a centimetre off the anchor the goals hang from. Planners whose
-  trajectory does not exist before the run — an MDM correction needs the user to
-  speak first — have nothing to preview and skip it.
+  leaves them about a centimetre off the anchor the goals hang from.
+
+  Which rollout previews which planner is a table in `planners/run.py`
+  (`_PREVIEW_ROLLOUTS`), asserted at import to name every Cartesian planner, so
+  a new one has to choose its stand-in rather than quietly inheriting the plain
+  ungated rollout. The robot-action and IK-gated planners roll out against
+  `RobotPlanPreviewEnv`, an offline double of the env frozen at the measured
+  state that delegates exact IK back to the env itself; they report their own
+  robot joints per step, so the window shows the planned robot rather than a
+  second IK chasing the arm. Planners whose trajectory does not exist before the
+  run — an MDM correction needs the user to speak first — have nothing to
+  preview and skip it; the Cartesian MDM planners preview the goal-seeking phase
+  that runs before the user speaks.
 
   The grasp is re-measured every step from the real ee pose and the measured
   forearm frame, and the gripper pose it implies rides the forearm rigidly —
@@ -743,9 +755,14 @@ the region that caused it:
 | 983 / 1000 | 78 ms | 41 s |
 
 The gate does not apply `robot_max_joint_delta`; that remains an execution-rate
-cap rather than an IK joint limit. Consequently, a joint-limit-feasible plan can
-still show transient robot lag in the preview if it asks for faster motion than
-that cap permits.
+cap rather than an IK joint limit. The preview *does* apply it when carrying its
+robot along, as execution will, so a joint-limit-feasible plan can still show
+transient robot lag there if it asks for faster motion than that cap permits.
+
+The preview runs this planner, gate included (`preview_plan`, below). It has to:
+previewed with the ungated planner it drew the run walking into exactly the
+poses the gate discards, ending with the gripper visibly off the forearm — a
+trajectory the run would never take.
 
 ```
 uv run python src/uncertain_feedback/planners/run.py \

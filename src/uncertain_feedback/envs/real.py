@@ -32,13 +32,19 @@ With ``real_mirror_host=None`` the loop runs on the live person and solves IK
 but sends nothing to the arm — the verification mode to use before anything
 moves. There is no real gripper to measure then, so the calibration falls back
 to the nominal grasp.
+
+With ``recording`` set, both sensed channels come from a file captured in the
+lab instead of the network, and the arm is an ideal tracker — development
+without the environment set up, on the geometry that was really measured. See
+:mod:`uncertain_feedback.envs.real_recording` for what that does and does not
+reproduce.
 """
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import pybullet as p
@@ -60,6 +66,11 @@ from uncertain_feedback.envs.human_mesh import (
     ArmSkeletonBody,
     HumanMeshBody,
 )
+from uncertain_feedback.envs.real_recording import (
+    RealRecording,
+    ReplayMirror,
+    ReplayReceiver,
+)
 from uncertain_feedback.envs.robot_fk import RobotChainFK
 from uncertain_feedback.envs.sim_mannequin import _ROBOT_SPECS, _SMPL_TO_PB
 from uncertain_feedback.mocap.natnet import (
@@ -70,6 +81,9 @@ from uncertain_feedback.mocap.natnet import (
 from uncertain_feedback.mocap.registration import ArmRegistration, arm_keypoints
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
+
+if TYPE_CHECKING:
+    from uncertain_feedback.envs.real_mirror import RealArmMirror
 
 # Rigid-body roles the config must supply streaming ids for. The right-collar
 # body is what makes the registration yaw measurable rather than assumed (see
@@ -101,6 +115,14 @@ _IK_TRACK_MAX_DIST = 0.5
 _LIVE_CAMERA_DISTANCE = 2.0
 _LIVE_CAMERA_YAW = -30.0
 _LIVE_CAMERA_PITCH = -12.0
+# Offscreen renders of that same scene (`save_scene_video`), which need a frame
+# size and a field of view the interactive window takes from the window itself.
+_SCENE_IMAGE_WIDTH = 960
+_SCENE_IMAGE_HEIGHT = 720
+_SCENE_CAMERA_FOV = 60.0
+# Further back than the live view: a saved frame cannot be orbited, so both the
+# person and the whole robot have to be in it.
+_SCENE_CAMERA_DISTANCE = 2.8
 # The link `gen3_ik` solves for, which is not the one the grasp is measured at.
 _SSIK_EE_LINK = b"end_effector_link"
 
@@ -178,8 +200,9 @@ class RealEnv(ExecutionEnv):
 
     def __init__(
         self,
-        mocap_host: str,
         mocap_rigid_bodies: dict[str, int],
+        mocap_host: str | None = None,
+        recording: str | Path | None = None,
         robot: str = "kinova_gen3",
         robot_max_joint_delta: float = 0.01,
         robot_joint_limit_padding: float = 0.27,
@@ -198,22 +221,32 @@ class RealEnv(ExecutionEnv):
         missing = {_BASE_KEY, _COLLAR_RIGHT_KEY, *_ARM_KEYS} - set(mocap_rigid_bodies)
         if missing:
             raise ValueError(f"mocap_rigid_bodies is missing {sorted(missing)}")
+        if (mocap_host is None) == (recording is None):
+            raise ValueError("Set exactly one of mocap_host (live) or recording")
         self._spec = _ROBOT_SPECS[robot]
-        self._mirror = None
-        if real_mirror_host is not None:
-            if robot != "kinova_gen3":
-                raise ValueError("real_mirror_host requires robot='kinova_gen3'")
-            from uncertain_feedback.envs.real_mirror import (  # pylint: disable=import-outside-toplevel
-                RealArmMirror,
-            )
+        self._mirror: RealArmMirror | ReplayMirror | None = None
+        # A recording carries both sensed channels, so replaying one replaces
+        # the mirror as well: `real_mirror_host` then only says whether the run
+        # commands a robot at all, not what it talks to.
+        if recording is not None:
+            replay = RealRecording.load(recording)
+            self._receiver: NatNetReceiver | ReplayReceiver = ReplayReceiver(replay)
+            if real_mirror_host is not None:
+                self._mirror = ReplayMirror(replay.robot_q[0])
+        else:
+            if real_mirror_host is not None:
+                from uncertain_feedback.envs.real_mirror import (  # pylint: disable=import-outside-toplevel
+                    RealArmMirror,
+                )
 
-            self._mirror = RealArmMirror.connect(
-                real_mirror_host,
-                confirm_start=real_mirror_confirm_start,
-                control_mode=control_mode,
-            )
+                self._mirror = RealArmMirror.connect(
+                    real_mirror_host,
+                    confirm_start=real_mirror_confirm_start,
+                    control_mode=control_mode,
+                )
+            assert mocap_host is not None
+            self._receiver = NatNetReceiver.connect(mocap_host)
         self._body_ids = {key: int(v) for key, v in mocap_rigid_bodies.items()}
-        self._receiver = NatNetReceiver.connect(mocap_host)
         self._hold_timeout = float(mocap_hold_timeout)
         self._robot_max_joint_delta = float(robot_max_joint_delta)
         self._robot_joint_limit_padding = float(robot_joint_limit_padding)
@@ -523,6 +556,83 @@ class RealEnv(ExecutionEnv):
         )
         render_env.execute(self._measured[-1])
         return render_env.visualize(path)
+
+    def save_scene_video(
+        self,
+        human_q: np.ndarray,
+        robot_q: np.ndarray | None,
+        path: str | Path,
+        fps: int = 8,
+    ) -> None:
+        """Render a rollout in the measured scene — the live view, offscreen.
+
+        The same bodies :meth:`_start_live_view` puts in the GUI: the person as
+        an SMPL mesh shaped to their *measured* arm lengths, the Gen3 at its
+        measured base, and the goal ghost. So what this shows is the geometry
+        the MPC solved against, which is what a stick figure of the joint angles
+        cannot tell you — whether the robot is actually where the person is. The
+        arm chain is in the scene too but the offscreen renderer draws the body
+        opaque, so it is hidden inside it; read the chain off
+        :meth:`save_video` instead.
+
+        ``human_q`` is ``(T, 7)``; ``robot_q`` is the planner's own ``(T, 7)``
+        robot joints where it has them, and ``None`` for a human-space rollout,
+        which is then chased with the same IK :meth:`execute` would use. Works
+        headless: pybullet renders these bodies offscreen in ``DIRECT``, so no
+        display and no live view are needed.
+        """
+        import imageio  # pylint: disable=import-outside-toplevel
+
+        assert self._registration is not None
+        if self._human_mesh is None:
+            self._start_live_view()
+        frames = []
+        for step, q in enumerate(np.asarray(human_q, dtype=np.float64)):
+            if robot_q is not None:
+                self._set_joints(np.asarray(robot_q, dtype=np.float64)[step])
+            else:
+                self._drive(q, mirror=False)
+            self._pose_arm_skeleton(q)
+            self._pose_human_mesh(q)
+            frames.append(self._scene_frame())
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimsave(str(path), np.stack(frames), fps=fps)
+        print(f"[real] saved scene video {path}", flush=True)
+
+    def _scene_frame(self) -> np.ndarray:
+        """One offscreen RGB frame of the person and the robot together.
+
+        Framed on the midpoint between the registered collar and the measured
+        robot base, rather than on the collar as the live view is: the window
+        can be orbited when the robot falls outside it, a saved frame cannot,
+        and a video that crops the robot cannot answer whether it is standing
+        where the person is.
+        """
+        assert self._registration is not None
+        target = 0.5 * (self._registration.collar_pb + self._registration.base_pb)
+        view = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=tuple(target),
+            distance=_SCENE_CAMERA_DISTANCE,
+            yaw=_LIVE_CAMERA_YAW,
+            pitch=_LIVE_CAMERA_PITCH,
+            roll=0.0,
+            upAxisIndex=2,
+        )
+        proj = p.computeProjectionMatrixFOV(
+            _SCENE_CAMERA_FOV, _SCENE_IMAGE_WIDTH / _SCENE_IMAGE_HEIGHT, 0.1, 10.0
+        )
+        rgb = p.getCameraImage(
+            _SCENE_IMAGE_WIDTH,
+            _SCENE_IMAGE_HEIGHT,
+            viewMatrix=view,
+            projectionMatrix=proj,
+            physicsClientId=self._cid,
+        )[2]
+        image = np.reshape(
+            np.asarray(rgb, dtype=np.uint8),
+            (_SCENE_IMAGE_HEIGHT, _SCENE_IMAGE_WIDTH, 4),
+        )
+        return image[..., :3].copy()
 
     def save_video(self, path: str | Path, fps: int = 20) -> None:
         """Render the *measured* arm trajectory — what the person actually did."""

@@ -3,6 +3,29 @@
 ## Getting Started
 Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model` and download the [required weights](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#mdm-is-now-40x-faster--04-secsample), [data](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#2-get-data) and [SMPL model](https://github.com/GuyTevet/motion-diffusion-model/blob/main/prepare/download_smpl_files.sh)
 
+### Kinova Gen3 URDF
+
+`env: real` and `sim_mannequin` with `robot: kinova_gen3` load
+`~/kortex_description/robots/gen3_7dof_no_vision_robotiq_2f_85.urdf`, as does the
+controller server's `config_tuned.yaml`. Generate it from
+[ros_kortex](https://github.com/Kinovarobotics/ros_kortex) (`noetic-devel`), then
+copy the `kortex_description` package to `~/kortex_description` — the URDF's
+`package://` mesh URIs resolve against the home directory:
+
+```
+xacro kortex_description/robots/gen3_robotiq_2f_85.xacro \
+  dof:=7 vision:=false gripper:=robotiq_2f_85 sim:=false \
+  -o gen3_7dof_no_vision_robotiq_2f_85.urdf
+```
+
+Then set the six Robotiq finger joints (`finger_joint`,
+`{left,right}_inner_knuckle_joint`, `{left,right}_inner_finger_joint`,
+`right_outer_knuckle_joint`) to `type="fixed"`. Stock xacro emits them as
+revolute, but `envs/real.py` treats *every* non-fixed joint as an arm DOF and
+raises on the 13-vs-7 mismatch; pinocchio likewise needs `nv == 7` server-side.
+Sanity check: at the `kinova_gen3` home configuration `tool_frame` sits at
+`(0.576, 0.002, 0.434)` in the base frame.
+
 ## Running (Custom) Motion Generation
 ```
 uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
@@ -333,7 +356,7 @@ optional YAML key `env`:
 - `sim_mannequin`: physics-based real-world proxy. The robot (a Franka Panda
   by default, or a Kinova Gen3 7-DOF with a Robotiq 2F-85 gripper via
   `env_params: {robot: kinova_gen3}`, loaded from
-  `/home/emprise/kortex_description`) starts grasping
+  `~/kortex_description`) starts grasping
   the forearm of the passive 4-DOF articulated mannequin left arm from
   [limb-manipulation](https://github.com/empriselab/limb-manipulation)
   (vendored under `src/uncertain_feedback/envs/assets/human/`, along with the
@@ -416,6 +439,9 @@ optional YAML key `env`:
   `collar_right`, `shoulder`, `elbow`, `wrist`),
   `mocap_hold_timeout` (s, default 0.5 — how long a tracking dropout is
   covered by holding the last valid pose before the run raises and halts),
+  `recording` (replay a saved snapshot instead of the live streams — see
+  **Recording the real environment** below; set this *or* `mocap_host`, not
+  both),
   `live_view` / `live_view_fps` (live mesh window — see below),
   plus `robot`, `robot_max_joint_delta`, `robot_joint_limit_padding`, and
   `real_mirror_host` as above; `real_mirror_confirm_start` here only prompts
@@ -638,6 +664,60 @@ optional YAML key `env`:
 
   `--env-video` renders the *measured* arm trajectory through
   `ArmVisualizer.render_rollout_video()`.
+
+  **Recording the real environment.** `env: real` senses the world through
+  exactly two channels — the OptiTrack stream and the Gen3's measured joint
+  state — so both can be captured to a file and replayed later without the lab.
+  Reading the arm is passive: nothing is commanded, no mode switched, the
+  gripper untouched.
+
+  ```
+  uv run python src/uncertain_feedback/envs/record_real.py \
+      --host 192.168.2.243 --controller-host 127.0.0.1 \
+      --require-bodies 1 2 3 4 5 6 --seconds 30 \
+      --out real_recordings/lab.npz
+  ```
+
+  It stores every streamed rigid body (not only the configured six) plus the
+  full robot state per frame, and blocks until `--require-bodies` are all
+  tracked so the window does not open on a dropout. Point `env_params.recording`
+  at the file to replay it — see
+  `arm_mpc_cartesian_no_mdm_ik_gated_replay.yaml`, which needs no hardware, no
+  display, and no network:
+
+  ```
+  uv run python src/uncertain_feedback/planners/run.py \
+      --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_ik_gated_replay.yaml
+  ```
+
+  Everything measured is the real thing: the registration and its yaw, the
+  person's segment lengths, the robot's base pose, the grasp read off the
+  recorded joint configuration, and therefore the analytical IK and the
+  feasibility gate. A relative `recording` path is resolved from the repo root,
+  because loading MDM chdirs the process into its submodule.
+
+  **What replay does not reproduce is the loop closing on the person.** The
+  mocap side is playback: `execute` returns the *recorded* configuration, so the
+  person does not respond to the robot and the human arm does not advance no
+  matter what is commanded (the robot side does move — `ReplayMirror` is an
+  ideal tracker seeded at the recorded joints). A full `run.py` replay therefore
+  exercises every solve but runs out its step budget in place. For a rollout
+  that actually progresses, use the planner's offline stand-in — the same
+  `RobotPlanPreviewEnv` rollout the plan preview runs
+  (`_rollout_gated_reference_trajectory` in `planners/run.py`), which drives the
+  arm kinematically from the measured snapshot and reaches the Cartesian goal.
+
+  **Rendering that rollout with meshes.** `RealEnv.save_scene_video(human_q,
+  robot_q, path)` renders the live view's scene offscreen — the person as an
+  SMPL mesh shaped to their *measured* arm lengths, the Gen3 at its measured
+  base, the green goal ghost — so a headless replay still shows whether the
+  robot is where the person is, which a stick figure of the joint angles cannot.
+  Pass the planner's own robot joints where it has them (the gated and
+  robot-action rollouts report them per step); pass `None` for a human-space
+  rollout and the robot is chased through the same IK `execute` uses. Needs no
+  display: pybullet renders it in `DIRECT`. The arm chain is in the scene but
+  the offscreen renderer draws the body opaque, so use `save_video` to see the
+  chain itself.
 
   **The plan is previewed before anything moves** (`preview_plan: true`, the
   default; needs `live_view`). After registration the run rolls the same planner

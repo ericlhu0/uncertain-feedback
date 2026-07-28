@@ -599,3 +599,142 @@ def test_preview_reports_the_grasp_error(monkeypatch, capsys) -> None:
     line = capsys.readouterr().out
     assert "grasp error over the plan" in line
     assert f"max {1e3 * position:.1f} mm at step 1" in line
+
+
+def _recording_from_frame(
+    bodies: dict[int, RigidBodyPose], robot_q: np.ndarray, n_frames: int = 3
+) -> "RealRecording":
+    """A recording that streams one synthesized mocap frame `n_frames` times."""
+    from uncertain_feedback.envs.real_recording import RealRecording
+
+    body_ids = sorted(bodies)
+    return RealRecording(
+        stamps=np.arange(n_frames, dtype=np.float64) / 60.0,
+        body_ids=np.asarray(body_ids, dtype=np.int64),
+        positions=np.tile(
+            np.stack([bodies[i].position for i in body_ids]), (n_frames, 1, 1)
+        ),
+        orientations=np.tile(
+            np.stack([bodies[i].orientation for i in body_ids]), (n_frames, 1, 1)
+        ),
+        valid=np.ones((n_frames, len(body_ids)), dtype=bool),
+        robot={"joint_positions": np.tile(robot_q, (n_frames, 1))},
+        metadata={"natnet_version": [4, 0, 0, 0]},
+    )
+
+
+def test_recording_round_trips_through_a_file(tmp_path) -> None:
+    fk = SmplLeftArmFK()
+    bodies = _mocap_frame(fk, np.zeros((3, 3)), np.array([0.7, -0.2, -0.4]))
+    robot_q = np.linspace(-0.5, 0.5, 7)
+    recording = _recording_from_frame(bodies, robot_q)
+
+    from uncertain_feedback.envs.real_recording import RealRecording
+
+    path = tmp_path / "rec.npz"
+    recording.save(path)
+    loaded = RealRecording.load(path)
+
+    assert loaded.n_frames == recording.n_frames
+    assert loaded.body_ids.tolist() == recording.body_ids.tolist()
+    np.testing.assert_allclose(loaded.positions, recording.positions)
+    np.testing.assert_allclose(loaded.robot_q, recording.robot_q)
+    assert loaded.metadata == recording.metadata
+    # The frame comes back in the shape a NatNet frame arrives in, keyed by the
+    # same streaming ids the config names.
+    frame = loaded.frame(0)
+    np.testing.assert_allclose(frame[2].position, bodies[2].position)
+    assert frame[2].valid
+
+
+def test_replaying_a_recording_registers_where_the_live_stream_did(
+    monkeypatch, tmp_path
+) -> None:
+    """Replay is only useful if it reproduces the live path's measurements."""
+    pytest.importorskip("pybullet")
+    from uncertain_feedback.envs import real as real_module
+
+    if not real_module._ROBOT_SPECS["kinova_gen3"].urdf.exists():
+        pytest.skip("kortex_description URDF not available")
+
+    fk_live = SmplLeftArmFK()
+    arm_aa = np.array(
+        [
+            [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783],
+            [0.6868865380518193, -0.18, -0.11006289820501858],
+            [0.035651850950680734, -1.23, 0.7515284911778386],
+        ]
+    )
+    bodies = _mocap_frame(fk_live, arm_aa, np.array([0.7, -0.2, -0.4]))
+    body_ids = {
+        "robot_base": 1,
+        "collar": 2,
+        "collar_right": 6,
+        "shoulder": 3,
+        "elbow": 4,
+        "wrist": 5,
+    }
+    robot_q = np.array([2.53, -0.99, 0.05, -1.16, -2.04, 1.18, 2.68])
+    path = tmp_path / "rec.npz"
+    _recording_from_frame(bodies, robot_q).save(path)
+
+    monkeypatch.setattr(
+        real_module.NatNetReceiver,
+        "connect",
+        staticmethod(lambda *a, **k: _StubReceiver(bodies)),
+    )
+    live = real_module.RealEnv(
+        mocap_rigid_bodies=body_ids, mocap_host="stub", live_view=False
+    )
+    live.set_pose_context(fk_live, None, None, fk_live.tpose_all_joints.copy())
+    q_live = live.initial_q(fk_live.arm_aa_to_q(arm_aa, None))
+
+    fk_replay = SmplLeftArmFK()
+    replay = real_module.RealEnv(
+        mocap_rigid_bodies=body_ids,
+        recording=path,
+        real_mirror_host="replay",
+        live_view=False,
+    )
+    replay.set_pose_context(fk_replay, None, None, fk_replay.tpose_all_joints.copy())
+    q_replay = replay.initial_q(fk_replay.arm_aa_to_q(arm_aa, None))
+
+    np.testing.assert_allclose(q_replay, q_live, atol=1e-12)
+    np.testing.assert_allclose(
+        replay._registration.base_pb,  # pylint: disable=protected-access
+        live._registration.base_pb,  # pylint: disable=protected-access
+    )
+    # The arm the recording measured, not the URDF home pose: the first grasp is
+    # measured against the gripper that was really there.
+    np.testing.assert_allclose(replay.current_robot_q(), robot_q)
+    # ...and afterwards the mirror is an ideal tracker, so what was commanded is
+    # what comes back.
+    replay.execute_robot(robot_q + 0.001)
+    np.testing.assert_allclose(replay.current_robot_q(), robot_q + 0.001, atol=1e-9)
+
+
+def test_a_recording_missing_a_configured_body_is_reported() -> None:
+    from uncertain_feedback.envs.real_recording import ReplayReceiver
+
+    fk = SmplLeftArmFK()
+    bodies = _mocap_frame(fk, np.zeros((3, 3)), np.array([0.7, -0.2, -0.4]))
+    recording = _recording_from_frame(bodies, np.zeros(7))
+    receiver = ReplayReceiver(recording)
+
+    with pytest.raises(MocapStaleError, match=r"\[7\]"):
+        receiver.wait_for([2, 7], 1.0)
+
+
+def test_replay_holds_the_last_recorded_frame() -> None:
+    from uncertain_feedback.envs.real_recording import ReplayReceiver
+
+    fk = SmplLeftArmFK()
+    bodies = _mocap_frame(fk, np.zeros((3, 3)), np.array([0.7, -0.2, -0.4]))
+    receiver = ReplayReceiver(_recording_from_frame(bodies, np.zeros(7), n_frames=2))
+
+    # An MPC run reads far more often than the recording has frames; running out
+    # must hold the last pose rather than raise or wrap around to the start.
+    for _ in range(5):
+        _, frame = receiver.latest()
+        np.testing.assert_allclose(frame[2].position, bodies[2].position)
+    assert receiver.index == 1

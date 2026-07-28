@@ -82,8 +82,8 @@ class _RobotSpec:
     mesh_search_path: str | None = None
 
 
-_KINOVA_URDF = Path(
-    "/home/emprise/kortex_description/robots/gen3_7dof_no_vision_robotiq_2f_85.urdf"
+_KINOVA_URDF = (
+    Path.home() / "kortex_description/robots/gen3_7dof_no_vision_robotiq_2f_85.urdf"
 )
 
 _ROBOT_SPECS: dict[str, _RobotSpec] = {
@@ -112,7 +112,7 @@ _ROBOT_SPECS: dict[str, _RobotSpec] = {
         joint_forces=(39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0),
         base_yaw=np.deg2rad(166.0),
         tool_quat=(0.0, 0.0, 0.7071067811865476, 0.7071067811865476),
-        mesh_search_path="/home/emprise",
+        mesh_search_path=str(Path.home()),
     ),
 }
 

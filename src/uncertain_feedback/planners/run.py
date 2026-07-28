@@ -1135,6 +1135,14 @@ def run_repeated_correction_session(
     assert setup.gen is not None and setup.initial_pose is not None
     gen = setup.gen
     feedback_text = resolve_feedback_text(args.text, setup.user)
+    # The operator's stdin watcher must be the only stdin reader. RealEnv's
+    # "press Enter to start tracking" confirmation fires when the grasp is
+    # first established — normally at the first MPC step, after the watcher
+    # thread has taken stdin, and the two then race for the typed line and the
+    # run freezes at the prompt. Establish the grasp (and consume that prompt)
+    # first.
+    if args.interactive and cfg.env == "real":
+        setup.env.current_grasp(setup.q0)
     # Interactive runs take the words from whoever is being moved, so the
     # scripted step trigger would only inject a correction nobody asked for.
     operator = OperatorPause() if args.interactive else None

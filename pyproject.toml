@@ -173,7 +173,7 @@ torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 detectron2 = { git = "https://github.com/facebookresearch/detectron2.git" }
-emprise-gen3-controller = { path = "/home/eric/emprise-gen3-controller", editable = true }
+emprise-gen3-controller = { path = "../../emprise-gen3-controller", editable = true }
 # No released ssik supports Python 3.10 (every wheel is cp311+); the 3.10 floor
 # landed on main after 3.3.0, so track the tested commit rather than a tag.
 ssik = { git = "https://github.com/personalrobotics/ssik", rev = "5109a670e041b842439cb74f501bacbb01f95883" }

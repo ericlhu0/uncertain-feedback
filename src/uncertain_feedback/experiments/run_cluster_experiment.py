@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from pathlib import Path
+
 from uncertain_feedback.experiments.cluster_comparison import run_cluster_comparison
 from uncertain_feedback.experiments.experiment_pipeline import apply_persona_goals
 from uncertain_feedback.planners.mpc.config import COST_BACKENDS, load_mpc_config
@@ -26,7 +27,6 @@ from uncertain_feedback.planners.run import (
     run_planning_loop,
 )
 from uncertain_feedback.simulated_users import PERSONAS, choose_cluster, get_persona
-
 
 
 def _experiment_parser() -> argparse.ArgumentParser:
@@ -71,10 +71,9 @@ def main() -> None:
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
 
-    if cfg.feedback is None or cfg.feedback.uq is None:
-        raise ValueError(
-            "Cluster experiments require a feedback: section with uq:."
-        )
+    feedback_cfg = cfg.feedback
+    if feedback_cfg is None or feedback_cfg.uq is None:
+        raise ValueError("Cluster experiments require a feedback: section with uq:.")
     if not cfg.llm_cost.enabled:
         raise ValueError("Experiments require llm_cost.enabled: true in the config.")
 
@@ -90,7 +89,7 @@ def main() -> None:
     mpc = setup.mpc
 
     effective_text_time = (
-        args.text_time if args.text_time is not None else cfg.feedback.text_time
+        args.text_time if args.text_time is not None else feedback_cfg.text_time
     )
     q = setup.q0.copy()
     q_history: list = []
@@ -101,12 +100,12 @@ def main() -> None:
             q = q_history[-1]
 
     mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
+        args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames
     )
     feedback_text = resolve_feedback_text(args.text, setup.user)
     cluster_selector = (
         (lambda means: choose_cluster(setup.user, setup.cost_context, means))
-        if cfg.feedback.uq.user_cluster and setup.user.bounds
+        if feedback_cfg.uq.user_cluster and setup.user.bounds
         else None
     )
     current_pose = setup.gen.build_pose_from_arm_aa(
@@ -118,7 +117,7 @@ def main() -> None:
         feedback_text,
         start_pose=current_pose,
         current_q=q,
-        auto_cluster=cfg.feedback.uq.auto_cluster,
+        auto_cluster=feedback_cfg.uq.auto_cluster,
         mdm_frames=mdm_frames,
         frozen_body=args.frozen_body,
         cluster_selector=cluster_selector,

@@ -113,9 +113,7 @@ class RobotJointActions(ActionSpace):
         )
         largest = np.abs(actions).max(axis=-1, keepdims=True)
         actions *= np.minimum(1.0, self._max_joint_delta / largest)
-        trajs = np.empty(
-            (self._n_samples, self._horizon + 1, Q_DIM), dtype=np.float64
-        )
+        trajs = np.empty((self._n_samples, self._horizon + 1, Q_DIM), dtype=np.float64)
         trajs[:, 0] = robot_q[np.newaxis]
         for t in range(self._horizon):
             trajs[:, t + 1] = np.clip(trajs[:, t] + actions[:, t], lower, upper)
@@ -213,9 +211,9 @@ class RobotJointActions(ActionSpace):
                 .reshape(shoulder.shape)
             )
             shoulder_err = (relative**2).sum(axis=-1).mean(axis=-1)
-            elbow_err = (
-                (aa_trajs[:, 1:, 2] @ hinge - q_target[Q_ELBOW]) ** 2
-            ).mean(axis=-1)
+            elbow_err = ((aa_trajs[:, 1:, 2] @ hinge - q_target[Q_ELBOW]) ** 2).mean(
+                axis=-1
+            )
             return shoulder_err + elbow_err
 
         return cost

@@ -26,9 +26,7 @@ class FeasibilityConstraint(ABC):
     def rollout_feasible(self, batch: RolloutBatch) -> np.ndarray:
         """``(N,)`` mask of rollouts execution can realize."""
 
-    def screen_frames(
-        self, q_frames: np.ndarray, current_q: np.ndarray
-    ) -> np.ndarray:
+    def screen_frames(self, q_frames: np.ndarray, current_q: np.ndarray) -> np.ndarray:
         """Drop frames of a feedback trajectory this constraint rules out."""
         _ = current_q
         return q_frames

@@ -11,6 +11,7 @@ warm-starts from a consistent robot state).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pybullet as p
@@ -26,6 +27,8 @@ from uncertain_feedback.planners.mpc import (
     FeedbackConfig,
     RobotIkConfig,
 )
+from uncertain_feedback.planners.mpc.constraints import RobotIkConstraint
+from uncertain_feedback.planners.mpc.feedback import MdmFeedback
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_DIM,
     SmplLeftArmFK,
@@ -159,6 +162,17 @@ def _make_env_and_start(fk: SmplLeftArmFK) -> tuple[_KinematicGraspEnv, np.ndarr
     return _KinematicGraspEnv(fk, q0), q0
 
 
+def _gate(mpc: ArmMPC) -> RobotIkConstraint:
+    constraint = mpc._constraints[0]
+    assert isinstance(constraint, RobotIkConstraint)
+    return constraint
+
+
+def _playback(mpc: ArmMPC) -> MdmFeedback:
+    assert mpc._feedback is not None
+    return mpc._feedback
+
+
 def test_ik_gated_planner_reaches_cartesian_goal() -> None:
     fk = SmplLeftArmFK()
     env, q0 = _make_env_and_start(fk)
@@ -204,7 +218,7 @@ def test_ik_gated_solve_keeps_first_steps_reachable() -> None:
         cartesian=CartesianConfig(goals=[goal]),
         constraints={"robot_ik": RobotIkConfig()},
     )
-    gate = mpc._constraints[0]
+    gate = _gate(mpc)
     _first, plan = mpc.solve(q0)
     best_traj = np.empty((1, plan.shape[0] + 1, Q_DIM))
     best_traj[0, 0] = np.asarray(q0, dtype=np.float64)
@@ -237,13 +251,15 @@ def test_ik_gated_pinned_robot_rejects_all_motion() -> None:
         cartesian=CartesianConfig(goals=[goal]),
         constraints={"robot_ik": RobotIkConfig()},
     )
-    gate = mpc._constraints[0]
+    gate = _gate(mpc)
     batch = mpc._human_actions.rollouts(
         env, np.asarray(q0, dtype=np.float64), np.zeros((mpc._horizon, Q_DIM))
     )
+    assert batch.q_trajs is not None
     residuals = gate._grasp_ik_residuals(batch.q_trajs)
     assert residuals[0] <= gate._max_residual
     assert np.all(residuals[1:] > gate._max_residual)
+    assert mpc._goal_space is not None
     costs = mpc._constrained(mpc._goal_space.stage_cost(mpc._extra_costs))(batch)
     assert np.isfinite(costs[0])
     assert np.all(np.isinf(costs[1:]))
@@ -283,20 +299,18 @@ def test_preview_stand_in_gates_a_human_action_rollout() -> None:
     env._upper = env._robot_q.copy()
     wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
     goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
-    kwargs = dict(
-        horizon=5,
-        n_mpc_samples=64,
-        max_angle_delta=0.02,
-        fk=fk,
-        seed=0,
-        initial_q=q0,
-        cartesian=CartesianConfig(goals=[goal]),
-    )
+    kwargs: dict[str, Any] = {
+        "horizon": 5,
+        "n_mpc_samples": 64,
+        "max_angle_delta": 0.02,
+        "fk": fk,
+        "seed": 0,
+        "initial_q": q0,
+        "cartesian": CartesianConfig(goals=[goal]),
+    }
 
     gated_env = _preview_env_for(fk, env, q0)
-    gated = ArmMPC(
-        **kwargs, env=gated_env, constraints={"robot_ik": RobotIkConfig()}
-    )
+    gated = ArmMPC(**kwargs, env=gated_env, constraints={"robot_ik": RobotIkConfig()})
     q = q0
     for _ in range(10):
         q = gated.step(q)
@@ -323,7 +337,7 @@ def test_preview_rollout_selection_prefers_constraints_then_robot() -> None:
     from uncertain_feedback.planners.mpc import RobotActionsConfig
     from uncertain_feedback.planners.mpc.config import LlmCostConfig, MpcRunConfig
 
-    def cfg_with(**overrides):
+    def cfg_with(**overrides: Any) -> MpcRunConfig:
         return MpcRunConfig(
             steps=1,
             horizon=1,
@@ -344,9 +358,7 @@ def test_preview_rollout_selection_prefers_constraints_then_robot() -> None:
         is run_module._rollout_gated_reference_trajectory
     )
     assert (
-        run_module._select_preview_rollout(
-            cfg_with(robot_actions=RobotActionsConfig())
-        )
+        run_module._select_preview_rollout(cfg_with(robot_actions=RobotActionsConfig()))
         is run_module._rollout_robot_reference_trajectory
     )
     assert (
@@ -414,8 +426,7 @@ def test_ik_gated_yaml_config_loads() -> None:
     from uncertain_feedback.planners.mpc.config import load_mpc_config
 
     cfg = load_mpc_config(
-        Path("src/uncertain_feedback/planners/mpc/configs")
-        / "ik_gated_real.yaml"
+        Path("src/uncertain_feedback/planners/mpc/configs") / "ik_gated_real.yaml"
     )
     gate_cfg = cfg.constraints["robot_ik"]
     assert cfg.feedback is None
@@ -458,8 +469,9 @@ def test_ik_gated_mdm_planner_tracks_playback_then_reaches_goal() -> None:
     frames = np.tile(q0, (8, 1))
     frames[:, 6] = q0[6] + np.linspace(0.0, -0.3, 8)
     mpc.push_trajectory(frames, current_q=q0)
-    assert mpc._feedback.in_playback()
-    assert len(mpc._feedback._frames) == 8  # nothing dropped: all reachable
+    assert _playback(mpc).in_playback()
+    frames_kept = _playback(mpc)._frames
+    assert frames_kept is not None and len(frames_kept) == 8  # nothing dropped: all reachable
 
     q = q0
     for _ in range(80):
@@ -493,11 +505,14 @@ def test_push_screen_drops_unreachable_frames(capsys) -> None:
 
     out = capsys.readouterr().out
     assert "[push] dropped 1/2" in out
-    assert mpc._feedback.in_playback()
-    assert len(mpc._feedback._frames) == 1
-    np.testing.assert_allclose(mpc._feedback._frames[0], q0)
+    assert _playback(mpc).in_playback()
+    frames_kept = _playback(mpc)._frames
+    assert frames_kept is not None and len(frames_kept) == 1
+    np.testing.assert_allclose(frames_kept[0], q0)
     # The goal marker is re-pointed at the last *kept* frame.
-    np.testing.assert_allclose(mpc._feedback.mdm_goal, q0)
+    goal_marker = _playback(mpc).mdm_goal
+    assert goal_marker is not None
+    np.testing.assert_allclose(goal_marker, q0)
 
 
 def test_push_screen_all_unreachable_queues_nothing(capsys) -> None:
@@ -515,7 +530,7 @@ def test_push_screen_all_unreachable_queues_nothing(capsys) -> None:
     mpc.push_trajectory(frames, current_q=q0)
 
     assert "nothing queued" in capsys.readouterr().out
-    assert not mpc._feedback.in_playback()
+    assert not _playback(mpc).in_playback()
 
 
 def test_ik_gated_playback_pinned_robot_holds_then_skips(capsys) -> None:
@@ -537,7 +552,7 @@ def test_ik_gated_playback_pinned_robot_holds_then_skips(capsys) -> None:
     frames[0, 6] = q0[6] - 0.4
     frames[1, 6] = q0[6] - 0.5
     mpc.push_trajectory(frames)
-    assert mpc._feedback.in_playback()
+    assert _playback(mpc).in_playback()
 
     q = q0
     for _ in range(20):
@@ -565,20 +580,19 @@ def test_stall_state_resets_on_new_trajectory() -> None:
     q = q0
     for _ in range(3):
         q = mpc.step(q)
-    assert mpc._feedback._stall_count > 0
+    assert _playback(mpc)._stall_count > 0
 
     mpc.push_trajectory(frames)
-    assert mpc._feedback._stall_count == 0
-    assert mpc._feedback._stall_best_dist == np.inf
-    assert mpc._feedback._idx == 0
+    assert _playback(mpc)._stall_count == 0
+    assert _playback(mpc)._stall_best_dist == np.inf
+    assert _playback(mpc)._idx == 0
 
 
 def test_mdm_ik_gated_yaml_config_loads() -> None:
     from uncertain_feedback.planners.mpc.config import load_mpc_config
 
     cfg = load_mpc_config(
-        Path("src/uncertain_feedback/planners/mpc/configs")
-        / "mdm_ik_gated_real.yaml"
+        Path("src/uncertain_feedback/planners/mpc/configs") / "mdm_ik_gated_real.yaml"
     )
     gate_cfg = cfg.constraints["robot_ik"]
     assert cfg.feedback is not None and cfg.feedback.uq is not None

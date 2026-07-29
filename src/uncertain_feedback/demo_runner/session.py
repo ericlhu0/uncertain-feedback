@@ -38,7 +38,7 @@ from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
     TriggerReason,
 )
-from uncertain_feedback.planners.mpc import ArmMPC
+from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
     arm_feature_series,
@@ -62,11 +62,25 @@ from uncertain_feedback.simulated_users.base import (
     first_violation_step,
     violation_metrics,
 )
+from uncertain_feedback.uncertainty import UqConfig
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 from uncertain_feedback.uncertainty.clustering import make_clusterer
 
 if TYPE_CHECKING:
     from uncertain_feedback.demo_runner.core import DemoRig
+
+
+def _feedback_cfg(rig: DemoRig) -> FeedbackConfig:
+    """The rig's feedback section (guaranteed by the DemoRig constructor check)."""
+    assert rig.cfg.feedback is not None
+    return rig.cfg.feedback
+
+
+def _uq_cfg(rig: DemoRig) -> UqConfig:
+    """The rig's uq section (guaranteed by the DemoRig constructor check)."""
+    uq = _feedback_cfg(rig).uq
+    assert uq is not None
+    return uq
 
 
 def _arm_aa(rig: DemoRig, state: np.ndarray) -> np.ndarray:
@@ -607,7 +621,7 @@ class Session:
             artifact_dir=artifact_dir,
             start_q=start_q,
             goal=goal_arr,
-            scale=rig.cfg.feedback.uq.scale,
+            scale=_uq_cfg(rig).scale,
         )
         self.trajectory_count += 1
         self._save()
@@ -789,7 +803,7 @@ class Session:
             prompt,
             start_pose=start_pose,
             num_samples=n_samples,
-            num_frames=rig.cfg.feedback.frames,
+            num_frames=_feedback_cfg(rig).frames,
         )
         _log(f"MDM generation done in {time.perf_counter() - t0:.1f}s")
         traj.prompt = prompt
@@ -1271,7 +1285,9 @@ class Session:
             raise ValueError("Generate a cost for the selected cluster first.")
         correction = traj.scaled_correction.copy()
         self.commit_round()
-        cutoff = max(1, round(len(correction) * rig.cfg.feedback.trajectory_fraction))
+        cutoff = max(
+            1, round(len(correction) * _feedback_cfg(rig).trajectory_fraction)
+        )
         correction = correction[:cutoff]
         traj.mpc.set_mdm_goal(correction[-1])
         traj.mpc.push_trajectory(correction)

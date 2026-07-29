@@ -35,7 +35,6 @@ from uncertain_feedback.planners.run import (
     _rollout_reference_trajectory,
     run_planning_loop,
 )
-from uncertain_feedback.uncertainty import UqClusterResult
 from uncertain_feedback.simulated_users import (
     HiddenCostTerm,
     SimulatedUser,
@@ -43,6 +42,7 @@ from uncertain_feedback.simulated_users import (
     first_violation_step,
     violation_metrics,
 )
+from uncertain_feedback.uncertainty import UqClusterResult
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 from uncertain_feedback.utils.plot import ArmVisualizer
 
@@ -568,8 +568,11 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     )
     goal_pos = (
         np.asarray(cfg_backend.cartesian.goals[0], dtype=np.float64)
-        if cfg_backend.cartesian.goals
+        if cfg_backend.cartesian is not None
         else None
+    )
+    cartesian_threshold = (
+        cfg_backend.cartesian.threshold if cfg_backend.cartesian is not None else 0.05
     )
     correction_q = canonical_arm_q(cluster_traj, context)
     full_correction_q = _assemble_full_correction_traj(
@@ -610,7 +613,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         reference_traj=reference_q,
         full_correction_traj=full_correction_q,
         cartesian_goal=goal_pos,
-        cartesian_threshold=cfg_backend.cartesian.threshold,
+        cartesian_threshold=cartesian_threshold,
         rejected_trajs=rejected_trajs,
     )
     summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
@@ -649,7 +652,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         reference_traj=reference_q,
         full_correction_traj=full_correction_q,
         cartesian_goal=goal_pos,
-        cartesian_threshold=cfg_backend.cartesian.threshold,
+        cartesian_threshold=cartesian_threshold,
         rejected_trajs=rejected_trajs,
     )
     generator: CostGenerator = create_cost_generator(
@@ -1025,7 +1028,7 @@ def run_experiment(  # pylint: disable=too-many-arguments,too-many-locals
     _log(f"{user.name}: artifacts saved to {root_dir}", prefix=log_prefix)
     goal_pos = (
         np.asarray(cfg_backend.cartesian.goals[0], dtype=np.float64)
-        if cfg_backend.cartesian.goals
+        if cfg_backend.cartesian is not None
         else None
     )
     return ExperimentResult(

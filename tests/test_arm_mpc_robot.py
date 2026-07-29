@@ -33,9 +33,7 @@ from uncertain_feedback.planners.mpc.kinematics import (
     q_to_arm_aa,
 )
 
-_PANDA_HOME = np.array(
-    [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=np.float64
-)
+_PANDA_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=np.float64)
 
 
 def _panda_chain() -> tuple[RobotChainFK, np.ndarray, np.ndarray]:
@@ -166,9 +164,7 @@ def test_no_mdm_robot_planner_reaches_cartesian_goal() -> None:
         cartesian=CartesianConfig(goals=[goal]),
         # The grasp gate scales with the sampling std dev; match it here (the
         # default is tuned for the configs' 0.005).
-        robot_actions=RobotActionsConfig(
-            max_joint_delta=0.02, max_grasp_residual=0.05
-        ),
+        robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.05),
     )
     dist0 = float(np.linalg.norm((wrist0 - spine3) - goal))
     q = q0
@@ -198,15 +194,13 @@ def test_mdm_robot_planner_tracks_playback_then_reaches_goal() -> None:
         initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         feedback=FeedbackConfig(max_playback_delta=0.1),
-        robot_actions=RobotActionsConfig(
-            max_joint_delta=0.01, max_grasp_residual=0.03
-        ),
+        robot_actions=RobotActionsConfig(max_joint_delta=0.01, max_grasp_residual=0.03),
     )
 
     frames = np.tile(q0, (8, 1))
     frames[:, 6] = q0[6] + np.linspace(0.0, -0.3, 8)
     mpc.push_trajectory(frames)
-    assert mpc._feedback.in_playback()
+    assert mpc._feedback is not None and mpc._feedback.in_playback()
 
     q = q0
     for _ in range(80):
@@ -270,13 +264,11 @@ def test_robot_solve_discards_grasp_breaking_rollouts() -> None:
     )
     grasp = env.current_grasp(q0)
     robot_q = env.current_robot_q()
+    assert mpc._goal_space is not None
     stage = mpc._goal_space.stage_cost(mpc._extra_costs)
     batch, best = mpc._solve_sampling(q0, stage, mpc._actions)
     target = mpc._actions.command(batch, best)
     # The chosen first step keeps the grasp within the gate.
-    from uncertain_feedback.envs.sim_mannequin import _SMPL_TO_PB
-    from uncertain_feedback.planners.mpc.kinematics import project_forearm_frames
-
     step = np.stack([robot_q, target])
     ee_pos, ee_rot = env.robot_fk().ee_pose(step[np.newaxis])
     forearm_rot_pb = ee_rot @ grasp.rotation.inv().as_matrix()
@@ -300,9 +292,7 @@ def test_robot_solve_discards_grasp_breaking_rollouts() -> None:
         env=env,
         initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
-        robot_actions=RobotActionsConfig(
-            max_joint_delta=0.02, max_grasp_residual=0.0
-        ),
+        robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.0),
     )
     q = mpc_strict.step(q0)
     assert q.shape == (Q_DIM,)
@@ -335,9 +325,7 @@ def test_robot_plan_preview_env_rollout_is_consistent() -> None:
         env=preview_env,
         initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
-        robot_actions=RobotActionsConfig(
-            max_joint_delta=0.02, max_grasp_residual=0.05
-        ),
+        robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.05),
     )
     q = q0
     human = [q0]

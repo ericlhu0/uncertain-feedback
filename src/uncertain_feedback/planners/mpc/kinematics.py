@@ -846,7 +846,9 @@ def project_forearm_frames(
         anchor = Rotation.from_rotvec(
             _shortest_arc_rotvecs(
                 grip_implied
-                / np.maximum(np.linalg.norm(grip_implied, axis=-1, keepdims=True), 1e-9),
+                / np.maximum(
+                    np.linalg.norm(grip_implied, axis=-1, keepdims=True), 1e-9
+                ),
                 grip_proj
                 / np.maximum(np.linalg.norm(grip_proj, axis=-1, keepdims=True), 1e-9),
             )

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 from uncertain_feedback.experiments.experiment_pipeline import (
     apply_persona_goals,
     require_correction_planner,
@@ -68,6 +69,7 @@ def main() -> None:
     cfg = load_mpc_config(args.mpc_config)
 
     require_correction_planner(cfg, "Transfer experiments")
+    assert cfg.feedback is not None
     if not cfg.llm_cost.enabled:
         raise ValueError("Transfer experiments require llm_cost.enabled: true.")
 
@@ -89,9 +91,7 @@ def main() -> None:
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Transfer experiment config must provide an MDM pose.")
     mpc = setup.mpc
-    mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
-    )
+    mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
     print("[transfer] shared setup ready", flush=True)
 
     for idx, name in enumerate(persona_names, start=1):

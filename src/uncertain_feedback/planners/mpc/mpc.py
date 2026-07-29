@@ -261,22 +261,27 @@ class ArmMPC:
 
     @property
     def has_feedback(self) -> bool:
+        """Whether a feedback method is configured."""
         return self._feedback is not None
 
     @property
     def has_uq(self) -> bool:
+        """Whether the feedback method carries a UQ layer."""
         return self._uq is not None
 
     @property
     def has_goal_space(self) -> bool:
+        """Whether a goal space is configured."""
         return self._goal_space is not None
 
     @property
     def has_constraints(self) -> bool:
+        """Whether any feasibility constraint is active."""
         return bool(self._constraints)
 
     @property
     def uses_robot_actions(self) -> bool:
+        """Whether the solve loop samples robot joint deltas."""
         return isinstance(self._actions, RobotJointActions)
 
     # ------------------------------------------------------------------
@@ -286,9 +291,7 @@ class ArmMPC:
     @property
     def current_cartesian_goal(self) -> np.ndarray | None:
         """The active Cartesian goal, or ``None`` without one."""
-        return (
-            self._goal_space.current_goal if self._goal_space is not None else None
-        )
+        return self._goal_space.current_goal if self._goal_space is not None else None
 
     def append_cartesian_goal(self, goal: np.ndarray) -> None:
         """Add a Cartesian goal to the back of the queue."""
@@ -475,7 +478,7 @@ class ArmMPC:
         self.reset_warmstart()
 
         # Notify live visualiser of the new preview frame (last frame).
-        if self._vis is not None:
+        if self._vis is not None and feedback.preview_q is not None:
             self._vis.update_trajectory_preview(
                 q_to_arm_aa(feedback.preview_q, self._fk.elbow_hinge_axis)
             )
@@ -507,8 +510,7 @@ class ArmMPC:
         """
         feedback = self._feedback
         assert feedback is not None and self._uq is not None, (
-            "query_mdm_with_uncertainty requires a feedback method with a uq "
-            "layer."
+            "query_mdm_with_uncertainty requires a feedback method with a uq " "layer."
         )
         result = self._uq.query(
             gen,
@@ -656,9 +658,7 @@ class ArmMPC:
             q_cmd = feedback.advance(current_q)
             if not feedback.in_playback():
                 self.reset_warmstart()
-            if any(
-                not c.step_reachable(current_q, q_cmd) for c in self._constraints
-            ):
+            if any(not c.step_reachable(current_q, q_cmd) for c in self._constraints):
                 # Held rather than handed to execution's enumerating fallback.
                 q_cmd = current_q
             next_q = self._env.execute(q_cmd)

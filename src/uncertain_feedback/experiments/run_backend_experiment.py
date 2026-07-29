@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 from uncertain_feedback.experiments.backend_comparison import run_backend_comparison
 from uncertain_feedback.experiments.experiment_pipeline import (
     apply_persona_goals,
@@ -81,6 +82,8 @@ def main() -> None:
     # which needs a persistent Cartesian goal; any other config scores every backend
     # inf and the comparison is meaningless, so gate explicitly.
     require_correction_planner(cfg, "Backend comparison")
+    feedback_cfg = cfg.feedback
+    assert feedback_cfg is not None and feedback_cfg.uq is not None
     if not cfg.llm_cost.enabled:
         raise ValueError("Experiments require llm_cost.enabled: true in the config.")
 
@@ -94,7 +97,7 @@ def main() -> None:
     mpc = setup.mpc
 
     effective_text_time = (
-        args.text_time if args.text_time is not None else cfg.feedback.text_time
+        args.text_time if args.text_time is not None else feedback_cfg.text_time
     )
 
     q = setup.q0.copy()
@@ -106,12 +109,12 @@ def main() -> None:
             q = q_history[-1]
 
     mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
+        args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames
     )
     feedback_text = resolve_feedback_text(args.text, setup.user)
     cluster_selector = (
         (lambda means: choose_cluster(setup.user, setup.cost_context, means))
-        if cfg.feedback.uq.user_cluster and setup.user.bounds
+        if feedback_cfg.uq.user_cluster and setup.user.bounds
         else None
     )
     current_pose = setup.gen.build_pose_from_arm_aa(
@@ -123,7 +126,7 @@ def main() -> None:
         feedback_text,
         start_pose=current_pose,
         current_q=q,
-        auto_cluster=cfg.feedback.uq.auto_cluster,
+        auto_cluster=feedback_cfg.uq.auto_cluster,
         mdm_frames=mdm_frames,
         frozen_body=args.frozen_body,
         cluster_selector=cluster_selector,

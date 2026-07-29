@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
 from uncertain_feedback.planners.mpc import ArmMPC, CartesianConfig
+from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
 from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_CLAVICLE,
@@ -335,13 +335,12 @@ def test_project_forearm_frames_batched_matches_single() -> None:
         q[6] = rng.uniform(-2.0, -0.1)
         elbow_pos, forearm_rot = forearm_frame_fk(fk, q, None, None)
         ees.append(
-            elbow_pos
-            + forearm_rot.apply(_GRASP_V)
-            + rng.normal(scale=0.02, size=3)
+            elbow_pos + forearm_rot.apply(_GRASP_V) + rng.normal(scale=0.02, size=3)
         )
         rots.append(
-            (Rotation.from_rotvec(rng.normal(scale=0.05, size=3)) * forearm_rot)
-            .as_matrix()
+            (
+                Rotation.from_rotvec(rng.normal(scale=0.05, size=3)) * forearm_rot
+            ).as_matrix()
         )
     ee_batch = np.stack(ees).reshape(2, 3, 3)
     rot_batch = np.stack(rots).reshape(2, 3, 3, 3)
@@ -387,9 +386,10 @@ def test_project_forearm_frames_off_manifold() -> None:
     # representation near the +-pi boundary), only the roll is reported.
     expected_aa = q_to_arm_aa(q_ref, fk.elbow_hinge_axis)
     for row in range(3):
-        relative = Rotation.from_rotvec(arm_aa[row]) * Rotation.from_rotvec(
-            expected_aa[row]
-        ).inv()
+        relative = (
+            Rotation.from_rotvec(arm_aa[row])
+            * Rotation.from_rotvec(expected_aa[row]).inv()
+        )
         assert float(np.linalg.norm(relative.as_rotvec())) < 1e-8
     assert residual == pytest.approx(0.4, abs=1e-6)
 

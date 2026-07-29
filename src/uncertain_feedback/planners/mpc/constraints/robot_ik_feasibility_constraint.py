@@ -179,9 +179,7 @@ class RobotIkConstraint(FeasibilityConstraint):
         )
         return (gap if feasible[0] else np.inf), gap, solutions
 
-    def screen_frames(
-        self, q_frames: np.ndarray, current_q: np.ndarray
-    ) -> np.ndarray:
+    def screen_frames(self, q_frames: np.ndarray, current_q: np.ndarray) -> np.ndarray:
         """Drop robot-unreachable frames of a feedback trajectory.
 
         The frames are walked sequentially through continuation IK from the

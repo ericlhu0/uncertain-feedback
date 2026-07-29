@@ -262,9 +262,7 @@ def _parse_uq(data: dict[str, Any]) -> UqConfig:
             None if data.get("auto_cluster") is None else int(data["auto_cluster"])
         ),
         scale=_float(data.get("scale", 1.0), "feedback.uq.scale"),
-        user_cluster=_bool(
-            data.get("user_cluster", False), "feedback.uq.user_cluster"
-        ),
+        user_cluster=_bool(data.get("user_cluster", False), "feedback.uq.user_cluster"),
     )
 
 
@@ -282,11 +280,7 @@ def _parse_feedback(data: dict[str, Any]) -> FeedbackConfig:
             else _positive_int(data["frames"], "feedback.frames")
         ),
         text_time=int(data.get("text_time", 0)),
-        uq=(
-            _parse_uq(_mapping(data["uq"], "feedback.uq"))
-            if "uq" in data
-            else None
-        ),
+        uq=(_parse_uq(_mapping(data["uq"], "feedback.uq")) if "uq" in data else None),
     )
 
 
@@ -303,9 +297,7 @@ def _parse_constraints(data: dict[str, Any]) -> dict[str, Any]:
         valid = {f.name for f in fields(cfg_cls)}
         unknown = set(params_map) - valid
         if unknown:
-            raise ValueError(
-                f"Unknown constraints.{name} keys: {sorted(unknown)}."
-            )
+            raise ValueError(f"Unknown constraints.{name} keys: {sorted(unknown)}.")
         constraints[name] = cfg_cls(**params_map)
     return constraints
 

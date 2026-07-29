@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 from uncertain_feedback.experiments.experiment_pipeline import (
-    require_correction_planner,
     apply_persona_goals,
+    require_correction_planner,
     run_experiment,
 )
 from uncertain_feedback.planners.mpc.config import COST_BACKENDS, load_mpc_config
@@ -78,10 +79,9 @@ def main() -> None:
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Experiment config must provide an MDM pose.")
     mpc = setup.mpc
+    assert persona_cfg.feedback is not None
     mdm_frames = (
-        args.mdm_frames
-        if args.mdm_frames is not None
-        else persona_cfg.feedback.frames
+        args.mdm_frames if args.mdm_frames is not None else persona_cfg.feedback.frames
     )
 
     run_experiment(

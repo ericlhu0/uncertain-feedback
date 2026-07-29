@@ -7,13 +7,17 @@ parsed at load time and the constraint is built by the planner, which supplies
 the runtime objects (env, fk, spine3 frame).
 """
 
+from typing import Callable
+
 from uncertain_feedback.planners.mpc.constraints.base import FeasibilityConstraint
 from uncertain_feedback.planners.mpc.constraints.robot_ik_feasibility_constraint import (
     RobotIkConfig,
     RobotIkConstraint,
 )
 
-CONSTRAINT_BUILDERS: dict[str, tuple[type, type[FeasibilityConstraint]]] = {
+ConstraintBuilder = Callable[..., FeasibilityConstraint]
+
+CONSTRAINT_BUILDERS: dict[str, tuple[type, ConstraintBuilder]] = {
     "robot_ik": (RobotIkConfig, RobotIkConstraint),
 }
 
@@ -22,4 +26,5 @@ __all__ = [
     "RobotIkConfig",
     "RobotIkConstraint",
     "CONSTRAINT_BUILDERS",
+    "ConstraintBuilder",
 ]

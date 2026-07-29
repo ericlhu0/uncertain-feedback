@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 from uncertain_feedback.experiments.episode_loop import run_episode
 from uncertain_feedback.experiments.experiment_pipeline import (
     apply_persona_goals,
@@ -43,6 +44,7 @@ def main() -> None:
     args = _parser().parse_args()
     cfg = load_mpc_config(args.mpc_config)
     require_correction_planner(cfg, "Episode experiments")
+    assert cfg.feedback is not None
     if not cfg.llm_cost.enabled:
         raise ValueError("Episode experiments require llm_cost.enabled: true.")
     if args.all_personas:
@@ -56,9 +58,7 @@ def main() -> None:
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Episode experiment config must provide an MDM pose.")
     mpc = setup.mpc
-    mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
-    )
+    mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
     for name in persona_names:
         user = get_persona(name)
         if not user.bounds:

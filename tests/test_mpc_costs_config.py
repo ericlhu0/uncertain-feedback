@@ -40,6 +40,7 @@ from uncertain_feedback.planners.mpc.costs import (
     update_elbow_cost,
     update_preference_cost,
 )
+from uncertain_feedback.planners.mpc.feedback import MdmFeedback
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_DIM,
     SmplLeftArmFK,
@@ -87,7 +88,13 @@ def _stage_costs(mpc: ArmMPC, q_trajs: np.ndarray) -> np.ndarray:
         aa_trajs=q_to_arm_aa(q_trajs, mpc._fk.elbow_hinge_axis),
         q_trajs=q_trajs,
     )
+    assert mpc._goal_space is not None
     return mpc._goal_space.stage_cost(mpc._extra_costs)(batch)
+
+
+def _playback(mpc: ArmMPC) -> MdmFeedback:
+    assert mpc._feedback is not None
+    return mpc._feedback
 
 
 def _joint_limit_user() -> SimulatedUser:
@@ -1181,7 +1188,7 @@ def test_cartesian_mpc_consumes_final_mdm_goal_then_uses_cartesian_mode() -> Non
     assert not mpc.mdm_tracking_complete
     q1 = mpc.step(q0)
 
-    assert mpc.mdm_tracking_complete
+    assert not _playback(mpc).in_playback()
 
     called = {"cartesian": False}
     real_solve_sampling = mpc._solve_sampling
@@ -1221,14 +1228,14 @@ def test_cartesian_mpc_tracking_complete_only_after_playback_exhausts() -> None:
 
     # One frame followed, one remaining: still in playback.
     assert not mpc.mdm_tracking_complete
-    assert mpc._feedback._idx == 1
+    assert _playback(mpc)._idx == 1
 
     q2 = mpc.step(q1)
     np.testing.assert_allclose(q2, fk.arm_aa_to_q(far_goal))
 
     # Trajectory exhausted: Cartesian mode now engages.
-    assert mpc.mdm_tracking_complete
-    assert mpc._feedback._idx == 2  # type: ignore[unreachable]
+    assert not _playback(mpc).in_playback()
+    assert _playback(mpc)._idx == 2
 
 
 def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
@@ -1310,10 +1317,14 @@ def test_mdm_push_trajectory_stores_full_trajectory_for_playback() -> None:
 
     # The full-resolution trajectory is stored for direct playback.
     expected = mpc._fk.arm_aa_to_q_batch(frames)  # pylint: disable=protected-access
-    np.testing.assert_allclose(mpc._feedback._frames, expected)  # type: ignore[arg-type]
-    assert mpc._feedback._idx == 0
+    frames_now = _playback(mpc)._frames
+    assert frames_now is not None
+    np.testing.assert_allclose(frames_now, expected)
+    assert _playback(mpc)._idx == 0
     assert not mpc.mdm_tracking_complete
-    np.testing.assert_allclose(mpc._feedback.preview_q, expected[22])  # type: ignore[arg-type]
+    preview_now = _playback(mpc).preview_q
+    assert preview_now is not None
+    np.testing.assert_allclose(preview_now, expected[22])
 
 
 def test_mdm_push_trajectory_accepts_canonical_arm_q() -> None:
@@ -1323,7 +1334,9 @@ def test_mdm_push_trajectory_accepts_canonical_arm_q() -> None:
 
     mpc.push_trajectory(frames)
 
-    np.testing.assert_allclose(mpc._feedback._frames, frames)  # type: ignore[arg-type]
+    frames_pushed = _playback(mpc)._frames
+    assert frames_pushed is not None
+    np.testing.assert_allclose(frames_pushed, frames)
 
 
 def test_mdm_push_trajectory_rejects_collar_row() -> None:
@@ -1518,11 +1531,10 @@ def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
     )
 
     assert gen.received_spine3_aa is not None
-    assert mpc._feedback._frames is not None
+    uq_frames = _playback(mpc)._frames
+    assert uq_frames is not None
     np.testing.assert_allclose(gen.received_spine3_aa, spine3_aa)
-    np.testing.assert_allclose(
-        mpc._feedback._frames[0], fk.arm_aa_to_q(trajectory[0], spine3_aa)
-    )
+    np.testing.assert_allclose(uq_frames[0], fk.arm_aa_to_q(trajectory[0], spine3_aa))
 
 
 def test_uq_result_contains_all_cluster_mean_trajectories() -> None:

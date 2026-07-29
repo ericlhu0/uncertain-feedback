@@ -158,8 +158,7 @@ class DemoRig:
             or self.cfg.cartesian is None
         ):
             raise ValueError(
-                "demo_runner requires feedback: (with uq:) and cartesian: "
-                "sections."
+                "demo_runner requires feedback: (with uq:) and cartesian: sections."
             )
         self.artifact_root = Path("demo_runner_artifacts").resolve()
         self.personas_path = personas_path.resolve()
@@ -339,6 +338,7 @@ class DemoRig:
     # --- shared helpers ---------------------------------------------------
 
     def _cfg_with_goal(self, goal: np.ndarray) -> MpcRunConfig:
+        assert self.cfg.cartesian is not None
         return replace(
             self.cfg,
             cartesian=replace(self.cfg.cartesian, goals=[list(map(float, goal))]),
@@ -430,6 +430,11 @@ class DemoRig:
 
     def init_payload(self) -> dict[str, Any]:
         """The one-shot bootstrap payload the browser loads on connect."""
+        assert (
+            self.cfg.feedback is not None
+            and self.cfg.feedback.uq is not None
+            and self.cfg.cartesian is not None
+        )
         arm_bones = {
             (p, c)
             for p, c in SMPL_BONE_PAIRS_22

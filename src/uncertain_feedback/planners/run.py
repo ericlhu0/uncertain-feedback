@@ -691,9 +691,7 @@ def _rollout_reference_trajectory(
         q0,
         max(1, cfg.steps),
         on_post_step=(
-            None
-            if on_step is None
-            else lambda _step, q, _history: on_step(q, None)
+            None if on_step is None else lambda _step, q, _history: on_step(q, None)
         ),
         stop_on_runtime_error=True,
     )
@@ -835,6 +833,7 @@ def _rollout_human_reference_trajectory(
 _PreviewRollout = Callable[
     [MpcRunConfig, RunSetup, Callable[[np.ndarray, np.ndarray | None], None]], None
 ]
+
 
 def _select_preview_rollout(cfg: MpcRunConfig) -> _PreviewRollout | None:
     """Pick the offline rollout that runs the planner about to run live.
@@ -996,9 +995,7 @@ def run_repeated_correction_session(
     effective_text_time = (
         None
         if operator is not None
-        else (
-            args.text_time if args.text_time is not None else feedback_cfg.text_time
-        )
+        else (args.text_time if args.text_time is not None else feedback_cfg.text_time)
     )
     configured_base_costs = replace_generated_costs(
         mpc._extra_costs, None  # pylint: disable=protected-access

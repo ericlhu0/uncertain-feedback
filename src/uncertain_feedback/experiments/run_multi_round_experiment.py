@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 from uncertain_feedback.experiments.experiment_pipeline import (
     apply_persona_goals,
     require_correction_planner,
@@ -45,6 +46,7 @@ def main() -> None:
     args = _parser().parse_args()
     cfg = load_mpc_config(args.mpc_config)
     require_correction_planner(cfg, "Multi-round experiments")
+    assert cfg.feedback is not None
     if not cfg.llm_cost.enabled:
         raise ValueError("Multi-round experiments require llm_cost.enabled: true.")
     if args.all_personas:
@@ -58,14 +60,13 @@ def main() -> None:
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Multi-round experiment config must provide an MDM pose.")
     mpc = setup.mpc
-    mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
-    )
+    mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
     for name in persona_names:
         user = get_persona(name)
         if not user.bounds:
             raise ValueError(f"Persona {name!r} has no hidden feedback bounds.")
         persona_cfg = apply_persona_goals(cfg, name)
+        assert persona_cfg.cartesian is not None
         if len(persona_cfg.cartesian.goals) < 2:
             print(
                 f"[multi-round] warning: {name} has fewer than two goals; "

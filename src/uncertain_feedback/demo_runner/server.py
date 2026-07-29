@@ -32,8 +32,7 @@ if TYPE_CHECKING:
 _STATIC_DIR = Path(__file__).parent / "static"
 _ARTIFACT_ROOT = Path("demo_runner_artifacts").resolve()
 _DEFAULT_CONFIG = (
-    Path(__file__).parents[1]
-    / "planners/mpc/configs/mdm_llm_transfer.yaml"
+    Path(__file__).parents[1] / "planners/mpc/configs/mdm_llm_transfer.yaml"
 )
 
 # Mutable process-wide handle, installed by boot(); not a constant.

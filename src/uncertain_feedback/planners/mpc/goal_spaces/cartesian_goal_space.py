@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Callable
+from dataclasses import dataclass
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -18,7 +18,7 @@ from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_a
 class CartesianConfig:
     """Cartesian wrist goals and the distance that counts as reaching one."""
 
-    goals: list[list[float]] = field(default_factory=list)
+    goals: Sequence[Sequence[float] | np.ndarray] = ()
     threshold: float = 0.05
 
 

@@ -23,7 +23,6 @@ from uncertain_feedback.experiments.experiment_pipeline import (
 )
 from uncertain_feedback.planners.mpc import ArmMPC, SmplLeftArmFK
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
-from uncertain_feedback.uncertainty import UqClusterResult
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
@@ -37,6 +36,7 @@ from uncertain_feedback.planners.run import (
     run_planning_loop,
 )
 from uncertain_feedback.simulated_users import SimulatedUser
+from uncertain_feedback.uncertainty import UqClusterResult
 from uncertain_feedback.utils.plot import ArmVisualizer
 
 

@@ -43,10 +43,10 @@ def test_multi_round_loop_persists_history_and_replaces_costs(
     tmp_path, monkeypatch
 ) -> None:
     config_path = Path(
-        "src/uncertain_feedback/planners/mpc/configs/"
-        "mdm_llm_multiround.yaml"
+        "src/uncertain_feedback/planners/mpc/configs/mdm_llm_multiround.yaml"
     )
     cfg = load_mpc_config(config_path)
+    assert cfg.cartesian is not None
     cfg = replace(
         cfg,
         cartesian=replace(

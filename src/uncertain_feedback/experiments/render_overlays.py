@@ -14,6 +14,7 @@ Run as::
 from __future__ import annotations
 
 from pathlib import Path
+
 import numpy as np
 
 from uncertain_feedback.planners.mpc.config import load_mpc_config
@@ -41,6 +42,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     cfg = load_mpc_config(args.mpc_config)
+    feedback_cfg = cfg.feedback
+    if feedback_cfg is None or feedback_cfg.uq is None:
+        raise ValueError("Overlay rendering requires a feedback: section with uq:.")
 
     setup = build_run(args, cfg)
     if setup.gen is None or setup.initial_pose is None:
@@ -48,7 +52,7 @@ def main() -> None:
     mpc = setup.mpc
 
     effective_text_time = (
-        args.text_time if args.text_time is not None else cfg.feedback.text_time
+        args.text_time if args.text_time is not None else feedback_cfg.text_time
     )
     q = setup.q0.copy()
     q_history: list = []
@@ -59,7 +63,7 @@ def main() -> None:
             q = q_history[-1]
 
     mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
+        args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames
     )
     current_pose = setup.gen.build_pose_from_arm_aa(
         setup.initial_pose,
@@ -70,7 +74,7 @@ def main() -> None:
         args.text,
         start_pose=current_pose,
         current_q=q,
-        auto_cluster=cfg.feedback.uq.auto_cluster,
+        auto_cluster=feedback_cfg.uq.auto_cluster,
         mdm_frames=mdm_frames,
         frozen_body=args.frozen_body,
     )
@@ -90,7 +94,7 @@ def main() -> None:
     )
     goal_pos = (
         np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-        if reference_q is not None and cfg.cartesian.goals
+        if reference_q is not None and cfg.cartesian is not None
         else None
     )
     out_dir = Path(args.out_dir)

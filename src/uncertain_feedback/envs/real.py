@@ -954,7 +954,7 @@ class RealEnv(ExecutionEnv):
         if p.getConnectionInfo(physicsClientId=self._cid)["isConnected"]:
             return
         print(
-            "[real] live view window closed — continuing headless on the " "real robot",
+            "[real] live view window closed — continuing headless on the real robot",
             flush=True,
         )
         self._live_view = False

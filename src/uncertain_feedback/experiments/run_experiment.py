@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import cast
 
 from uncertain_feedback.experiments.experiment_pipeline import (
     apply_persona_goals,
+    require_correction_planner,
     run_experiment,
 )
-from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import COST_BACKENDS, load_mpc_config
 from uncertain_feedback.planners.run import build_parser, build_run
 from uncertain_feedback.simulated_users import PERSONAS, get_persona
@@ -63,10 +62,7 @@ def main() -> None:
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
 
-    if cfg.planner != "arm_mpc_cartesian":
-        raise ValueError(
-            "Experiments require planner: arm_mpc_cartesian; " f"got {cfg.planner!r}."
-        )
+    require_correction_planner(cfg, "Experiments")
     if not cfg.llm_cost.enabled:
         raise ValueError("Experiments require llm_cost.enabled: true.")
 
@@ -82,9 +78,10 @@ def main() -> None:
     setup = build_run(args, persona_cfg)
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Experiment config must provide an MDM pose.")
-    mpc = cast(LeftArmMPCMDMUQ, setup.mpc)
+    mpc = setup.mpc
+    assert persona_cfg.feedback is not None
     mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else persona_cfg.mdm_frames
+        args.mdm_frames if args.mdm_frames is not None else persona_cfg.feedback.frames
     )
 
     run_experiment(

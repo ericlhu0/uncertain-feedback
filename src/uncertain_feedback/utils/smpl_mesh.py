@@ -111,16 +111,18 @@ class SmplMeshCache:
                 betas=betas,
                 transl=torch.zeros(1, 3),
             ).joints[0, :24]
+            # pylint: disable=not-callable
             lengths = torch.stack(
                 [torch.linalg.norm(joints[c] - joints[j]) for j, c in _LEFT_ARM_BONES]
             )
+            # pylint: enable=not-callable
             error = lengths - target
             # Shape stays as close to neutral as the lengths allow: the arm pins
             # three numbers, and the remaining freedom should not invent a body.
             # The weight has to be tiny because the data term is in metres² — at
             # 1e-4 the prior outweighs 6 mm of arm and quietly wins.
             loss = (error * error).sum() + 1e-6 * (betas * betas).mean()
-            loss.backward()
+            loss.backward()  # type: ignore[no-untyped-call]
             optimizer.step()
         return betas.detach()
 

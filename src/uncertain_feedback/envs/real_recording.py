@@ -156,7 +156,7 @@ class RealRecording:
         receiver = NatNetReceiver.connect(mocap_host)
         controller = None
         if controller_host is not None:
-            from emprise_gen3_controller import (  # pylint: disable=import-outside-toplevel
+            from emprise_gen3_controller import (  # type: ignore[import-not-found]  # pylint: disable=import-outside-toplevel
                 ArmController,
             )
 

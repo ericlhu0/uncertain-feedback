@@ -1,0 +1,16 @@
+env: sim_robot_visual
+steps: 100
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.01
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
+
+arm:
+  - [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783]
+  - [0.6868865380518193, -0.18, -0.11006289820501858]
+  - [0.035651850950680734, -1.23, 0.7515284911778386]
+
+cartesian:
+  goals:
+    - [0.25, 0.3, 0.18]
+  threshold: 0.05

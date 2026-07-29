@@ -5,7 +5,7 @@ Run from the repo root -- the artifact root is resolved against the CWD.
 Usage::
 
     uv run python src/uncertain_feedback/demo_runner/server.py \\
-        [--mpc-config <path to an arm_mpc_cartesian_mdm_llm_transfer.yaml>] \\
+        [--mpc-config <path to an mdm_llm_transfer.yaml>] \\
         [--personas-file demo_runner_personas.json] \\
         [--trajectory-configs-file demo_runner_trajectory_configs.json] \\
         [--host 127.0.0.1] [--port 6781]
@@ -32,8 +32,7 @@ if TYPE_CHECKING:
 _STATIC_DIR = Path(__file__).parent / "static"
 _ARTIFACT_ROOT = Path("demo_runner_artifacts").resolve()
 _DEFAULT_CONFIG = (
-    Path(__file__).parents[1]
-    / "planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml"
+    Path(__file__).parents[1] / "planners/mpc/configs/mdm_llm_transfer.yaml"
 )
 
 # Mutable process-wide handle, installed by boot(); not a constant.

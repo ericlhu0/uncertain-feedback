@@ -25,7 +25,7 @@ from uncertain_feedback.experiments.experiment_pipeline import (
     save_rollout,
 )
 from uncertain_feedback.motion_generators.base import MotionGenerator
-from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, SimulatedUserConfig
 from uncertain_feedback.planners.mpc.costs import (
@@ -156,7 +156,7 @@ def _combine_costs(
 
 
 def run_episode(  # pylint: disable=too-many-arguments,too-many-locals,too-many-statements
-    mpc: LeftArmMPCMDMUQ,
+    mpc: ArmMPC,
     cfg: MpcRunConfig,
     user: SimulatedUser,
     gen: MotionGenerator,
@@ -177,7 +177,7 @@ def run_episode(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     root_dir = artifact_run_dir(artifact_base_dir, Path("episode_artifacts"))
     root_dir.mkdir(parents=True, exist_ok=True)
     base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
-    if not cfg.cartesian.goals:
+    if cfg.cartesian is None:
         raise ValueError("Episode experiments require cartesian.goals.")
     goal = np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
     episode_key = f"{user.name}_seed{cfg.seed}"

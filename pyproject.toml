@@ -57,7 +57,6 @@ dependencies = [
    "detectron2",
    "flask",
    "openai>=1.0.0",
-   "emprise-gen3-controller",
    "ssik",
 ]
 
@@ -146,14 +145,20 @@ module = [
     "smplx",
     "tqdm.*",
     "pybullet",
+    # ZMQ-client dep whose checkout is absent on non-rig hosts.
+    "emprise_gen3_controller",
+    "emprise_gen3_controller.*",
 ]
 ignore_missing_imports = true
 
 [tool.uv]
 extra-build-dependencies = { chumpy = ["pip"], detectron2 = ["torch", "pip"] }
-# emprise-gen3-controller is used only as a ZMQ client here; pin (pinocchio)
-# and ruckig are server-side deps (and pin forces numpy>=2.0, conflicting with
-# the MDM numpy<1.24 pin), so exclude them from resolution.
+# emprise-gen3-controller (the real-arm ZMQ client, envs/real_mirror.py) is not
+# a project dependency — its checkout only exists on rig hosts. Install it there
+# with `uv pip install -e ../../emprise-gen3-controller` after `uv sync`.
+# Its pin (pinocchio) and ruckig deps are server-side (and pin forces
+# numpy>=2.0, conflicting with the MDM numpy<1.24 pin), so exclude them from
+# resolution.
 # ssik asks for numpy>=1.26 but its compiled extensions are built against the
 # numpy 2 headers, whose ABI runs back to 1.19 — the Gen3 solver is exact on
 # the MDM pin, so keep numpy where MDM needs it.
@@ -173,7 +178,6 @@ torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 detectron2 = { git = "https://github.com/facebookresearch/detectron2.git" }
-emprise-gen3-controller = { path = "../../emprise-gen3-controller", editable = true }
 # No released ssik supports Python 3.10 (every wheel is cp311+); the 3.10 floor
 # landed on main after 3.3.0, so track the tested commit rather than a tag.
 ssik = { git = "https://github.com/personalrobotics/ssik", rev = "5109a670e041b842439cb74f501bacbb01f95883" }

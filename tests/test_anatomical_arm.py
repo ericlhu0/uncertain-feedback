@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
+from uncertain_feedback.planners.mpc import ArmMPC, CartesianConfig
 from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
-from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_CLAVICLE,
@@ -234,8 +234,18 @@ def test_mpc_actions_never_move_the_clavicle() -> None:
     """The robot holds the forearm, so plans may not use the clavicle DOFs."""
     fk = SmplLeftArmFK()
     target = np.array([0.1, -0.2, 0.1, 0.2, 0.1, -0.1, 0.4])
-    mpc = SmplLeftArmMPC(goals=[target], horizon=3, n_mpc_samples=32, fk=fk, seed=7)
     q0 = np.array([0.05, -0.1, 0.2, 0.0, 0.0, 0.0, 0.0])
+    wrist_rel = (
+        fk.fk(q_to_arm_aa(target, fk.elbow_hinge_axis))[-1] - fk.tpose_spine3_pos
+    )
+    mpc = ArmMPC(
+        horizon=3,
+        n_mpc_samples=32,
+        fk=fk,
+        seed=7,
+        initial_q=q0,
+        cartesian=CartesianConfig(goals=[wrist_rel]),
+    )
 
     _, plan = mpc.solve(q0)
     next_q = mpc.step(q0)
@@ -247,7 +257,17 @@ def test_mpc_actions_never_move_the_clavicle() -> None:
 def test_seeded_mpc_step_keeps_scalar_elbow_representation() -> None:
     fk = SmplLeftArmFK()
     target = np.array([0.1, -0.2, 0.1, 0.2, 0.1, -0.1, 0.4])
-    mpc = SmplLeftArmMPC(goals=[target], horizon=2, n_mpc_samples=16, fk=fk, seed=4)
+    wrist_rel = (
+        fk.fk(q_to_arm_aa(target, fk.elbow_hinge_axis))[-1] - fk.tpose_spine3_pos
+    )
+    mpc = ArmMPC(
+        horizon=2,
+        n_mpc_samples=16,
+        fk=fk,
+        seed=4,
+        initial_q=np.zeros(Q_DIM),
+        cartesian=CartesianConfig(goals=[wrist_rel]),
+    )
 
     next_q = mpc.step(np.zeros(Q_DIM))
     arm_aa = q_to_arm_aa(next_q, fk.elbow_hinge_axis)
@@ -315,13 +335,12 @@ def test_project_forearm_frames_batched_matches_single() -> None:
         q[6] = rng.uniform(-2.0, -0.1)
         elbow_pos, forearm_rot = forearm_frame_fk(fk, q, None, None)
         ees.append(
-            elbow_pos
-            + forearm_rot.apply(_GRASP_V)
-            + rng.normal(scale=0.02, size=3)
+            elbow_pos + forearm_rot.apply(_GRASP_V) + rng.normal(scale=0.02, size=3)
         )
         rots.append(
-            (Rotation.from_rotvec(rng.normal(scale=0.05, size=3)) * forearm_rot)
-            .as_matrix()
+            (
+                Rotation.from_rotvec(rng.normal(scale=0.05, size=3)) * forearm_rot
+            ).as_matrix()
         )
     ee_batch = np.stack(ees).reshape(2, 3, 3)
     rot_batch = np.stack(rots).reshape(2, 3, 3, 3)
@@ -367,9 +386,10 @@ def test_project_forearm_frames_off_manifold() -> None:
     # representation near the +-pi boundary), only the roll is reported.
     expected_aa = q_to_arm_aa(q_ref, fk.elbow_hinge_axis)
     for row in range(3):
-        relative = Rotation.from_rotvec(arm_aa[row]) * Rotation.from_rotvec(
-            expected_aa[row]
-        ).inv()
+        relative = (
+            Rotation.from_rotvec(arm_aa[row])
+            * Rotation.from_rotvec(expected_aa[row]).inv()
+        )
         assert float(np.linalg.norm(relative.as_rotvec())) < 1e-8
     assert residual == pytest.approx(0.4, abs=1e-6)
 

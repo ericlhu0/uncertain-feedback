@@ -34,7 +34,7 @@ from uncertain_feedback.experiments.experiment_pipeline import (
     evaluate_cost_conditions,
     generate_cost_for_cluster,
 )
-from uncertain_feedback.planners.mpc import SmplLeftArmMPC
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     MpcCostContext,
@@ -57,7 +57,7 @@ def _finite_or_none(score: float | None) -> float | None:
 
 
 def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-locals
-    mpc: SmplLeftArmMPC,
+    mpc: ArmMPC,
     cfg: MpcRunConfig,
     instruction: str,
     correction_traj: np.ndarray,
@@ -90,7 +90,9 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
     base_extra_costs = mpc._extra_costs  # pylint: disable=protected-access
     rollout_steps = max(1, rollout_steps)
 
-    cartesian_goal = np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian.goals else None
+    cartesian_goal = (
+        np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian is not None else None
+    )
 
     summary: dict[str, Any] = {
         "instruction": instruction,
@@ -163,7 +165,7 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
         entry["score"] = _finite_or_none(score)
         print(f"[backend-compare] {backend}: score={score:.4f}")
 
-        if user is not None and initial_q is not None and cfg.cartesian.goals:
+        if user is not None and initial_q is not None and cfg.cartesian is not None:
             entry["hidden_cost_evaluation"] = evaluate_cost_conditions(
                 cfg,
                 user,
@@ -195,7 +197,8 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
             np.save(backend_dir / "rollout.npy", rollout)
             entry["rollout_metrics"] = metrics
             n_frames = correction_traj.shape[0]
-            cutoff = max(1, round(n_frames * cfg.trajectory_fraction))
+            assert cfg.feedback is not None
+            cutoff = max(1, round(n_frames * cfg.feedback.trajectory_fraction))
             _render_rollout_video(
                 rollout,
                 context.fk,
@@ -207,9 +210,11 @@ def run_backend_comparison(  # pylint: disable=too-many-arguments,too-many-local
                 frame_colors=colors,
                 mdm_goal_q=correction_traj[cutoff - 1],
             )
-            if initial_q is not None and cfg.planner in (
-                "arm_mpc_cartesian",
-                "arm_mpc_cartesian_no_mdm",
+            if (
+                initial_q is not None
+                and cfg.cartesian is not None
+                and not cfg.constraints
+                and cfg.robot_actions is None
             ):
                 is_rollout, is_metrics = _run_initial_state_rollout(
                     cfg,

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 
 import numpy as np
 
@@ -21,14 +21,7 @@ from uncertain_feedback.experiments.experiment_pipeline import (
     evaluate_cost_conditions,
     generate_cost_for_cluster,
 )
-from uncertain_feedback.planners.mpc import (
-    ArmMPCCartesianNoMDM,
-    LeftArmMPCCartesian,
-    LeftArmMPCMDM,
-    SmplLeftArmFK,
-    SmplLeftArmMPC,
-)
-from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import UqClusterResult
+from uncertain_feedback.planners.mpc import ArmMPC, SmplLeftArmFK
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -43,12 +36,13 @@ from uncertain_feedback.planners.run import (
     run_planning_loop,
 )
 from uncertain_feedback.simulated_users import SimulatedUser
+from uncertain_feedback.uncertainty import UqClusterResult
 from uncertain_feedback.utils.plot import ArmVisualizer
 
 
-def _planner_frame_color(planner: SmplLeftArmMPC) -> str:
+def _planner_frame_color(planner: ArmMPC) -> str:
     """Return the arm color for the current planner state (MDM vs Cartesian)."""
-    if isinstance(planner, LeftArmMPCCartesian) and not planner.mdm_tracking_complete:
+    if planner.has_feedback and not planner.mdm_tracking_complete:
         return ArmVisualizer.MDM_COLOR
     return ArmVisualizer.TARGET_COLOR
 
@@ -63,58 +57,35 @@ def _build_cluster_rollout_planner(  # pylint: disable=too-many-arguments
     body_pos: np.ndarray | None,
     spine3_pos: np.ndarray | None,
     spine3_aa: np.ndarray | None,
-) -> SmplLeftArmMPC:
+) -> ArmMPC:
     """Build an isolated headless planner for one cluster comparison rollout."""
     extra_costs = _append_extra_cost(base_extra_costs, generated_cost)
-    common: dict[str, Any] = {
-        "horizon": cfg.horizon,
-        "n_mpc_samples": cfg.n_mpc_samples,
-        "max_angle_delta": cfg.max_angle_delta,
-        "goal_threshold": cfg.goal_threshold,
-        "visualize": False,
-        "fk": context.fk,
-        "spine3_pos": spine3_pos,
-        "spine3_aa": spine3_aa,
-        "body_pos": body_pos,
-        "extra_costs": extra_costs,
-        "seed": cfg.seed,
-    }
-    if cfg.planner == "arm_mpc_cartesian":
-        planner: SmplLeftArmMPC = LeftArmMPCCartesian(
-            cartesian_goals=[
-                np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals
-            ],
-            initial_q=current_q,
-            cartesian_threshold=cfg.cartesian.threshold,
-            **common,
-            advance_threshold=cfg.advance_threshold,
-            max_playback_delta=cfg.max_playback_delta,
-            trajectory_fraction=cfg.trajectory_fraction,
-            n_diffusion_samples=cfg.uq.diffusion_samples,
-            n_clusters=cfg.uq.n_clusters,
-        )
-    else:
-        planner = LeftArmMPCMDM(
-            **common,
-            goals=[],
-            advance_threshold=cfg.advance_threshold,
-            max_playback_delta=cfg.max_playback_delta,
-            trajectory_fraction=cfg.trajectory_fraction,
-        )
-
-    mdm_planner = cast(LeftArmMPCMDM, planner)
-    n_frames = cluster_traj.shape[0]
-    cutoff = max(1, round(n_frames * mdm_planner.trajectory_fraction))
-    mdm_planner.set_mdm_goal(
-        context.fk.arm_aa_to_q(cluster_traj[cutoff - 1], spine3_aa)
+    planner = ArmMPC(
+        horizon=cfg.horizon,
+        n_mpc_samples=cfg.n_mpc_samples,
+        max_angle_delta=cfg.max_angle_delta,
+        visualize=False,
+        fk=context.fk,
+        spine3_pos=spine3_pos,
+        spine3_aa=spine3_aa,
+        body_pos=body_pos,
+        extra_costs=extra_costs,
+        seed=cfg.seed,
+        initial_q=current_q,
+        cartesian=cfg.cartesian,
+        feedback=cfg.feedback,
     )
-    mdm_planner.push_trajectory(cluster_traj[:cutoff])
+
+    n_frames = cluster_traj.shape[0]
+    cutoff = max(1, round(n_frames * planner.trajectory_fraction))
+    planner.set_mdm_goal(context.fk.arm_aa_to_q(cluster_traj[cutoff - 1], spine3_aa))
+    planner.push_trajectory(cluster_traj[:cutoff])
     return planner
 
 
 def _rollout_metrics(
     rollout: np.ndarray,
-    mpc: SmplLeftArmMPC,
+    mpc: ArmMPC,
     context: MpcCostContext,
 ) -> dict[str, Any]:
     deltas = np.diff(rollout, axis=0)
@@ -127,15 +98,12 @@ def _rollout_metrics(
         context.spine3_pos,
         context.spine3_aa,
     )
+    _ = mpc
     metrics: dict[str, Any] = {
         "path_length_joint_l2": path_length,
         "final_q_norm": float(np.linalg.norm(final_q)),
         "final_wrist_position": positions[-1].tolist(),
     }
-    if mpc.current_goal is not None:
-        metrics["final_goal_distance"] = float(
-            np.linalg.norm(final_q - mpc.current_goal)
-        )
     return metrics
 
 
@@ -233,14 +201,10 @@ def _run_initial_state_rollout(  # pylint: disable=too-many-arguments
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Run MPC from the true initial state with one cluster's cost and the Cartesian goal."""
     extra_costs = _append_extra_cost(base_extra_costs, generated_cost)
-    planner = ArmMPCCartesianNoMDM(
-        cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
-        initial_q=initial_q,
-        cartesian_threshold=cfg.cartesian.threshold,
+    planner = ArmMPC(
         horizon=cfg.horizon,
         n_mpc_samples=cfg.n_mpc_samples,
         max_angle_delta=cfg.max_angle_delta,
-        goal_threshold=cfg.goal_threshold,
         visualize=False,
         fk=context.fk,
         spine3_pos=spine3_pos,
@@ -248,6 +212,8 @@ def _run_initial_state_rollout(  # pylint: disable=too-many-arguments
         body_pos=body_pos,
         extra_costs=extra_costs,
         seed=cfg.seed,
+        initial_q=initial_q,
+        cartesian=cfg.cartesian,
     )
     result = run_planning_loop(
         planner, initial_q, rollout_steps, stop_on_runtime_error=True
@@ -275,7 +241,7 @@ def _write_comparison_summary(root_dir: Path, summary: dict[str, Any]) -> None:
 
 
 def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-locals
-    mpc: SmplLeftArmMPC,
+    mpc: ArmMPC,
     cfg: MpcRunConfig,
     instruction: str,
     uq_result: UqClusterResult,
@@ -384,7 +350,9 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
         _write_comparison_summary(root_dir, summary)
 
     # Phase 2: roll out each cluster's cost and (optionally) render the video.
-    cartesian_goal = np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian.goals else None
+    cartesian_goal = (
+        np.asarray(cfg.cartesian.goals[0]) if cfg.cartesian is not None else None
+    )
     for label, traj, gen_cost, cdir, entry in costs_ready:
         rollout, metrics, colors = _run_cluster_comparison_rollout(
             cfg,
@@ -404,7 +372,7 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
         entry["rollout_path"] = str(cdir / "rollout.npy")
         entry["metrics_path"] = str(cdir / "metrics.json")
         entry["rollout_metrics"] = metrics
-        if user is not None and initial_q is not None and cfg.cartesian.goals:
+        if user is not None and initial_q is not None and cfg.cartesian is not None:
             entry["hidden_cost_evaluation"] = evaluate_cost_conditions(
                 cfg,
                 user,
@@ -420,8 +388,9 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
                 log_prefix="[cluster-compare]",
             )
         if save_video:
+            assert cfg.feedback is not None
             n_frames = traj.shape[0]
-            cutoff = max(1, round(n_frames * cfg.trajectory_fraction))
+            cutoff = max(1, round(n_frames * cfg.feedback.trajectory_fraction))
             _render_rollout_video(
                 rollout,
                 context.fk,
@@ -436,9 +405,11 @@ def run_cluster_comparison(  # pylint: disable=too-many-arguments,too-many-local
         summary["clusters"][str(label)] = entry
         _write_comparison_summary(root_dir, summary)
 
-    if initial_q is not None and cfg.planner in (
-        "arm_mpc_cartesian",
-        "arm_mpc_cartesian_no_mdm",
+    if (
+        initial_q is not None
+        and cfg.cartesian is not None
+        and not cfg.constraints
+        and cfg.robot_actions is None
     ):
         for label in summary["cluster_ids"]:
             initial_state_cost = generated_costs_by_label.get(int(label))

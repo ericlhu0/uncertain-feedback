@@ -1,0 +1,86 @@
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.01
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
+feedback:
+  max_playback_delta: 0.05
+  trajectory_fraction: 1
+  frames: 50
+  uq:
+    diffusion_samples: 500
+    n_clusters: 6
+    scale: 0.5
+    user_cluster: true
+
+user: adhesive_capsulitis
+
+corrections:
+  trigger_threshold: 0.02
+
+cartesian:
+  goals:
+    - [0.42, 0.30, 0.12]
+  threshold: 0.05
+
+transfer:
+  goals:
+    - [0.50, 0.20, 0.10]
+    - [0.11, 0.44, 0.26]
+    - [-0.04, 0.42, 0.18]
+
+persona_goals:
+  adhesive_capsulitis:
+    cartesian:
+      - [0.42, 0.30, 0.12]
+    transfer:
+      - [0.50, 0.20, 0.10]
+      - [0.11, 0.44, 0.26]
+      - [-0.04, 0.42, 0.18]
+  stroke_flexor_synergy:
+    cartesian:
+      - [0.42, 0.48, 0.12]
+    transfer:
+      - [0.18, 0.52, 0.14]
+      - [0.13, 0.50, 0.28]
+      - [-0.04, 0.48, 0.18]
+  painful_arc:
+    cartesian:
+      - [0.42, 0.30, 0.12]
+    transfer:
+      - [0.52, 0.12, 0.08]
+      - [0.30, 0.28, 0.28]
+      - [0.20, 0.38, 0.24]
+      - [0.10, 0.32, 0.35]
+  cross_body_pain:
+    cartesian:
+      - [-0.05, 0.40, 0.35]
+    transfer:
+      - [-0.12, 0.25, 0.25]
+      - [-0.08, 0.32, 0.28]
+      - [-0.08, 0.32, 0.35]
+  triceps_long_head_contracture:
+    cartesian:
+      - [0.25, 0.32, 0.15]
+    transfer: []
+  elbow_contracture:
+    cartesian:
+      - [-0.18, 0.40, 0.34]
+    transfer:
+      - [-0.22, 0.30, 0.34]
+      - [-0.16, 0.44, 0.30]
+      - [-0.16, 0.30, 0.40]
+
+preference_learning: false
+preference_alpha: 0
+
+llm_cost:
+  enabled: true
+  backend: llm
+  model: gpt-5.6-sol
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true
+  max_turns: 3
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"

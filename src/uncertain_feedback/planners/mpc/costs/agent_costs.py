@@ -334,7 +334,7 @@ class AgentCostGenerator(CostGenerator):
         source = _REPO_ROOT / "src" / "uncertain_feedback"
         package = destination / "src" / "uncertain_feedback"
         package.mkdir(parents=True)
-        # ``envs`` is staged because arm_mpc imports ExecutionEnv at module level;
+        # ``envs`` is staged because mpc.py imports ExecutionEnv at module level;
         # its meshes are skipped since nothing here constructs a sim env.
         ignored = shutil.ignore_patterns("__pycache__", "*artifacts*", "assets")
         for directory in ("planners", "uncertainty", "utils", "envs"):

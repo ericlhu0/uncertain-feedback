@@ -296,9 +296,7 @@ class SimMannequinEnv(ExecutionEnv):
         q = np.asarray(q, dtype=np.float64)
         if not self._attached:
             self._attach(q)
-        return MeasuredGrasp.measure(
-            *self._forearm_frame_pb(q), *self._ee_pose_pb()
-        )
+        return MeasuredGrasp.measure(*self._forearm_frame_pb(q), *self._ee_pose_pb())
 
     def execute_robot(self, target: np.ndarray) -> np.ndarray:
         if not self._attached:
@@ -592,9 +590,7 @@ class SimMannequinEnv(ExecutionEnv):
         return np.asarray(ee_pos, dtype=np.float64), Rotation.from_quat(ee_orn)
 
     def _solve_ik(self, target_pos: np.ndarray, target_quat: np.ndarray) -> np.ndarray:
-        solution = self.solve_robot_ik_exact(
-            target_pos, target_quat, self._robot_q()
-        )
+        solution = self.solve_robot_ik_exact(target_pos, target_quat, self._robot_q())
         assert solution is not None
         return solution
 

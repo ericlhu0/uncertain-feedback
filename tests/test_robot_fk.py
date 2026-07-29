@@ -120,9 +120,7 @@ def test_ee_pose_batched_shapes_and_state_restored() -> None:
             p.resetJointState(body, joint, value, physicsClientId=cid)
 
         chain = RobotChainFK.from_pybullet(body, ee_index, cid)
-        after = [
-            p.getJointState(body, j, physicsClientId=cid)[0] for j in movable
-        ]
+        after = [p.getJointState(body, j, physicsClientId=cid)[0] for j in movable]
         np.testing.assert_allclose(after, before)
 
         q = np.random.default_rng(1).uniform(-1.0, 1.0, size=(4, 3, 7))

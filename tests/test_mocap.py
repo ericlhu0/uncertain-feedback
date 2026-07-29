@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import struct
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -25,6 +26,9 @@ from uncertain_feedback.mocap.registration import (
     ArmRegistration,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
+
+if TYPE_CHECKING:
+    from uncertain_feedback.envs.real_recording import RealRecording
 
 _TRUE_YAW = 0.83
 
@@ -700,6 +704,7 @@ def test_replaying_a_recording_registers_where_the_live_stream_did(
     q_replay = replay.initial_q(fk_replay.arm_aa_to_q(arm_aa, None))
 
     np.testing.assert_allclose(q_replay, q_live, atol=1e-12)
+    assert replay._registration is not None and live._registration is not None
     np.testing.assert_allclose(
         replay._registration.base_pb,  # pylint: disable=protected-access
         live._registration.base_pb,  # pylint: disable=protected-access

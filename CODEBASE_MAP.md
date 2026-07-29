@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-28
+**Last updated:** 2026-07-29
 **Branch:** real-env
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -27,7 +27,7 @@ uncertain-feedback/
 ├── src/uncertain_feedback/
 │   ├── consts.py                     # Project-wide paths (MDM_ROOT, weights)
 │   ├── planners/
-│   │   ├── run.py                    # Single-run CLI + repeated-correction callbacks/artifacts; `_PREVIEW_ROLLOUTS` maps each Cartesian planner to the offline rollout that previews it (asserted at import to cover them all, so a new planner cannot silently inherit the plain ungated rollout) — plain human-action, IK-gated, and robot-action stand-ins, the last two against `RobotPlanPreviewEnv`
+│   │   ├── run.py                    # Single-run CLI + repeated-correction callbacks/artifacts; `_select_preview_rollout` picks the offline rollout that previews the run by capability (constraints > robot_actions > human), so a constrained run is never previewed unconstrained — plain human-action, constrained, and robot-action stand-ins, the last two against `RobotPlanPreviewEnv`
 │   │   ├── correction_session.py     # Edge-triggered repeated correction session state machine
 │   │   ├── interactive.py           # OperatorPause: stdin watcher for --interactive live runs
 │   │   └── mpc/
@@ -50,35 +50,42 @@ uncertain-feedback/
 │   │       │       ├── runtime_api.txt       # Shared technical contract
 │   │       │       ├── output_contract.txt   # Shared output rules
 │   │       │       └── stages/       # interpret.txt, ground.txt, author.txt, refine.txt, combine.txt
-│   │       ├── arm_mpc.py            # SmplLeftArmMPC (base sampling MPC)
-│   │       ├── arm_mpc_mdm.py        # LeftArmMPCMDM (+ MDM trajectory tracking)
-│   │       ├── arm_mpc_mdm_uq.py     # LeftArmMPCMDMUQ (+ UQ clustering)
-│   │       ├── arm_mpc_cartesian_base.py  # _CartesianGoalsMixin (shared Cartesian logic)
-│   │       ├── arm_mpc_cartesian.py  # LeftArmMPCCartesian (MDM then Cartesian)
-│   │       ├── arm_mpc_cartesian_no_mdm.py  # ArmMPCCartesianNoMDM (pure Cartesian)
-│   │       ├── arm_mpc_ik_gated.py   # _IKGateMixin + ArmMPCCartesianNoMDMIKGated + LeftArmMPCCartesianIKGated (human-action MPC gated by the env's robot IK; MDM variant screens playback too)
-│   │       ├── arm_mpc_robot.py      # _RobotActionsMixin + ArmMPCCartesianNoMDMRobot (sample robot joint deltas, cost the human arm)
-│   │       ├── arm_mpc_cartesian_robot.py  # LeftArmMPCCartesianRobot (MDM+UQ in robot joint space)
+│   │       ├── mpc.py                # ArmMPC — the one planner class, composed from the module slots below
+│   │       ├── action_spaces/        # ActionSpace ABC + RolloutBatch/StageCost contract
+│   │       │   ├── base.py           # ABC: rollouts/shape_costs/command/execute/hold
+│   │       │   ├── human_action_space.py  # HumanArmActions (Gaussian deltas composed on SO(3))
+│   │       │   └── robot_action_space.py  # RobotJointActions + RobotActionsConfig (robot joint deltas projected back through the grasp)
+│   │       ├── goal_spaces/          # GoalSpace ABC
+│   │       │   ├── base.py           # ABC: stage_cost/reached/progress
+│   │       │   └── cartesian_goal_space.py  # CartesianGoalSpace + CartesianConfig (spine3-relative wrist goals)
+│   │       ├── constraints/          # FeasibilityConstraint ABC + CONSTRAINT_BUILDERS registry
+│   │       │   ├── base.py           # ABC: rollout_feasible/screen_frames/step_reachable
+│   │       │   └── robot_ik_feasibility_constraint.py  # RobotIkConstraint + RobotIkConfig (continuation-IK gate + playback screens)
+│   │       ├── feedback/             # FeedbackMethod ABC
+│   │       │   ├── base.py           # ABC: playback state machine contract
+│   │       │   └── mdm.py            # MdmFeedback + FeedbackConfig (rate-limited MDM playback, stall-skip when constrained)
 │   │       └── configs/              # Example YAML config files
-│   │           ├── arm_mpc_cartesian_mdm.yaml
-│   │           ├── arm_mpc_cartesian_mdm_learn.yaml
-│   │           ├── arm_mpc_cartesian_mdm_llm.yaml
-│   │           ├── arm_mpc_cartesian_mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
-│   │           ├── arm_mpc_cartesian_mdm_llm_agent.yaml  # backend: agent (codex CLI)
-│   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
-│   │           ├── arm_mpc_cartesian_mdm_llm_multiround.yaml # pose-dependent multi-round experiment
-│   │           ├── arm_mpc_cartesian_mdm_llm_real.yaml  # full method on env: real, for --interactive live corrections
-│   │           ├── arm_mpc_cartesian_mdm_ik_gated_real.yaml  # full method on env: real with every robot-facing step IK-screened + compliant_joint
-│   │           ├── arm_mpc_cartesian_no_mdm.yaml
-│   │           ├── arm_mpc_cartesian_no_mdm_sim.yaml  # same, with env: sim_robot_visual
-│   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin.yaml  # same, with env: sim_mannequin (physics; more steps)
-│   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml  # same, with robot: kinova_gen3
-│   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml  # same, mirroring the sim robot onto the real Gen3 (real_mirror_host)
-│   │           ├── arm_mpc_cartesian_no_mdm_real.yaml  # env: real (OptiTrack-measured human arm + real Gen3)
-│   │           ├── arm_mpc_cartesian_no_mdm_robot_real.yaml  # robot-action sampler on env: real
-│   │           ├── arm_mpc_cartesian_no_mdm_ik_gated_replay.yaml  # the IK-gated planner on env: real driven from a saved RealRecording — no hardware, display, or network
-│   │           ├── arm_mpc_cartesian_no_mdm_robot_sim_mannequin_kinova.yaml  # robot-action sampler rehearsal on sim_mannequin
-│   │           └── arm_mpc_cartesian_robot_mdm_llm_real.yaml  # full method with the robot-action sampler on env: real
+│   │           ├── mdm.yaml
+│   │           ├── kimodo.yaml  # motion_generator: kimodo backend
+│   │           ├── mdm_learn.yaml
+│   │           ├── mdm_llm.yaml
+│   │           ├── mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
+│   │           ├── mdm_llm_agent.yaml  # backend: agent (codex CLI)
+│   │           ├── mdm_llm_transfer.yaml  # simulated-user transfer experiment
+│   │           ├── mdm_llm_multiround.yaml # pose-dependent multi-round experiment
+│   │           ├── mdm_llm_real.yaml  # full method on env: real, for --interactive live corrections
+│   │           ├── mdm_ik_gated_real.yaml  # full method on env: real with every robot-facing step IK-screened + compliant_joint
+│   │           ├── plain.yaml
+│   │           ├── plain_sim.yaml  # same, with env: sim_robot_visual
+│   │           ├── plain_mannequin.yaml  # same, with env: sim_mannequin (physics; more steps)
+│   │           ├── plain_mannequin_kinova.yaml  # same, with robot: kinova_gen3
+│   │           ├── plain_mannequin_kinova_mirror.yaml  # same, mirroring the sim robot onto the real Gen3 (real_mirror_host)
+│   │           ├── plain_real.yaml  # env: real (OptiTrack-measured human arm + real Gen3)
+│   │           ├── robot_real.yaml  # robot-action sampler on env: real
+│   │           ├── ik_gated_real.yaml  # robot_ik-constrained goal-seeking on env: real
+│   │           ├── ik_gated_replay.yaml  # the IK-gated planner on env: real driven from a saved RealRecording — no hardware, display, or network
+│   │           ├── robot_mannequin_kinova.yaml  # robot-action sampler rehearsal on sim_mannequin
+│   │           └── mdm_robot_real.yaml  # full method with the robot-action sampler on env: real
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
 │   │   ├── run_experiment.py         # CLI: one persona + one backend on the original goal
@@ -185,120 +192,49 @@ uncertain-feedback/
 
 ---
 
-## 3. Planner Hierarchy
+## 3. Planner Modules (one `ArmMPC` class)
 
-```
-SmplLeftArmMPC (arm_mpc.py)
-│  Core sampling MPC: sample N action sequences, roll out, pick min-cost.
-│  State: (7,) [clavicle rotvec, shoulder rotvec, elbow flexion angle].
-│  Actions only use the shoulder + elbow DOFs — the clavicle slots are zeroed
-│  in _sample_actions (a robot holding the forearm cannot actuate the
-│  shoulder girdle), so the clavicle stays at its (measured) current value.
-│  Warm-start: shifts previous best plan by one step each iteration.
-│
-├── LeftArmMPCMDM (arm_mpc_mdm.py)
-│     Adds: validate_trajectory() (advisory safety-cost check), push_trajectory()
-│     (validate + queue for rate-limited playback), set_mdm_goal(),
-│     MDM-colored arm rendering, body_pos background skeleton. The MDM trajectory
-│     is played back directly (no per-step sampling) at a bounded angular speed
-│     (max_playback_delta per joint per step), so jumps are eased not snapped;
-│     the MPC then resumes sampling toward the final goal. A new push replaces
-│     any unfinished playback suffix; remaining_mdm_trajectory() snapshots it.
-│
-│   └── LeftArmMPCMDMUQ (arm_mpc_mdm_uq.py)
-│         Adds: query_mdm_with_uncertainty() — draws N diffusion samples,
-│         clusters with XyzPositionClusterer, shows cluster picker UI (each
-│         cluster has a magnitude slider that scales the chosen motion about
-│         its start pose via scale_trajectory); the user can recursively
-│         re-cluster a selected cluster's raw samples and back up through the
-│         hierarchy before enqueuing the final subset mean. Headless selection:
-│         `auto_cluster` (fixed label)
-│         or `cluster_selector` (callable on the cluster means; used by
-│         simulated-user experiments; takes precedence). Transfer experiments
-│         use a selector that scores each scaled raw cluster mean with the
-│         hidden oracle cost and chooses the lowest score.
-│
-└── _CartesianGoalsMixin (arm_mpc_cartesian_base.py)
-      Adds: Cartesian wrist-goal queue; cost switches from joint-space to
-      world-space wrist position.
+There is a single planner class, `ArmMPC` (`mpc.py`), composed of four
+pluggable module slots. Every solve call runs one loop: warm-start the sampling
+mean (shift the previous best plan by one step), draw and integrate rollouts
+through the **action space**, evaluate the **goal space**'s stage cost under
+the **constraints**, and keep the argmin as the next warm start. While a
+**feedback** trajectory is queued, `step()` plays it back directly (rate-limited,
+no sampling) before the goal phase resumes.
 
-    ├── LeftArmMPCCartesian (arm_mpc_cartesian.py)
-    │     Inherits LeftArmMPCMDMUQ + _CartesianGoalsMixin.
-    │     First tracks MDM/UQ trajectory, then switches to Cartesian wrist goals.
-    │
-    │   ├── LeftArmMPCCartesianRobot (arm_mpc_cartesian_robot.py)
-    │   │     + _RobotActionsMixin. Same corrections/UQ/LLM machinery, but both
-    │   │     phases sample robot joint deltas and command the robot directly
-    │   │     (env.execute_robot). Playback keeps its rate-limited cursor; each
-    │   │     frame becomes the target of a robot-space tracking solve (geodesic
-    │   │     shoulder error — measured rotvecs sit near the ±pi boundary).
-    │   │
-    │   └── LeftArmMPCCartesianIKGated (arm_mpc_ik_gated.py)
-    │         + _IKGateMixin. Same corrections/UQ/LLM machinery; the goal phase
-    │         is the gated sampling of ArmMPCCartesianNoMDMIKGated, and MDM
-    │         playback stays direct but is IK-screened at three points so
-    │         execution's enumeration fallback / graceful miss never fire:
-    │         push_trajectory drops frames continuation IK cannot reach from
-    │         the live robot state (walked sequentially through kept frames),
-    │         each rate-limited step is checked and held when unreachable, and
-    │         a frame the arm stops progressing toward (closest-approach, so
-    │         jitter cannot reset the counter) is skipped after
-    │         playback_stall_steps steps — playback follows the trajectory's
-    │         reachable shadow. Requires env: real or sim_mannequin.
-    │
-    └── ArmMPCCartesianNoMDM (arm_mpc_cartesian_no_mdm.py)
-          Cartesian MPC only — no MDM, no UQ.
-          Decodes optional HML pose to initialize body but generates nothing.
+| Slot | Base class | Implementations | Config section | Absent means |
+|------|-----------|-----------------|----------------|--------------|
+| goal space | `GoalSpace` (`goal_spaces/base.py`) | `CartesianGoalSpace` — spine3-relative wrist goals, rotation-free | `cartesian:` | no goal phase (hold after feedback) |
+| action space | `ActionSpace` (`action_spaces/base.py`) | `HumanArmActions` — Gaussian deltas composed on SO(3), clavicle zeroed (a robot holding the forearm cannot actuate the shoulder girdle); `RobotJointActions` — robot joint deltas capped at the execution inf-norm cap, projected back through the rigid `MeasuredGrasp` (`project_forearm_frames`) so every cost still scores the human arm, projection residual hard-gated (`max_grasp_residual` over the leading `grasp_residual_frames`) and soft-penalized | `robot_actions:` | human-arm sampling |
+| feedback method | `FeedbackMethod` (`feedback/base.py`) | `MdmFeedback` — validated MDM trajectory played back one rate-limited frame per step (`max_playback_delta` per joint), with an optional UQ layer (`UqSelector`, `uncertainty/uq_selector.py`): draw N diffusion samples, cluster, pick interactively or headlessly (`auto_cluster` / `cluster_selector`), scale, enqueue the chosen mean | `feedback:` (nested `uq:`) | no correction phase |
+| constraints | `FeasibilityConstraint` (`constraints/base.py`) | `RobotIkConstraint` — masks rollouts whose leading frames continuation IK (`track_robot_ik_batch`, never execution's enumerating fallback) cannot place within `max_residual`; also screens feedback playback at push time (drop unreachable frames), step time (hold), and via the closest-approach stall-skip (`playback_stall_steps`) | `constraints:` (named entries, `CONSTRAINT_BUILDERS` registry) | unconstrained |
 
-        ├── ArmMPCCartesianNoMDMIKGated (arm_mpc_ik_gated.py)
-        │     Samples human-arm deltas, but checks each rollout's leading
-        │     gripper poses with the environment's IK. RealEnv uses the same
-        │     analytical Gen3 branch continuation and padded controller joint
-        │     box as execution, seeded sequentially through the rollout, as one
-        │     vectorized Gen3 FK/Jacobian solve over all MPC samples. Gating
-        │     goes through track_robot_ik_batch (continuation only), NOT
-        │     execution's solve_robot_ik_exact_batch: its enumeration fallback
-        │     would pass off-branch solutions the arm needs tens of steps to
-        │     reach, and costs ~1 vectorized-batch-equivalent per rejected
-        │     candidate, making the solve scale with infeasibility (16 ms ->
-        │     tens of seconds per frame near a limit).
-        │     Residuals above max_grasp_ik_residual
-        │     are gated; an explicit zero-motion sample makes hold the safe
-        │     fallback. The execution-rate cap is deliberately not part of IK.
-        │     Previewed by this same class against RobotPlanPreviewEnv, gate
-        │     included — previewing the ungated planner instead drew the run
-        │     walking into the poses the gate discards.
-        │
-        └── ArmMPCCartesianNoMDMRobot (arm_mpc_robot.py)
-              + _RobotActionsMixin (arm_mpc_robot.py): samples robot joint
-              deltas instead of human-arm deltas — every rollout is
-              robot-feasible by construction, and each sampled action is capped
-              at max_robot_joint_delta (inf-norm, uniformly scaled), the same
-              cap execute_robot enforces. Rollouts go robot FK (RobotChainFK)
-              → inverse of the rigid MeasuredGrasp → grasp-position-anchored
-              projection (project_forearm_frames, kinematics.py) onto the 4-DOF
-              arm manifold, so every cost term still receives (N, H+1, 3, 3)
-              human-arm axis-angles unchanged. Rollouts whose leading frames
-              (grasp_residual_frames) exceed max_grasp_residual are discarded
-              outright — they would break the grasp; the squared whole-horizon
-              residual (elbow displacement + untransmittable forearm roll) is
-              also soft-penalized (robot_infeasibility_weight). Requires
-              env: real or sim_mannequin.
-```
+Composition rules (enforced in the loader and `ArmMPC.__init__`):
+`feedback.uq` requires `feedback`; `constraints` and `robot_actions` are
+mutually exclusive (robot rollouts are feasible by construction and carry no
+per-sample human-q frames for the gate); `constraints`/`robot_actions` require
+an env with a robot (`real` or `sim_mannequin`). With constraints present the
+human sampler forces sample 0 to a zero-motion hold so an all-infeasible draw
+holds instead of selecting the least-infeasible motion.
 
-**YAML `planner` → class mapping:**
+Capability flags for consumers: `has_feedback`, `has_uq`, `has_goal_space`,
+`has_constraints`, `uses_robot_actions` — code never branches on planner
+names.
 
-| `planner` value                    | Class                       |
-|------------------------------------|-----------------------------|
-| `arm_mpc`                          | `SmplLeftArmMPC`            |
-| `arm_mpc_mdm`                      | `LeftArmMPCMDM`             |
-| `arm_mpc_mdm_uq`                   | `LeftArmMPCMDMUQ`           |
-| `arm_mpc_cartesian`                | `LeftArmMPCCartesian`       |
-| `arm_mpc_cartesian_no_mdm`         | `ArmMPCCartesianNoMDM`      |
-| `arm_mpc_cartesian_ik_gated`       | `LeftArmMPCCartesianIKGated` |
-| `arm_mpc_cartesian_no_mdm_ik_gated` | `ArmMPCCartesianNoMDMIKGated` |
-| `arm_mpc_cartesian_robot`          | `LeftArmMPCCartesianRobot`  |
-| `arm_mpc_cartesian_no_mdm_robot`   | `ArmMPCCartesianNoMDMRobot` |
+**Module sections → capabilities** (the retired `planner:` names, for
+orientation):
+
+| Old `planner` value | Equivalent sections |
+|---------------------|---------------------|
+| `plain` | `cartesian:` |
+| `arm_mpc_cartesian` | `cartesian:` + `feedback:` (with `uq:`) |
+| `plain_ik_gated` | `cartesian:` + `constraints: robot_ik:` |
+| `arm_mpc_cartesian_ik_gated` | `cartesian:` + `feedback:` + `constraints: robot_ik:` |
+| `plain_robot` | `cartesian:` + `robot_actions:` |
+| `arm_mpc_cartesian_robot` | `cartesian:` + `feedback:` + `robot_actions:` |
+
+(The joint-space `arm_mpc`/`arm_mpc_mdm`/`arm_mpc_mdm_uq` planners were retired
+with the joint-goal queue; Cartesian goals are the only goal space.)
 
 ---
 
@@ -459,11 +395,11 @@ When `llm_cost.enabled: true` in the YAML:
 
 - `rank_candidate_cost()` (`cost_generator.py`) evaluates a candidate cost by **ranking consistency**: the cost is applied directly to the trajectories whose preference order the user revealed — the chosen correction (`mdm_traj`) must cost strictly less than the original plan (`reference_traj`) and every UQ cluster the Demo Runner user explicitly marked wrong (`context.rejected_trajs`). Unmarked non-chosen clusters are dropped from summaries, images, and ranking; automated/simulated-user paths pass no negatives and rank only against the reference plan. All comparison trajectories are first resampled to equidistant joint-space-arclength points (`resample_equidistant`) so only the path matters, not timing (MDM output is systematically slower than a fresh rollout — timing is a pipeline artifact, not intent), then compared after z-normalization. Returns a `CostRanking` (rank accuracy + normalized margin + inert flag + explicit original-plan-improvement flag; `sort_key` orders candidates), or `None` when the context has no comparison trajectories — then `turns` falls back to the L2 rollout score. Every generator backend rejects rather than installs a cost whose chosen-correction score is not strictly lower than its original-plan score. The Demo Runner threads its per-level `undesirable_labels` into `generate_cost_for_cluster`; `build_motion_summaries` exposes rollout-labeled `candidate_comparison` entries containing chosen, current, original-plan, and per-marked-wrong-cluster terminal values and deltas.
 - `evaluate_candidate_cost()` rolls the goal-seeking MPC with a candidate cost installed (`_make_cost_eval_rollout` in `run.py`) and returns the mean FK-position L2 distance to the MDM correction (`_score_rollout`; both trajectories resampled equidistant-in-arclength, so the score is path-only). Lower is better; `inf` when the planner has no Cartesian goal. Drives the `backend_comparison.json` ranking and the `turns` fallback.
-- **Goal-reachability check** (`goal_reach_report()`): because ranking/`_score_rollout` grade only against the correction preferences, a cost can score well while stopping the arm short of the goal. `goal_reach_report(context, rollout)` reproduces the MPC's own `ArmMPCCartesian.goal_reached` criterion (FK the final rollout frame, spine3-relative wrist vs `context.cartesian_goal` within `context.cartesian_threshold`), returning `{reached, distance, threshold}` (or `None` for non-Cartesian planners). The goal + threshold are threaded onto `GeneratedCostContext` via `build_generated_cost_context` / `EvalState`. This is gated on `goal_conflict` (`parse_goal_conflict()` reads the stage-1 flag): only when stage one judged the goal reachable does missing it count against a candidate. In the `turns` backend selection is keyed on `(reach_rank, *ranking.sort_key)` so a goal-reaching candidate beats a non-reaching one and ranking consistency orders candidates within that, and each turn's feedback tells the model whether the goal was reached; in the `agent` backend `render_cost_comparison.py` prints a `goal reached:` line and `TASK.md` instructs codex to keep revising until the goal is reached (unless it conflicts).
+- **Goal-reachability check** (`goal_reach_report()`): because ranking/`_score_rollout` grade only against the correction preferences, a cost can score well while stopping the arm short of the goal. `goal_reach_report(context, rollout)` reproduces the MPC's own `ArmMPC.goal_reached` criterion (FK the final rollout frame, spine3-relative wrist vs `context.cartesian_goal` within `context.cartesian_threshold`), returning `{reached, distance, threshold}` (or `None` for non-Cartesian planners). The goal + threshold are threaded onto `GeneratedCostContext` via `build_generated_cost_context` / `EvalState`. This is gated on `goal_conflict` (`parse_goal_conflict()` reads the stage-1 flag): only when stage one judged the goal reachable does missing it count against a candidate. In the `turns` backend selection is keyed on `(reach_rank, *ranking.sort_key)` so a goal-reaching candidate beats a non-reaching one and ranking consistency orders candidates within that, and each turn's feedback tells the model whether the goal was reached; in the `agent` backend `render_cost_comparison.py` prints a `goal reached:` line and `TASK.md` instructs codex to keep revising until the goal is reached (unless it conflicts).
 - `CostGenerator.begin()` writes `reference_with_correction.mp4` into every generated-cost artifact directory using `context.full_correction_traj` when present, falling back to `context.mdm_traj`.
 - `evaluate_and_render()` does the **same single rollout** and additionally renders `ArmVisualizer.render_cost_feedback_overlay()` — a rollout (red) vs target-corrected-path (green) overlay — returning `(score, image_path)`. When an `angle_path` is passed it also renders `ArmVisualizer.render_joint_angle_comparison()` — a joint-angle-over-time graph (one subplot per anatomical joint feature; green target vs red rollout, per-frame series from `build_joint_angle_series()`) — so the model sees the temporal shape of the motion, not just endpoints. The green target is `context.full_correction_traj` when present (the **entire** intended path: pre-correction history → MDM correction → comfort-only continuation to the goal, assembled once in `run.py:_assemble_full_correction_traj` and threaded through `build_generated_cost_context` / `EvalState`), falling back to the MDM correction segment (`mdm_traj`) alone. The score (`_score_rollout`) still measures distance to the MDM correction segment only. It can also persist the exact rollout array and MP4 used for that feedback image. When `use_images` is on:
   - `turns` feeds `turn_<i>/comparison.png` + `turn_<i>/angles.png` + score back through the conversation each turn; backend experiments with `--save-video` also write `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
-  - `agent` self-iterates: `EvalState` (`costs/cost_feedback.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Before serialization, the full `MpcRunConfig` is reduced to frozen `EvalMpcConfig`, which retains only operational rollout fields (planner, Cartesian goals/threshold, step/sampling parameters, goal threshold, and seed); `user`, `persona_goals`, and all other config metadata are absent. `EvalState.load()` converts legacy full-config pickles, and combine staging always load/re-saves each round state so old sessions are sanitized too. Codex runs `experiments/render_cost_comparison.py` (writing both `comparison.png` and `angles.png`) to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
+  - `agent` self-iterates: `EvalState` (`costs/cost_feedback.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Before serialization, the full `MpcRunConfig` is reduced to frozen `EvalMpcConfig`, which retains only operational rollout fields (Cartesian goals/threshold, step/sampling parameters, seed, and a `has_constraints` flag — constrained rollouts need the env's robot IK, which cannot ride a pickle, so their candidates are not scoreable); `user`, `persona_goals`, and all other config metadata are absent. Combine staging always load/re-saves each round state so sessions stay sanitized. Codex runs `experiments/render_cost_comparison.py` (writing both `comparison.png` and `angles.png`) to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
 
 ---
 
@@ -475,7 +411,6 @@ When `llm_cost.enabled: true` in the YAML:
 
 | Key                    | Type     | Purpose                                               |
 |------------------------|----------|-------------------------------------------------------|
-| `planner`              | str      | One of the 9 planner choices                         |
 | `motion_generator`     | str      | Text-to-motion backend: `mdm` (default) or `kimodo`  |
 | `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default), `sim_robot_visual` (no-physics PyBullet scene with a Panda IK'd to a forearm grasp point), `sim_mannequin` (physics proxy: Panda drags the passive limb-manipulation mannequin arm; achieved q measured back from link positions), or `real` (real world: human arm measured from OptiTrack rigid bodies, real Gen3 commanded over ZMQ). Passed to the planner constructor (`build_run`, demo runner) after `set_pose_context`; every planner's `step` returns the env-achieved q. Envs render via `visualize()`/`save_video()` (`run.py --env-video`). |
 | `env_params`           | mapping  | Keyword args forwarded to the env constructor by `make_env` (empty default). `sim_mannequin` accepts `robot` (`panda` default, or `kinova_gen3` — Gen3 7-DOF + Robotiq 2F-85 URDF loaded from `~/kortex_description`), `robot_max_joint_delta` (per-step robot joint travel cap, rad), `robot_base_offset` (robot base position relative to spine3, pybullet frame), `robot_joint_limit_padding` (rad; shrinks robot joint limits so commands clear the real controller's soft limits), and — kinova_gen3 only — `real_mirror_host`/`real_mirror_confirm_start` (mirror the sim robot's achieved joint trajectory onto the real Gen3 via an emprise-gen3-controller ZMQ server, planning against the controller's enforced joint-limit table; see `envs/real_mirror.py`). `real` accepts `mocap_host` (OptiTrack PC address), `mocap_rigid_bodies` (Motive streaming ids for `robot_base`/`collar`/`collar_right`/`shoulder`/`elbow`/`wrist`; the right-collar body — read at calibration only — makes the registration yaw measurable: the left→right collar axis is the torso's facing, so its measured direction solves the yaw with no arm assumption, and the robot is loaded at that solved yaw), `mocap_hold_timeout` (s, default 0.5 — dropout hold before raising `MocapStaleError`), `recording` (path to a `RealRecording` .npz — replays both sensed channels instead of the live streams; set this *or* `mocap_host`, not both; `real_mirror_host` then only says whether a robot is in the loop at all, not what it talks to), plus `robot`, `robot_max_joint_delta`, `robot_joint_limit_padding`, `real_mirror_host` (null = mocap-only dry run, no command reaches the arm), `real_mirror_confirm_start` (one prompt before tracking starts — the real env moves nothing at startup, since the grasp must already be taken and is measured from the real ee pose), `control_mode` (default `position_joint`; `compliant_joint` tracks targets with the emprise controller's joint-space impedance so the arm yields to the person — gains are server-side), `live_view`/`live_view_fps` (PyBullet GUI window with the measured person as an SMPL mesh next to the robot's meshes; needs a display, mesh refresh rate-limited because each refresh replaces the whole mesh), and `preview_plan` (default true; draw each planned step in the live view as it is solved and wait for operator approval before the first command — needs `live_view`). |
@@ -484,26 +419,19 @@ When `llm_cost.enabled: true` in the YAML:
 | `n_mpc_samples`        | int      | Candidate action sequences per step                  |
 | `seed`                 | int      | MPC action-sampling seed (default 0); also locks each MDM generation request in Demo Runner |
 | `max_angle_delta`      | float    | Sampling std dev (radians)                           |
-| `max_robot_joint_delta` | float   | Robot-action planners only: per-step inf-norm cap on sampled robot joint deltas (rad, default 0.005), the same cap `execute_robot` enforces. The env's `robot_max_joint_delta` remains the hardware backstop, applied in `execute_robot` with uniform scaling (whole delta slowed) rather than the IK path's per-joint clip. |
-| `robot_joint_delta_std` | float \| null | Robot-action planners only: std of the joint-delta sampling noise around the warm-started previous plan (rad, default null = a third of the cap). Keep it well below `max_robot_joint_delta` — at std == cap nearly every sample saturates the inf-norm cap and the uniform rescale drowns the warm-started mean in noise. |
-| `robot_infeasibility_weight` | float | Robot-action planners only: weight on the squared grasp-transmission residual from `project_forearm_frames` (default 1.0) — penalizes sampled robot motions the arm cannot follow (elbow off the upper-arm sphere, forearm roll a parallel-jaw grasp cannot transmit). |
-| `max_grasp_residual` / `grasp_residual_frames` | float / int | Robot-action planners only: hard gate — rollouts whose first `grasp_residual_frames` frames (default 3) exceed `max_grasp_residual` per frame (default 0.02; m + rad) are discarded before the argmin (fallback: least-violating sample if none pass). Only the leading frames are gated since only they get executed; the tail stays soft-penalized. The residual floor scales with `max_robot_joint_delta`; tighter = stricter grasp preservation, slower progress. |
-| `max_grasp_ik_residual` | float | IK-gated human-action planners only: maximum gripper pose error (metres + radians, default 0.001) over the leading `grasp_residual_frames`. The real env evaluates it with the same analytical IK and padded joint-limit box as execution. Also the threshold for `arm_mpc_cartesian_ik_gated`'s push and per-step playback screens. |
-| `playback_stall_steps` | int | `arm_mpc_cartesian_ik_gated` only: consecutive playback steps without closest-approach progress on the current MDM frame before the cursor skips it (default 40). Bounds how long an unreachable frame — or a person actively resisting — can hold the run. |
+| `robot_actions.*`      | RobotActionsConfig | Presence switches the action space to robot joint deltas. `max_joint_delta` (per-step inf-norm cap on sampled robot joint deltas, rad, default 0.005 — the same cap `execute_robot` enforces; the env's `robot_max_joint_delta` remains the hardware backstop), `joint_delta_std` (sampling-noise std around the warm-started previous plan, rad; default null = a third of the cap — keep it well below the cap or the uniform rescale drowns the warm-started mean in noise), `infeasibility_weight` (weight on the squared grasp-transmission residual from `project_forearm_frames`, default 1.0), `max_grasp_residual` / `grasp_residual_frames` (hard gate: rollouts whose first `grasp_residual_frames` frames [default 3] exceed `max_grasp_residual` per frame [default 0.02; m + rad] are discarded before the argmin; fallback: least-violating sample if none pass). Mutually exclusive with `constraints:`. |
+| `constraints.*`        | mapping  | Named feasibility constraints (registry: `CONSTRAINT_BUILDERS`). `robot_ik:` takes `max_residual` (maximum gripper pose error, metres + radians, default 0.001, over the leading `grasp_residual_frames` [default 3]; the real env evaluates it with the same analytical IK and padded joint-limit box as execution; also the threshold for the feedback push and per-step playback screens), and `playback_stall_steps` (consecutive playback steps without closest-approach progress before the cursor skips the frame, default 40). Requires `env: real` or `sim_mannequin`. |
 | `pose`                 | path?    | HML pose `.pt` file for initial body state           |
 | `arm`                  | 3×3 list? | Initial left-arm `[shoulder, elbow, wrist]` axis-angle override on top of `pose` (same semantics as `--arm`, which wins when both are given) |
-| `goal_threshold`       | float    | L2 dist threshold to pop goal (default 0.01)         |
-| `advance_threshold`    | float    | Goal-advance threshold for the MPC resume phase (default 0.1). MDM frames are now played back directly, so this no longer governs MDM frame advancement. |
-| `max_playback_delta`   | float    | Max per-joint rotation (radians) per step while following the MDM trajectory (default 0.1). Rate limit: caps playback angular speed so the initial jump into the trajectory and any large frame-to-frame jump are eased rather than snapped. |
-| `trajectory_fraction`  | float    | Fraction of MDM frames to enqueue (default 1.0)      |
+| `feedback.*`           | FeedbackConfig | Presence enables the MDM feedback method. `max_playback_delta` (max per-joint rotation, radians, per step while following the MDM trajectory, default 0.05 — rate limit easing the initial jump into the trajectory and any large frame-to-frame jump), `trajectory_fraction` (fraction of MDM frames to enqueue, default 1.0), `frames` (exact MDM frames to generate; null = generator default), `text_time` (step at which the scripted correction triggers), and a nested optional `uq:` (below). |
+| `feedback.uq.*`        | UqConfig | Presence enables the UQ layer: `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose [default] \| agglo_path_pca \| agglo_t2m; Demo Runner dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
 | `num_denoising_steps`  | int?     | Kimodo DDIM steps (kimodo backend only; None = backend default 100) |
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
 | `user`                 | str      | Simulated-user persona name (default `unrestricted`); loaded by `build_run` into `RunSetup.user` for every run |
 | `corrections.*`        | CorrectionConfig | `trigger_threshold` (default 0.02 rad). Restricted users trigger on a new above-threshold episode after returning to comfort; legacy `transfer.trigger_threshold` is accepted as a fallback. |
-| `uq.*`                 | UqConfig | `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose [default] \| agglo_path_pca \| agglo_t2m; Demo Runner dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
-| `cartesian.*`          | CartesianConfig | `goals` (list of [x,y,z]), `threshold`        |
+| `cartesian.*`          | CartesianConfig | Presence enables the Cartesian goal space: `goals` (non-empty list of [x,y,z]), `threshold` |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets); legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
@@ -604,7 +532,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | Command / Script                                      | Purpose                              |
 |-------------------------------------------------------|--------------------------------------|
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
-| `uv run python src/.../planners/run.py --mpc-config <yaml> --interactive` | Same run, but each correction's trigger and text come from the operator mid-run (`OperatorPause`); `text_time`/`--text` ignored. Full method on the real rig: `arm_mpc_cartesian_mdm_llm_real.yaml` |
+| `uv run python src/.../planners/run.py --mpc-config <yaml> --interactive` | Same run, but each correction's trigger and text come from the operator mid-run (`OperatorPause`); `text_time`/`--text` ignored. Full method on the real rig: `mdm_llm_real.yaml` |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml> [--persona <name>] [--backend agent]` | One simulated-user persona/backend experiment on the original goal |
 | `uv run python src/.../experiments/run_cluster_experiment.py --mpc-config <yaml>` | Per-cluster cost comparison with base/oracle/generated hidden-cost evaluation for Cartesian goals |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison with base/oracle/generated hidden-cost evaluation |
@@ -633,6 +561,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
   `conda run` subprocess (`kimodo/_kimodo_inference_worker.py`), mirroring the SAM/MHR
   worker pattern. Needs gated HF access to `meta-llama/Meta-Llama-3-8B-Instruct`.
 - **OpenAI** — used for LLM cost generation (`llm/openai_model.py`)
+- **emprise-gen3-controller** — private lab repo driving the real Kinova Gen3 (`envs/real_mirror.py`); not a project dependency — rig hosts install it with `uv pip install -e ../../emprise-gen3-controller` after `uv sync`
 - **sklearn** — KMeans + AgglomerativeClustering in `clustering/base.py`, PCA in `clustering/path_pca_clusterer.py`
 - **smplx** — SMPL model loading
 - **detectron2** — human pose estimation in data collection worker

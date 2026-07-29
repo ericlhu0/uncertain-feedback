@@ -7,13 +7,16 @@ from __future__ import annotations
 import json
 import pickle
 import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.costs import (
     CombineCostGenerator,
     CompositeTrajectoryCost,
@@ -56,14 +59,13 @@ def _round(tmp_path: Path, index: int) -> CostRound:
         fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
     )
     full_cfg = SimpleNamespace(
-        planner="arm_mpc_cartesian",
         steps=3,
         horizon=2,
         n_mpc_samples=4,
         max_angle_delta=0.01,
-        goal_threshold=0.05,
         seed=0,
         cartesian=SimpleNamespace(goals=[[0.1, 0.2, 0.3]], threshold=0.05),
+        constraints={},
         user=f"secret_persona_{index}",
         persona_goals={f"secret_persona_{index}": [[9.0, 9.0, 9.0]]},
     )
@@ -152,9 +154,7 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
         slots=(0,), low=np.full((1, 3), -1.0), high=np.full((1, 3), 1.0)
     )
     old = GeneratedPythonCost(_CODE, {"weight": 9.0}, context)
-    mpc = SmplLeftArmMPC(
-        goals=[np.zeros(7)], extra_costs=CompositeTrajectoryCost([base, old])
-    )
+    mpc = ArmMPC(extra_costs=CompositeTrajectoryCost([base, old]))
     generator = CombineCostGenerator(
         context=context,
         instruction="feedback",
@@ -207,6 +207,36 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
     assert not hasattr(EvalState.load(staged_state_path).cfg, "user")
 
 
+def _bwrap_usable() -> bool:
+    """Whether bwrap can create a user namespace on this host.
+
+    Ubuntu's apparmor_restrict_unprivileged_userns denies it to unconfined
+    binaries ("setting up uid map: Permission denied"), which no amount of
+    bwrap flags can work around.
+    """
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        return False
+    try:
+        probe = subprocess.run(
+            [bwrap, "--ro-bind", "/", "/", "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
+_requires_bwrap = pytest.mark.skipif(
+    not _bwrap_usable(),
+    reason="bwrap cannot create a user namespace on this host",
+)
+
+
+@_requires_bwrap
 def test_combine_codex_streams_output_to_console_and_log(tmp_path, capsys) -> None:
     run_dir = tmp_path / "combine"
     run_dir.mkdir()
@@ -230,6 +260,7 @@ def test_combine_codex_streams_output_to_console_and_log(tmp_path, capsys) -> No
     assert message in (run_dir / "codex.log").read_text(encoding="utf-8")
 
 
+@_requires_bwrap
 def test_agent_sandbox_hides_oracle_and_prior_runs(tmp_path) -> None:
     secret_session_name = "hidden_persona_session"
     run_dir = tmp_path / secret_session_name / "combine"

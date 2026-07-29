@@ -19,10 +19,12 @@ from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.envs.grasp import MeasuredGrasp, forearm_frame_fk
 from uncertain_feedback.envs.robot_fk import RobotChainFK
 from uncertain_feedback.envs.sim_mannequin import _PANDA_URDF, _SMPL_TO_PB
-from uncertain_feedback.planners.mpc.arm_mpc_cartesian_robot import (
-    LeftArmMPCCartesianRobot,
+from uncertain_feedback.planners.mpc import (
+    ArmMPC,
+    CartesianConfig,
+    FeedbackConfig,
+    RobotActionsConfig,
 )
-from uncertain_feedback.planners.mpc.arm_mpc_robot import ArmMPCCartesianNoMDMRobot
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_DIM,
@@ -31,9 +33,7 @@ from uncertain_feedback.planners.mpc.kinematics import (
     q_to_arm_aa,
 )
 
-_PANDA_HOME = np.array(
-    [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=np.float64
-)
+_PANDA_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=np.float64)
 
 
 def _panda_chain() -> tuple[RobotChainFK, np.ndarray, np.ndarray]:
@@ -153,19 +153,18 @@ def test_no_mdm_robot_planner_reaches_cartesian_goal() -> None:
     goal = (wrist0 - spine3) + np.array([0.0, 0.08, -0.05])
 
     recorder = _RecordingCost()
-    mpc = ArmMPCCartesianNoMDMRobot(
-        cartesian_goals=[goal],
-        initial_q=q0,
+    mpc = ArmMPC(
         horizon=5,
         n_mpc_samples=128,
-        max_robot_joint_delta=0.02,
-        # The grasp gate scales with the sampling std dev; match it here (the
-        # default is tuned for the configs' 0.005).
-        max_grasp_residual=0.05,
         fk=fk,
         extra_costs=CompositeTrajectoryCost([recorder]),
         seed=0,
         env=env,
+        initial_q=q0,
+        cartesian=CartesianConfig(goals=[goal]),
+        # The grasp gate scales with the sampling std dev; match it here (the
+        # default is tuned for the configs' 0.005).
+        robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.05),
     )
     dist0 = float(np.linalg.norm((wrist0 - spine3) - goal))
     q = q0
@@ -186,23 +185,22 @@ def test_mdm_robot_planner_tracks_playback_then_reaches_goal() -> None:
     spine3 = fk.tpose_spine3_pos
     goal = (wrist0 - spine3) + np.array([0.0, 0.06, -0.04])
 
-    mpc = LeftArmMPCCartesianRobot(
-        cartesian_goals=[goal],
-        initial_q=q0,
+    mpc = ArmMPC(
         horizon=5,
         n_mpc_samples=256,
-        max_robot_joint_delta=0.01,
-        max_grasp_residual=0.03,
-        max_playback_delta=0.1,
         fk=fk,
         seed=0,
         env=env,
+        initial_q=q0,
+        cartesian=CartesianConfig(goals=[goal]),
+        feedback=FeedbackConfig(max_playback_delta=0.1),
+        robot_actions=RobotActionsConfig(max_joint_delta=0.01, max_grasp_residual=0.03),
     )
 
     frames = np.tile(q0, (8, 1))
     frames[:, 6] = q0[6] + np.linspace(0.0, -0.3, 8)
     mpc.push_trajectory(frames)
-    assert mpc._in_playback()
+    assert mpc._feedback is not None and mpc._feedback.in_playback()
 
     q = q0
     for _ in range(80):
@@ -224,25 +222,26 @@ def test_robot_planner_yaml_configs_load() -> None:
     from uncertain_feedback.planners.mpc.config import load_mpc_config
 
     configs = Path("src/uncertain_feedback/planners/mpc/configs")
-    for name, planner in [
-        ("arm_mpc_cartesian_no_mdm_robot_real.yaml", "arm_mpc_cartesian_no_mdm_robot"),
-        ("arm_mpc_cartesian_robot_mdm_llm_real.yaml", "arm_mpc_cartesian_robot"),
-        (
-            "arm_mpc_cartesian_no_mdm_robot_sim_mannequin_kinova.yaml",
-            "arm_mpc_cartesian_no_mdm_robot",
-        ),
+    for name in [
+        "robot_real.yaml",
+        "mdm_robot_real.yaml",
+        "robot_mannequin_kinova.yaml",
     ]:
         cfg = load_mpc_config(configs / name)
-        assert cfg.planner == planner
+        assert cfg.robot_actions is not None
         # The rig-tuned numbers churn; check the sampling geometry instead —
         # the std must sit well below the inf-norm cap or the uniform rescale
         # drowns the warm-started mean in noise.
-        assert cfg.max_robot_joint_delta > 0.0
-        assert cfg.robot_joint_delta_std is not None
-        assert 0.0 < cfg.robot_joint_delta_std <= cfg.max_robot_joint_delta / 2.0
-        assert cfg.robot_infeasibility_weight > 0.0
-        assert cfg.max_grasp_residual > 0.0
-        assert cfg.grasp_residual_frames >= 1
+        assert cfg.robot_actions.max_joint_delta > 0.0
+        assert cfg.robot_actions.joint_delta_std is not None
+        assert (
+            0.0
+            < cfg.robot_actions.joint_delta_std
+            <= cfg.robot_actions.max_joint_delta / 2.0
+        )
+        assert cfg.robot_actions.infeasibility_weight > 0.0
+        assert cfg.robot_actions.max_grasp_residual > 0.0
+        assert cfg.robot_actions.grasp_residual_frames >= 1
         assert cfg.env in ("real", "sim_mannequin")
 
 
@@ -251,37 +250,49 @@ def test_robot_solve_discards_grasp_breaking_rollouts() -> None:
     env, q0 = _make_env_and_start(fk)
     wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
     goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
-    mpc = ArmMPCCartesianNoMDMRobot(
-        cartesian_goals=[goal],
-        initial_q=q0,
+    mpc = ArmMPC(
         horizon=5,
         n_mpc_samples=128,
-        max_robot_joint_delta=0.02,
-        max_grasp_residual=0.02,
-        grasp_residual_frames=3,
         fk=fk,
         seed=0,
         env=env,
+        initial_q=q0,
+        cartesian=CartesianConfig(goals=[goal]),
+        robot_actions=RobotActionsConfig(
+            max_joint_delta=0.02, max_grasp_residual=0.02, grasp_residual_frames=3
+        ),
     )
     grasp = env.current_grasp(q0)
     robot_q = env.current_robot_q()
-    target = mpc._robot_solve(q0, mpc._robot_cartesian_cost)
+    assert mpc._goal_space is not None
+    stage = mpc._goal_space.stage_cost(mpc._extra_costs)
+    batch, best = mpc._solve_sampling(q0, stage, mpc._actions)
+    target = mpc._actions.command(batch, best)
     # The chosen first step keeps the grasp within the gate.
     step = np.stack([robot_q, target])
-    _aa, _w, residual = mpc._project_rollouts(step[np.newaxis], q0, grasp)
+    ee_pos, ee_rot = env.robot_fk().ee_pose(step[np.newaxis])
+    forearm_rot_pb = ee_rot @ grasp.rotation.inv().as_matrix()
+    _aa, _w, residual = project_forearm_frames(
+        fk,
+        ee_pos @ _SMPL_TO_PB,
+        _SMPL_TO_PB.T @ forearm_rot_pb,
+        grasp.position,
+        np.asarray(q0, dtype=np.float64),
+        fk.tpose_spine3_pos,
+        np.zeros(3),
+    )
     assert float(residual[0, 1]) <= 0.02 + 1e-9
 
     # An impossible gate falls back to the least-violating sample, not a crash.
-    mpc_strict = ArmMPCCartesianNoMDMRobot(
-        cartesian_goals=[goal],
-        initial_q=q0,
+    mpc_strict = ArmMPC(
         horizon=5,
         n_mpc_samples=64,
-        max_robot_joint_delta=0.02,
-        max_grasp_residual=0.0,
         fk=fk,
         seed=0,
         env=env,
+        initial_q=q0,
+        cartesian=CartesianConfig(goals=[goal]),
+        robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.0),
     )
     q = mpc_strict.step(q0)
     assert q.shape == (Q_DIM,)
@@ -306,16 +317,15 @@ def test_robot_plan_preview_env_rollout_is_consistent() -> None:
     )
     wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
     goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.05, -0.03])
-    mpc = ArmMPCCartesianNoMDMRobot(
-        cartesian_goals=[goal],
-        initial_q=q0,
+    mpc = ArmMPC(
         horizon=5,
         n_mpc_samples=64,
-        max_robot_joint_delta=0.02,
-        max_grasp_residual=0.05,
         fk=fk,
         seed=0,
         env=preview_env,
+        initial_q=q0,
+        cartesian=CartesianConfig(goals=[goal]),
+        robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.05),
     )
     q = q0
     human = [q0]

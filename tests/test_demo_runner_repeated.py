@@ -113,18 +113,18 @@ def make_session(monkeypatch, tmp_path) -> tuple[Session, SimulatedUser]:
     config_path = tmp_path / "mpc.yaml"
     config_path.write_text(
         """
-planner: arm_mpc_cartesian
 steps: 6
 horizon: 2
 n_mpc_samples: 2
 max_angle_delta: 0.01
 pose: pose.npy
-text_time: 5
 preference_learning: false
-trajectory_fraction: 1.0
-uq:
-  diffusion_samples: 2
-  n_clusters: 1
+feedback:
+  text_time: 5
+  trajectory_fraction: 1.0
+  uq:
+    diffusion_samples: 2
+    n_clusters: 1
 cartesian:
   goals:
     - [0.1, 0.2, 0.3]

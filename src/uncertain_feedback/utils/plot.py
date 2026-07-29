@@ -17,11 +17,11 @@ Static utilities (no instantiation required)::
 
 Live MPC visualization::
 
-    from uncertain_feedback.planners.mpc import SmplLeftArmMPC, SmplLeftArmFK
+    from uncertain_feedback.planners.mpc import ArmMPC, SmplLeftArmFK
     from uncertain_feedback.utils.plot import ArmVisualizer
 
     fk  = SmplLeftArmFK()
-    mpc = SmplLeftArmMPC(horizon=10, n_mpc_samples=512)
+    mpc = ArmMPC(horizon=10, n_mpc_samples=512, ...)
     vis = ArmVisualizer(fk)
 
     initial_q = np.zeros(7)
@@ -79,7 +79,7 @@ from uncertain_feedback.planners.mpc.kinematics import (
 # pylint: enable=wrong-import-position
 
 if TYPE_CHECKING:
-    from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
+    from uncertain_feedback.planners.mpc.mpc import ArmMPC
 
 # Internal style constants
 _TRACE_COLOR = "cornflowerblue"
@@ -293,7 +293,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
     def animate(
         self,
-        mpc: SmplLeftArmMPC,
+        mpc: ArmMPC,
         initial_q: np.ndarray,
         target_q: np.ndarray,
         n_steps: int = 50,
@@ -305,7 +305,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         """Run the MPC loop and return a matplotlib animation.
 
         Args:
-            mpc:        Configured :class:`SmplLeftArmMPC`.
+            mpc:        Configured :class:`ArmMPC`.
             initial_q:  ``(7,)`` planner state.
             target_q:   ``(7,)`` target planner state.
             n_steps:    Number of MPC steps to simulate.
@@ -522,7 +522,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         cutoff frame.
 
         Called automatically by
-        :meth:`~uncertain_feedback.planners.mpc.arm_mpc_mdm.LeftArmMPCMDM.push_trajectory`
+        :meth:`~uncertain_feedback.planners.mpc.mpc.ArmMPC.push_trajectory`
         to show the arm pose at the enqueued cutoff timestep (e.g. 75 % through
         the generated trajectory).  Safe to call multiple times.
 
@@ -2020,7 +2020,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
     def _run_mpc(
         self,
-        mpc: SmplLeftArmMPC,
+        mpc: ArmMPC,
         initial_q: np.ndarray,
         target_q: np.ndarray,
         n_steps: int,
@@ -2288,7 +2288,8 @@ def _save(anim: FuncAnimation, path: str) -> None:
 
 
 if __name__ == "__main__":
-    from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
+    from uncertain_feedback.planners.mpc.goal_spaces import CartesianConfig
+    from uncertain_feedback.planners.mpc.mpc import ArmMPC
 
     # Entry point for the animate demo.
     parser = argparse.ArgumentParser(description="Visualise SMPL left arm MPC")
@@ -2302,13 +2303,20 @@ if __name__ == "__main__":
     demo_args = parser.parse_args()
 
     demo_fk = SmplLeftArmFK()
-    demo_mpc = SmplLeftArmMPC(
-        horizon=demo_args.horizon, n_mpc_samples=demo_args.samples
-    )
-    demo_vis = ArmVisualizer(demo_fk)
-
     demo_initial_q = np.zeros(7)
     demo_target_q = np.array([0.0, -1.45, 0.0, 0.0, 0.0, 0.4, 0.0])
+    demo_goal = (
+        demo_fk.fk(q_to_arm_aa(demo_target_q, demo_fk.elbow_hinge_axis), None, None)[-1]
+        - demo_fk.tpose_spine3_pos
+    )
+    demo_mpc = ArmMPC(
+        horizon=demo_args.horizon,
+        n_mpc_samples=demo_args.samples,
+        fk=demo_fk,
+        initial_q=demo_initial_q,
+        cartesian=CartesianConfig(goals=[list(demo_goal)]),
+    )
+    demo_vis = ArmVisualizer(demo_fk)
 
     demo_fig, demo_anim = demo_vis.animate(
         demo_mpc,

@@ -21,7 +21,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence, cast
+from typing import Any, Callable, Iterable, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,18 +40,7 @@ from uncertain_feedback.planners.correction_session import (
     TriggerReason,
 )
 from uncertain_feedback.planners.interactive import OperatorPause
-from uncertain_feedback.planners.mpc import (
-    ArmMPCCartesianNoMDM,
-    ArmMPCCartesianNoMDMIKGated,
-    ArmMPCCartesianNoMDMRobot,
-    LeftArmMPCCartesian,
-    LeftArmMPCCartesianIKGated,
-    LeftArmMPCCartesianRobot,
-    LeftArmMPCMDM,
-    LeftArmMPCMDMUQ,
-    SmplLeftArmFK,
-    SmplLeftArmMPC,
-)
+from uncertain_feedback.planners.mpc import ArmMPC, SmplLeftArmFK
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CombineCostGenerator,
@@ -78,32 +67,6 @@ from uncertain_feedback.simulated_users import (
     get_persona,
 )
 from uncertain_feedback.utils.plot import ArmVisualizer
-
-_MDM_PLANNERS = {
-    "arm_mpc_mdm",
-    "arm_mpc_mdm_uq",
-    "arm_mpc_cartesian",
-    "arm_mpc_cartesian_ik_gated",
-    "arm_mpc_cartesian_robot",
-}
-# Planners carrying a persistent Cartesian goal, so a plan to the goal exists
-# before the run starts.
-_CARTESIAN_PLANNERS = (
-    "arm_mpc_cartesian",
-    "arm_mpc_cartesian_ik_gated",
-    "arm_mpc_cartesian_no_mdm",
-    "arm_mpc_cartesian_no_mdm_ik_gated",
-    "arm_mpc_cartesian_robot",
-    "arm_mpc_cartesian_no_mdm_robot",
-)
-# Planners that sample robot joint actions, so they need an env with a robot.
-_ROBOT_ACTION_PLANNERS = ("arm_mpc_cartesian_robot", "arm_mpc_cartesian_no_mdm_robot")
-# Planners that need the env's robot interface (grasp/joints/FK) at solve time,
-# whether they sample robot actions or gate human actions on robot feasibility.
-_ROBOT_ENV_PLANNERS = _ROBOT_ACTION_PLANNERS + (
-    "arm_mpc_cartesian_no_mdm_ik_gated",
-    "arm_mpc_cartesian_ik_gated",
-)
 
 
 @dataclass
@@ -247,7 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save the execution env's rendering of the run (.mp4 or .gif)",
     )
 
-    # --- MDM args (arm_mpc_mdm, arm_mpc_mdm_uq) ---
+    # --- MDM args (feedback-configured runs) ---
     p.add_argument(
         "--text",
         type=str,
@@ -279,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         dest="save_motion",
-        help="Save the raw MDM full-body motion video to this path (arm_mpc_mdm only)",
+        help="Save the raw MDM full-body motion video to this path (direct-MDM runs only)",
     )
     p.add_argument(
         "--mdm-frames",
@@ -326,7 +289,7 @@ def _restore_interactive_backend() -> None:
                 continue
 
 
-def _get_vis(mpc: SmplLeftArmMPC) -> ArmVisualizer | None:
+def _get_vis(mpc: ArmMPC) -> ArmVisualizer | None:
     return mpc.get_visualizer()
 
 
@@ -342,7 +305,7 @@ def _iter_learnable_costs(
 
 
 def _apply_preference_update(
-    mpc: SmplLeftArmMPC,
+    mpc: ArmMPC,
     mdm_traj: np.ndarray,
     q_history: list[np.ndarray],
     context: MpcCostContext,
@@ -454,7 +417,7 @@ class RunSetup:
     both reach an identical planner/context before stepping.
     """
 
-    mpc: SmplLeftArmMPC
+    mpc: ArmMPC
     gen: Any | None
     fk: SmplLeftArmFK
     cost_context: MpcCostContext
@@ -477,7 +440,7 @@ def build_run(
     motion_generator_factory: Callable[[Path | None], MotionGenerator] | None = None,
 ) -> RunSetup:
     """Load the pose, kinematics, costs, and planner for a single run."""
-    uses_mdm = cfg.planner in _MDM_PLANNERS
+    uses_mdm = cfg.feedback is not None
     visualize = args.live or (args.save is not None)
     # Compact (1-panel) rendering when saving without live view.
     compact = (args.save is not None) and not args.live
@@ -529,156 +492,45 @@ def build_run(
     if user.joint_limits:
         extra_costs = CompositeTrajectoryCost([*extra_costs.terms(), user.limit_cost()])
 
-    # Default goal: arm raised from the initial pose. Shoulder slot, not
-    # clavicle — the planner's actions cannot move the shoulder girdle.
-    default_goal = q0.copy()
-    default_goal[4] += 0.7
-
-    common: dict = {
-        "horizon": cfg.horizon,
-        "n_mpc_samples": cfg.n_mpc_samples,
-        "max_angle_delta": cfg.max_angle_delta,
-        "goal_threshold": cfg.goal_threshold,
-        "visualize": visualize,
-        "fk": fk,
-        "spine3_pos": spine3_pos,
-        "spine3_aa": spine3_aa,
-        "body_pos": body_pos,
-        "extra_costs": extra_costs,
-        "seed": cfg.seed,
-        "env": env,
-    }
-
-    if cfg.planner in _ROBOT_ENV_PLANNERS and cfg.env not in (
+    if (cfg.robot_actions is not None or cfg.constraints) and cfg.env not in (
         "real",
         "sim_mannequin",
     ):
         raise ValueError(
-            f"planner {cfg.planner} needs an env with a robot "
+            "robot_actions and constraints need an env with a robot "
             f"('real' or 'sim_mannequin'), got '{cfg.env}'."
         )
 
-    mpc: SmplLeftArmMPC
-    if cfg.planner == "arm_mpc":
-        mpc = SmplLeftArmMPC(**common, goals=[default_goal])
-    elif cfg.planner == "arm_mpc_mdm":
-        mpc = LeftArmMPCMDM(
-            **common,
-            goals=[default_goal],
-            advance_threshold=cfg.advance_threshold,
-            max_playback_delta=cfg.max_playback_delta,
-            trajectory_fraction=cfg.trajectory_fraction,
-        )
-    elif cfg.planner == "arm_mpc_cartesian_no_mdm":
-        if not cfg.cartesian.goals:
-            raise ValueError(
-                "cartesian.goals is required when planner is arm_mpc_cartesian_no_mdm."
-            )
+    if cfg.cartesian is not None:
         _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
         init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
         print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
-        mpc = ArmMPCCartesianNoMDM(
-            cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
-            initial_q=q0,
-            cartesian_threshold=cfg.cartesian.threshold,
-            **common,
-        )
-    elif cfg.planner == "arm_mpc_cartesian_no_mdm_ik_gated":
-        if not cfg.cartesian.goals:
-            raise ValueError(
-                "cartesian.goals is required when planner is "
-                "arm_mpc_cartesian_no_mdm_ik_gated."
-            )
-        _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
-        print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
-        mpc = ArmMPCCartesianNoMDMIKGated(
-            cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
-            initial_q=q0,
-            cartesian_threshold=cfg.cartesian.threshold,
-            max_grasp_ik_residual=cfg.max_grasp_ik_residual,
-            grasp_residual_frames=cfg.grasp_residual_frames,
-            **common,
-        )
-    elif cfg.planner == "arm_mpc_cartesian_no_mdm_robot":
-        if not cfg.cartesian.goals:
-            raise ValueError(
-                "cartesian.goals is required when planner is "
-                "arm_mpc_cartesian_no_mdm_robot."
-            )
-        _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
-        print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
-        mpc = ArmMPCCartesianNoMDMRobot(
-            cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
-            initial_q=q0,
-            cartesian_threshold=cfg.cartesian.threshold,
-            max_robot_joint_delta=cfg.max_robot_joint_delta,
-            robot_joint_delta_std=cfg.robot_joint_delta_std,
-            robot_infeasibility_weight=cfg.robot_infeasibility_weight,
-            max_grasp_residual=cfg.max_grasp_residual,
-            grasp_residual_frames=cfg.grasp_residual_frames,
-            **common,
-        )
-    elif cfg.planner in (
-        "arm_mpc_cartesian",
-        "arm_mpc_cartesian_ik_gated",
-        "arm_mpc_cartesian_robot",
-    ):
-        if not cfg.cartesian.goals:
-            raise ValueError(
-                f"cartesian.goals is required when planner is {cfg.planner}."
-            )
-        _spine3_ref = spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos
-        init_wrist_rel = fk.fk(arm_aa, spine3_pos, spine3_aa)[-1] - _spine3_ref
-        print(f"Initial wrist position (spine3-relative): {init_wrist_rel}")
-        cartesian_kwargs: dict = {}
-        cartesian_cls: type[LeftArmMPCCartesian] = LeftArmMPCCartesian
-        if cfg.planner == "arm_mpc_cartesian_robot":
-            cartesian_cls = LeftArmMPCCartesianRobot
-            cartesian_kwargs = {
-                "max_robot_joint_delta": cfg.max_robot_joint_delta,
-                "robot_joint_delta_std": cfg.robot_joint_delta_std,
-                "robot_infeasibility_weight": cfg.robot_infeasibility_weight,
-                "max_grasp_residual": cfg.max_grasp_residual,
-                "grasp_residual_frames": cfg.grasp_residual_frames,
-            }
-        elif cfg.planner == "arm_mpc_cartesian_ik_gated":
-            cartesian_cls = LeftArmMPCCartesianIKGated
-            cartesian_kwargs = {
-                "max_grasp_ik_residual": cfg.max_grasp_ik_residual,
-                "grasp_residual_frames": cfg.grasp_residual_frames,
-                "playback_stall_steps": cfg.playback_stall_steps,
-            }
-        mpc = cartesian_cls(
-            cartesian_goals=[np.array(g) for g in cfg.cartesian.goals],
-            initial_q=q0,
-            cartesian_threshold=cfg.cartesian.threshold,
-            **common,
-            **cartesian_kwargs,
-            advance_threshold=cfg.advance_threshold,
-            max_playback_delta=cfg.max_playback_delta,
-            trajectory_fraction=cfg.trajectory_fraction,
-            n_diffusion_samples=cfg.uq.diffusion_samples,
-            n_clusters=cfg.uq.n_clusters,
-        )
-    else:
-        mpc = LeftArmMPCMDMUQ(
-            **common,
-            goals=[default_goal],
-            advance_threshold=cfg.advance_threshold,
-            max_playback_delta=cfg.max_playback_delta,
-            trajectory_fraction=cfg.trajectory_fraction,
-            n_diffusion_samples=cfg.uq.diffusion_samples,
-            n_clusters=cfg.uq.n_clusters,
-        )
+
+    mpc = ArmMPC(
+        horizon=cfg.horizon,
+        n_mpc_samples=cfg.n_mpc_samples,
+        max_angle_delta=cfg.max_angle_delta,
+        visualize=visualize,
+        fk=fk,
+        spine3_pos=spine3_pos,
+        spine3_aa=spine3_aa,
+        body_pos=body_pos,
+        extra_costs=extra_costs,
+        seed=cfg.seed,
+        env=env,
+        initial_q=q0,
+        cartesian=cfg.cartesian,
+        feedback=cfg.feedback,
+        constraints=cfg.constraints,
+        robot_actions=cfg.robot_actions,
+    )
 
     mpc.set_visualization_mode(capture=args.save is not None, compact=compact)
     # Show the goal to envs that can draw it (env: real's live view). A Cartesian
     # goal pins the wrist only, so the pose shown is the nearest configuration
     # reaching it — solved against the anchor the env reported, since the goal is
     # relative to that.
-    if cfg.cartesian.goals:
+    if cfg.cartesian is not None:
         env.show_goal(
             q_reaching_wrist(
                 fk,
@@ -690,6 +542,10 @@ def build_run(
             )
         )
     else:
+        # Default goal display: arm raised from the initial pose. Shoulder
+        # slot, not clavicle — the planner's actions cannot move the girdle.
+        default_goal = q0.copy()
+        default_goal[4] += 0.7
         env.show_goal(default_goal)
 
     return RunSetup(
@@ -724,7 +580,7 @@ StepHook = Callable[[int, np.ndarray, list[np.ndarray]], None]
 
 
 def run_planning_loop(
-    mpc: SmplLeftArmMPC,
+    mpc: ArmMPC,
     q0: np.ndarray,
     n_steps: int,
     *,
@@ -803,28 +659,22 @@ def _rollout_reference_trajectory(
 ) -> np.ndarray | None:
     """Roll the MPC toward its original Cartesian goal, ignoring the correction.
 
-    Builds a headless :class:`ArmMPCCartesianNoMDM` from ``current_q`` carrying only
-    the configured comfort costs (no MDM correction, no LLM-generated cost) and steps
-    it toward ``cfg.cartesian.goals`` so the cost generator can see what the arm was
-    driving toward before the correction — and avoid blocking it. With no MDM phase
-    (``mdm_ready_to_terminate`` is always ``True``) the loop stops as soon as the wrist
-    reaches the goal, so the trajectory ends at the goal rather than idling there for the
-    full ``cfg.steps``. Returns ``(T, 7)``, or ``None`` for planners without a
-    persistent Cartesian goal.
+    Builds a headless goal-space-only :class:`ArmMPC` from ``current_q`` carrying only
+    the configured comfort costs (no feedback correction, no LLM-generated cost) and
+    steps it toward ``cfg.cartesian.goals`` so the cost generator can see what the arm
+    was driving toward before the correction — and avoid blocking it. With no feedback
+    phase (``mdm_ready_to_terminate`` is always ``True``) the loop stops as soon as the
+    wrist reaches the goal, so the trajectory ends at the goal rather than idling there
+    for the full ``cfg.steps``. Returns ``(T, 7)``, or ``None`` without a persistent
+    Cartesian goal.
     """
-    if cfg.planner not in _CARTESIAN_PLANNERS:
-        return None
-    if not cfg.cartesian.goals:
+    if cfg.cartesian is None:
         return None
 
-    planner = ArmMPCCartesianNoMDM(
-        cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
-        initial_q=current_q,
-        cartesian_threshold=cfg.cartesian.threshold,
+    planner = ArmMPC(
         horizon=cfg.horizon,
         n_mpc_samples=cfg.n_mpc_samples,
         max_angle_delta=cfg.max_angle_delta,
-        goal_threshold=cfg.goal_threshold,
         visualize=False,
         fk=context.fk,
         spine3_pos=spine3_pos,
@@ -832,6 +682,8 @@ def _rollout_reference_trajectory(
         body_pos=body_pos,
         extra_costs=base_extra_costs,
         seed=cfg.seed,
+        initial_q=current_q,
+        cartesian=cfg.cartesian,
     )
     q0 = np.asarray(current_q, dtype=np.float64).copy()
     result = run_planning_loop(
@@ -839,9 +691,7 @@ def _rollout_reference_trajectory(
         q0,
         max(1, cfg.steps),
         on_post_step=(
-            None
-            if on_step is None
-            else lambda _step, q, _history: on_step(q, None)
+            None if on_step is None else lambda _step, q, _history: on_step(q, None)
         ),
         stop_on_runtime_error=True,
     )
@@ -887,19 +737,10 @@ def _rollout_robot_reference_trajectory(
     """
     q0 = np.asarray(setup.q0, dtype=np.float64).copy()
     preview_env = _preview_env(setup)
-    planner = ArmMPCCartesianNoMDMRobot(
-        cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
-        initial_q=q0,
-        cartesian_threshold=cfg.cartesian.threshold,
+    planner = ArmMPC(
         horizon=cfg.horizon,
         n_mpc_samples=cfg.n_mpc_samples,
         max_angle_delta=cfg.max_angle_delta,
-        max_robot_joint_delta=cfg.max_robot_joint_delta,
-        robot_joint_delta_std=cfg.robot_joint_delta_std,
-        robot_infeasibility_weight=cfg.robot_infeasibility_weight,
-        max_grasp_residual=cfg.max_grasp_residual,
-        grasp_residual_frames=cfg.grasp_residual_frames,
-        goal_threshold=cfg.goal_threshold,
         visualize=False,
         fk=setup.cost_context.fk,
         spine3_pos=setup.spine3_pos,
@@ -908,6 +749,9 @@ def _rollout_robot_reference_trajectory(
         extra_costs=setup.extra_costs,
         seed=cfg.seed,
         env=preview_env,
+        initial_q=q0,
+        cartesian=cfg.cartesian,
+        robot_actions=cfg.robot_actions,
     )
 
     def report(_step: int, q: np.ndarray, _history: list[np.ndarray]) -> None:
@@ -939,16 +783,10 @@ def _rollout_gated_reference_trajectory(
     """
     q0 = np.asarray(setup.q0, dtype=np.float64).copy()
     preview_env = _preview_env(setup)
-    planner = ArmMPCCartesianNoMDMIKGated(
-        cartesian_goals=[np.asarray(g, dtype=np.float64) for g in cfg.cartesian.goals],
-        initial_q=q0,
-        cartesian_threshold=cfg.cartesian.threshold,
+    planner = ArmMPC(
         horizon=cfg.horizon,
         n_mpc_samples=cfg.n_mpc_samples,
         max_angle_delta=cfg.max_angle_delta,
-        max_grasp_ik_residual=cfg.max_grasp_ik_residual,
-        grasp_residual_frames=cfg.grasp_residual_frames,
-        goal_threshold=cfg.goal_threshold,
         visualize=False,
         fk=setup.cost_context.fk,
         spine3_pos=setup.spine3_pos,
@@ -957,6 +795,9 @@ def _rollout_gated_reference_trajectory(
         extra_costs=setup.extra_costs,
         seed=cfg.seed,
         env=preview_env,
+        initial_q=q0,
+        cartesian=cfg.cartesian,
+        constraints=cfg.constraints,
     )
 
     def report(_step: int, q: np.ndarray, _history: list[np.ndarray]) -> None:
@@ -993,23 +834,26 @@ _PreviewRollout = Callable[
     [MpcRunConfig, RunSetup, Callable[[np.ndarray, np.ndarray | None], None]], None
 ]
 
-# Which offline rollout previews each planner. A preview is only worth watching
-# if it runs the planner that is about to run live, so every Cartesian planner
-# picks its rollout explicitly and the assert refuses a new one that forgot to:
-# falling through to the plain human-action rollout is how the IK-gated planner
-# came to be previewed ungated, which drew the run walking into exactly the
-# unreachable poses the gate exists to discard. The MDM planners map to their
-# no-MDM counterpart because their correction does not exist until the user has
-# spoken — only the Cartesian-goal phase can be previewed at all.
-_PREVIEW_ROLLOUTS: dict[str, _PreviewRollout] = {
-    "arm_mpc_cartesian": _rollout_human_reference_trajectory,
-    "arm_mpc_cartesian_ik_gated": _rollout_gated_reference_trajectory,
-    "arm_mpc_cartesian_no_mdm": _rollout_human_reference_trajectory,
-    "arm_mpc_cartesian_no_mdm_ik_gated": _rollout_gated_reference_trajectory,
-    "arm_mpc_cartesian_robot": _rollout_robot_reference_trajectory,
-    "arm_mpc_cartesian_no_mdm_robot": _rollout_robot_reference_trajectory,
-}
-assert set(_PREVIEW_ROLLOUTS) == set(_CARTESIAN_PLANNERS)
+
+def _select_preview_rollout(cfg: MpcRunConfig) -> _PreviewRollout | None:
+    """Pick the offline rollout that runs the planner about to run live.
+
+    A preview is only worth watching if it carries the same feasibility
+    constraints and action space as the run: previewing the constrained
+    planner unconstrained once drew the run walking into exactly the poses
+    the constraints exist to discard. The constraint > robot > human
+    precedence is deliberate (the loader forbids constraints + robot_actions
+    together today, but the ordering keeps this correct if that changes).
+    Feedback corrections do not exist until the user has spoken, so only the
+    goal-space phase can be previewed at all — ``None`` without one.
+    """
+    if cfg.cartesian is None:
+        return None
+    if cfg.constraints:
+        return _rollout_gated_reference_trajectory
+    if cfg.robot_actions is not None:
+        return _rollout_robot_reference_trajectory
+    return _rollout_human_reference_trajectory
 
 
 def preview_planned_trajectory(cfg: MpcRunConfig, setup: RunSetup) -> bool:
@@ -1029,16 +873,16 @@ def preview_planned_trajectory(cfg: MpcRunConfig, setup: RunSetup) -> bool:
     step, and only envs that show it need it — each planned step streams through
     the env's ``on_step`` callback as its solve finishes, so the env draws the
     rollout live while it is being planned. Which rollout runs is
-    ``_PREVIEW_ROLLOUTS``: the planner previewed is the planner that will run,
-    including whatever feasibility gate it carries and the robot state that
-    gate reasons against, so a plan the run would refuse is never drawn as one
-    it would take. The planners with a robot report their own robot joints per
-    step, so the animation shows the planned robot motion rather than an IK
-    chase.
+    :func:`_select_preview_rollout`: the planner previewed is the planner that
+    will run, including whatever feasibility constraints it carries and the
+    robot state those constraints reason against, so a plan the run would
+    refuse is never drawn as one it would take. The planners with a robot
+    report their own robot joints per step, so the animation shows the planned
+    robot motion rather than an IK chase.
     """
-    if cfg.planner not in _PREVIEW_ROLLOUTS or not cfg.cartesian.goals:
+    rollout = _select_preview_rollout(cfg)
+    if rollout is None:
         return True
-    rollout = _PREVIEW_ROLLOUTS[cfg.planner]
 
     def plan(on_step: Callable[[np.ndarray, np.ndarray | None], None]) -> None:
         rollout(cfg, setup, on_step)
@@ -1130,8 +974,10 @@ def run_repeated_correction_session(
     prior_rounds: tuple[CostRound, ...] = (),
     prior_unified_cost: GeneratedPythonCost | None = None,
 ) -> tuple[CorrectionTrajectoryResult, list[ArmVisualizer], tuple[CostRound, ...]]:
-    """Run one configured MDM planner with repeated feedback interruptions."""
-    mpc = cast(LeftArmMPCMDM, setup.mpc)
+    """Run one feedback-configured planner with repeated interruptions."""
+    mpc = setup.mpc
+    feedback_cfg = cfg.feedback
+    assert feedback_cfg is not None
     assert setup.gen is not None and setup.initial_pose is not None
     gen = setup.gen
     feedback_text = resolve_feedback_text(args.text, setup.user)
@@ -1149,7 +995,7 @@ def run_repeated_correction_session(
     effective_text_time = (
         None
         if operator is not None
-        else (args.text_time if args.text_time is not None else cfg.text_time)
+        else (args.text_time if args.text_time is not None else feedback_cfg.text_time)
     )
     configured_base_costs = replace_generated_costs(
         mpc._extra_costs, None  # pylint: disable=protected-access
@@ -1188,7 +1034,9 @@ def run_repeated_correction_session(
         current_pose = gen.build_pose_from_arm_aa(
             setup.initial_pose, q_to_arm_aa(q, setup.fk.elbow_hinge_axis)
         )
-        mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
+        mdm_frames = (
+            args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames
+        )
         save_path: str | None = None
         if args.save_motion is not None:
             path = Path(args.save_motion)
@@ -1196,7 +1044,7 @@ def run_repeated_correction_session(
                 path.with_name(f"{path.stem}_round_{round_index:02d}{path.suffix}")
             )
 
-        if cfg.planner == "arm_mpc_mdm":
+        if feedback_cfg.uq is None:
             traj = gen.generate_left_arm_trajectory(
                 feedback_text,
                 start_pose=current_pose,
@@ -1211,19 +1059,18 @@ def run_repeated_correction_session(
             mpc.set_mdm_goal(llm_traj[-1])
             mpc.push_trajectory(arm_aa_traj)
         else:
-            uq_mpc = cast(LeftArmMPCMDMUQ, mpc)
             selector = (
                 (lambda means: choose_cluster(setup.user, setup.cost_context, means))
-                if cfg.uq.user_cluster and setup.user.bounds
+                if feedback_cfg.uq.user_cluster and setup.user.bounds
                 else None
             )
-            traj = uq_mpc.query_mdm_with_uncertainty(
+            traj = mpc.query_mdm_with_uncertainty(
                 gen,
                 feedback_text,
                 start_pose=current_pose,
                 current_q=q,
-                auto_cluster=cfg.uq.auto_cluster,
-                default_scale=cfg.uq.scale,
+                auto_cluster=feedback_cfg.uq.auto_cluster,
+                default_scale=feedback_cfg.uq.scale,
                 mdm_frames=mdm_frames,
                 frozen_body=args.frozen_body,
                 cluster_selector=selector,
@@ -1273,8 +1120,11 @@ def run_repeated_correction_session(
                 )
             goal_pos = (
                 np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
-                if cfg.cartesian.goals
+                if cfg.cartesian is not None
                 else None
+            )
+            cartesian_threshold = (
+                cfg.cartesian.threshold if cfg.cartesian is not None else 0.05
             )
             full_correction_q = _assemble_full_correction_traj(
                 cfg,
@@ -1296,7 +1146,7 @@ def run_repeated_correction_session(
                 reference_traj=reference_q,
                 full_correction_traj=full_correction_q,
                 cartesian_goal=goal_pos,
-                cartesian_threshold=cfg.cartesian.threshold,
+                cartesian_threshold=cartesian_threshold,
                 rejected_trajs=rejected_trajs,
             )
             summaries = build_motion_summaries(context, cartesian_goal=goal_pos)
@@ -1324,7 +1174,7 @@ def run_repeated_correction_session(
                 reference_traj=reference_q,
                 full_correction_traj=full_correction_q,
                 cartesian_goal=goal_pos,
-                cartesian_threshold=cfg.cartesian.threshold,
+                cartesian_threshold=cartesian_threshold,
                 rejected_trajs=rejected_trajs,
             )
             state_path = round_dir / "state.pkl"
@@ -1486,10 +1336,10 @@ def main() -> None:
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
     # Checked before build_run, which on env: real already talks to the hardware.
-    if args.interactive and cfg.planner not in _MDM_PLANNERS:
+    if args.interactive and cfg.feedback is None:
         raise ValueError(
-            "--interactive needs an MDM-backed planner to turn the typed "
-            f"feedback into a correction; planner is {cfg.planner}."
+            "--interactive needs a feedback: section to turn the typed "
+            "feedback into a correction."
         )
     setup = build_run(args, cfg)
     preference_output_path = args.preference_output or _default_preference_output_path(

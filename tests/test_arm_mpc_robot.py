@@ -229,9 +229,9 @@ def test_robot_planner_yaml_configs_load() -> None:
 
     configs = Path("src/uncertain_feedback/planners/mpc/configs")
     for name in [
-        "arm_mpc_cartesian_no_mdm_robot_real.yaml",
-        "arm_mpc_cartesian_robot_mdm_llm_real.yaml",
-        "arm_mpc_cartesian_no_mdm_robot_sim_mannequin_kinova.yaml",
+        "robot_real.yaml",
+        "mdm_robot_real.yaml",
+        "robot_mannequin_kinova.yaml",
     ]:
         cfg = load_mpc_config(configs / name)
         assert cfg.robot_actions is not None

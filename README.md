@@ -236,7 +236,7 @@ VRAM from ~17 GB to <3 GB.
 **3. Run** any MDM-backed planner with `motion_generator: kimodo` in its YAML, e.g.:
 ```bash
 uv run python src/uncertain_feedback/planners/run.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_kimodo.yaml
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/kimodo.yaml
 ```
 The kimodo start pose is a SMPL `body_pose (21,3)` `.npy` (`motion_generators/kimodo/start_pose.npy`). The wrapper converts it through the same FK used by the visualizer; the worker retargets that pose onto Kimodo's skeleton and applies the resulting positions and global rotations as the frame-0 Kimodo constraint. `--frozen-body` is not supported with `motion_generator: kimodo`.
 
@@ -380,7 +380,7 @@ optional YAML key `env`:
   mannequin keeps the real hardware's link lengths, and its shoulder is
   fixed, so clavicle commands are not realized — runs converge slower than
   the kinematic envs (use more `steps`, see
-  `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml`). Tunable via the YAML
+  `plain_mannequin.yaml`). Tunable via the YAML
   `env_params:` mapping (forwarded to the env constructor):
   `robot` (`panda` or `kinova_gen3`),
   `robot_max_joint_delta` (per-step cap on each robot joint's travel, rad),
@@ -409,7 +409,7 @@ optional YAML key `env`:
 
   then run any `sim_mannequin` config with
   `env_params: {robot: kinova_gen3, real_mirror_host: "127.0.0.1"}` (see
-  `arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml`). At the first
+  `plain_mannequin_kinova_mirror.yaml`). At the first
   MPC step the real arm closes its gripper, zeros its joints (upright
   reference pose), moves to the sim's grasp configuration, and opens the
   gripper there; the two moves are streamed slowly through position mode
@@ -458,7 +458,7 @@ optional YAML key `env`:
   arm tracks targets in. Set `compliant_joint` for joint-space impedance: the
   arm yields to the person instead of tracking stiffly, taking the same
   sparse joint targets. Stiffness gains are the server's, from its
-  `config_tuned.yaml`). See `arm_mpc_cartesian_no_mdm_real.yaml`.
+  `config_tuned.yaml`). See `plain_real.yaml`.
 
   **The grasp is measured, not assumed — and re-measured every step.** Put the
   gripper on the person's forearm and close it *before* starting the run — jog the
@@ -663,7 +663,7 @@ optional YAML key `env`:
   # 2. full loop on the live person with real_mirror_host: null — IK is solved
   #    but no command reaches the arm
   uv run python src/uncertain_feedback/planners/run.py \
-      --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_real.yaml \
+      --mpc-config src/uncertain_feedback/planners/mpc/configs/plain_real.yaml \
       --env-video real_rollout.mp4
 
   # 3. the same with real_mirror_host set, after taking the grasp by hand and
@@ -690,12 +690,12 @@ optional YAML key `env`:
   full robot state per frame, and blocks until `--require-bodies` are all
   tracked so the window does not open on a dropout. Point `env_params.recording`
   at the file to replay it — see
-  `arm_mpc_cartesian_no_mdm_ik_gated_replay.yaml`, which needs no hardware, no
+  `ik_gated_replay.yaml`, which needs no hardware, no
   display, and no network:
 
   ```
   uv run python src/uncertain_feedback/planners/run.py \
-      --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_ik_gated_replay.yaml
+      --mpc-config src/uncertain_feedback/planners/mpc/configs/ik_gated_replay.yaml
   ```
 
   Everything measured is the real thing: the registration and its yaw, the
@@ -797,19 +797,19 @@ video at the end of a run:
 
 ```
 uv run python src/uncertain_feedback/planners/run.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_sim.yaml \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/plain_sim.yaml \
     --env-video env_rollout.mp4
 ```
 
-(`arm_mpc_cartesian_no_mdm_sim.yaml` is the Cartesian no-MDM config with
-`env: sim_robot_visual`; `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml` is the
+(`plain_sim.yaml` is the Cartesian no-MDM config with
+`env: sim_robot_visual`; `plain_mannequin.yaml` is the
 same run with `env: sim_mannequin`;
-`arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml` is the mannequin run
+`plain_mannequin_kinova.yaml` is the mannequin run
 with the Kinova Gen3;
-`arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml` additionally
+`plain_mannequin_kinova_mirror.yaml` additionally
 mirrors the sim robot onto the real Gen3;
-`arm_mpc_cartesian_no_mdm_real.yaml` is the mocap-closed-loop real run;
-`arm_mpc_cartesian_mdm_llm_real.yaml` is the *full method* on that rig (see
+`plain_real.yaml` is the mocap-closed-loop real run;
+`mdm_llm_real.yaml` is the *full method* on that rig (see
 below); the `--env-video` flag works with any env).
 
 ### The `robot_ik` feasibility constraint
@@ -859,7 +859,7 @@ trajectory the run would never take.
 
 ```
 uv run python src/uncertain_feedback/planners/run.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_ik_gated_real.yaml
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/ik_gated_real.yaml
 ```
 
 This config sets `control_mode: compliant_joint`, so the arm tracks the plan
@@ -901,8 +901,8 @@ the live measured grasp and robot state:
 
 The executed motion is the trajectory's *reachable shadow*: exact tracking
 wherever the correction is feasible, decelerate-hold-skip across the stretches
-it is not. `arm_mpc_cartesian_mdm_ik_gated_real.yaml` is
-`arm_mpc_cartesian_mdm_llm_real.yaml` with the `constraints: robot_ik:` keys and
+it is not. `mdm_ik_gated_real.yaml` is
+`mdm_llm_real.yaml` with the `constraints: robot_ik:` keys and
 `control_mode: compliant_joint` (any residual model mismatch becomes a bounded
 gentle pull, not a wrench — verify the server-side gains in
 `emprise-gen3-controller`'s `config_tuned.yaml` with the mannequin held before
@@ -910,7 +910,7 @@ a live run):
 
 ```
 uv run python src/uncertain_feedback/planners/run.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_ik_gated_real.yaml \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_ik_gated_real.yaml \
     --interactive --env-video real_gated_full_method.mp4
 ```
 
@@ -951,17 +951,17 @@ strictly at the cost of slower goal progress (a very large value disables it).
 ```
 # sim rehearsal (Kinova mannequin, physics)
 uv run python src/uncertain_feedback/planners/run.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_robot_sim_mannequin_kinova.yaml \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/robot_mannequin_kinova.yaml \
     --env-video robot_action_sim.mp4
 
-# real rig, same dry-run-first protocol as arm_mpc_cartesian_no_mdm_real.yaml
+# real rig, same dry-run-first protocol as plain_real.yaml
 uv run python src/uncertain_feedback/planners/run.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_robot_real.yaml \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/robot_real.yaml \
     --env-video robot_action_real.mp4
 
 # full method (MDM/UQ/LLM corrections) with the robot-action sampler
 uv run python src/uncertain_feedback/planners/run.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_robot_mdm_llm_real.yaml \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_robot_real.yaml \
     --interactive --env-video robot_action_full_method.mp4
 ```
 
@@ -982,10 +982,10 @@ human-space plan through IK and can visibly lag it.
 
 `env` is orthogonal to the planner modules, so the full method — MDM
 correction, UQ clustering, one LLM cost per round — runs on the real rig by
-config alone: `arm_mpc_cartesian_mdm_llm_real.yaml` is
-`arm_mpc_cartesian_no_mdm_real.yaml`'s env with a `feedback:` section (uq
+config alone: `mdm_llm_real.yaml` is
+`plain_real.yaml`'s env with a `feedback:` section (uq
 nested) and the LLM-cost keys.
-Prefer `arm_mpc_cartesian_mdm_ik_gated_real.yaml` (previous section) when the
+Prefer `mdm_ik_gated_real.yaml` (previous section) when the
 robot is in the loop — same method, but every robot-facing step is IK-screened
 so unreachable MDM frames are dropped, held, or skipped instead of handed to
 execution's IK fallbacks.
@@ -996,7 +996,7 @@ they say*: a scripted run injects one preset `--text` at `text_time`. Pass
 
 ```
 uv run python src/uncertain_feedback/planners/run.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_real.yaml \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_real.yaml \
     --interactive --env-video real_full_method.mp4
 ```
 
@@ -1144,7 +1144,7 @@ feedback:
 With both `feedback:` and `cartesian:` sections the planner first follows the
 selected/generated MDM arm trajectory, then switches to Cartesian wrist goals.
 
-Save as `src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm.yaml`:
+Save as `src/uncertain_feedback/planners/mpc/configs/mdm.yaml`:
 ```yaml
 steps: 750
 horizon: 10
@@ -1168,7 +1168,7 @@ cartesian:
 Run:
 ```bash
 uv run python src/uncertain_feedback/planners/run.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm.yaml \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm.yaml \
   --model-path "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save/my_finetuned_final/model000750500.pt" \
   --text "raise my left arm" \
   --mdm-frames 100 \
@@ -1182,7 +1182,7 @@ wrist-goal MPC. This path does not generate motion or run clustering. If you
 set an HML `pose:`, the runner decodes that pose once to initialize the arm,
 collar, spine, and background body.
 
-Save as `src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm.yaml`:
+Save as `src/uncertain_feedback/planners/mpc/configs/plain.yaml`:
 ```yaml
 steps: 750
 horizon: 10
@@ -1199,7 +1199,7 @@ cartesian:
 Run:
 ```bash
 uv run python src/uncertain_feedback/planners/run.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm.yaml \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/plain.yaml \
   --live
 ```
 
@@ -1255,7 +1255,7 @@ and a persona with hidden bounds:
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
   --persona adhesive_capsulitis \
   --backend agent \
   --save-video
@@ -1274,7 +1274,7 @@ each cluster entry also contains a `hidden_cost_evaluation` comparing `base`,
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_cluster_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm.yaml \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm.yaml \
   --text "raise my left arm" \
   --backend llm
 ```
@@ -1289,7 +1289,7 @@ Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
 Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
 `gpt-5.6-luna` with `xhigh` reasoning effort. Reasoning effort follows the model
 (`gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`); any other model is sent without
-one. The demo-runner config (`arm_mpc_cartesian_mdm_llm_transfer.yaml`)
+one. The demo-runner config (`mdm_llm_transfer.yaml`)
 pins `gpt-5.6-sol`.
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
@@ -1333,13 +1333,13 @@ persistent Cartesian goal) and `llm_cost.enabled: true`:
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_backend_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm.yaml \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm.yaml \
   --text "raise my left arm" \
   --backends turns agent \
   --save-video
 ```
 
-Pass the neutral base config (`arm_mpc_cartesian_mdm_llm.yaml`), not a
+Pass the neutral base config (`mdm_llm.yaml`), not a
 backend-specific one — the experiment sets `llm_cost.backend` itself for each
 backend. All other `llm_cost` settings (`model`, `max_turns`, `use_images`, and
 `codex_cmd` for the `agent` backend) come from that config, so
@@ -1415,7 +1415,7 @@ generated from.
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_transfer_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
   --save-video
 ```
 
@@ -1504,7 +1504,7 @@ the contrasting evidence needed by the multi-round combinator.
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_multi_round_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_multiround.yaml \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_multiround.yaml \
   --persona stroke_flexor_synergy \
   --save-video
 ```
@@ -1555,7 +1555,7 @@ reached cleanly, the verbalizer has nothing left to say, or
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_episode_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_multiround.yaml \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_multiround.yaml \
   --persona cross_body_pain \
   --save-video
 ```
@@ -1599,7 +1599,7 @@ root is CWD-relative):
 
 ```bash
 uv run python src/uncertain_feedback/demo_runner/server.py \
-  [--mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_transfer.yaml] \
+  [--mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml] \
   [--personas-file demo_runner_personas.json] \
   [--trajectory-configs-file demo_runner_trajectory_configs.json] \
   [--host 127.0.0.1] [--port 6781]

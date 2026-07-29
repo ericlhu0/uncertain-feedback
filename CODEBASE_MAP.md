@@ -65,25 +65,27 @@ uncertain-feedback/
 │   │       │   ├── base.py           # ABC: playback state machine contract
 │   │       │   └── mdm.py            # MdmFeedback + FeedbackConfig (rate-limited MDM playback, stall-skip when constrained)
 │   │       └── configs/              # Example YAML config files
-│   │           ├── arm_mpc_cartesian_mdm.yaml
-│   │           ├── arm_mpc_cartesian_mdm_learn.yaml
-│   │           ├── arm_mpc_cartesian_mdm_llm.yaml
-│   │           ├── arm_mpc_cartesian_mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
-│   │           ├── arm_mpc_cartesian_mdm_llm_agent.yaml  # backend: agent (codex CLI)
-│   │           ├── arm_mpc_cartesian_mdm_llm_transfer.yaml  # simulated-user transfer experiment
-│   │           ├── arm_mpc_cartesian_mdm_llm_multiround.yaml # pose-dependent multi-round experiment
-│   │           ├── arm_mpc_cartesian_mdm_llm_real.yaml  # full method on env: real, for --interactive live corrections
-│   │           ├── arm_mpc_cartesian_mdm_ik_gated_real.yaml  # full method on env: real with every robot-facing step IK-screened + compliant_joint
-│   │           ├── arm_mpc_cartesian_no_mdm.yaml
-│   │           ├── arm_mpc_cartesian_no_mdm_sim.yaml  # same, with env: sim_robot_visual
-│   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin.yaml  # same, with env: sim_mannequin (physics; more steps)
-│   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml  # same, with robot: kinova_gen3
-│   │           ├── arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml  # same, mirroring the sim robot onto the real Gen3 (real_mirror_host)
-│   │           ├── arm_mpc_cartesian_no_mdm_real.yaml  # env: real (OptiTrack-measured human arm + real Gen3)
-│   │           ├── arm_mpc_cartesian_no_mdm_robot_real.yaml  # robot-action sampler on env: real
-│   │           ├── arm_mpc_cartesian_no_mdm_ik_gated_replay.yaml  # the IK-gated planner on env: real driven from a saved RealRecording — no hardware, display, or network
-│   │           ├── arm_mpc_cartesian_no_mdm_robot_sim_mannequin_kinova.yaml  # robot-action sampler rehearsal on sim_mannequin
-│   │           └── arm_mpc_cartesian_robot_mdm_llm_real.yaml  # full method with the robot-action sampler on env: real
+│   │           ├── mdm.yaml
+│   │           ├── kimodo.yaml  # motion_generator: kimodo backend
+│   │           ├── mdm_learn.yaml
+│   │           ├── mdm_llm.yaml
+│   │           ├── mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
+│   │           ├── mdm_llm_agent.yaml  # backend: agent (codex CLI)
+│   │           ├── mdm_llm_transfer.yaml  # simulated-user transfer experiment
+│   │           ├── mdm_llm_multiround.yaml # pose-dependent multi-round experiment
+│   │           ├── mdm_llm_real.yaml  # full method on env: real, for --interactive live corrections
+│   │           ├── mdm_ik_gated_real.yaml  # full method on env: real with every robot-facing step IK-screened + compliant_joint
+│   │           ├── plain.yaml
+│   │           ├── plain_sim.yaml  # same, with env: sim_robot_visual
+│   │           ├── plain_mannequin.yaml  # same, with env: sim_mannequin (physics; more steps)
+│   │           ├── plain_mannequin_kinova.yaml  # same, with robot: kinova_gen3
+│   │           ├── plain_mannequin_kinova_mirror.yaml  # same, mirroring the sim robot onto the real Gen3 (real_mirror_host)
+│   │           ├── plain_real.yaml  # env: real (OptiTrack-measured human arm + real Gen3)
+│   │           ├── robot_real.yaml  # robot-action sampler on env: real
+│   │           ├── ik_gated_real.yaml  # robot_ik-constrained goal-seeking on env: real
+│   │           ├── ik_gated_replay.yaml  # the IK-gated planner on env: real driven from a saved RealRecording — no hardware, display, or network
+│   │           ├── robot_mannequin_kinova.yaml  # robot-action sampler rehearsal on sim_mannequin
+│   │           └── mdm_robot_real.yaml  # full method with the robot-action sampler on env: real
 │   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
 │   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
 │   │   ├── run_experiment.py         # CLI: one persona + one backend on the original goal
@@ -224,11 +226,11 @@ orientation):
 
 | Old `planner` value | Equivalent sections |
 |---------------------|---------------------|
-| `arm_mpc_cartesian_no_mdm` | `cartesian:` |
+| `plain` | `cartesian:` |
 | `arm_mpc_cartesian` | `cartesian:` + `feedback:` (with `uq:`) |
-| `arm_mpc_cartesian_no_mdm_ik_gated` | `cartesian:` + `constraints: robot_ik:` |
+| `plain_ik_gated` | `cartesian:` + `constraints: robot_ik:` |
 | `arm_mpc_cartesian_ik_gated` | `cartesian:` + `feedback:` + `constraints: robot_ik:` |
-| `arm_mpc_cartesian_no_mdm_robot` | `cartesian:` + `robot_actions:` |
+| `plain_robot` | `cartesian:` + `robot_actions:` |
 | `arm_mpc_cartesian_robot` | `cartesian:` + `feedback:` + `robot_actions:` |
 
 (The joint-space `arm_mpc`/`arm_mpc_mdm`/`arm_mpc_mdm_uq` planners were retired
@@ -530,7 +532,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | Command / Script                                      | Purpose                              |
 |-------------------------------------------------------|--------------------------------------|
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
-| `uv run python src/.../planners/run.py --mpc-config <yaml> --interactive` | Same run, but each correction's trigger and text come from the operator mid-run (`OperatorPause`); `text_time`/`--text` ignored. Full method on the real rig: `arm_mpc_cartesian_mdm_llm_real.yaml` |
+| `uv run python src/.../planners/run.py --mpc-config <yaml> --interactive` | Same run, but each correction's trigger and text come from the operator mid-run (`OperatorPause`); `text_time`/`--text` ignored. Full method on the real rig: `mdm_llm_real.yaml` |
 | `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml> [--persona <name>] [--backend agent]` | One simulated-user persona/backend experiment on the original goal |
 | `uv run python src/.../experiments/run_cluster_experiment.py --mpc-config <yaml>` | Per-cluster cost comparison with base/oracle/generated hidden-cost evaluation for Cartesian goals |
 | `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison with base/oracle/generated hidden-cost evaluation |

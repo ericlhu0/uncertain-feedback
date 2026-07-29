@@ -4,7 +4,7 @@ n_mpc_samples: 200
 max_angle_delta: 0.01
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 feedback:
-  max_playback_delta: 0.05  # max per-joint rotation (rad) per step while following the MDM trajectory
+  max_playback_delta: 0.05
   trajectory_fraction: 1
   frames: 50
   text_time: 10
@@ -12,7 +12,7 @@ feedback:
     diffusion_samples: 500
     n_clusters: 3
     auto_cluster: 0
-    scale: 1.0  # default motion-magnitude scale for the chosen cluster (GUI slider overrides)
+    scale: 1.0
 
 corrections:
   trigger_threshold: 0.02
@@ -31,12 +31,5 @@ llm_cost:
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true
-  backend: turns  # multi-turn: scores each candidate (rollout-vs-MDM L2) and keeps the best
-  max_turns: 3    # turns x full MPC rollouts can be slow; keep small for testing
-
-# costs:
-#   elbow_height:
-#     min: -0.25
-#     max: 0.45
-#     weight: 100.0
-#     progress_weight: 100.0
+  backend: agent
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"

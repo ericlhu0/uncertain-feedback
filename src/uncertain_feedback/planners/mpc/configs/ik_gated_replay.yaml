@@ -3,16 +3,8 @@ env_params:
   robot: kinova_gen3
   robot_max_joint_delta: 0.2
   robot_joint_limit_padding: 0.27
-  # Replay of a lab recording instead of the live OptiTrack + Gen3 streams, so
-  # this config needs no hardware, no display, and no network. The person in the
-  # file does not react to the robot and the arm tracks perfectly — see
-  # uncertain_feedback/envs/real_recording.py for what that costs.
   recording: "real_recordings/lab_2026-07-28.npz"
-  # Keeps the robot in the loop (an ideal tracker seeded at the recorded joint
-  # configuration). Set to null for the mocap-only path, which falls back to the
-  # nominal grasp.
   real_mirror_host: "replay"
-  # Streaming ids as recorded.
   mocap_rigid_bodies:
     robot_base: 1
     collar: 2
@@ -25,8 +17,6 @@ env_params:
   preview_plan: false
 constraints:
   robot_ik:
-    # Gate settings and planner knobs match
-    # arm_mpc_cartesian_no_mdm_ik_gated_real.yaml.
     max_residual: 0.001
     grasp_residual_frames: 3
 steps: 1000

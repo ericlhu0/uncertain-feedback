@@ -1,0 +1,23 @@
+env: sim_mannequin
+env_params:
+  robot: kinova_gen3
+  robot_max_joint_delta: 0.01
+  robot_base_offset: [0.6, -0.35, -0.35]
+  robot_joint_limit_padding: 0.27
+  real_mirror_host: "127.0.0.1"
+  real_mirror_confirm_start: true
+steps: 1000
+horizon: 10
+n_mpc_samples: 1000
+max_angle_delta: 0.001
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
+
+arm:
+  - [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783]
+  - [0.6868865380518193, -0.18, -0.11006289820501858]
+  - [0.035651850950680734, -1.23, 0.7515284911778386]
+
+cartesian:
+  goals:
+    - [0.25, 0.3, 0.18]
+  threshold: 0.05

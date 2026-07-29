@@ -1029,11 +1029,11 @@ def test_elbow_height_progress_penalty_only_penalizes_getting_worse_outside() ->
 
 
 def test_default_preference_output_path_uses_learned_suffix(tmp_path) -> None:
-    config_path = tmp_path / "arm_mpc_cartesian_mdm.yaml"
+    config_path = tmp_path / "mdm.yaml"
 
     output_path = planner_run._default_preference_output_path(config_path)
 
-    assert output_path == tmp_path / "arm_mpc_cartesian_mdm_learned.yaml"
+    assert output_path == tmp_path / "mdm_learned.yaml"
 
 
 def test_save_learned_preference_yaml_updates_multiple_costs(tmp_path) -> None:

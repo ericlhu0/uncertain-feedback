@@ -44,7 +44,7 @@ def test_multi_round_loop_persists_history_and_replaces_costs(
 ) -> None:
     config_path = Path(
         "src/uncertain_feedback/planners/mpc/configs/"
-        "arm_mpc_cartesian_mdm_llm_multiround.yaml"
+        "mdm_llm_multiround.yaml"
     )
     cfg = load_mpc_config(config_path)
     cfg = replace(

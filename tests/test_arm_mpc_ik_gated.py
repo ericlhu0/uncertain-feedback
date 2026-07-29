@@ -415,7 +415,7 @@ def test_ik_gated_yaml_config_loads() -> None:
 
     cfg = load_mpc_config(
         Path("src/uncertain_feedback/planners/mpc/configs")
-        / "arm_mpc_cartesian_no_mdm_ik_gated_real.yaml"
+        / "ik_gated_real.yaml"
     )
     gate_cfg = cfg.constraints["robot_ik"]
     assert cfg.feedback is None
@@ -578,7 +578,7 @@ def test_mdm_ik_gated_yaml_config_loads() -> None:
 
     cfg = load_mpc_config(
         Path("src/uncertain_feedback/planners/mpc/configs")
-        / "arm_mpc_cartesian_mdm_ik_gated_real.yaml"
+        / "mdm_ik_gated_real.yaml"
     )
     gate_cfg = cfg.constraints["robot_ik"]
     assert cfg.feedback is not None and cfg.feedback.uq is not None

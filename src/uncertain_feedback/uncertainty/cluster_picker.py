@@ -412,7 +412,7 @@ def _pick_cluster_level(
         trajectory_fraction: Fraction of trajectory frames that will be
                              enqueued; arms are drawn at this timestep.
                              Should match
-                             :attr:`~LeftArmMPCMDM.trajectory_fraction`.
+                             :attr:`~uncertain_feedback.planners.mpc.mpc.ArmMPC.trajectory_fraction`.
         spine_pos:           ``(3,)`` world position of spine3.
         spine_aa:            ``(3,)`` world axis-angle of spine3.
         body_pos:            ``(22, 3)`` reference body joint positions (e.g.

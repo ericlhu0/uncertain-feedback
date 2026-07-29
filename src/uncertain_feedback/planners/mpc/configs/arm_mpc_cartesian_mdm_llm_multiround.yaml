@@ -1,25 +1,22 @@
-planner: arm_mpc_cartesian
 steps: 300
 horizon: 10
 n_mpc_samples: 200
 max_angle_delta: 0.01
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
-goal_threshold: 0.15
-advance_threshold: 0.15
-max_playback_delta: 0.05
-trajectory_fraction: 1
-mdm_frames: 50
+feedback:
+  max_playback_delta: 0.05
+  trajectory_fraction: 1
+  frames: 50
+  uq:
+    diffusion_samples: 500
+    n_clusters: 6
+    scale: 0.25
+    user_cluster: true
 
 user: stroke_flexor_synergy
 
 corrections:
   trigger_threshold: 0.02
-
-uq:
-  diffusion_samples: 500
-  n_clusters: 6
-  scale: 0.25
-  user_cluster: true
 
 cartesian:
   goals:

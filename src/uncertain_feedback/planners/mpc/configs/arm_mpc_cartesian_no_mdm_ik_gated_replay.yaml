@@ -23,16 +23,16 @@ env_params:
   mocap_hold_timeout: 0.5
   live_view: false
   preview_plan: false
-planner: arm_mpc_cartesian_no_mdm_ik_gated
-# Gate settings and planner knobs match
-# arm_mpc_cartesian_no_mdm_ik_gated_real.yaml.
-max_grasp_ik_residual: 0.001
-grasp_residual_frames: 3
+constraints:
+  robot_ik:
+    # Gate settings and planner knobs match
+    # arm_mpc_cartesian_no_mdm_ik_gated_real.yaml.
+    max_residual: 0.001
+    grasp_residual_frames: 3
 steps: 1000
 horizon: 10
 n_mpc_samples: 1000
 max_angle_delta: 0.01
-goal_threshold: 0.15
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 
 arm:

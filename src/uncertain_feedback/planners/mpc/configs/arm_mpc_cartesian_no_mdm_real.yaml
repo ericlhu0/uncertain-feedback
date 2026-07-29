@@ -44,13 +44,11 @@ env_params:
   # command reaches the arm. Needs live_view. The robot and arm chain move every
   # step; the mesh refreshes at live_view_fps.
   preview_plan: true
-planner: arm_mpc_cartesian_no_mdm
 # Planner knobs match arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml.
 steps: 1000
 horizon: 10
 n_mpc_samples: 1000
 max_angle_delta: 0.001
-goal_threshold: 0.15
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 
 # Demo-runner "base1" initial pose ([shoulder, elbow, wrist] axis-angles).

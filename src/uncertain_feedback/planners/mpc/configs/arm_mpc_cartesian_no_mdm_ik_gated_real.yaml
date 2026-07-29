@@ -49,21 +49,21 @@ env_params:
   # command reaches the arm. Needs live_view. The robot and arm chain move every
   # step; the mesh refreshes at live_view_fps.
   preview_plan: true
-planner: arm_mpc_cartesian_no_mdm_ik_gated
-# Human-action sampling as in arm_mpc_cartesian_no_mdm_real.yaml, but rollouts
-# whose first grasp_residual_frames frames imply a gripper pose the robot
-# cannot IK to exactly (pose error above max_grasp_ik_residual, metres +
-# radians) are discarded outright. This uses the real env's analytical Gen3
-# IK and padded controller joint box, seeded through each rollout. The floor is
-# IK convergence, not model mismatch, so the threshold sits near zero.
-max_grasp_ik_residual: 0.001
-grasp_residual_frames: 3
+constraints:
+  robot_ik:
+    # Human-action sampling as in arm_mpc_cartesian_no_mdm_real.yaml, but rollouts
+    # whose first grasp_residual_frames frames imply a gripper pose the robot
+    # cannot IK to exactly (pose error above max_grasp_ik_residual, metres +
+    # radians) are discarded outright. This uses the real env's analytical Gen3
+    # IK and padded controller joint box, seeded through each rollout. The floor is
+    # IK convergence, not model mismatch, so the threshold sits near zero.
+    max_residual: 0.001
+    grasp_residual_frames: 3
 # Planner knobs match arm_mpc_cartesian_no_mdm_real.yaml.
 steps: 1000
 horizon: 10
 n_mpc_samples: 1000
 max_angle_delta: 0.01
-goal_threshold: 0.15
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 
 # Demo-runner "base1" initial pose ([shoulder, elbow, wrist] axis-angles).

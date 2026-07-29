@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Callable, Literal, Sequence
 
 import numpy as np
 
-from uncertain_feedback.planners.mpc import LeftArmMPCMDM
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost, MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.simulated_users import SimulatedUser, compute_violations
@@ -101,7 +101,7 @@ FinishHandler = Callable[[Sequence[CorrectionRoundResult]], GeneratedPythonCost 
 class CorrectionSession:
     """Run one MPC trajectory with any number of edge-triggered corrections."""
 
-    mpc: LeftArmMPCMDM
+    mpc: ArmMPC
     user: SimulatedUser
     cost_context: MpcCostContext
     feedback_text: str

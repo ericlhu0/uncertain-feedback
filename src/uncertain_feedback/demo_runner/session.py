@@ -38,7 +38,7 @@ from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
     TriggerReason,
 )
-from uncertain_feedback.planners.mpc import LeftArmMPCCartesian
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
     arm_feature_series,
@@ -238,7 +238,7 @@ class Trajectory:
     and dies with the object.
     """
 
-    mpc: LeftArmMPCCartesian
+    mpc: ArmMPC
     trigger: CorrectionTrigger
     q: np.ndarray
     executed: list[np.ndarray]
@@ -584,10 +584,6 @@ class Session:
     ) -> Trajectory:
         """Start one trajectory with the session costs installed from frame 0."""
         rig = self.rig
-        if rig.cfg.planner != "arm_mpc_cartesian":
-            raise ValueError(
-                "Multi-turn trajectories require planner: arm_mpc_cartesian."
-            )
         start_arm_aa = np.asarray(arm_aa, dtype=np.float64)
         start_q = rig.fk.arm_aa_to_q(start_arm_aa, rig.spine3_aa)
         goal_arr = np.asarray(goal, dtype=np.float64)
@@ -611,7 +607,7 @@ class Session:
             artifact_dir=artifact_dir,
             start_q=start_q,
             goal=goal_arr,
-            scale=rig.cfg.uq.scale,
+            scale=rig.cfg.feedback.uq.scale,
         )
         self.trajectory_count += 1
         self._save()
@@ -793,7 +789,7 @@ class Session:
             prompt,
             start_pose=start_pose,
             num_samples=n_samples,
-            num_frames=rig.cfg.mdm_frames,
+            num_frames=rig.cfg.feedback.frames,
         )
         _log(f"MDM generation done in {time.perf_counter() - t0:.1f}s")
         traj.prompt = prompt
@@ -1275,7 +1271,7 @@ class Session:
             raise ValueError("Generate a cost for the selected cluster first.")
         correction = traj.scaled_correction.copy()
         self.commit_round()
-        cutoff = max(1, round(len(correction) * rig.cfg.trajectory_fraction))
+        cutoff = max(1, round(len(correction) * rig.cfg.feedback.trajectory_fraction))
         correction = correction[:cutoff]
         traj.mpc.set_mdm_goal(correction[-1])
         traj.mpc.push_trajectory(correction)

@@ -41,15 +41,16 @@ if TYPE_CHECKING:
 class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
     """Operational MPC fields needed to reproduce a candidate-cost rollout."""
 
-    planner: str
     steps: int
     horizon: int
     n_mpc_samples: int
     max_angle_delta: float
-    goal_threshold: float
     seed: int | None
     cartesian_goals: tuple[tuple[float, float, float], ...]
     cartesian_threshold: float
+    # Constrained rollouts need the env's robot IK, which cannot ride a
+    # pickle, so candidate costs are not scoreable for constrained configs.
+    has_constraints: bool = False
 
     @classmethod
     def from_config(cls, cfg: MpcRunConfig | EvalMpcConfig) -> EvalMpcConfig:
@@ -57,18 +58,19 @@ class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
         if isinstance(cfg, EvalMpcConfig):
             return cfg
         return cls(
-            planner=cfg.planner,
             steps=cfg.steps,
             horizon=cfg.horizon,
             n_mpc_samples=cfg.n_mpc_samples,
             max_angle_delta=cfg.max_angle_delta,
-            goal_threshold=cfg.goal_threshold,
             seed=cfg.seed,
             cartesian_goals=tuple(
                 (float(goal[0]), float(goal[1]), float(goal[2]))
-                for goal in cfg.cartesian.goals
+                for goal in (cfg.cartesian.goals if cfg.cartesian is not None else ())
             ),
-            cartesian_threshold=cfg.cartesian.threshold,
+            cartesian_threshold=(
+                cfg.cartesian.threshold if cfg.cartesian is not None else 0.05
+            ),
+            has_constraints=bool(cfg.constraints),
         )
 
 
@@ -130,36 +132,28 @@ class EvalState:
         self,
     ) -> Callable[[GeneratedPythonCost], np.ndarray | None]:
         """Rebuild the goal-seeking rollout closure used to score a candidate."""
-        from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (  # pylint: disable=import-outside-toplevel
-            ArmMPCCartesianNoMDM,
+        from uncertain_feedback.planners.mpc.goal_spaces import (  # pylint: disable=import-outside-toplevel
+            CartesianConfig,
+        )
+        from uncertain_feedback.planners.mpc.mpc import (  # pylint: disable=import-outside-toplevel
+            ArmMPC,
         )
 
         def rollout(cost: GeneratedPythonCost) -> np.ndarray | None:
             cfg = EvalMpcConfig.from_config(self.cfg)
-            # Robot-action planners score candidates on the same human-space
+            # Robot-action configs score candidates on the same human-space
             # kinematic rollout — the cost being evaluated is a human-arm cost.
-            if cfg.planner not in (
-                "arm_mpc_cartesian",
-                "arm_mpc_cartesian_no_mdm",
-                "arm_mpc_cartesian_robot",
-                "arm_mpc_cartesian_no_mdm_robot",
-            ):
+            if cfg.has_constraints:
                 return None
             if not cfg.cartesian_goals:
                 return None
             extra_costs = CompositeTrajectoryCost(
                 [*self.base_extra_costs.terms(), cost]
             )
-            planner = ArmMPCCartesianNoMDM(
-                cartesian_goals=[
-                    np.asarray(goal, dtype=np.float64) for goal in cfg.cartesian_goals
-                ],
-                initial_q=self.current_q,
-                cartesian_threshold=cfg.cartesian_threshold,
+            planner = ArmMPC(
                 horizon=cfg.horizon,
                 n_mpc_samples=cfg.n_mpc_samples,
                 max_angle_delta=cfg.max_angle_delta,
-                goal_threshold=cfg.goal_threshold,
                 visualize=False,
                 fk=self.cost_context.fk,
                 spine3_pos=self.spine3_pos,
@@ -167,6 +161,11 @@ class EvalState:
                 body_pos=self.body_pos,
                 extra_costs=extra_costs,
                 seed=cfg.seed,
+                initial_q=self.current_q,
+                cartesian=CartesianConfig(
+                    goals=[list(goal) for goal in cfg.cartesian_goals],
+                    threshold=cfg.cartesian_threshold,
+                ),
             )
             q = np.asarray(self.current_q, dtype=np.float64).copy()
             q_history = [q.copy()]

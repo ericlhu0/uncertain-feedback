@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import cast
-
-from uncertain_feedback.experiments.experiment_pipeline import apply_persona_goals
+from uncertain_feedback.experiments.experiment_pipeline import (
+    apply_persona_goals,
+    require_correction_planner,
+)
 from uncertain_feedback.experiments.transfer_experiment import run_transfer_experiment
-from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.run import build_parser, build_run
 from uncertain_feedback.simulated_users import PERSONAS, get_persona
@@ -67,10 +67,7 @@ def main() -> None:
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
 
-    if cfg.planner != "arm_mpc_cartesian":
-        raise ValueError(
-            f"Transfer experiments require planner: arm_mpc_cartesian; got {cfg.planner!r}."
-        )
+    require_correction_planner(cfg, "Transfer experiments")
     if not cfg.llm_cost.enabled:
         raise ValueError("Transfer experiments require llm_cost.enabled: true.")
 
@@ -91,8 +88,10 @@ def main() -> None:
     setup = build_run(args, cfg)
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Transfer experiment config must provide an MDM pose.")
-    mpc = cast(LeftArmMPCMDMUQ, setup.mpc)
-    mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
+    mpc = setup.mpc
+    mdm_frames = (
+        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
+    )
     print("[transfer] shared setup ready", flush=True)
 
     for idx, name in enumerate(persona_names, start=1):

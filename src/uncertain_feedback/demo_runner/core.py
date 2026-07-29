@@ -26,7 +26,7 @@ import numpy as np
 from uncertain_feedback.envs import make_env
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators import make_motion_generator
-from uncertain_feedback.planners.mpc import LeftArmMPCCartesian
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
     arm_feature_series,
@@ -152,6 +152,15 @@ class DemoRig:
         trajectory_configs_path: Path,
     ) -> None:
         self.cfg: MpcRunConfig = load_mpc_config(config_path)
+        if (
+            self.cfg.feedback is None
+            or self.cfg.feedback.uq is None
+            or self.cfg.cartesian is None
+        ):
+            raise ValueError(
+                "demo_runner requires feedback: (with uq:) and cartesian: "
+                "sections."
+            )
         self.artifact_root = Path("demo_runner_artifacts").resolve()
         self.personas_path = personas_path.resolve()
         self.trajectory_configs_path = trajectory_configs_path.resolve()
@@ -346,17 +355,14 @@ class DemoRig:
         start_q: np.ndarray,
         goal: np.ndarray,
         extra_costs: CompositeTrajectoryCost,
-    ) -> LeftArmMPCCartesian:
+    ) -> ArmMPC:
         env = make_env(self.cfg.env, **self.cfg.env_params)
         env.set_pose_context(self.fk, self.spine3_pos, self.spine3_aa, self.body_pos)
-        return LeftArmMPCCartesian(
-            cartesian_goals=[goal.copy()],
-            initial_q=start_q,
-            cartesian_threshold=self.cfg.cartesian.threshold,
+        assert self.cfg.cartesian is not None
+        return ArmMPC(
             horizon=self.cfg.horizon,
             n_mpc_samples=self.cfg.n_mpc_samples,
             max_angle_delta=self.cfg.max_angle_delta,
-            goal_threshold=self.cfg.goal_threshold,
             visualize=False,
             fk=self.fk,
             spine3_pos=self.spine3_pos,
@@ -364,12 +370,10 @@ class DemoRig:
             body_pos=self.body_pos,
             extra_costs=extra_costs,
             seed=self.cfg.seed,
-            advance_threshold=self.cfg.advance_threshold,
-            max_playback_delta=self.cfg.max_playback_delta,
-            trajectory_fraction=self.cfg.trajectory_fraction,
-            n_diffusion_samples=self.cfg.uq.diffusion_samples,
-            n_clusters=self.cfg.uq.n_clusters,
             env=env,
+            initial_q=start_q,
+            cartesian=replace(self.cfg.cartesian, goals=[list(goal.copy())]),
+            feedback=self.cfg.feedback,
         )
 
     def package_trajectory(
@@ -437,7 +441,7 @@ class DemoRig:
             "start_arm_aa": self.default_arm_aa.tolist(),
             "default_goal": (
                 list(self.cfg.cartesian.goals[0])
-                if self.cfg.cartesian.goals
+                if self.cfg.cartesian is not None
                 else [0.4, 0.3, 0.1]
             ),
             "default_prompts": _DEFAULT_PROMPTS,
@@ -459,14 +463,14 @@ class DemoRig:
             ).tolist(),
             "arm_chain_indices": list(LEFT_ARM_CHAIN_INDICES),
             "uq": {
-                "diffusion_samples": self.cfg.uq.diffusion_samples,
-                "n_clusters": self.cfg.uq.n_clusters,
-                "clusterer": self.cfg.uq.clusterer,
-                "scale": self.cfg.uq.scale,
+                "diffusion_samples": self.cfg.feedback.uq.diffusion_samples,
+                "n_clusters": self.cfg.feedback.uq.n_clusters,
+                "clusterer": self.cfg.feedback.uq.clusterer,
+                "scale": self.cfg.feedback.uq.scale,
             },
             "cost_backend": self.cfg.llm_cost.backend,
             "default_persona": self.cfg.user,
-            "mdm_frames": self.cfg.mdm_frames,
+            "mdm_frames": self.cfg.feedback.frames,
             "steps": self.cfg.steps,
             "trigger_threshold": self.cfg.corrections.trigger_threshold,
             "cartesian_threshold": self.cfg.cartesian.threshold,

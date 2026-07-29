@@ -197,6 +197,34 @@ def _rate_limited_step_q(
     return next_q, reached
 
 
+def _frame_block_distances(
+    q: np.ndarray, target_q: np.ndarray
+) -> tuple[float, float, float]:
+    """Per-block geodesic angles (clavicle, shoulder, elbow) to ``target_q``."""
+    blocks = tuple(
+        float(
+            np.linalg.norm(
+                (
+                    Rotation.from_rotvec(target_q[block])
+                    * Rotation.from_rotvec(q[block]).inv()
+                ).as_rotvec()
+            )
+        )
+        for block in (Q_CLAVICLE, Q_SHOULDER)
+    )
+    return blocks[0], blocks[1], abs(float(target_q[Q_ELBOW] - q[Q_ELBOW]))
+
+
+def _frame_distance(q: np.ndarray, target_q: np.ndarray) -> float:
+    """Worst per-block geodesic angle to ``target_q``.
+
+    The same three angles ``_rate_limited_step_q`` caps, so
+    ``_frame_distance(q, t) <= max_playback_delta`` iff the cursor's reach
+    test passes from ``q``.
+    """
+    return max(_frame_block_distances(q, target_q))
+
+
 _WORLD_UP = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
 

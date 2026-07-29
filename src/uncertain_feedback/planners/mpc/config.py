@@ -1,48 +1,52 @@
-"""YAML configuration for MPC controller settings."""
+"""YAML configuration for MPC controller settings.
+
+Planner capabilities are selected by the presence of top-level sections, one
+per :class:`~uncertain_feedback.planners.mpc.mpc.ArmMPC` module slot:
+
+* ``cartesian:`` — the Cartesian goal space (targets + reach threshold).
+* ``feedback:`` — the MDM feedback method, with an optional nested ``uq:``.
+* ``constraints:`` — named feasibility constraints (e.g. ``robot_ik:``).
+* ``robot_actions:`` — switch the action space to robot joint deltas.
+
+The parsed section dataclasses are passed straight into ``ArmMPC``.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from uncertain_feedback.planners.mpc.action_spaces import RobotActionsConfig
+from uncertain_feedback.planners.mpc.constraints import CONSTRAINT_BUILDERS
 from uncertain_feedback.planners.mpc.costs import available_cost_names
+from uncertain_feedback.planners.mpc.feedback import FeedbackConfig
+from uncertain_feedback.planners.mpc.goal_spaces import CartesianConfig
+from uncertain_feedback.uncertainty.uq_selector import UqConfig
 
-PLANNER_CHOICES = {
-    "arm_mpc",
-    "arm_mpc_mdm",
-    "arm_mpc_mdm_uq",
-    "arm_mpc_cartesian",
-    "arm_mpc_cartesian_ik_gated",
-    "arm_mpc_cartesian_no_mdm",
-    "arm_mpc_cartesian_no_mdm_ik_gated",
-    "arm_mpc_cartesian_robot",
-    "arm_mpc_cartesian_no_mdm_robot",
+# Keys of the retired name-based planner schema; present only to fail loudly
+# so a stale config cannot silently load with different capabilities (e.g. a
+# gated real-robot config running unconstrained).
+_LEGACY_KEYS = {
+    "planner": "select modules with the cartesian:/feedback:/constraints:/"
+    "robot_actions: sections",
+    "goal_threshold": "removed with the joint-space goal queue",
+    "advance_threshold": "removed with the joint-space goal queue",
+    "max_playback_delta": "moved to feedback.max_playback_delta",
+    "trajectory_fraction": "moved to feedback.trajectory_fraction",
+    "mdm_frames": "moved to feedback.frames",
+    "text_time": "moved to feedback.text_time",
+    "uq": "moved under feedback.uq",
+    "max_grasp_ik_residual": "moved to constraints.robot_ik.max_residual",
+    "playback_stall_steps": "moved to constraints.robot_ik.playback_stall_steps",
+    "max_robot_joint_delta": "moved to robot_actions.max_joint_delta",
+    "robot_joint_delta_std": "moved to robot_actions.joint_delta_std",
+    "robot_infeasibility_weight": "moved to robot_actions.infeasibility_weight",
+    "max_grasp_residual": "moved to robot_actions.max_grasp_residual",
+    "grasp_residual_frames": "moved to constraints.robot_ik / robot_actions",
 }
-
-
-@dataclass(frozen=True)
-class UqConfig:
-    """How many MDM samples to draw, how to cluster them, and how to pick one."""
-
-    diffusion_samples: int = 128
-    n_clusters: int = 3
-    clusterer: str = "agglo_end_pose"
-    auto_cluster: int | None = None
-    scale: float = 1.0
-    # Delegate cluster selection to the configured simulated user (takes effect
-    # only when the user has hidden bounds).
-    user_cluster: bool = False
-
-
-@dataclass(frozen=True)
-class CartesianConfig:
-    """Cartesian wrist goals and the distance that counts as reaching one."""
-
-    goals: list[list[float]] = field(default_factory=list)
-    threshold: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -111,9 +115,8 @@ COST_BACKENDS = {"llm", "turns", "agent"}
 
 @dataclass(frozen=True)
 class MpcRunConfig:
-    """Everything one MPC run needs: planner choice, solver sizes, and sub-configs."""
+    """Everything one MPC run needs: module sections, solver sizes, sub-configs."""
 
-    planner: str
     steps: int
     horizon: int
     n_mpc_samples: int
@@ -122,34 +125,14 @@ class MpcRunConfig:
     # Optional (3, 3) [shoulder, elbow, wrist] axis-angle override for the
     # initial left-arm pose (same semantics as the --arm CLI flag, which wins).
     arm: list[list[float]] | None
-    goal_threshold: float
-    advance_threshold: float
-    max_playback_delta: float
-    trajectory_fraction: float
-    uq: UqConfig
-    cartesian: CartesianConfig
     costs: dict[str, dict[str, Any]]
     llm_cost: LlmCostConfig
-    # Robot-action planners only: per-step inf-norm cap on sampled robot joint
-    # deltas, the sampling-noise std around the warm-started mean (None = a
-    # third of the cap), the weight on the grasp-transmission (projection)
-    # residual, and the hard gate discarding rollouts whose leading frames
-    # break the grasp.
-    max_robot_joint_delta: float = 0.005
-    robot_joint_delta_std: float | None = None
-    robot_infeasibility_weight: float = 1.0
-    max_grasp_residual: float = 0.02
-    grasp_residual_frames: int = 3
-    # IK-gated human-action planners only: per-frame IK pose error (metres +
-    # radians) above which a rollout's leading frames count as breaking the
-    # grasp. Shares grasp_residual_frames with the robot-action gate.
-    max_grasp_ik_residual: float = 0.001
-    # Gated MDM playback only: consecutive steps without closest-approach
-    # progress on the current playback frame before the cursor skips it.
-    playback_stall_steps: int = 40
-    mdm_frames: int | None = None
+    # ArmMPC module sections; each is enabled by its section's presence.
+    cartesian: CartesianConfig | None = None
+    feedback: FeedbackConfig | None = None
+    constraints: dict[str, Any] = field(default_factory=dict)
+    robot_actions: RobotActionsConfig | None = None
     num_denoising_steps: int | None = None  # kimodo DDIM steps; None = backend default
-    text_time: int = 0
     preference_learning: bool = True
     preference_alpha: float = 0.5
     preference_window: int = 50
@@ -268,17 +251,97 @@ def _str_list(value: Any, name: str) -> list[str]:
     return out
 
 
+def _parse_uq(data: dict[str, Any]) -> UqConfig:
+    return UqConfig(
+        diffusion_samples=_positive_int(
+            data.get("diffusion_samples", 128), "feedback.uq.diffusion_samples"
+        ),
+        n_clusters=_positive_int(data.get("n_clusters", 3), "feedback.uq.n_clusters"),
+        clusterer=str(data.get("clusterer", "agglo_end_pose")),
+        auto_cluster=(
+            None if data.get("auto_cluster") is None else int(data["auto_cluster"])
+        ),
+        scale=_float(data.get("scale", 1.0), "feedback.uq.scale"),
+        user_cluster=_bool(
+            data.get("user_cluster", False), "feedback.uq.user_cluster"
+        ),
+    )
+
+
+def _parse_feedback(data: dict[str, Any]) -> FeedbackConfig:
+    return FeedbackConfig(
+        max_playback_delta=_float(
+            data.get("max_playback_delta", 0.05), "feedback.max_playback_delta"
+        ),
+        trajectory_fraction=_float(
+            data.get("trajectory_fraction", 1.0), "feedback.trajectory_fraction"
+        ),
+        frames=(
+            None
+            if data.get("frames") is None
+            else _positive_int(data["frames"], "feedback.frames")
+        ),
+        text_time=int(data.get("text_time", 0)),
+        uq=(
+            _parse_uq(_mapping(data["uq"], "feedback.uq"))
+            if "uq" in data
+            else None
+        ),
+    )
+
+
+def _parse_constraints(data: dict[str, Any]) -> dict[str, Any]:
+    constraints: dict[str, Any] = {}
+    for name, params in data.items():
+        if name not in CONSTRAINT_BUILDERS:
+            raise ValueError(
+                f"Unknown constraint '{name}'; choose from "
+                f"{sorted(CONSTRAINT_BUILDERS)}."
+            )
+        cfg_cls = CONSTRAINT_BUILDERS[name][0]
+        params_map = _mapping(params, f"constraints.{name}")
+        valid = {f.name for f in fields(cfg_cls)}
+        unknown = set(params_map) - valid
+        if unknown:
+            raise ValueError(
+                f"Unknown constraints.{name} keys: {sorted(unknown)}."
+            )
+        constraints[name] = cfg_cls(**params_map)
+    return constraints
+
+
+def _parse_robot_actions(data: dict[str, Any]) -> RobotActionsConfig:
+    return RobotActionsConfig(
+        max_joint_delta=_float(
+            data.get("max_joint_delta", 0.005), "robot_actions.max_joint_delta"
+        ),
+        joint_delta_std=(
+            None
+            if data.get("joint_delta_std") is None
+            else _float(data["joint_delta_std"], "robot_actions.joint_delta_std")
+        ),
+        infeasibility_weight=_float(
+            data.get("infeasibility_weight", 1.0),
+            "robot_actions.infeasibility_weight",
+        ),
+        max_grasp_residual=_float(
+            data.get("max_grasp_residual", 0.02), "robot_actions.max_grasp_residual"
+        ),
+        grasp_residual_frames=_positive_int(
+            data.get("grasp_residual_frames", 3),
+            "robot_actions.grasp_residual_frames",
+        ),
+    )
+
+
 def load_mpc_config(path: Path) -> MpcRunConfig:
     """Load required MPC controller settings from YAML."""
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     data = _mapping(raw, "MPC config")
 
-    planner = str(data.get("planner", ""))
-    if planner not in PLANNER_CHOICES:
-        raise ValueError(
-            f"planner must be one of {sorted(PLANNER_CHOICES)}; got {planner!r}."
-        )
+    for key in sorted(_LEGACY_KEYS.keys() & data.keys()):
+        raise ValueError(f"'{key}' is retired: {_LEGACY_KEYS[key]}.")
 
     from uncertain_feedback.motion_generators import (  # pylint: disable=import-outside-toplevel
         MOTION_GENERATOR_BUILDERS,
@@ -300,12 +363,40 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         raise ValueError(f"env must be one of {sorted(ENV_BUILDERS)}; got {env!r}.")
     env_params = _mapping(data.get("env_params"), "env_params")
 
-    uq_data = _mapping(data.get("uq"), "uq")
-    cartesian_data = _mapping(data.get("cartesian"), "cartesian")
     cost_data = _mapping(data.get("costs"), "costs")
     llm_cost_data = _mapping(data.get("llm_cost"), "llm_cost")
 
-    normalized_goals = _goal_list(cartesian_data.get("goals", []), "cartesian.goals")
+    cartesian: CartesianConfig | None = None
+    if "cartesian" in data:
+        cartesian_data = _mapping(data["cartesian"], "cartesian")
+        goals = _goal_list(cartesian_data.get("goals", []), "cartesian.goals")
+        if not goals:
+            raise ValueError("cartesian.goals must be non-empty.")
+        cartesian = CartesianConfig(
+            goals=goals,
+            threshold=_float(
+                cartesian_data.get("threshold", 0.05), "cartesian.threshold"
+            ),
+        )
+
+    feedback: FeedbackConfig | None = None
+    if "feedback" in data:
+        feedback = _parse_feedback(_mapping(data["feedback"], "feedback"))
+
+    constraints = _parse_constraints(_mapping(data.get("constraints"), "constraints"))
+
+    robot_actions: RobotActionsConfig | None = None
+    if "robot_actions" in data:
+        robot_actions = _parse_robot_actions(
+            _mapping(data["robot_actions"], "robot_actions")
+        )
+
+    if constraints and robot_actions is not None:
+        raise ValueError(
+            "constraints and robot_actions are mutually exclusive; robot "
+            "rollouts are feasible by construction."
+        )
+
     arm_data = data.get("arm")
     arm: list[list[float]] | None = None
     if arm_data is not None:
@@ -377,66 +468,16 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     )
 
     return MpcRunConfig(
-        planner=planner,
         steps=_positive_int(data.get("steps"), "steps"),
         horizon=_positive_int(data.get("horizon"), "horizon"),
         n_mpc_samples=_positive_int(data.get("n_mpc_samples"), "n_mpc_samples"),
         max_angle_delta=_float(data.get("max_angle_delta"), "max_angle_delta"),
-        max_robot_joint_delta=_float(
-            data.get("max_robot_joint_delta", 0.005), "max_robot_joint_delta"
-        ),
-        robot_joint_delta_std=(
-            None
-            if data.get("robot_joint_delta_std") is None
-            else _float(data["robot_joint_delta_std"], "robot_joint_delta_std")
-        ),
-        robot_infeasibility_weight=_float(
-            data.get("robot_infeasibility_weight", 1.0), "robot_infeasibility_weight"
-        ),
-        max_grasp_residual=_float(
-            data.get("max_grasp_residual", 0.02), "max_grasp_residual"
-        ),
-        grasp_residual_frames=_positive_int(
-            data.get("grasp_residual_frames", 3), "grasp_residual_frames"
-        ),
-        max_grasp_ik_residual=_float(
-            data.get("max_grasp_ik_residual", 0.001), "max_grasp_ik_residual"
-        ),
-        playback_stall_steps=_positive_int(
-            data.get("playback_stall_steps", 40), "playback_stall_steps"
-        ),
         pose=_optional_path(data.get("pose"), "pose"),
         arm=arm,
-        goal_threshold=_float(data.get("goal_threshold", 0.01), "goal_threshold"),
-        advance_threshold=_float(
-            data.get("advance_threshold", 0.1), "advance_threshold"
-        ),
-        max_playback_delta=_float(
-            data.get("max_playback_delta", 0.05), "max_playback_delta"
-        ),
-        trajectory_fraction=_float(
-            data.get("trajectory_fraction", 1.0), "trajectory_fraction"
-        ),
-        uq=UqConfig(
-            diffusion_samples=_positive_int(
-                uq_data.get("diffusion_samples", 128), "uq.diffusion_samples"
-            ),
-            n_clusters=_positive_int(uq_data.get("n_clusters", 3), "uq.n_clusters"),
-            clusterer=str(uq_data.get("clusterer", "agglo_end_pose")),
-            auto_cluster=(
-                None
-                if uq_data.get("auto_cluster") is None
-                else int(uq_data["auto_cluster"])
-            ),
-            scale=_float(uq_data.get("scale", 1.0), "uq.scale"),
-            user_cluster=_bool(uq_data.get("user_cluster", False), "uq.user_cluster"),
-        ),
-        cartesian=CartesianConfig(
-            goals=normalized_goals,
-            threshold=_float(
-                cartesian_data.get("threshold", 0.05), "cartesian.threshold"
-            ),
-        ),
+        cartesian=cartesian,
+        feedback=feedback,
+        constraints=constraints,
+        robot_actions=robot_actions,
         costs=costs,
         llm_cost=LlmCostConfig(
             enabled=_bool(llm_cost_data.get("enabled", False), "llm_cost.enabled"),
@@ -464,17 +505,11 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             ),
         ),
         seed=_nonnegative_int(data.get("seed", 0), "seed"),
-        mdm_frames=(
-            None
-            if data.get("mdm_frames") is None
-            else _positive_int(data["mdm_frames"], "mdm_frames")
-        ),
         num_denoising_steps=(
             None
             if data.get("num_denoising_steps") is None
             else _positive_int(data["num_denoising_steps"], "num_denoising_steps")
         ),
-        text_time=int(data.get("text_time", 0)),
         preference_learning=_bool(
             data.get("preference_learning", True), "preference_learning"
         ),

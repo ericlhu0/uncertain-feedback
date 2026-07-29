@@ -19,7 +19,7 @@ from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
 )
 from uncertain_feedback.planners.interactive import OperatorPause
-from uncertain_feedback.planners.mpc import LeftArmMPCMDM, SmplLeftArmFK
+from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig, SmplLeftArmFK
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -112,11 +112,10 @@ def test_remaining_mdm_trajectory_is_snapshot_and_replacement_discards_suffix() 
     q0 = np.zeros(7, dtype=np.float64)
     old = np.stack([np.full((3, 3), value) for value in (0.1, 0.2, 0.3)])
     old_q = fk.arm_aa_to_q_batch(old)
-    planner = LeftArmMPCMDM(
-        goals=[q0],
+    planner = ArmMPC(
         visualize=False,
         fk=fk,
-        max_playback_delta=10.0,
+        feedback=FeedbackConfig(max_playback_delta=10.0),
     )
     planner.push_trajectory(old)
     q1 = planner.step(q0)
@@ -139,7 +138,7 @@ def test_remaining_mdm_trajectory_is_snapshot_and_replacement_discards_suffix() 
 def test_session_triggers_again_after_comfort_rearms(monkeypatch, tmp_path) -> None:
     q0 = np.zeros(7, dtype=np.float64)
     fk = SmplLeftArmFK()
-    planner = LeftArmMPCMDM(goals=[np.ones(7)], visualize=False, fk=fk)
+    planner = ArmMPC(visualize=False, fk=fk, feedback=FeedbackConfig())
     monkeypatch.setattr(planner, "step", np.asarray)
     violations = iter((0.0, 0.03, 0.0, 0.03, 0.04))
     monkeypatch.setattr(
@@ -195,12 +194,12 @@ def test_interactive_runner_takes_its_correction_from_the_operator(
     config_path = tmp_path / "mpc.yaml"
     config_path.write_text(
         """
-planner: arm_mpc_mdm
 steps: 4
 horizon: 2
 n_mpc_samples: 2
 max_angle_delta: 0.01
-text_time: 0
+feedback:
+  text_time: 0
 preference_learning: false
 llm_cost:
   enabled: false
@@ -213,7 +212,7 @@ corrections:
     cfg = load_mpc_config(config_path)
     q0 = np.zeros(7, dtype=np.float64)
     fk = SmplLeftArmFK()
-    planner = LeftArmMPCMDM(goals=[np.ones(7)], visualize=False, fk=fk)
+    planner = ArmMPC(visualize=False, fk=fk, feedback=FeedbackConfig())
     monkeypatch.setattr(planner, "step", np.asarray)
     requests = iter((False, True, False, False))
 
@@ -290,12 +289,12 @@ def test_runner_persists_multiple_corrections_in_one_trajectory(
     config_path = tmp_path / "mpc.yaml"
     config_path.write_text(
         """
-planner: arm_mpc_mdm
 steps: 5
 horizon: 2
 n_mpc_samples: 2
 max_angle_delta: 0.01
-text_time: 0
+feedback:
+  text_time: 0
 preference_learning: false
 llm_cost:
   enabled: false
@@ -308,7 +307,7 @@ corrections:
     cfg = load_mpc_config(config_path)
     q0 = np.zeros(7, dtype=np.float64)
     fk = SmplLeftArmFK()
-    planner = LeftArmMPCMDM(goals=[np.ones(7)], visualize=False, fk=fk)
+    planner = ArmMPC(visualize=False, fk=fk, feedback=FeedbackConfig())
     monkeypatch.setattr(planner, "step", np.asarray)
     violations = iter((0.0, 0.03, 0.0, 0.03, 0.04))
     monkeypatch.setattr(

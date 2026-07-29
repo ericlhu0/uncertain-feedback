@@ -1,12 +1,10 @@
 env: sim_robot_visual
-planner: arm_mpc_cartesian_no_mdm
 # Planner knobs match the demo runner's config
 # (arm_mpc_cartesian_mdm_llm_transfer.yaml) so trajectories look alike.
 steps: 100
 horizon: 10
 n_mpc_samples: 200
 max_angle_delta: 0.01
-goal_threshold: 0.15
 # Same body pose the demo runner boots with (its base1/goal library was
 # authored against this pose's spine3 frame).
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"

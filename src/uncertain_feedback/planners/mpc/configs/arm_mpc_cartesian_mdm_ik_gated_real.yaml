@@ -56,21 +56,22 @@ env_params:
   # the Cartesian goal exists this early — the MDM correction has not been
   # spoken yet; the rollout runs the gated planner, gate included.
   preview_plan: true
-planner: arm_mpc_cartesian_ik_gated
-# Human-action sampling as in arm_mpc_cartesian_no_mdm_ik_gated_real.yaml:
-# rollouts whose first grasp_residual_frames frames imply a gripper pose the
-# robot cannot IK to exactly (pose error above max_grasp_ik_residual, metres +
-# radians) are discarded outright. This uses the real env's analytical Gen3
-# IK and padded controller joint box, seeded through each rollout. The floor is
-# IK convergence, not model mismatch, so the threshold sits near zero. The same
-# threshold screens MDM playback: unreachable frames are dropped at push time
-# and a step continuation cannot place is held rather than commanded.
-max_grasp_ik_residual: 0.001
-grasp_residual_frames: 3
-# Consecutive playback steps without closest-approach progress on the current
-# frame before the cursor skips it. Worst case an all-unreachable correction
-# costs mdm_frames * playback_stall_steps steps out of the session budget.
-playback_stall_steps: 40
+constraints:
+  robot_ik:
+    # Human-action sampling as in arm_mpc_cartesian_no_mdm_ik_gated_real.yaml:
+    # rollouts whose first grasp_residual_frames frames imply a gripper pose the
+    # robot cannot IK to exactly (pose error above max_grasp_ik_residual, metres +
+    # radians) are discarded outright. This uses the real env's analytical Gen3
+    # IK and padded controller joint box, seeded through each rollout. The floor is
+    # IK convergence, not model mismatch, so the threshold sits near zero. The same
+    # threshold screens MDM playback: unreachable frames are dropped at push time
+    # and a step continuation cannot place is held rather than commanded.
+    max_residual: 0.001
+    grasp_residual_frames: 3
+    # Consecutive playback steps without closest-approach progress on the current
+    # frame before the cursor skips it. Worst case an all-unreachable correction
+    # costs mdm_frames * playback_stall_steps steps out of the session budget.
+    playback_stall_steps: 40
 # Planner knobs match arm_mpc_cartesian_no_mdm_ik_gated_real.yaml, except
 # steps: every correction is played back at the rate caps below, so a session
 # holds far more steps than one reach — this budgets the whole session.
@@ -78,30 +79,28 @@ steps: 3000
 horizon: 10
 n_mpc_samples: 1000
 max_angle_delta: 0.01
-goal_threshold: 0.15
-advance_threshold: 0.15
-# Correction playback is rate-limited against the *measured* arm and advances a
-# frame only once the arm reaches it, so this bounds how far the command may lead
-# the person; the env's own robot_max_joint_delta is the hard per-step bound.
-# Under compliant_joint the measured arm settles short of commands — if
-# steady-state deflection under load exceeds this, frames finish by stall-skip
-# rather than by being reached; loosen it on the rig if the skip logs say so.
-max_playback_delta: 0.002
-trajectory_fraction: 1
-mdm_frames: 50
-# Ignored with --interactive; kept so this config also runs scripted.
-text_time: 300
+feedback:
+  # Correction playback is rate-limited against the *measured* arm and advances a
+  # frame only once the arm reaches it, so this bounds how far the command may lead
+  # the person; the env's own robot_max_joint_delta is the hard per-step bound.
+  # Under compliant_joint the measured arm settles short of commands — if
+  # steady-state deflection under load exceeds this, frames finish by stall-skip
+  # rather than by being reached; loosen it on the rig if the skip logs say so.
+  max_playback_delta: 0.002
+  trajectory_fraction: 1
+  frames: 50
+  # Ignored with --interactive; kept so this config also runs scripted.
+  text_time: 300
+  uq:
+    diffusion_samples: 500
+    n_clusters: 3
+    # No auto_cluster: each correction opens the cluster picker so the person's
+    # intent — and its magnitude — is chosen rather than assumed.
+    scale: 1.0
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 
 corrections:
   trigger_threshold: 0.02
-
-uq:
-  diffusion_samples: 500
-  n_clusters: 3
-  # No auto_cluster: each correction opens the cluster picker so the person's
-  # intent — and its magnitude — is chosen rather than assumed.
-  scale: 1.0
 
 # Demo-runner "base1" initial pose ([shoulder, elbow, wrist] axis-angles).
 # The run starts from the *measured* arm configuration — every row is

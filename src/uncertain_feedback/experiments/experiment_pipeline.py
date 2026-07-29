@@ -11,13 +11,8 @@ from typing import Any, Callable
 import numpy as np
 
 from uncertain_feedback.motion_generators.base import MotionGenerator
-from uncertain_feedback.planners.mpc import (
-    ArmMPCCartesianNoMDM,
-    LeftArmMPCMDMUQ,
-    SmplLeftArmMPC,
-)
+from uncertain_feedback.planners.mpc import ArmMPC, CartesianConfig
 from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
-from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import UqClusterResult
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -40,6 +35,7 @@ from uncertain_feedback.planners.run import (
     _rollout_reference_trajectory,
     run_planning_loop,
 )
+from uncertain_feedback.uncertainty import UqClusterResult
 from uncertain_feedback.simulated_users import (
     HiddenCostTerm,
     SimulatedUser,
@@ -154,11 +150,20 @@ def apply_persona_goals(cfg: MpcRunConfig, user_name: str) -> MpcRunConfig:
     cfg = replace(cfg, user=user_name)
     if persona_goals is None:
         return cfg
+    assert cfg.cartesian is not None
     return replace(
         cfg,
         cartesian=replace(cfg.cartesian, goals=persona_goals.cartesian),
         transfer=replace(cfg.transfer, goals=persona_goals.transfer),
     )
+
+
+def require_correction_planner(cfg: MpcRunConfig, label: str) -> None:
+    """Fail fast when a correction experiment's config lacks the modules it drives."""
+    if cfg.feedback is None or cfg.feedback.uq is None or cfg.cartesian is None:
+        raise ValueError(
+            f"{label} requires feedback: (with uq:) and cartesian: sections."
+        )
 
 
 def rollout_to_goal(
@@ -181,14 +186,11 @@ def rollout_to_goal(
     ``steps`` overrides ``cfg.steps`` and ``stop_at_goal=False`` forces the
     full step budget (the episode loop's fixed-length nominal plan).
     """
-    planner = ArmMPCCartesianNoMDM(
-        cartesian_goals=[np.asarray(goal, dtype=np.float64)],
-        initial_q=q0,
-        cartesian_threshold=cfg.cartesian.threshold,
+    assert cfg.cartesian is not None
+    planner = ArmMPC(
         horizon=cfg.horizon,
         n_mpc_samples=cfg.n_mpc_samples,
         max_angle_delta=cfg.max_angle_delta,
-        goal_threshold=cfg.goal_threshold,
         visualize=False,
         fk=context.fk,
         spine3_pos=spine3_pos,
@@ -196,6 +198,11 @@ def rollout_to_goal(
         body_pos=body_pos,
         extra_costs=extra_costs,
         seed=cfg.seed,
+        initial_q=q0,
+        cartesian=CartesianConfig(
+            goals=[list(np.asarray(goal, dtype=np.float64))],
+            threshold=cfg.cartesian.threshold,
+        ),
     )
     q0 = np.asarray(q0, dtype=np.float64).copy()
     n_steps = max(1, cfg.steps if steps is None else steps)
@@ -235,6 +242,7 @@ def goal_reach(
     )
     wrist_rel = arm_pos[-1] - context.spine3_pos
     distance = float(np.linalg.norm(wrist_rel - np.asarray(goal, dtype=np.float64)))
+    assert cfg.cartesian is not None
     return {
         "reached": distance < cfg.cartesian.threshold,
         "distance": distance,
@@ -394,7 +402,7 @@ def run_initial_rollout(
 
 
 def generate_uq_correction(
-    mpc: LeftArmMPCMDMUQ,
+    mpc: ArmMPC,
     cfg: MpcRunConfig,
     user: SimulatedUser,
     gen: MotionGenerator,
@@ -419,6 +427,8 @@ def generate_uq_correction(
     episode loop passes a :func:`choose_correction` wrapper returning
     ``(label, magnitude)``).
     """
+    assert cfg.feedback is not None and cfg.feedback.uq is not None
+    uq_cfg = cfg.feedback.uq
     cluster_oracle_scores: dict[int, float] = {}
 
     def select_oracle_cluster(means: dict[int, np.ndarray]) -> int:
@@ -428,7 +438,7 @@ def generate_uq_correction(
             prefix=log_prefix,
         )
         chosen, cluster_oracle_scores = choose_oracle_cluster(
-            user, context, means, cfg.uq.scale
+            user, context, means, uq_cfg.scale
         )
         scores = ", ".join(
             f"{label}={score:.3f}"
@@ -442,8 +452,8 @@ def generate_uq_correction(
     mdm_t0 = time.perf_counter()
     _log(
         f"{user.name}: phase B MDM/UQ correction "
-        f"(samples={cfg.uq.diffusion_samples}, clusters={cfg.uq.n_clusters}, "
-        f"frames={mdm_frames}, scale={cfg.uq.scale})",
+        f"(samples={uq_cfg.diffusion_samples}, clusters={uq_cfg.n_clusters}, "
+        f"frames={mdm_frames}, scale={uq_cfg.scale})",
         prefix=log_prefix,
     )
     current_pose = gen.build_pose_from_arm_aa(
@@ -454,7 +464,7 @@ def generate_uq_correction(
         feedback_text if feedback_text is not None else user.feedback_text,
         start_pose=current_pose,
         current_q=q_feedback,
-        default_scale=cfg.uq.scale,
+        default_scale=uq_cfg.scale,
         mdm_frames=mdm_frames,
         frozen_body=frozen_body,
         cluster_selector=(
@@ -470,7 +480,7 @@ def generate_uq_correction(
         f"correction_frames={correction_traj.shape[0]}",
         prefix=log_prefix,
     )
-    if cfg.cartesian.goals:
+    if cfg.cartesian is not None:
         overlay_t0 = time.perf_counter()
         _log(f"{user.name}: rendering UQ cluster overlay", prefix=log_prefix)
         ArmVisualizer(context.fk).render_cluster_contrast_overlay(
@@ -514,7 +524,7 @@ def _rejected_candidate_trajs(
 
 
 def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-locals
-    mpc: SmplLeftArmMPC | None,
+    mpc: ArmMPC | None,
     cfg: MpcRunConfig,
     instruction: str,
     cluster_traj: np.ndarray,
@@ -719,8 +729,8 @@ def evaluate_cost_conditions(  # pylint: disable=too-many-arguments
     the user speaks — and are scored on the assembled prefix + continuation,
     like the tracking condition. Base always rolls from ``initial_q``.
     """
-    if not cfg.cartesian.goals:
-        raise ValueError("Experiment evaluation requires cartesian.goals.")
+    if cfg.cartesian is None:
+        raise ValueError("Experiment evaluation requires a cartesian: section.")
     goal_pos = np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
     _log(
         f"{user.name}: evaluating original goal (save_video={save_video})",
@@ -831,6 +841,7 @@ def evaluate_original_goal(  # pylint: disable=too-many-arguments
         q_history=q_history,
         log_prefix=log_prefix,
     )
+    assert cfg.cartesian is not None
     goal_pos = np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
     _log(
         f"{user.name} tracking/goal_0: scoring assembled correction trajectory",
@@ -854,7 +865,7 @@ def evaluate_original_goal(  # pylint: disable=too-many-arguments
 
 
 def run_experiment(  # pylint: disable=too-many-arguments,too-many-locals
-    mpc: LeftArmMPCMDMUQ,
+    mpc: ArmMPC,
     cfg: MpcRunConfig,
     user: SimulatedUser,
     gen: MotionGenerator,

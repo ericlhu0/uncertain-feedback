@@ -1,29 +1,25 @@
-planner: arm_mpc_cartesian
 motion_generator: kimodo
 steps: 300
 horizon: 10
 n_mpc_samples: 200
 max_angle_delta: 0.01
 pose: "src/uncertain_feedback/motion_generators/kimodo/start_pose_kimodo.npy"
-goal_threshold: 0.15
-advance_threshold: 0.15
-max_playback_delta: 0.05  # max per-joint rotation (rad) per step while following the MDM trajectory
-trajectory_fraction: 1
-mdm_frames: 50
-text_time: 10
+feedback:
+  max_playback_delta: 0.05  # max per-joint rotation (rad) per step while following the MDM trajectory
+  trajectory_fraction: 1
+  frames: 50
+  text_time: 10
+  uq:
+    # The worker now encodes the (shared) prompt once regardless of this count, so
+    # raising it back toward 500 is feasible; cost scales with diffusion + memory.
+    diffusion_samples: 60
+    n_clusters: 3
+    auto_cluster: 0
+    scale: 1.0  # default motion-magnitude scale for the chosen cluster (GUI slider overrides)
 
 corrections:
   trigger_threshold: 0.02
 num_denoising_steps: 100  # kimodo DDIM steps; lower (e.g. 30-50) is faster, lower quality
-
-
-uq:
-  # The worker now encodes the (shared) prompt once regardless of this count, so
-  # raising it back toward 500 is feasible; cost scales with diffusion + memory.
-  diffusion_samples: 60
-  n_clusters: 3
-  auto_cluster: 0
-  scale: 1.0  # default motion-magnitude scale for the chosen cluster (GUI slider overrides)
 
 cartesian:
   goals:

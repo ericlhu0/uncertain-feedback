@@ -15,11 +15,8 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
-
 from uncertain_feedback.experiments.cluster_comparison import run_cluster_comparison
 from uncertain_feedback.experiments.experiment_pipeline import apply_persona_goals
-from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import COST_BACKENDS, load_mpc_config
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.planners.run import (
@@ -30,7 +27,6 @@ from uncertain_feedback.planners.run import (
 )
 from uncertain_feedback.simulated_users import PERSONAS, choose_cluster, get_persona
 
-_UQ_PLANNERS = {"arm_mpc_mdm_uq", "arm_mpc_cartesian"}
 
 
 def _experiment_parser() -> argparse.ArgumentParser:
@@ -75,11 +71,9 @@ def main() -> None:
     artifact_base_dir = Path.cwd().resolve()
     cfg = load_mpc_config(args.mpc_config)
 
-    if cfg.planner not in _UQ_PLANNERS:
+    if cfg.feedback is None or cfg.feedback.uq is None:
         raise ValueError(
-            "Cluster experiments require a UQ planner "
-            "(arm_mpc_mdm_uq or arm_mpc_cartesian); "
-            f"got {cfg.planner!r}."
+            "Cluster experiments require a feedback: section with uq:."
         )
     if not cfg.llm_cost.enabled:
         raise ValueError("Experiments require llm_cost.enabled: true in the config.")
@@ -93,10 +87,10 @@ def main() -> None:
     setup = build_run(args, cfg)
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Experiment config must provide an MDM pose to generate from.")
-    mpc = cast(LeftArmMPCMDMUQ, setup.mpc)
+    mpc = setup.mpc
 
     effective_text_time = (
-        args.text_time if args.text_time is not None else cfg.text_time
+        args.text_time if args.text_time is not None else cfg.feedback.text_time
     )
     q = setup.q0.copy()
     q_history: list = []
@@ -106,28 +100,30 @@ def main() -> None:
         if q_history:
             q = q_history[-1]
 
-    mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
+    mdm_frames = (
+        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
+    )
     feedback_text = resolve_feedback_text(args.text, setup.user)
     cluster_selector = (
         (lambda means: choose_cluster(setup.user, setup.cost_context, means))
-        if cfg.uq.user_cluster and setup.user.bounds
+        if cfg.feedback.uq.user_cluster and setup.user.bounds
         else None
     )
     current_pose = setup.gen.build_pose_from_arm_aa(
         setup.initial_pose,
         q_to_arm_aa(q, setup.fk.elbow_hinge_axis),
     )
-    mpc.query_mdm_with_uncertainty(  # pylint: disable=no-member
+    mpc.query_mdm_with_uncertainty(
         setup.gen,
         feedback_text,
         start_pose=current_pose,
         current_q=q,
-        auto_cluster=cfg.uq.auto_cluster,
+        auto_cluster=cfg.feedback.uq.auto_cluster,
         mdm_frames=mdm_frames,
         frozen_body=args.frozen_body,
         cluster_selector=cluster_selector,
     )
-    uq_result = mpc.last_uq_result  # pylint: disable=no-member
+    uq_result = mpc.last_uq_result
     if uq_result is None:
         raise RuntimeError("UQ clustering produced no result.")
 

@@ -47,35 +47,32 @@ env_params:
   # before the first command. Only the pre-correction plan to the Cartesian goal
   # exists this early — the MDM correction has not been spoken yet.
   preview_plan: true
-planner: arm_mpc_cartesian
 # The real rig's conservative step caps, as in arm_mpc_cartesian_no_mdm_real.yaml.
 horizon: 10
 n_mpc_samples: 1000
 max_angle_delta: 0.001
-# Correction playback is rate-limited against the *measured* arm and advances a
-# frame only once the arm reaches it, so this bounds how far the command may lead
-# the person; the env's own robot_max_joint_delta is the hard per-step bound.
-max_playback_delta: 0.002
+feedback:
+  # Correction playback is rate-limited against the *measured* arm and advances a
+  # frame only once the arm reaches it, so this bounds how far the command may lead
+  # the person; the env's own robot_max_joint_delta is the hard per-step bound.
+  max_playback_delta: 0.002
+  trajectory_fraction: 1
+  frames: 50
+  # Ignored with --interactive; kept so this config also runs scripted.
+  text_time: 300
+  uq:
+    diffusion_samples: 500
+    n_clusters: 3
+    # No auto_cluster: each correction opens the cluster picker so the person's
+    # intent — and its magnitude — is chosen rather than assumed.
+    scale: 1.0
 # Every correction is played back at those caps, so a run holds far more steps
 # than a kinematic one — this is the budget for the whole session, not one reach.
 steps: 3000
-goal_threshold: 0.15
-advance_threshold: 0.15
-trajectory_fraction: 1
-mdm_frames: 50
-# Ignored with --interactive; kept so this config also runs scripted.
-text_time: 300
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 
 corrections:
   trigger_threshold: 0.02
-
-uq:
-  diffusion_samples: 500
-  n_clusters: 3
-  # No auto_cluster: each correction opens the cluster picker so the person's
-  # intent — and its magnitude — is chosen rather than assumed.
-  scale: 1.0
 
 # Demo-runner "base1" initial pose ([shoulder, elbow, wrist] axis-angles).
 # The run starts from the *measured* arm configuration — every row is

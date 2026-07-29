@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import cast
-
-from uncertain_feedback.experiments.experiment_pipeline import apply_persona_goals
+from uncertain_feedback.experiments.experiment_pipeline import (
+    apply_persona_goals,
+    require_correction_planner,
+)
 from uncertain_feedback.experiments.multi_round_experiment import (
     run_multi_round_experiment,
 )
-from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.run import build_parser, build_run
 from uncertain_feedback.simulated_users import PERSONAS, get_persona
@@ -44,11 +44,7 @@ def main() -> None:
     """Run the requested personas while reusing one loaded motion generator."""
     args = _parser().parse_args()
     cfg = load_mpc_config(args.mpc_config)
-    if cfg.planner != "arm_mpc_cartesian":
-        raise ValueError(
-            "Multi-round experiments require planner: arm_mpc_cartesian; "
-            f"got {cfg.planner!r}."
-        )
+    require_correction_planner(cfg, "Multi-round experiments")
     if not cfg.llm_cost.enabled:
         raise ValueError("Multi-round experiments require llm_cost.enabled: true.")
     if args.all_personas:
@@ -61,8 +57,10 @@ def main() -> None:
     setup = build_run(args, cfg)
     if setup.gen is None or setup.initial_pose is None:
         raise ValueError("Multi-round experiment config must provide an MDM pose.")
-    mpc = cast(LeftArmMPCMDMUQ, setup.mpc)
-    mdm_frames = args.mdm_frames if args.mdm_frames is not None else cfg.mdm_frames
+    mpc = setup.mpc
+    mdm_frames = (
+        args.mdm_frames if args.mdm_frames is not None else cfg.feedback.frames
+    )
     for name in persona_names:
         user = get_persona(name)
         if not user.bounds:

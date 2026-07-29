@@ -22,7 +22,7 @@ from uncertain_feedback.experiments.experiment_pipeline import (
     save_rollout,
 )
 from uncertain_feedback.motion_generators.base import MotionGenerator
-from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -55,7 +55,7 @@ def _choose_oracle_cluster(
 
 
 def run_transfer_experiment(  # pylint: disable=too-many-arguments,too-many-locals
-    mpc: LeftArmMPCMDMUQ,
+    mpc: ArmMPC,
     cfg: MpcRunConfig,
     user: SimulatedUser,
     gen: MotionGenerator,

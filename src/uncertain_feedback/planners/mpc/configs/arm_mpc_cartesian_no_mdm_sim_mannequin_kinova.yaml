@@ -8,7 +8,6 @@ env_params:
   # Robot base position relative to spine3, pybullet frame (x = person's
   # left, y = behind the person, z = up).
   robot_base_offset: [0.6, -0.35, -0.35]
-planner: arm_mpc_cartesian_no_mdm
 # Planner knobs match the demo runner's config
 # (arm_mpc_cartesian_mdm_llm_transfer.yaml) so trajectories look alike.
 # More steps than the kinematic configs: the physical proxy can't realize
@@ -17,7 +16,6 @@ steps: 1000
 horizon: 10
 n_mpc_samples: 1000
 max_angle_delta: 0.001
-goal_threshold: 0.15
 # Same body pose the demo runner boots with (its base1/goal library was
 # authored against this pose's spine3 frame).
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"

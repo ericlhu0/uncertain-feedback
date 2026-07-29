@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.costs import (
     CombineCostGenerator,
     CompositeTrajectoryCost,
@@ -56,14 +56,13 @@ def _round(tmp_path: Path, index: int) -> CostRound:
         fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
     )
     full_cfg = SimpleNamespace(
-        planner="arm_mpc_cartesian",
         steps=3,
         horizon=2,
         n_mpc_samples=4,
         max_angle_delta=0.01,
-        goal_threshold=0.05,
         seed=0,
         cartesian=SimpleNamespace(goals=[[0.1, 0.2, 0.3]], threshold=0.05),
+        constraints={},
         user=f"secret_persona_{index}",
         persona_goals={f"secret_persona_{index}": [[9.0, 9.0, 9.0]]},
     )
@@ -152,9 +151,7 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
         slots=(0,), low=np.full((1, 3), -1.0), high=np.full((1, 3), 1.0)
     )
     old = GeneratedPythonCost(_CODE, {"weight": 9.0}, context)
-    mpc = SmplLeftArmMPC(
-        goals=[np.zeros(7)], extra_costs=CompositeTrajectoryCost([base, old])
-    )
+    mpc = ArmMPC(extra_costs=CompositeTrajectoryCost([base, old]))
     generator = CombineCostGenerator(
         context=context,
         instruction="feedback",

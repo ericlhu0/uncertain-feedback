@@ -243,7 +243,7 @@ The kimodo start pose is a SMPL `body_pose (21,3)` `.npy` (`motion_generators/ki
 **Generation speed.** Kimodo's text encoder is an 8B LLM2Vec model. With no encoder
 server reachable on `127.0.0.1:9550` it loads locally, and `TEXT_ENCODER_DEVICE=cpu`
 (auto-set when VRAM < 18 GB) runs it on CPU — slow per prompt. The worker encodes the
-(shared) prompt once per call regardless of `uq.diffusion_samples`, so generation time is
+(shared) prompt once per call regardless of `feedback.uq.diffusion_samples`, so generation time is
 dominated by the one-time ~85 s model load plus diffusion, not the sample count. To speed
 diffusion, lower `num_denoising_steps` (top-level YAML key, kimodo only; default 100,
 try 30-50 for a quality/speed trade).
@@ -316,12 +316,21 @@ mid-run instead of `--text` at `text_time` — see
 [Interactive corrections with a live person](#interactive-corrections-with-a-live-person---interactive)).
 `--pose` and `--arm` are still accepted as overrides for the YAML values.
 
-Supported YAML `planner` values:
-- `arm_mpc`: joint-space MPC only, no MDM.
-- `arm_mpc_mdm`: MDM correction playback followed by joint-goal MPC, with repeated corrections for restricted users.
-- `arm_mpc_mdm_uq`: UQ clustering/picker followed by joint-goal MPC, with repeated corrections for restricted users.
-- `arm_mpc_cartesian`: MDM/UQ correction playback followed by Cartesian wrist-goal MPC, with repeated corrections for restricted users.
-- `arm_mpc_cartesian_no_mdm`: Cartesian wrist-goal MPC only, no MDM and no UQ.
+There is one planner class (`ArmMPC`); its capabilities are selected by the
+presence of top-level YAML sections, one per module slot:
+
+| Section | Module | Absent means |
+|---|---|---|
+| `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
+| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`) | no correction phase |
+| `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
+| `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
+
+So the full method is `cartesian:` + `feedback:` (with `uq:`); the plain
+goal-seeking baseline is `cartesian:` alone. `constraints:` and
+`robot_actions:` are mutually exclusive (robot rollouts are feasible by
+construction). The old `planner:` names are retired and rejected by the
+loader.
 
 Set the optional top-level `seed` key to control MPC action sampling. It defaults
 to `0`; use another nonnegative integer to reproduce a different sampling
@@ -334,9 +343,8 @@ The text-to-motion backend is selected by the optional YAML key `motion_generato
 - `kimodo`: NVIDIA's [kimodo](https://github.com/nv-tlabs/kimodo) SMPL-X model, run in an
   isolated conda env via a subprocess worker (see [Kimodo backend setup](#kimodo-backend-setup)).
 
-Both backends expose the same interface, so any MDM-backed planner
-(`arm_mpc_mdm`, `arm_mpc_mdm_uq`, `arm_mpc_cartesian`) works with either by setting
-`motion_generator:` in its config.
+Both backends expose the same interface, so any config with a `feedback:`
+section works with either by setting `motion_generator:` in its config.
 
 ### Execution environment (`env`)
 
@@ -752,17 +760,18 @@ optional YAML key `env`:
   `pose:`: nothing measures them, the MPC does not use them, and the shape fit
   leaves them about a centimetre off the anchor the goals hang from.
 
-  Which rollout previews which planner is a table in `planners/run.py`
-  (`_PREVIEW_ROLLOUTS`), asserted at import to name every Cartesian planner, so
-  a new one has to choose its stand-in rather than quietly inheriting the plain
-  ungated rollout. The robot-action and IK-gated planners roll out against
-  `RobotPlanPreviewEnv`, an offline double of the env frozen at the measured
-  state that delegates exact IK back to the env itself; they report their own
-  robot joints per step, so the window shows the planned robot rather than a
-  second IK chasing the arm. Planners whose trajectory does not exist before the
-  run — an MDM correction needs the user to speak first — have nothing to
-  preview and skip it; the Cartesian MDM planners preview the goal-seeking phase
-  that runs before the user speaks.
+  Which rollout previews the run is `_select_preview_rollout` in
+  `planners/run.py`: configs with `constraints:` preview constrained, configs
+  with `robot_actions:` preview the robot-action solve, plain Cartesian
+  configs preview the human-action rollout — the preview always carries the
+  same feasibility constraints and action space as the run. The robot-action
+  and constrained rollouts run against `RobotPlanPreviewEnv`, an offline
+  double of the env frozen at the measured state that delegates exact IK back
+  to the env itself; they report their own robot joints per step, so the
+  window shows the planned robot rather than a second IK chasing the arm. A
+  feedback correction does not exist before the run — the user has not spoken
+  yet — so only the goal-seeking phase is previewed, and configs without a
+  `cartesian:` section skip the preview.
 
   The grasp is re-measured every step from the real ee pose and the measured
   forearm frame, and the gripper pose it implies rides the forearm rigidly —
@@ -803,17 +812,17 @@ mirrors the sim robot onto the real Gen3;
 `arm_mpc_cartesian_mdm_llm_real.yaml` is the *full method* on that rig (see
 below); the `--env-video` flag works with any env).
 
-### IK-gated human-action planner
+### The `robot_ik` feasibility constraint
 
-`arm_mpc_cartesian_no_mdm_ik_gated` keeps sampling human-arm deltas, but gates
+A `constraints: robot_ik:` section keeps sampling human-arm deltas, but gates
 each rollout's first `grasp_residual_frames` frames with the robot environment's
 own IK. On `env: real`, this is the same analytical Gen3 branch continuation
 used for execution — one vectorized Newton batch over every sample, seeded
 sequentially through each rollout and filtered against the controller's padded
 joint-limit box. A rollout is discarded when its remaining gripper pose error
-exceeds `max_grasp_ik_residual` (metres + radians). Each sample set includes a
-zero-motion hold, so an all-infeasible draw holds instead of selecting the
-least-infeasible motion.
+exceeds `constraints.robot_ik.max_residual` (metres + radians). Each sample set
+includes a zero-motion hold, so an all-infeasible draw holds instead of
+selecting the least-infeasible motion.
 
 **The gate continues; it does not enumerate.** Execution's
 `solve_robot_ik_exact_batch` falls back to enumerating every analytical branch
@@ -843,9 +852,9 @@ cap rather than an IK joint limit. The preview *does* apply it when carrying its
 robot along, as execution will, so a joint-limit-feasible plan can still show
 transient robot lag there if it asks for faster motion than that cap permits.
 
-The preview runs this planner, gate included (`preview_plan`, below). It has to:
-previewed with the ungated planner it drew the run walking into exactly the
-poses the gate discards, ending with the gripper visibly off the forearm — a
+The preview runs this constrained planner (`preview_plan`, below). It has to:
+previewed unconstrained it drew the run walking into exactly the poses the
+constraint discards, ending with the gripper visibly off the forearm — a
 trajectory the run would never take.
 
 ```
@@ -860,10 +869,11 @@ more than under `position_joint`; `_drive` re-solves from the measured state
 each step, so the loop self-corrects, but the per-step grasp-error report reads
 slightly optimistic.
 
-### Full method with the IK screens (`arm_mpc_cartesian_ik_gated`)
+### Full method with the IK screens
 
-`arm_mpc_cartesian_ik_gated` adds MDM/UQ/LLM corrections to the gated planner.
-The goal phase is the gated sampling above, unchanged. MDM playback stays
+Adding a `feedback:` section (with `uq:`) to a constrained config gives the
+full method with MDM/UQ/LLM corrections on top of the constraint. The goal
+phase is the constrained sampling above, unchanged. MDM playback stays
 direct — rate-limited frames, no sampling — but MDM knows nothing about the
 robot, so an unreachable frame would otherwise land in execution's IK
 fallbacks: the branch enumeration (an exact solution up to ~1.5 rad away that
@@ -892,7 +902,7 @@ the live measured grasp and robot state:
 The executed motion is the trajectory's *reachable shadow*: exact tracking
 wherever the correction is feasible, decelerate-hold-skip across the stretches
 it is not. `arm_mpc_cartesian_mdm_ik_gated_real.yaml` is
-`arm_mpc_cartesian_mdm_llm_real.yaml` with this planner, the gate keys, and
+`arm_mpc_cartesian_mdm_llm_real.yaml` with the `constraints: robot_ik:` keys and
 `control_mode: compliant_joint` (any residual model mismatch becomes a bounded
 gentle pull, not a wrench — verify the server-side gains in
 `emprise-gen3-controller`'s `config_tuned.yaml` with the mannequin held before
@@ -912,29 +922,29 @@ watch drop → hold → skip. Two rig-tuning notes: under `compliant_joint` the
 measured arm settles short of commands, so if steady-state deflection under
 load exceeds `max_playback_delta` (0.002) every frame finishes by stall-skip —
 loosen it if the skip logs say so; and a fully-unreachable correction costs at
-worst `mdm_frames × playback_stall_steps` steps of the session's `steps`
+worst `feedback.frames × playback_stall_steps` steps of the session's `steps`
 budget.
 
-### Robot-action planners (`*_robot`)
+### The robot action space (`robot_actions:`)
 
-`arm_mpc_cartesian_no_mdm_robot` and `arm_mpc_cartesian_robot` are the same two
-Cartesian planners sampling **robot joint deltas** instead of human-arm deltas:
+A `robot_actions:` section switches the same Cartesian planner to sampling
+**robot joint deltas** instead of human-arm deltas:
 every rollout is robot-feasible by construction, each rolled-out ee pose is
 mapped through the rigid measured grasp back to a human arm configuration for
 the (unchanged) human-arm costs, and the best joint target is sent to the robot
-directly — no grasp FK, no IK, no per-joint delta clipping. They require
-`env: sim_mannequin` or `env: real`, and take five extra keys:
-`max_robot_joint_delta` (per-step inf-norm cap on sampled joint deltas, rad),
-`robot_joint_delta_std` (sampling-noise std around the warm-started previous
+directly — no grasp FK, no IK, no per-joint delta clipping. It requires
+`env: sim_mannequin` or `env: real`, and takes five keys:
+`max_joint_delta` (per-step inf-norm cap on sampled joint deltas, rad),
+`joint_delta_std` (sampling-noise std around the warm-started previous
 plan, rad; keep it well below the cap or the uniform rescale drowns the warm
 start in noise — `null` defaults to a third of the cap),
-`robot_infeasibility_weight` (soft penalty on motions the grasp cannot
+`infeasibility_weight` (soft penalty on motions the grasp cannot
 transmit), and `max_grasp_residual` / `grasp_residual_frames` — a hard gate
 that discards any rollout whose first `grasp_residual_frames` frames exceed
 `max_grasp_residual` (metres of elbow displacement + radians of untransmitted
 roll per frame). Only the leading frames are gated — they are what actually
 gets executed; the tail is re-solved every step and stays soft-penalized. The
-residual floor scales with `max_robot_joint_delta`, so tighten or loosen the
+residual floor scales with `robot_actions.max_joint_delta`, so tighten or loosen the
 gate together with the sampling scale; a tighter gate preserves the grasp more
 strictly at the cost of slower goal progress (a very large value disables it).
 
@@ -955,25 +965,26 @@ uv run python src/uncertain_feedback/planners/run.py \
     --interactive --env-video robot_action_full_method.mp4
 ```
 
-MDM playback under `arm_mpc_cartesian_robot` keeps its rate-limited cursor, but
+MDM playback with `robot_actions:` keeps its rate-limited cursor, but
 each playback frame is tracked with the robot-action solve rather than commanded
-through IK, so its `max_playback_delta` is looser (0.02) than the human-action
-config's 0.002 — the robot-space tracking has a noise floor the cursor must be
-able to cross.
+through IK, so its `feedback.max_playback_delta` is looser (0.02) than the
+human-action config's 0.002 — the robot-space tracking has a noise floor the
+cursor must be able to cross.
 
-The plan preview on `env: real` rolls out the *actual* robot-action planner
+The plan preview on `env: real` rolls out the *actual* robot-action solve
 against a kinematic stand-in of the measured rig (robot chain, measured grasp,
 joint state — see `envs/robot_preview.py`), so the animation poses the robot at
 its planned joints and the robot and arm stay consistent by construction. The
-human-action planners keep the previous preview, whose robot chases the
+human-action configs keep the previous preview, whose robot chases the
 human-space plan through IK and can visibly lag it.
 
 ### Interactive corrections with a live person (`--interactive`)
 
-`env` is orthogonal to `planner`, so the full method — MDM correction, UQ
-clustering, one LLM cost per round — runs on the real rig by config alone:
-`arm_mpc_cartesian_mdm_llm_real.yaml` is `arm_mpc_cartesian_no_mdm_real.yaml`'s
-env with `planner: arm_mpc_cartesian` and the correction/UQ/LLM-cost keys.
+`env` is orthogonal to the planner modules, so the full method — MDM
+correction, UQ clustering, one LLM cost per round — runs on the real rig by
+config alone: `arm_mpc_cartesian_mdm_llm_real.yaml` is
+`arm_mpc_cartesian_no_mdm_real.yaml`'s env with a `feedback:` section (uq
+nested) and the LLM-cost keys.
 Prefer `arm_mpc_cartesian_mdm_ik_gated_real.yaml` (previous section) when the
 robot is in the loop — same method, but every robot-facing step is IK-screened
 so unreachable MDM frames are dropped, held, or skipped instead of handed to
@@ -1005,7 +1016,7 @@ before the env is built, i.e. before anything touches the hardware.
 
 Two knobs matter more here than in sim:
 
-- **`uq.auto_cluster` must stay unset** for the person to choose among the
+- **`feedback.uq.auto_cluster` must stay unset** for the person to choose among the
   clusters — that is the point of sampling several. With it set, the round takes
   that cluster silently.
 - **`max_playback_delta`** (0.002 in the real config, against `max_angle_delta`
@@ -1021,7 +1032,7 @@ loop with `real_mirror_host: null` so MDM, the picker, and cost generation all
 run against the live person while no command reaches the arm, then set the host.
 The generation stalls are worth knowing before someone is in the gripper: 500
 diffusion samples plus an LLM round pause the loop for tens of seconds with the
-arm held. Lower `uq.diffusion_samples` or set `llm_cost.enabled: false` to
+arm held. Lower `feedback.uq.diffusion_samples` or set `llm_cost.enabled: false` to
 shorten them.
 
 ### Simulated user (`user:`)
@@ -1046,56 +1057,41 @@ outside the post-stroke flexor synergy ([Hadjiosif et al., 2024](https://pmc.ncb
 
 - `--text` defaults to the user's feedback line (an explicit `--text` still wins;
   with the unrestricted user the default stays `"move my arm up"`).
-- `uq.user_cluster: true` delegates UQ cluster selection to the user (it picks
-  the most comfortable cluster mean), taking precedence over `uq.auto_cluster`
+- `feedback.uq.user_cluster: true` delegates UQ cluster selection to the user (it picks
+  the most comfortable cluster mean), taking precedence over `feedback.uq.auto_cluster`
   and the interactive picker.
 
 The same hidden bounds are the evaluation ground truth for the
 [transfer experiment](#simulated-user-transfer-experiment).
 
-### Minimal Joint-Space MPC Config
-Save as `src/uncertain_feedback/planners/mpc/configs/mpc_plain.yaml`:
-```yaml
-planner: arm_mpc
-steps: 500
-horizon: 10
-n_mpc_samples: 256
-seed: 0  # reproducible MPC action sampling
-max_angle_delta: 0.001
-goal_threshold: 0.01
-```
-
-Run:
-```bash
-uv run python src/uncertain_feedback/planners/run.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/mpc_plain.yaml \
-  --live
-```
-
 ### MDM + UQ Config
 Save as `src/uncertain_feedback/planners/mpc/configs/mpc_mdm_uq.yaml`:
 ```yaml
-planner: arm_mpc_mdm_uq
 steps: 750
 horizon: 10
 n_mpc_samples: 512
+seed: 0  # reproducible MPC action sampling
 max_angle_delta: 0.0025
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
-goal_threshold: 0.1
-advance_threshold: 0.1
-trajectory_fraction: 1.0
-mdm_frames: 50
 
-uq:
-  diffusion_samples: 128
-  n_clusters: 3
-  clusterer: agglo_end_pose  # kmeans_end_pose | agglo_end_pose | agglo_path_pca | agglo_t2m
-  auto_cluster: null
-  scale: 1.0  # default motion-magnitude scale for the chosen cluster
+feedback:
+  trajectory_fraction: 1.0
+  frames: 50
+  uq:
+    diffusion_samples: 128
+    n_clusters: 3
+    clusterer: agglo_end_pose  # kmeans_end_pose | agglo_end_pose | agglo_path_pca | agglo_t2m
+    auto_cluster: null
+    scale: 1.0  # default motion-magnitude scale for the chosen cluster
+
+cartesian:
+  goals:
+    - [0.3, 0.5, 0.0]
+  threshold: 0.05
 ```
 
-`uq.clusterer` selects the clustering method (used by the demo runner; the MPC
-planners keep their injected clusterer):
+`feedback.uq.clusterer` selects the clustering method (used by the demo runner;
+the MPC planner keeps its injected clusterer):
 
 - `kmeans_end_pose` — KMeans on spine3-relative arm-chain positions at a
   single late frame.
@@ -1114,12 +1110,12 @@ planners keep their injected clusterer):
 In the interactive picker, each cluster panel has a **magnitude** slider
 (range 0.0–2.0) that scales that trajectory's motion up or down while
 preserving the direction of motion at every timestep (`scale` in joint-angle
-space about the start pose: `1.0` = unchanged, `0.0` = hold start). `uq.scale`
+space about the start pose: `1.0` = unchanged, `0.0` = hold start). `feedback.uq.scale`
 sets the slider's initial value and is used directly as the scale in headless
 runs. Select a panel and click **Refine selected** to cluster only that
-panel's raw trajectories into `uq.n_clusters` child options; refinement can be
+panel's raw trajectories into `feedback.uq.n_clusters` child options; refinement can be
 repeated recursively. When a selected option has fewer trajectories than
-`uq.n_clusters`, each trajectory becomes its own child option. **Back** restores
+`feedback.uq.n_clusters`, each trajectory becomes its own child option. **Back** restores
 the parent options and selection, and **Confirm** accepts the selected mean at
 the current depth.
 
@@ -1133,36 +1129,35 @@ uv run python src/uncertain_feedback/planners/run.py \
   --live
 ```
 
-For headless runs, set `uq.auto_cluster` in the YAML (and optionally `uq.scale`
-to apply a fixed magnitude without the GUI):
+For headless runs, set `feedback.uq.auto_cluster` in the YAML (and optionally
+`feedback.uq.scale` to apply a fixed magnitude without the GUI):
 ```yaml
-uq:
-  diffusion_samples: 128
-  n_clusters: 3
-  auto_cluster: 0
-  scale: 1.0
+feedback:
+  uq:
+    diffusion_samples: 128
+    n_clusters: 3
+    auto_cluster: 0
+    scale: 1.0
 ```
 
 ### Cartesian MPC With MDM/UQ
-This planner first follows the selected/generated MDM arm trajectory, then switches
-to Cartesian wrist goals.
+With both `feedback:` and `cartesian:` sections the planner first follows the
+selected/generated MDM arm trajectory, then switches to Cartesian wrist goals.
 
 Save as `src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm.yaml`:
 ```yaml
-planner: arm_mpc_cartesian
 steps: 750
 horizon: 10
 n_mpc_samples: 512
 max_angle_delta: 0.0025
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
-goal_threshold: 0.1
-advance_threshold: 0.1
-trajectory_fraction: 1.0
 
-uq:
-  diffusion_samples: 200
-  n_clusters: 5
-  auto_cluster: null
+feedback:
+  trajectory_fraction: 1.0
+  uq:
+    diffusion_samples: 200
+    n_clusters: 5
+    auto_cluster: null
 
 cartesian:
   goals:
@@ -1182,20 +1177,18 @@ uv run python src/uncertain_feedback/planners/run.py \
 ```
 
 ### Cartesian MPC Without MDM or UQ
-Use `arm_mpc_cartesian_no_mdm` when you want direct Cartesian wrist-goal MPC only.
-This path does not generate motion or run clustering. If you set an HML `pose:`,
-the runner decodes that pose once to initialize the arm, collar, spine, and
-background body.
+A config whose only module section is `cartesian:` is direct Cartesian
+wrist-goal MPC. This path does not generate motion or run clustering. If you
+set an HML `pose:`, the runner decodes that pose once to initialize the arm,
+collar, spine, and background body.
 
 Save as `src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm.yaml`:
 ```yaml
-planner: arm_mpc_cartesian_no_mdm
 steps: 750
 horizon: 10
 n_mpc_samples: 512
 max_angle_delta: 0.0025
 pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
-goal_threshold: 0.1
 
 cartesian:
   goals:
@@ -1257,7 +1250,7 @@ Experiments live separately from a single run, under
 persona with one cost-generation backend on the original goal only: initial
 rollout, hidden-cost trigger, MDM/UQ candidates, oracle cluster selection, one
 generated cost, and original-goal evaluation (`base`, `tracking`, `generated`,
-`oracle`). It requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
+`oracle`). It requires `feedback:` (with `uq:`) and `cartesian:` sections, `llm_cost.enabled: true`,
 and a persona with hidden bounds:
 
 ```bash
@@ -1335,8 +1328,8 @@ The backend experiment is the orthogonal axis: it holds the correction fixed (th
 a `backend_comparison.json` ranking. Each backend entry also includes a
 `hidden_cost_evaluation` comparing `base`, `oracle`, and `generated` using the
 simulated user's hidden cost and original Cartesian goal. It requires
-`planner: arm_mpc_cartesian` (the
-scorer needs a persistent Cartesian goal) and `llm_cost.enabled: true`:
+`feedback:` (with `uq:`) and `cartesian:` sections (the scorer needs a
+persistent Cartesian goal) and `llm_cost.enabled: true`:
 
 ```bash
 uv run python src/uncertain_feedback/experiments/run_backend_experiment.py \
@@ -1440,7 +1433,7 @@ Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
 `brachial_plexus_mechanosensitivity` (minimum elbow flexion rises with abduction),
 and `cross_body_pain`
 (pose-dependent bound: tolerable elevation drops linearly as the upper arm
-adducts past the midline) — the unrestricted default is rejected. Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`,
+adducts past the midline) — the unrestricted default is rejected. Requires `feedback:` (with `uq:`) and `cartesian:` sections, `llm_cost.enabled: true`,
 `cartesian.goals`, and a `transfer:` block:
 
 ```yaml
@@ -1567,7 +1560,7 @@ uv run python src/uncertain_feedback/experiments/run_episode_experiment.py \
   --save-video
 ```
 
-Requires `planner: arm_mpc_cartesian`, `llm_cost.enabled: true`, and an MDM
+Requires `feedback:` (with `uq:`) and `cartesian:` sections, `llm_cost.enabled: true`, and an MDM
 pose; the episode uses the first `cartesian.goals` entry (after
 `persona_goals` overrides). The optional `simulated_user` config block
 controls the automated user:
@@ -1613,7 +1606,7 @@ uv run python src/uncertain_feedback/demo_runner/server.py \
 ```
 
 Then open `http://127.0.0.1:6781`. The config supplies the pose, MPC settings,
-UQ defaults, `mdm_frames`, per-persona goal presets, and the `llm_cost` backend
+UQ defaults, `feedback.frames`, per-persona goal presets, and the `llm_cost` backend
 used by the cost-generation stage. With the default config, cost generation
 starts on `llm (single-pass)`; the backend dropdown can still select `turns` or
 `agent`. When `motion_generator: mdm`, the top-level `seed` is reset before each
@@ -1727,7 +1720,7 @@ Stages (each stage's controls unlock once the previous one ran):
    the SMPL body views; falls back to the start pose when the base never
    violates) and clusters them (*Re-cluster* reuses cached samples at the
    currently displayed refinement level). The *Clusterer* dropdown selects the
-   clustering method (see `uq.clusterer` above; initial value from the config)
+   clustering method (see `feedback.uq.clusterer` above; initial value from the config)
    and applies on the next Generate/Re-cluster/Refine. Each cluster is
    represented by its medoid — an actual MDM sample — rather than the
    elementwise mean. Every

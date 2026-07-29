@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import uncertain_feedback.planners.mpc.costs.agent_costs as agent_costs_module
-from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.config import LlmCostConfig
 from uncertain_feedback.planners.mpc.costs import (
     AgentCostGenerator,
@@ -156,7 +156,7 @@ def test_create_cost_generator_selects_backend(tmp_path) -> None:
 def test_llm_generator_produces_and_installs_cost(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
     kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
-    mpc = SmplLeftArmMPC(goals=[np.zeros(7)])
+    mpc = ArmMPC()
     gen = create_cost_generator(mpc=mpc, **kwargs)
 
     cost = gen.generate(install=True)

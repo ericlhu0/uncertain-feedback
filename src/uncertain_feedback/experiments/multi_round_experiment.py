@@ -17,7 +17,7 @@ from uncertain_feedback.experiments.experiment_pipeline import (
 )
 from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators.base import MotionGenerator
-from uncertain_feedback.planners.mpc import LeftArmMPCMDMUQ
+from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     CombineCostGenerator,
@@ -47,7 +47,7 @@ def _cost_record(cost: GeneratedPythonCost | None) -> dict[str, Any] | None:
 
 
 def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-locals,too-many-statements
-    mpc: LeftArmMPCMDMUQ,
+    mpc: ArmMPC,
     cfg: MpcRunConfig,
     user: SimulatedUser,
     gen: MotionGenerator,
@@ -75,6 +75,7 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
     combine_runs: list[dict[str, Any]] = []
 
     print(f"[multi-round] {user.name}: artifacts -> {root_dir}", flush=True)
+    assert cfg.cartesian is not None
     for index, goal_values in enumerate(cfg.cartesian.goals):
         goal = (
             float(goal_values[0]),
@@ -234,6 +235,7 @@ def run_multi_round_experiment(  # pylint: disable=too-many-arguments,too-many-l
         round_summaries.append(round_summary)
 
     final_results: dict[str, Any] = {}
+    assert cfg.cartesian is not None
     for index, goal_values in enumerate(cfg.cartesian.goals):
         goal_cfg = replace(
             cfg, cartesian=replace(cfg.cartesian, goals=[list(goal_values)])

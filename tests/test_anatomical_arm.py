@@ -11,12 +11,14 @@ joint positions exactly.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
 from uncertain_feedback.planners.mpc.arm_mpc import SmplLeftArmMPC
 from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import (
+    Q_CLAVICLE,
     Q_DIM,
     SmplLeftArmFK,
     _rate_limited_step_q,
@@ -200,6 +202,48 @@ def test_rate_limited_q_step_reaches_target() -> None:
     np.testing.assert_allclose(current, target, atol=1e-9)
 
 
+def test_scale_arm_lengths_sets_measured_segments() -> None:
+    fk = SmplLeftArmFK()
+    reference = SmplLeftArmFK()
+    lengths = np.array([0.19, 0.33, 0.27])
+
+    fk.scale_arm_lengths(*lengths)
+
+    q = np.random.default_rng(6).uniform(-0.6, 0.6, size=Q_DIM)
+    segments = np.diff(fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis))[1:], axis=0)
+    np.testing.assert_allclose(np.linalg.norm(segments, axis=1), lengths, atol=1e-12)
+    # Directions are untouched: the same q gives parallel bones on both
+    # skeletons, and the hinge axis keeps its meaning.
+    ref_segments = np.diff(
+        reference.fk(q_to_arm_aa(q, reference.elbow_hinge_axis))[1:], axis=0
+    )
+    unit = segments / np.linalg.norm(segments, axis=1, keepdims=True)
+    ref_unit = ref_segments / np.linalg.norm(ref_segments, axis=1, keepdims=True)
+    np.testing.assert_allclose(unit, ref_unit, atol=1e-12)
+    np.testing.assert_allclose(
+        fk.elbow_hinge_axis, reference.elbow_hinge_axis, atol=1e-12
+    )
+    # Lengths are absolute, so re-applying is a no-op.
+    tpose = fk.tpose_joints
+    fk.scale_arm_lengths(*lengths)
+    np.testing.assert_allclose(fk.tpose_joints, tpose, atol=1e-15)
+    np.testing.assert_allclose(fk.tpose_all_joints[[13, 16, 18, 20]], tpose[1:])
+
+
+def test_mpc_actions_never_move_the_clavicle() -> None:
+    """The robot holds the forearm, so plans may not use the clavicle DOFs."""
+    fk = SmplLeftArmFK()
+    target = np.array([0.1, -0.2, 0.1, 0.2, 0.1, -0.1, 0.4])
+    mpc = SmplLeftArmMPC(goals=[target], horizon=3, n_mpc_samples=32, fk=fk, seed=7)
+    q0 = np.array([0.05, -0.1, 0.2, 0.0, 0.0, 0.0, 0.0])
+
+    _, plan = mpc.solve(q0)
+    next_q = mpc.step(q0)
+
+    assert np.all(plan[:, Q_CLAVICLE] == 0.0)
+    np.testing.assert_allclose(next_q[Q_CLAVICLE], q0[Q_CLAVICLE], atol=1e-12)
+
+
 def test_seeded_mpc_step_keeps_scalar_elbow_representation() -> None:
     fk = SmplLeftArmFK()
     target = np.array([0.1, -0.2, 0.1, 0.2, 0.1, -0.1, 0.4])
@@ -210,3 +254,142 @@ def test_seeded_mpc_step_keeps_scalar_elbow_representation() -> None:
 
     assert next_q.shape == (Q_DIM,)
     np.testing.assert_allclose(arm_aa[2], next_q[6] * fk.elbow_hinge_axis, atol=1e-12)
+
+
+def _canonical_q(fk: SmplLeftArmFK, q, spine3_pos, spine3_aa) -> np.ndarray:
+    """The decode-branch representative of ``q`` — what measuring envs report."""
+    positions = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), spine3_pos, spine3_aa)
+    aa = fk.arm_aa_from_positions(positions, spine3_aa)
+    q_canon = fk.arm_aa_to_q(aa, spine3_aa)
+    q_canon[Q_CLAVICLE] = np.asarray(q, dtype=np.float64)[Q_CLAVICLE]
+    return q_canon
+
+
+# Synthetic gripper origin in the forearm frame for the projection tests.
+_GRASP_V = np.array([0.06, -0.02, 0.05])
+
+
+def test_project_forearm_frames_roundtrips_on_manifold() -> None:
+    """Frames FK'd from measured-style configurations project back exactly."""
+    from uncertain_feedback.envs.grasp import forearm_frame_fk
+    from uncertain_feedback.planners.mpc.kinematics import project_forearm_frames
+
+    fk = SmplLeftArmFK()
+    rng = np.random.default_rng(3)
+    clavicle = rng.uniform(-0.2, 0.2, 3)
+    spine3_aa = rng.uniform(-0.3, 0.3, 3)
+    spine3_pos = rng.normal(size=3)
+    q_ref = np.concatenate([clavicle, rng.uniform(-0.8, 0.8, 3), [-0.9]])
+    for _ in range(30):
+        q = _canonical_q(
+            fk,
+            np.concatenate(
+                [clavicle, rng.uniform(-1.0, 1.0, 3), [rng.uniform(-2.0, -0.1)]]
+            ),
+            spine3_pos,
+            spine3_aa,
+        )
+        elbow_pos, forearm_rot = forearm_frame_fk(fk, q, spine3_pos, spine3_aa)
+        ee = elbow_pos + forearm_rot.apply(_GRASP_V)
+        arm_aa, wrist_pos, residual = project_forearm_frames(
+            fk, ee, forearm_rot.as_matrix(), _GRASP_V, q_ref, spine3_pos, spine3_aa
+        )
+        expected_aa = q_to_arm_aa(q, fk.elbow_hinge_axis)
+        expected_pos = fk.fk(expected_aa, spine3_pos, spine3_aa)
+        np.testing.assert_allclose(arm_aa, expected_aa, atol=1e-8)
+        np.testing.assert_allclose(wrist_pos, expected_pos[4], atol=1e-8)
+        assert residual < 1e-8
+
+
+def test_project_forearm_frames_batched_matches_single() -> None:
+    from uncertain_feedback.envs.grasp import forearm_frame_fk
+    from uncertain_feedback.planners.mpc.kinematics import project_forearm_frames
+
+    fk = SmplLeftArmFK()
+    rng = np.random.default_rng(4)
+    q_ref = np.concatenate([rng.uniform(-0.2, 0.2, 3), np.zeros(3), [-0.5]])
+    ees, rots = [], []
+    for _ in range(6):
+        q = q_ref.copy()
+        q[3:6] = rng.uniform(-1.0, 1.0, 3)
+        q[6] = rng.uniform(-2.0, -0.1)
+        elbow_pos, forearm_rot = forearm_frame_fk(fk, q, None, None)
+        ees.append(
+            elbow_pos
+            + forearm_rot.apply(_GRASP_V)
+            + rng.normal(scale=0.02, size=3)
+        )
+        rots.append(
+            (Rotation.from_rotvec(rng.normal(scale=0.05, size=3)) * forearm_rot)
+            .as_matrix()
+        )
+    ee_batch = np.stack(ees).reshape(2, 3, 3)
+    rot_batch = np.stack(rots).reshape(2, 3, 3, 3)
+    aa_batch, wrist_batch, res_batch = project_forearm_frames(
+        fk, ee_batch, rot_batch, _GRASP_V, q_ref
+    )
+    assert aa_batch.shape == (2, 3, 3, 3)
+    assert wrist_batch.shape == (2, 3, 3)
+    assert res_batch.shape == (2, 3)
+    for i in range(2):
+        for j in range(3):
+            aa, wrist, res = project_forearm_frames(
+                fk, ee_batch[i, j], rot_batch[i, j], _GRASP_V, q_ref
+            )
+            np.testing.assert_allclose(aa_batch[i, j], aa, atol=1e-12)
+            np.testing.assert_allclose(wrist_batch[i, j], wrist, atol=1e-12)
+            np.testing.assert_allclose(res_batch[i, j], res, atol=1e-12)
+
+
+def test_project_forearm_frames_off_manifold() -> None:
+    """Roll is reported untransmitted; a dragged ee keeps the grasp distance."""
+    from uncertain_feedback.envs.grasp import forearm_frame_fk
+    from uncertain_feedback.planners.mpc.kinematics import project_forearm_frames
+
+    fk = SmplLeftArmFK()
+    q_seed = np.zeros(Q_DIM)
+    q_seed[6] = -0.8
+    q_ref = _canonical_q(fk, q_seed, None, None)
+    elbow_pos, forearm_rot = forearm_frame_fk(fk, q_ref, None, None)
+    shoulder = fk.fk(q_to_arm_aa(q_ref, fk.elbow_hinge_axis), None, None)[2]
+    upper_len = float(np.linalg.norm(elbow_pos - shoulder))
+
+    # Pure roll about the forearm axis: position feasible, rotation is not.
+    roll_axis = forearm_rot.apply(
+        fk._bone_offsets[3] / np.linalg.norm(fk._bone_offsets[3])
+    )
+    bad_rot = Rotation.from_rotvec(0.4 * roll_axis) * forearm_rot
+    ee_roll = elbow_pos + bad_rot.apply(_GRASP_V)
+    arm_aa, wrist_pos, residual = project_forearm_frames(
+        fk, ee_roll, bad_rot.as_matrix(), _GRASP_V, q_ref
+    )
+    # Same configuration recovered (rotvec rows may take the antipodal
+    # representation near the +-pi boundary), only the roll is reported.
+    expected_aa = q_to_arm_aa(q_ref, fk.elbow_hinge_axis)
+    for row in range(3):
+        relative = Rotation.from_rotvec(arm_aa[row]) * Rotation.from_rotvec(
+            expected_aa[row]
+        ).inv()
+        assert float(np.linalg.norm(relative.as_rotvec())) < 1e-8
+    assert residual == pytest.approx(0.4, abs=1e-6)
+
+    # Gripper dragged radially outward: the projected arm keeps both the
+    # upper-arm length and the rigid elbow-to-gripper distance (the position
+    # coupling physics enforces), and reports the elbow displacement.
+    ee_true = elbow_pos + forearm_rot.apply(_GRASP_V)
+    pull = (ee_true - shoulder) / np.linalg.norm(ee_true - shoulder)
+    ee_far = ee_true + 0.02 * pull
+    arm_aa, wrist_pos, residual = project_forearm_frames(
+        fk, ee_far, forearm_rot.as_matrix(), _GRASP_V, q_ref
+    )
+    positions = fk.fk(arm_aa, None, None)
+    np.testing.assert_allclose(
+        np.linalg.norm(positions[3] - shoulder), upper_len, atol=1e-8
+    )
+    np.testing.assert_allclose(
+        np.linalg.norm(ee_far - positions[3]),
+        np.linalg.norm(_GRASP_V),
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(positions[4], wrist_pos, atol=1e-8)
+    assert residual > 0.01

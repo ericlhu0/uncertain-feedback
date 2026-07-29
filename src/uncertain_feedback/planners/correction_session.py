@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from uncertain_feedback.planners.mpc.costs import CostRound
     from uncertain_feedback.planners.run import LoopResult
 
-TriggerReason = Literal["text_time", "discomfort"]
+TriggerReason = Literal["text_time", "discomfort", "operator"]
 
 
 @dataclass
@@ -29,9 +29,16 @@ class CorrectionTrigger:
     automatic: bool = True
     first_correction_triggered: bool = False
     discomfort_armed: bool = True
+    operator_requested: Callable[[], bool] | None = None
 
     def evaluate(self, step: int, violation: float | None) -> TriggerReason | None:
         """Decide whether this step should pause for feedback, and why."""
+        if self.operator_requested is not None and self.operator_requested():
+            # A live person asking outranks both the scripted step and the
+            # discomfort edge, and needs no re-arming: they can ask again at will.
+            self.first_correction_triggered = True
+            self.discomfort_armed = False
+            return "operator"
         uncomfortable = (
             self.automatic and violation is not None and violation > self.threshold
         )
@@ -99,13 +106,14 @@ class CorrectionSession:
     cost_context: MpcCostContext
     feedback_text: str
     trigger_threshold: float
-    text_time: int
+    text_time: int | None
     artifact_dir: Path
     handle_correction: CorrectionHandler
     finish: FinishHandler | None = None
     trajectory_index: int = 0
     prior_rounds: Sequence[CostRound] = ()
     prior_unified_cost: GeneratedPythonCost | None = None
+    operator_requested: Callable[[], bool] | None = None
     rounds: list[CorrectionRoundResult] = field(default_factory=list, init=False)
 
     def run_trajectory(
@@ -124,6 +132,7 @@ class CorrectionSession:
             threshold=self.trigger_threshold,
             text_time=self.text_time,
             automatic=automatic,
+            operator_requested=self.operator_requested,
         )
 
         def on_pre_step(step: int, q: np.ndarray, q_history: list[np.ndarray]) -> None:

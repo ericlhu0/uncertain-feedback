@@ -18,6 +18,7 @@ from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.envs.grasp import GRASP_FRACTION, grasp_pose_fk
+from uncertain_feedback.envs.human_mesh import HumanMeshBody
 from uncertain_feedback.planners.mpc.kinematics import (
     _SMPL_PKL_DEFAULT,
     SmplLeftArmFK,
@@ -52,8 +53,6 @@ _CAMERA_PITCH = -12.0
 _CAMERA_TOP_PITCH = -89.0
 _CAMERA_FOV = 60.0
 
-_BODY_COLOR = (0.62, 0.71, 0.82, 1.0)
-
 
 class SimRobotVisualEnv(ExecutionEnv):
     """Kinematic pass-through env rendering a Panda grasping the forearm."""
@@ -66,9 +65,7 @@ class SimRobotVisualEnv(ExecutionEnv):
         self._movable_joints: list[int] = []
         self._ee_index: int = -1
         self._spine3_pb: np.ndarray = np.zeros(3, dtype=np.float64)
-        self._mesh_cache: SmplMeshCache | None = None
-        self._smpl_faces: np.ndarray = np.zeros((0, 3), dtype=np.int64)
-        self._human_body: int = -1
+        self._human_mesh: HumanMeshBody | None = None
 
     def set_pose_context(
         self,
@@ -152,8 +149,7 @@ class SimRobotVisualEnv(ExecutionEnv):
             if self._body_pos is not None
             else self._fk.tpose_all_joints
         )
-        self._mesh_cache = SmplMeshCache(body_pos)
-        self._smpl_faces = np.asarray(self._mesh_cache.faces, dtype=np.int64)
+        self._human_mesh = HumanMeshBody(self._cid, SmplMeshCache(body_pos))
 
     def _set_robot_joints(self, q_robot: np.ndarray) -> None:
         for joint, value in zip(self._movable_joints, q_robot):
@@ -162,36 +158,13 @@ class SimRobotVisualEnv(ExecutionEnv):
             )
 
     def _sync_human(self, q: np.ndarray) -> None:
-        import trimesh  # pylint: disable=import-outside-toplevel
-
-        assert self._fk is not None and self._mesh_cache is not None
-        arm_positions = self._fk.fk(
-            q_to_arm_aa(q, self._fk.elbow_hinge_axis),
-            self._spine3_pos,
-            self._spine3_aa,
-        )
-        vertices = (
-            self._mesh_cache.preview(arm_positions).astype(np.float64) @ _SMPL_TO_PB.T
-        )
-        normals = trimesh.Trimesh(
-            vertices, self._smpl_faces, process=False
-        ).vertex_normals
-        if self._human_body >= 0:
-            p.removeBody(self._human_body, physicsClientId=self._cid)
-        vis = p.createVisualShape(
-            p.GEOM_MESH,
-            vertices=vertices.tolist(),
-            indices=self._smpl_faces.flatten().tolist(),
-            normals=normals.tolist(),
-            rgbaColor=_BODY_COLOR,
-            physicsClientId=self._cid,
-        )
-        self._human_body = p.createMultiBody(
-            baseMass=0.0,
-            baseCollisionShapeIndex=-1,
-            baseVisualShapeIndex=vis,
-            basePosition=(0.0, 0.0, 0.0),
-            physicsClientId=self._cid,
+        assert self._fk is not None and self._human_mesh is not None
+        self._human_mesh.update(
+            self._fk.fk(
+                q_to_arm_aa(q, self._fk.elbow_hinge_axis),
+                self._spine3_pos,
+                self._spine3_aa,
+            )
         )
 
     def _sync(self, q: np.ndarray) -> np.ndarray:

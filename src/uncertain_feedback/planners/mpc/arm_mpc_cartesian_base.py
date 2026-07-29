@@ -31,6 +31,7 @@ class _CartesianGoalsMixin:
     _extra_costs: CompositeTrajectoryCost
     _sample_actions: Callable[[np.ndarray, tuple[int, ...]], np.ndarray]
     _rollout: Callable[[np.ndarray, np.ndarray], np.ndarray]
+    reset_warmstart: Callable[[], None]
 
     def _init_cartesian(
         self,
@@ -86,6 +87,28 @@ class _CartesianGoalsMixin:
         )
         wrist_rel = arm_pos[-1] - self._spine3_pos
         return float(np.linalg.norm(wrist_rel - goal)) < self._cartesian_threshold
+
+    def _cartesian_progress(self, next_q: np.ndarray) -> tuple[np.ndarray, float]:
+        """Distance to the front goal, popping it when reached.
+
+        Returns the active goal and the wrist distance to it, after advancing
+        the queue (and resetting the warm start) if ``next_q`` reached the
+        front goal and more goals remain.
+        """
+        arm_pos = self._fk_inst.fk(
+            q_to_arm_aa(next_q, self._fk_inst.elbow_hinge_axis),
+            self._spine3_pos,
+            self._spine3_aa,
+        )
+        wrist_rel = arm_pos[-1] - self._spine3_pos
+        goal = self._cartesian_goals[0]
+        dist = float(np.linalg.norm(wrist_rel - goal))
+        if dist < self._cartesian_threshold and len(self._cartesian_goals) > 1:
+            self._cartesian_goals.popleft()
+            self.reset_warmstart()
+            goal = self._cartesian_goals[0]
+            dist = float(np.linalg.norm(wrist_rel - goal))
+        return goal, dist
 
     def _cartesian_cost(self, q_trajs: np.ndarray) -> np.ndarray:
         """L2 Cartesian cost: spine3-relative wrist distance to current target.

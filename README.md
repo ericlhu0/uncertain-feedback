@@ -3,6 +3,29 @@
 ## Getting Started
 Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model` and download the [required weights](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#mdm-is-now-40x-faster--04-secsample), [data](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#2-get-data) and [SMPL model](https://github.com/GuyTevet/motion-diffusion-model/blob/main/prepare/download_smpl_files.sh)
 
+### Kinova Gen3 URDF
+
+`env: real` and `sim_mannequin` with `robot: kinova_gen3` load
+`~/kortex_description/robots/gen3_7dof_no_vision_robotiq_2f_85.urdf`, as does the
+controller server's `config_tuned.yaml`. Generate it from
+[ros_kortex](https://github.com/Kinovarobotics/ros_kortex) (`noetic-devel`), then
+copy the `kortex_description` package to `~/kortex_description` — the URDF's
+`package://` mesh URIs resolve against the home directory:
+
+```
+xacro kortex_description/robots/gen3_robotiq_2f_85.xacro \
+  dof:=7 vision:=false gripper:=robotiq_2f_85 sim:=false \
+  -o gen3_7dof_no_vision_robotiq_2f_85.urdf
+```
+
+Then set the six Robotiq finger joints (`finger_joint`,
+`{left,right}_inner_knuckle_joint`, `{left,right}_inner_finger_joint`,
+`right_outer_knuckle_joint`) to `type="fixed"`. Stock xacro emits them as
+revolute, but `envs/real.py` treats *every* non-fixed joint as an arm DOF and
+raises on the 13-vs-7 mismatch; pinocchio likewise needs `nv == 7` server-side.
+Sanity check: at the `kinova_gen3` home configuration `tool_frame` sits at
+`(0.576, 0.002, 0.434)` in the base frame.
+
 ## Running (Custom) Motion Generation
 ```
 uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
@@ -287,7 +310,10 @@ Controller settings live in the required YAML file passed with `--mpc-config`.
 The initial whole-body HML pose can be set with `pose:` in the YAML, and the
 initial left arm can be overridden with an inline 3×3 `arm:` list of
 `[shoulder, elbow, wrist]` axis-angles. Runtime inputs still stay on the
-command line: `--model-path`, `--arm`, `--text`, `--save`, `--live`, and `--frozen-body`.
+command line: `--model-path`, `--arm`, `--text`, `--save`, `--live`,
+`--frozen-body`, and `--interactive` (take each correction from the operator
+mid-run instead of `--text` at `text_time` — see
+[Interactive corrections with a live person](#interactive-corrections-with-a-live-person---interactive)).
 `--pose` and `--arm` are still accepted as overrides for the YAML values.
 
 Supported YAML `planner` values:
@@ -330,7 +356,7 @@ optional YAML key `env`:
 - `sim_mannequin`: physics-based real-world proxy. The robot (a Franka Panda
   by default, or a Kinova Gen3 7-DOF with a Robotiq 2F-85 gripper via
   `env_params: {robot: kinova_gen3}`, loaded from
-  `/home/emprise/kortex_description`) starts grasping
+  `~/kortex_description`) starts grasping
   the forearm of the passive 4-DOF articulated mannequin left arm from
   [limb-manipulation](https://github.com/empriselab/limb-manipulation)
   (vendored under `src/uncertain_feedback/envs/assets/human/`, along with the
@@ -349,9 +375,409 @@ optional YAML key `env`:
   `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml`). Tunable via the YAML
   `env_params:` mapping (forwarded to the env constructor):
   `robot` (`panda` or `kinova_gen3`),
-  `robot_max_joint_delta` (per-step cap on each robot joint's travel, rad)
-  and `robot_base_offset` (robot base position relative to spine3, pybullet
-  frame).
+  `robot_max_joint_delta` (per-step cap on each robot joint's travel, rad),
+  `robot_base_offset` (robot base position relative to spine3, pybullet
+  frame), `robot_joint_limit_padding` (rad, default 0; shrinks the robot's
+  joint limits so commanded targets stay clear of them — set it slightly
+  above the real controller's `joint_limit_padding_deg` when mirroring),
+  and — with `robot: kinova_gen3` only — `real_mirror_host` /
+  `real_mirror_confirm_start` (see below).
+
+  **Real-arm mirroring** (`real_mirror_host`): when set, the sim robot's
+  achieved joint configuration is forwarded each MPC step to a real Kinova
+  Gen3 through an [emprise-gen3-controller](https://github.com/empriselab)
+  ZMQ server, which shadows the sim in 1 kHz joint position mode (the
+  server-side OTG interpolates between the sparse targets). The sim remains
+  the source of truth — physics, mannequin read-back, and planning all stay
+  simulated. With mirroring on, the sim robot plans against the controller's
+  enforced joint-limit table (narrower than the kortex URDF's) so every
+  mirrored command passes the controller's safety checks. Start the server
+  first from the controller repo on the machine that reaches the robot:
+
+  ```
+  cd ~/emprise-gen3-controller
+  .venv/bin/python scripts/launch_server.py --config config_tuned.yaml
+  ```
+
+  then run any `sim_mannequin` config with
+  `env_params: {robot: kinova_gen3, real_mirror_host: "127.0.0.1"}` (see
+  `arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml`). At the first
+  MPC step the real arm closes its gripper, zeros its joints (upright
+  reference pose), moves to the sim's grasp configuration, and opens the
+  gripper there; the two moves are streamed slowly through position mode
+  (0.15 rad/s peak joint speed, `_MOVE_SPEED_RAD_S` in
+  `envs/real_mirror.py`) — with `real_mirror_confirm_start: true` (default)
+  the operator must confirm each move and the gripper opening at the
+  terminal; set it to `false` for headless/mock runs. On exit — including Ctrl+C, which is caught to halt the arm before
+  the process dies — the arm is returned to high-level mode, holding its
+  last position. The arm can also be zeroed on its own:
+
+  ```
+  uv run python src/uncertain_feedback/envs/zero_kinova.py [--host HOST] [--yes]
+  ```
+
+- `real`: the real world. The human arm state is *measured* rather than
+  simulated: OptiTrack rigid bodies on the shoulder, elbow, and wrist are
+  streamed in over NatNet (multicast) and converted to the planner's `(7,)`
+  configuration each step, so the MPC closes the loop on the actual person.
+  Three more rigid bodies supply the registration: one on the **robot base**,
+  whose position fixes where the robot stands (replacing `sim_mannequin`'s
+  hardcoded `robot_base_offset`); one on the **collar**, which fixes where the
+  person is; and one on the **right collar** (read at calibration only), which
+  closes the last degree of freedom — the person's facing (see below).
+  IK is analytical, from `ssik`'s prebuilt Kinova Gen3 solver
+  (`ssik.prebuilt.gen3_ik`); PyBullet runs in `DIRECT` for scene geometry only
+  (no physics, no cameras). Each step continues the branch the arm is already
+  on, and enumerates every analytical branch only when that continuation leaves
+  the controller's joint limits — see **Inverse kinematics** below. The robot is
+  commanded through the same `real_mirror_host` ZMQ path as above. Unlike the
+  `sim_mannequin` mirror, the first MPC step moves nothing and touches no
+  gripper: **the grasp must already be established** before the run, and it is
+  *measured* rather than assumed (see below). `env_params:`
+  `mocap_host` (the OptiTrack PC),
+  `mocap_rigid_bodies` (Motive streaming ids for `robot_base`, `collar`,
+  `collar_right`, `shoulder`, `elbow`, `wrist`),
+  `mocap_hold_timeout` (s, default 0.5 — how long a tracking dropout is
+  covered by holding the last valid pose before the run raises and halts),
+  `recording` (replay a saved snapshot instead of the live streams — see
+  **Recording the real environment** below; set this *or* `mocap_host`, not
+  both),
+  `live_view` / `live_view_fps` (live mesh window — see below),
+  plus `robot`, `robot_max_joint_delta`, `robot_joint_limit_padding`, and
+  `real_mirror_host` as above; `real_mirror_confirm_start` here only prompts
+  once before the arm starts tracking (there is no move to confirm);
+  `control_mode` (default `position_joint` — the emprise controller mode the
+  arm tracks targets in. Set `compliant_joint` for joint-space impedance: the
+  arm yields to the person instead of tracking stiffly, taking the same
+  sparse joint targets. Stiffness gains are the server's, from its
+  `config_tuned.yaml`). See `arm_mpc_cartesian_no_mdm_real.yaml`.
+
+  **The grasp is measured, not assumed — and re-measured every step.** Put the
+  gripper on the person's forearm and close it *before* starting the run — jog the
+  arm there however you normally would. At each MPC step the env reads the real
+  arm's joint configuration, computes the gripper pose from it, and stores the
+  rigid transform between that pose and the measured forearm frame
+  (`MeasuredGrasp` in `envs/grasp.py`); the commanded arm configuration is then
+  mapped through *that* transform. So the MPC tracks where the gripper actually is
+  on the limb, instead of the nominal 15%-along-the-forearm, top-down grasp the
+  simulated envs place their robot at. The reference frame is the FK's forearm
+  bone rotation, which carries its own roll and cannot flip when the forearm
+  passes through vertical — so the gripper takes the forearm's full rotation each
+  step rather than only its direction change.
+
+  Re-measuring rather than capturing once matters because the physical grasp is
+  not rigid over a trajectory: the forearm turns and slides a little inside the
+  fingers, and sleeve and skin move over the bone. The transform is the lever arm
+  the gripper is swung on, so a stale one converts the commanded forearm motion
+  into the wrong gripper motion. Two consequences:
+
+  - The command can be an **absolute** gripper pose. A transform captured once
+    could not afford that — SMPL FK and the tracked limb disagree on segment
+    lengths, so an absolute target re-anchors on that read-back bias every step
+    and integrates it into drift, which is why `sim_mannequin` (and this env,
+    before) commands a target relative to the read-back. Re-measuring absorbs the
+    bias into the transform instead, which makes the pose implied by the measured
+    configuration *exactly* the current end-effector pose — the relative form
+    reduces to the absolute one identically.
+  - The **on-forearm check below runs every step**, so it doubles as a slip
+    guard: a grasp that creeps along the forearm or off it walks the offset out of
+    tolerance and halts the run.
+
+  With `real_mirror_host: null` there is no real gripper to read, so the dry run
+  puts the IK robot on the nominal grasp and calibrates from that; the plumbing
+  is otherwise identical.
+
+  The preview reports the **grasp error** over the plan before prompting —
+  position and attitude between the gripper pose each commanded configuration
+  asks for and the one the robot actually reached, as mean, max, and the step
+  the max falls on:
+
+  ```
+  [real] grasp error over the plan: position mean 35.1 mm, max 68.6 mm at step 39; attitude mean 5.1 deg, max 8.4 deg at step 38
+  ```
+
+  Zeros mean the arm tracks the plan exactly. Non-zero has two causes, both
+  worth knowing before approving: a stretch of the plan outside the padded joint
+  box, where the IK deliberately spends attitude to hold position (so the
+  gripper stays on the forearm), and a plan that moves faster than
+  `robot_max_joint_delta` permits, which shows up as the arm lagging.
+
+  **Inverse kinematics.** Solved analytically by `ssik`'s prebuilt Gen3 artifact
+  rather than numerically. It works in `end_effector_link` relative to
+  `base_link`, so a target leaves both frames it arrives in — the PyBullet world
+  the scene is built in (the robot stands at its *measured* base pose) and the
+  `tool_frame` between the gripper's fingers where the grasp is measured, 12 cm
+  further along. Two layers:
+
+  - **Continuation** (the normal case, ~0.3 ms). `ssik` Newton-continues from
+    the arm's current configuration and rejects its own step if it would land on
+    a different branch. This comes first because the Gen3 is redundant: a pose
+    has a whole self-motion manifold of exact solutions, so *which* one a solver
+    returns is not pinned down by the pose, and taking whichever scores best
+    walks the gripper across the person for nothing — measured over one plan it
+    moved the solution up to 1.5 rad in a step against a
+    `robot_max_joint_delta` of 0.01.
+  - **Enumeration**, when continuation leaves the controller's padded joint box.
+    `ssik` returns *every* analytical branch ranked against the current
+    configuration, so the nearest reachable one is known outright instead of
+    searched for.
+
+  Only when no branch fits the box does anything numerical run: a bounded
+  least-squares that keeps position and spends orientation
+  (`_IK_ORIENTATION_WEIGHT_M_PER_RAD`), matching what the physical grasp does —
+  the gripper stays clamped on the forearm and the wrist carries the miss. Its
+  residual uses `gen3_ik.fk`, not PyBullet's: PyBullet holds link state in
+  single precision, so differencing it over the optimiser's ~1e-8 step returns a
+  Jacobian that is mostly rounding error.
+
+  `ssik` has no released wheel for Python 3.10 (every published release is
+  cp311+), so `pyproject.toml` pins the tested commit from `main`, where the
+  3.10 floor landed. It asks for `numpy>=1.26`, overridden to the MDM pin
+  (`numpy<1.24`) — its extensions are built against the numpy 2 headers, whose
+  ABI runs back to 1.19.
+
+  **Live view** (`live_view: true`, the default in the real config). Opens a
+  PyBullet GUI window showing the scene the MPC is solving in: the measured
+  person as a posed SMPL **mesh** (same fit the demo runner shows) and the
+  **robot's own URDF meshes**, both in the registered frame. It comes up right
+  after registration — before any command is sent — so a bad registration (person
+  or robot in the wrong place, arm on the wrong side) is visible while nothing is
+  moving. Requires a display; set `live_view: false` when running headless over
+  ssh. Closing the window mid-run does not end the process: the env reconnects
+  its pybullet backend headless, restores the robot's joint state, and the run
+  continues on the real robot without the drawing.
+
+  **The planner's skeleton** is drawn inside the person in orange: the five joints
+  its FK returns and its costs read — spine3, collar, shoulder, elbow, wrist — as
+  bones and joint balls (`ArmSkeletonBody`). The body around it is a shaped,
+  skinned surface *posed from* that chain; this is the chain, so the two agreeing
+  is the check that the mesh is not telling you a story. It is real geometry, not
+  debug lines, so it also survives into `getCameraImage` screenshots and videos,
+  and it is cheap enough to refresh every step while the mesh is rate-limited —
+  during a run the skeleton is live even when the body around it lags. The person
+  is therefore drawn translucent (`BODY_XRAY_COLOR`); an opaque body would simply
+  hide the thing being checked. Lower that alpha for a fainter body, or raise it to
+  1.0 to go back to a solid person and give up seeing the chain.
+
+  **Goal ghost.** The configuration the run drives toward is drawn in the same
+  window as a **translucent green arm** (`env.show_goal`, wired up in
+  `build_run`), so the gap between the person's own mesh and the ghost *is* the
+  remaining error. Only the arm is drawn: it is all the MPC controls, so a
+  whole-body ghost would coincide with the person's mesh everywhere else and
+  z-fight into speckle. A Cartesian goal fixes the wrist alone, so the posture
+  shown is the nearest configuration reaching it (`q_reaching_wrist` in
+  `kinematics.py`, a wrist-position least-squares fit pulled toward the arm's
+  current configuration); joint-space configs pass their goal `q` straight
+  through. It is set once, from the first goal, and does not follow later queued
+  goals or MDM corrections. Transparency only renders in the GUI window — the
+  offscreen TinyRenderer used by `getCameraImage` ignores alpha.
+
+  PyBullet cannot update a mesh's vertices, so each human pose replaces the whole
+  6890-vertex body — ~140 ms in the GUI, during which the MPC step is blocked and
+  the mocap receive thread is delayed toward `mocap_hold_timeout`. The mesh is
+  therefore rate-limited by `live_view_fps` (default 5); the robot is re-posed
+  every step regardless, since `resetJointState` costs nothing. Raising
+  `live_view_fps` buys smoother human motion at the cost of a slower control loop
+  — and above ~10 it starts tripping `MocapStaleError`.
+
+  **Why the right-collar body matters.** The person's orientation relative to
+  the robot is one unmeasured degree of freedom, and getting it wrong rotates
+  every measured bone direction (with `sim_mannequin`'s `166 deg` base yaw
+  carried over, the *left* arm landed on the person's right). The left→right
+  collar line is the torso's mediolateral axis — requiring its measured
+  direction to match the start pose's *solves* the registration yaw instead of
+  assuming it, with no assumption about the arm. The robot is then loaded into
+  the scene at that solved yaw, so the scene and the measured directions share
+  one frame. Only the yaw is fitted: mocap, the Kinova base, and PyBullet are
+  all Z-up, and any leftover angle is measurement noise in the collar bodies'
+  heights, which must not tilt the world. `mocap/monitor.py` prints the solved
+  yaw, and a near-vertical collar axis (which would leave the yaw undetermined)
+  is rejected outright. Mount the two collar bodies so their pivots straddle
+  the sternum symmetrically: the line between them *is* the measured facing,
+  so a right body sitting forward or back of the left biases the yaw by that
+  offset angle.
+
+  **Where the person is, is measured too.** The registered PyBullet frame *is*
+  the mocap world turned by the solved yaw, so the person's torso is anchored on
+  their **measured collar** and the robot on its measured base. Neither is a
+  constant of the config: sit somewhere else next run and the whole body moves
+  there, while the bolted-down robot stays put. The config's start pose supplies
+  the torso's shape and orientation only — its position is discarded. Cartesian
+  goals are spine3-relative, so they follow the person, and the anchor is frozen
+  for the run, which is what `MpcCostContext` requires. A run must therefore read
+  the anchor back from `env.pose_context()` after `initial_q` (`planners/run.py`
+  does); planning against the config's `spine3_pos` would put the goals on a
+  torso that is not where the person is.
+
+  Within a run, only bone *directions* come from mocap: they are re-anchored at
+  the frozen collar and rescaled to SMPL bone lengths, so mid-run torso
+  translation is deliberately not tracked — the registration yaw is likewise
+  solved once, so a person who rotates in their seat drifts out of registration
+  silently.
+
+  **The run starts from the measured arm configuration.** `RealEnv.initial_q`
+  registers against the person before planning and hands the planner the pose
+  they are actually in — it prints
+  `[real] waiting for mocap rigid bodies [...]` first, so a run stalled on
+  untracked markers is visible instead of looking like a hang. The arm they
+  start with need not match the config's
+  `arm:` — every slot, clavicle included, is overwritten by mocap.
+  Registration moves nothing; the robot still takes its grasp on the first MPC
+  step, at the forearm's measured position.
+
+  **Motive setup.** In Motive's Streaming pane set **Local Interface** to the
+  OptiTrack PC's LAN address (on loopback the stream never leaves that
+  machine), transmission `Multicast` on `239.255.42.99`, command port `1510`,
+  data port `1511`, **Z-up**, and enable **Rigid Bodies**. Keep the up axis Z:
+  mocap, the Kinova base, and PyBullet then share one vertical, which is what
+  lets the registration be a single yaw; a Y-up stream would only add a fixed
+  conversion and another place for a sign to be wrong.
+
+  The **robot base body's orientation must be aligned to the Kinova base frame**
+  (`+x` forward, `+z` up — `+x` is the Gen3's reach direction: at the repo's
+  home configuration the gripper sits at `(0.576, 0.002, 0.434)` in the base
+  frame). It is used *only* for the robot's facing in the scene, never for the
+  measured bone directions, so a misaligned plate leaves the person correctly
+  placed while the robot is loaded rotated away from reality — IK then solves
+  against the wrong pose, with nothing catching it, so check it in the dry run.
+  Create the six rigid
+  bodies and put their streaming ids in `mocap_rigid_bodies`. NatNet 3 or
+  newer is required (verified against Motive 3.0.3.1 / NatNet 4.0).
+
+  **Verify before anything moves**, in this order:
+
+  ```
+  # 1. mocap only, no robot: validity, frame rate, derived q, rendered arm
+  uv run python src/uncertain_feedback/mocap/monitor.py --host 192.168.2.243 \
+      --base-id 1 --collar-id 2 --collar-right-id 6 --shoulder-id 3 \
+      --elbow-id 4 --wrist-id 5 --video mocap_check.mp4
+
+  # 2. full loop on the live person with real_mirror_host: null — IK is solved
+  #    but no command reaches the arm
+  uv run python src/uncertain_feedback/planners/run.py \
+      --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_real.yaml \
+      --env-video real_rollout.mp4
+
+  # 3. the same with real_mirror_host set, after taking the grasp by hand and
+  #    launching the controller server
+  ```
+
+  `--env-video` renders the *measured* arm trajectory through
+  `ArmVisualizer.render_rollout_video()`.
+
+  **Recording the real environment.** `env: real` senses the world through
+  exactly two channels — the OptiTrack stream and the Gen3's measured joint
+  state — so both can be captured to a file and replayed later without the lab.
+  Reading the arm is passive: nothing is commanded, no mode switched, the
+  gripper untouched.
+
+  ```
+  uv run python src/uncertain_feedback/envs/record_real.py \
+      --host 192.168.2.243 --controller-host 127.0.0.1 \
+      --require-bodies 1 2 3 4 5 6 --seconds 30 \
+      --out real_recordings/lab.npz
+  ```
+
+  It stores every streamed rigid body (not only the configured six) plus the
+  full robot state per frame, and blocks until `--require-bodies` are all
+  tracked so the window does not open on a dropout. Point `env_params.recording`
+  at the file to replay it — see
+  `arm_mpc_cartesian_no_mdm_ik_gated_replay.yaml`, which needs no hardware, no
+  display, and no network:
+
+  ```
+  uv run python src/uncertain_feedback/planners/run.py \
+      --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_ik_gated_replay.yaml
+  ```
+
+  Everything measured is the real thing: the registration and its yaw, the
+  person's segment lengths, the robot's base pose, the grasp read off the
+  recorded joint configuration, and therefore the analytical IK and the
+  feasibility gate. A relative `recording` path is resolved from the repo root,
+  because loading MDM chdirs the process into its submodule.
+
+  **What replay does not reproduce is the loop closing on the person.** The
+  mocap side is playback: `execute` returns the *recorded* configuration, so the
+  person does not respond to the robot and the human arm does not advance no
+  matter what is commanded (the robot side does move — `ReplayMirror` is an
+  ideal tracker seeded at the recorded joints). A full `run.py` replay therefore
+  exercises every solve but runs out its step budget in place. For a rollout
+  that actually progresses, use the planner's offline stand-in — the same
+  `RobotPlanPreviewEnv` rollout the plan preview runs
+  (`_rollout_gated_reference_trajectory` in `planners/run.py`), which drives the
+  arm kinematically from the measured snapshot and reaches the Cartesian goal.
+
+  **Rendering that rollout with meshes.** `RealEnv.save_scene_video(human_q,
+  robot_q, path)` renders the live view's scene offscreen — the person as an
+  SMPL mesh shaped to their *measured* arm lengths, the Gen3 at its measured
+  base, the green goal ghost — so a headless replay still shows whether the
+  robot is where the person is, which a stick figure of the joint angles cannot.
+  Pass the planner's own robot joints where it has them (the gated and
+  robot-action rollouts report them per step); pass `None` for a human-space
+  rollout and the robot is chased through the same IK `execute` uses. Needs no
+  display: pybullet renders it in `DIRECT`. The arm chain is in the scene but
+  the offscreen renderer draws the body opaque, so use `save_video` to see the
+  chain itself.
+
+  **The plan is previewed before anything moves** (`preview_plan: true`, the
+  default; needs `live_view`). After registration the run rolls the same planner
+  — same action space, same feasibility gate, against the same robot IK and
+  padded joint box — with the same goals and costs, kinematically from the
+  *measured* start configuration, drawing each step in the live view the moment
+  its MPC solve finishes — the
+  person's mesh at the registered anchor, posed by the same FK the planner costs
+  against, the Gen3 at its measured base, the gripper carried by the grasp
+  measured off the real arm — then asks:
+
+  ```
+  [real] planning the preview — each step is drawn in the live view as it is solved (robot + arm chain every step, mesh at live_view_fps)
+  [real] preview done. Enter = run on the robot, n = abort:
+  ```
+
+  Answering `n` ends the run before the first command. Drawing goes through the
+  same rate limit as the run's live view — the robot and the planner's arm chain
+  move every step, the person's mesh (~140 ms per re-pose) refreshes at
+  `live_view_fps` — so the preview runs at roughly planning speed, and the
+  animation *is* the planning progress: a plan going somewhere unacceptable is
+  visible without waiting for the rest of the rollout. The preview is a
+  kinematic rollout, so it assumes the arm tracks each command exactly; the real
+  loop closes on mocap and will drift from it.
+
+  The drawn arm is the planner's arm: `_start_live_view` hands the calibrated
+  segment lengths to `SmplMeshCache`, which fits `betas` to them, and every mesh
+  pose is shifted so its shoulder lands on the FK's — measured at under a
+  millimetre from collar through wrist on subjects 5–12% off SMPL neutral (it was
+  ~4 cm at the wrist before the shape fit, against a 0.05 m
+  `cartesian.threshold`). Its *torso*, legs, and head are still the config
+  `pose:`: nothing measures them, the MPC does not use them, and the shape fit
+  leaves them about a centimetre off the anchor the goals hang from.
+
+  Which rollout previews which planner is a table in `planners/run.py`
+  (`_PREVIEW_ROLLOUTS`), asserted at import to name every Cartesian planner, so
+  a new one has to choose its stand-in rather than quietly inheriting the plain
+  ungated rollout. The robot-action and IK-gated planners roll out against
+  `RobotPlanPreviewEnv`, an offline double of the env frozen at the measured
+  state that delegates exact IK back to the env itself; they report their own
+  robot joints per step, so the window shows the planned robot rather than a
+  second IK chasing the arm. Planners whose trajectory does not exist before the
+  run — an MDM correction needs the user to speak first — have nothing to
+  preview and skip it; the Cartesian MDM planners preview the goal-seeking phase
+  that runs before the user speaks.
+
+  The grasp is re-measured every step from the real ee pose and the measured
+  forearm frame, and the gripper pose it implies rides the forearm rigidly —
+  rotation included. The IK tracks that rigid pose exactly while it is
+  reachable (the joint limits planned against are the emprise controller's
+  table, which now carries the kortex URDF hard stops minus
+  `robot_joint_limit_padding`); if a stretch of the plan leaves the reachable
+  set, position wins — the gripper stays on the forearm and the wrist attitude
+  carries the miss, rather than the robot drifting off the arm. The
+  measured grasp itself is used as given — nothing checks that it landed on the
+  forearm. A wrong registration yaw, a base plate misaligned in Motive, or a
+  mirror arm that was never actually placed on the person (e.g. a fresh sim
+  controller) bakes that offset into a long lever arm the commands then swing
+  through, so verify the registration in the dry run (`real_mirror_host: null`)
+  — which stages the robot at the nominal grasp — before commanding the arm.
 
 Every planner takes the env at construction (defaulting to `kinematic`), and
 `step` returns the configuration the env actually achieved. Envs also expose
@@ -370,9 +796,233 @@ uv run python src/uncertain_feedback/planners/run.py \
 `env: sim_robot_visual`; `arm_mpc_cartesian_no_mdm_sim_mannequin.yaml` is the
 same run with `env: sim_mannequin`;
 `arm_mpc_cartesian_no_mdm_sim_mannequin_kinova.yaml` is the mannequin run
-with the Kinova Gen3; the `--env-video` flag works with any
-env). A real-robot environment will be added as a further `env` value; see
-`src/uncertain_feedback/envs/`.
+with the Kinova Gen3;
+`arm_mpc_cartesian_no_mdm_sim_mannequin_kinova_real.yaml` additionally
+mirrors the sim robot onto the real Gen3;
+`arm_mpc_cartesian_no_mdm_real.yaml` is the mocap-closed-loop real run;
+`arm_mpc_cartesian_mdm_llm_real.yaml` is the *full method* on that rig (see
+below); the `--env-video` flag works with any env).
+
+### IK-gated human-action planner
+
+`arm_mpc_cartesian_no_mdm_ik_gated` keeps sampling human-arm deltas, but gates
+each rollout's first `grasp_residual_frames` frames with the robot environment's
+own IK. On `env: real`, this is the same analytical Gen3 branch continuation
+used for execution — one vectorized Newton batch over every sample, seeded
+sequentially through each rollout and filtered against the controller's padded
+joint-limit box. A rollout is discarded when its remaining gripper pose error
+exceeds `max_grasp_ik_residual` (metres + radians). Each sample set includes a
+zero-motion hold, so an all-infeasible draw holds instead of selecting the
+least-infeasible motion.
+
+**The gate continues; it does not enumerate.** Execution's
+`solve_robot_ik_exact_batch` falls back to enumerating every analytical branch
+for candidates continuation cannot place, because execution has to command
+something and the nearest reachable branch is the best available. The gate uses
+`track_robot_ik_batch` instead, which stops at continuation, for two reasons. A
+branch change is an *exact* solution, so the residual check cannot fault it, yet
+it sits far enough away that the arm spends tens of steps at
+`robot_max_joint_delta` reaching it with the grasp wrong the whole way — a
+measured case needed 0.78 rad, or 78 steps at the default cap. And enumeration
+is serial: one call costs about as much as the entire vectorized continuation
+over all 1000 samples, and it is paid on exactly the candidates about to be
+discarded. Gating on the enumerating solve made the cost scale with
+*infeasibility*, so a plan pressed against a limit went from 16 ms to tens of
+seconds per frame and stayed there, since the resulting hold keeps the arm in
+the region that caused it:
+
+| samples continuation rejects | gate cost (continuation) | gate cost (with enumeration) |
+| --- | --- | --- |
+| 0 / 1000 | 16 ms | 16 ms |
+| 62 / 1000 | 21 ms | 1.6 s |
+| 814 / 1000 | 32 ms | 26 s |
+| 983 / 1000 | 78 ms | 41 s |
+
+The gate does not apply `robot_max_joint_delta`; that remains an execution-rate
+cap rather than an IK joint limit. The preview *does* apply it when carrying its
+robot along, as execution will, so a joint-limit-feasible plan can still show
+transient robot lag there if it asks for faster motion than that cap permits.
+
+The preview runs this planner, gate included (`preview_plan`, below). It has to:
+previewed with the ungated planner it drew the run walking into exactly the
+poses the gate discards, ending with the gripper visibly off the forearm — a
+trajectory the run would never take.
+
+```
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_ik_gated_real.yaml
+```
+
+This config sets `control_mode: compliant_joint`, so the arm tracks the plan
+with joint-space impedance — it yields when the person resists rather than
+wrestling the grasp. Expect the measured joints to lag the commanded targets
+more than under `position_joint`; `_drive` re-solves from the measured state
+each step, so the loop self-corrects, but the per-step grasp-error report reads
+slightly optimistic.
+
+### Full method with the IK screens (`arm_mpc_cartesian_ik_gated`)
+
+`arm_mpc_cartesian_ik_gated` adds MDM/UQ/LLM corrections to the gated planner.
+The goal phase is the gated sampling above, unchanged. MDM playback stays
+direct — rate-limited frames, no sampling — but MDM knows nothing about the
+robot, so an unreachable frame would otherwise land in execution's IK
+fallbacks: the branch enumeration (an exact solution up to ~1.5 rad away that
+the arm then chases for tens of steps with the grasp wrong throughout) or the
+position-priority miss (attitude twisted against the forearm). Playback is
+therefore screened with the same continuation IK at three points, all against
+the live measured grasp and robot state:
+
+- **Push**: when a correction is queued, its frames are walked sequentially
+  through continuation IK from the current robot joints; unreachable frames
+  are dropped with a `[push] dropped n/m ...` report, and playback follows the
+  reachable ones. (The walk advances only through kept frames — the ones
+  playback will actually visit.)
+- **Step**: each rate-limited playback step is checked before it is commanded
+  (~0.3 ms) and held when continuation cannot place it, so `_drive`'s own solve
+  is guaranteed to succeed by continuation — neither fallback ever fires
+  during playback.
+- **Stall**: the cursor normally advances only once the measured arm reaches
+  the frame, so a frame the arm cannot reach — or settle on, under compliant
+  control — would hold the run forever. Closest approach to the frame is
+  tracked instead (monotone, so mocap jitter cannot reset the counter), and
+  after `playback_stall_steps` steps without progress the frame is skipped
+  with a `[playback] frame i stalled ...` log. A person actively resisting
+  reads as a stall too — the arm yields and moves on rather than pressing.
+
+The executed motion is the trajectory's *reachable shadow*: exact tracking
+wherever the correction is feasible, decelerate-hold-skip across the stretches
+it is not. `arm_mpc_cartesian_mdm_ik_gated_real.yaml` is
+`arm_mpc_cartesian_mdm_llm_real.yaml` with this planner, the gate keys, and
+`control_mode: compliant_joint` (any residual model mismatch becomes a bounded
+gentle pull, not a wrench — verify the server-side gains in
+`emprise-gen3-controller`'s `config_tuned.yaml` with the mannequin held before
+a live run):
+
+```
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_ik_gated_real.yaml \
+    --interactive --env-video real_gated_full_method.mp4
+```
+
+Stage it like every real run: mocap monitor, then the whole loop with
+`real_mirror_host: null` (type a correction and check the `[push]` and
+`[playback]` reports with nothing commanding the arm), then live — a
+trivially-reachable correction first, then a deliberately over-extended one to
+watch drop → hold → skip. Two rig-tuning notes: under `compliant_joint` the
+measured arm settles short of commands, so if steady-state deflection under
+load exceeds `max_playback_delta` (0.002) every frame finishes by stall-skip —
+loosen it if the skip logs say so; and a fully-unreachable correction costs at
+worst `mdm_frames × playback_stall_steps` steps of the session's `steps`
+budget.
+
+### Robot-action planners (`*_robot`)
+
+`arm_mpc_cartesian_no_mdm_robot` and `arm_mpc_cartesian_robot` are the same two
+Cartesian planners sampling **robot joint deltas** instead of human-arm deltas:
+every rollout is robot-feasible by construction, each rolled-out ee pose is
+mapped through the rigid measured grasp back to a human arm configuration for
+the (unchanged) human-arm costs, and the best joint target is sent to the robot
+directly — no grasp FK, no IK, no per-joint delta clipping. They require
+`env: sim_mannequin` or `env: real`, and take five extra keys:
+`max_robot_joint_delta` (per-step inf-norm cap on sampled joint deltas, rad),
+`robot_joint_delta_std` (sampling-noise std around the warm-started previous
+plan, rad; keep it well below the cap or the uniform rescale drowns the warm
+start in noise — `null` defaults to a third of the cap),
+`robot_infeasibility_weight` (soft penalty on motions the grasp cannot
+transmit), and `max_grasp_residual` / `grasp_residual_frames` — a hard gate
+that discards any rollout whose first `grasp_residual_frames` frames exceed
+`max_grasp_residual` (metres of elbow displacement + radians of untransmitted
+roll per frame). Only the leading frames are gated — they are what actually
+gets executed; the tail is re-solved every step and stays soft-penalized. The
+residual floor scales with `max_robot_joint_delta`, so tighten or loosen the
+gate together with the sampling scale; a tighter gate preserves the grasp more
+strictly at the cost of slower goal progress (a very large value disables it).
+
+```
+# sim rehearsal (Kinova mannequin, physics)
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_robot_sim_mannequin_kinova.yaml \
+    --env-video robot_action_sim.mp4
+
+# real rig, same dry-run-first protocol as arm_mpc_cartesian_no_mdm_real.yaml
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_no_mdm_robot_real.yaml \
+    --env-video robot_action_real.mp4
+
+# full method (MDM/UQ/LLM corrections) with the robot-action sampler
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_robot_mdm_llm_real.yaml \
+    --interactive --env-video robot_action_full_method.mp4
+```
+
+MDM playback under `arm_mpc_cartesian_robot` keeps its rate-limited cursor, but
+each playback frame is tracked with the robot-action solve rather than commanded
+through IK, so its `max_playback_delta` is looser (0.02) than the human-action
+config's 0.002 — the robot-space tracking has a noise floor the cursor must be
+able to cross.
+
+The plan preview on `env: real` rolls out the *actual* robot-action planner
+against a kinematic stand-in of the measured rig (robot chain, measured grasp,
+joint state — see `envs/robot_preview.py`), so the animation poses the robot at
+its planned joints and the robot and arm stay consistent by construction. The
+human-action planners keep the previous preview, whose robot chases the
+human-space plan through IK and can visibly lag it.
+
+### Interactive corrections with a live person (`--interactive`)
+
+`env` is orthogonal to `planner`, so the full method — MDM correction, UQ
+clustering, one LLM cost per round — runs on the real rig by config alone:
+`arm_mpc_cartesian_mdm_llm_real.yaml` is `arm_mpc_cartesian_no_mdm_real.yaml`'s
+env with `planner: arm_mpc_cartesian` and the correction/UQ/LLM-cost keys.
+Prefer `arm_mpc_cartesian_mdm_ik_gated_real.yaml` (previous section) when the
+robot is in the loop — same method, but every robot-facing step is IK-screened
+so unreachable MDM frames are dropped, held, or skipped instead of handed to
+execution's IK fallbacks.
+
+What a config cannot supply is *when* a real person wants a correction and *what
+they say*: a scripted run injects one preset `--text` at `text_time`. Pass
+`--interactive` and both come from the operator instead:
+
+```
+uv run python src/uncertain_feedback/planners/run.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/arm_mpc_cartesian_mdm_llm_real.yaml \
+    --interactive --env-video real_full_method.mp4
+```
+
+Press **enter** at any point to pause at the next MPC step, then type what the
+person asked for (typing the correction directly and pressing enter does both at
+once). The run then does exactly what it does in a scripted round — MDM samples
+from the arm's *current* pose, the cluster picker opens, an LLM cost is generated
+and stacked — and resumes tracking the chosen correction. Repeat as often as the
+person speaks; `steps` bounds the whole session. `text_time` is ignored, and
+`--text` with it.
+
+While paused nothing is commanded, so the arm stays where the controller last put
+it — the person is held, not released. Enter pressed during the pause queues the
+*next* pause rather than being swallowed, so an accidental double-press costs one
+extra round. `--interactive` requires an MDM-backed planner and is rejected
+before the env is built, i.e. before anything touches the hardware.
+
+Two knobs matter more here than in sim:
+
+- **`uq.auto_cluster` must stay unset** for the person to choose among the
+  clusters — that is the point of sampling several. With it set, the round takes
+  that cluster silently.
+- **`max_playback_delta`** (0.002 in the real config, against `max_angle_delta`
+  0.001) bounds how far the commanded configuration may lead the *measured* arm
+  while the correction plays back. Playback advances a frame only once the arm
+  reaches it, and the env's `robot_max_joint_delta` clips every robot joint
+  besides, so raising it makes corrections finish sooner rather than making the
+  robot lunge — but it is the first thing to re-tune on the rig, together with
+  `steps` (3000, since every correction is traversed at those caps).
+
+Stage it exactly like the no-MDM real run: mocap monitor first, then the whole
+loop with `real_mirror_host: null` so MDM, the picker, and cost generation all
+run against the live person while no command reaches the arm, then set the host.
+The generation stalls are worth knowing before someone is in the gripper: 500
+diffusion samples plus an LLM round pause the loop for tens of seconds with the
+arm held. Lower `uq.diffusion_samples` or set `llm_cost.enabled: false` to
+shorten them.
 
 ### Simulated user (`user:`)
 

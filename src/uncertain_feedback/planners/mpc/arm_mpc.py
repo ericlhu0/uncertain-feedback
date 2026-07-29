@@ -18,6 +18,7 @@ from uncertain_feedback.planners.mpc.costs import (
     ElbowHeightCost,
 )
 from uncertain_feedback.planners.mpc.kinematics import (
+    Q_CLAVICLE,
     Q_DIM,
     SmplLeftArmFK,
     _compose_q,
@@ -225,11 +226,16 @@ class SmplLeftArmMPC:
 
     def _sample_actions(self, mean: np.ndarray, size: tuple[int, ...]) -> np.ndarray:
         rng = self._rng if self._rng is not None else np.random
-        return rng.normal(
+        actions = rng.normal(
             loc=mean,
             scale=self._max_angle_delta,
             size=size,
         )
+        # A robot holding the forearm cannot actuate the shoulder girdle, so
+        # plans may only use the shoulder and elbow DOFs; the clavicle stays at
+        # its (measured) current value.
+        actions[..., Q_CLAVICLE] = 0.0
+        return actions
 
     def _rollout(self, current_q: np.ndarray, actions: np.ndarray) -> np.ndarray:
         """Roll out N trajectories from ``current_q`` using action sequences
@@ -392,8 +398,8 @@ if __name__ == "__main__":
 
     demo_initial_q = np.zeros(Q_DIM)
     demo_goals = [
-        np.array([0.0, -1.45, 0.0, 0.0, 0.0, 0.4, 0.0]),
-        np.array([0.0, -0.8, 0.0, 0.0, 0.0, 0.8, 0.0]),
+        np.array([0.0, 0.0, 0.0, 0.0, -1.45, 0.4, 0.0]),
+        np.array([0.0, 0.0, 0.0, 0.0, -0.8, 0.8, 0.0]),
     ]
 
     demo_mpc = SmplLeftArmMPC(

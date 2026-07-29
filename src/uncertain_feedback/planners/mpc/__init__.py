@@ -5,14 +5,26 @@ from uncertain_feedback.planners.mpc.arm_mpc_cartesian import LeftArmMPCCartesia
 from uncertain_feedback.planners.mpc.arm_mpc_cartesian_no_mdm import (
     ArmMPCCartesianNoMDM,
 )
+from uncertain_feedback.planners.mpc.arm_mpc_cartesian_robot import (
+    LeftArmMPCCartesianRobot,
+)
+from uncertain_feedback.planners.mpc.arm_mpc_ik_gated import (
+    ArmMPCCartesianNoMDMIKGated,
+    LeftArmMPCCartesianIKGated,
+)
 from uncertain_feedback.planners.mpc.arm_mpc_mdm import LeftArmMPCMDM
 from uncertain_feedback.planners.mpc.arm_mpc_mdm_uq import LeftArmMPCMDMUQ
+from uncertain_feedback.planners.mpc.arm_mpc_robot import ArmMPCCartesianNoMDMRobot
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 __all__ = [
     "SmplLeftArmMPC",
     "LeftArmMPCCartesian",
+    "LeftArmMPCCartesianRobot",
     "ArmMPCCartesianNoMDM",
+    "ArmMPCCartesianNoMDMIKGated",
+    "LeftArmMPCCartesianIKGated",
+    "ArmMPCCartesianNoMDMRobot",
     "LeftArmMPCMDM",
     "LeftArmMPCMDMUQ",
     "SmplLeftArmFK",

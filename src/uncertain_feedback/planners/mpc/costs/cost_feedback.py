@@ -136,7 +136,14 @@ class EvalState:
 
         def rollout(cost: GeneratedPythonCost) -> np.ndarray | None:
             cfg = EvalMpcConfig.from_config(self.cfg)
-            if cfg.planner not in ("arm_mpc_cartesian", "arm_mpc_cartesian_no_mdm"):
+            # Robot-action planners score candidates on the same human-space
+            # kinematic rollout — the cost being evaluated is a human-arm cost.
+            if cfg.planner not in (
+                "arm_mpc_cartesian",
+                "arm_mpc_cartesian_no_mdm",
+                "arm_mpc_cartesian_robot",
+                "arm_mpc_cartesian_no_mdm_robot",
+            ):
                 return None
             if not cfg.cartesian_goals:
                 return None

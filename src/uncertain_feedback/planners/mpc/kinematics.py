@@ -404,6 +404,27 @@ class SmplLeftArmFK:
         """Canonical elbow-flexion axis in the shoulder-local frame."""
         return self._hinge_axis.copy()
 
+    def scale_arm_lengths(
+        self, clavicle: float, upper_arm: float, forearm: float
+    ) -> None:
+        """Rescale the arm bones to measured segment lengths (metres).
+
+        Bone directions are unchanged (so the elbow hinge axis and all joint
+        angles keep their meaning); only the lengths move, and the T-pose joint
+        positions are recomputed to stay consistent. Idempotent — lengths are
+        absolute, not relative scales. Used by envs that measure the person, so
+        the whole run plans on their proportions instead of SMPL neutral's.
+        """
+        for i, length in zip((1, 2, 3), (clavicle, upper_arm, forearm)):
+            self._bone_offsets[i] *= length / float(
+                np.linalg.norm(self._bone_offsets[i])
+            )
+        self._tpose_joints[1:] = self._tpose_joints[0] + np.cumsum(
+            self._bone_offsets, axis=0
+        )
+        for local_i, global_i in enumerate(LEFT_ARM_CHAIN_INDICES):
+            self._tpose_22[global_i] = self._tpose_joints[local_i]
+
     # ------------------------------------------------------------------
     # FK — arm only
     # ------------------------------------------------------------------
@@ -446,18 +467,46 @@ class SmplLeftArmFK:
             else np.zeros(3)
         )
 
-        # Build full 4-joint array: [collar, shoulder, elbow, wrist]
-        full_aa = np.concatenate([self.collar_aa[None], arm_aa], axis=0)
-
         positions = np.empty((5, 3), dtype=np.float64)
         positions[0] = spine3_pos
 
+        rotations = self.bone_world_rotations(arm_aa, spine3_aa)
+        for i in range(4):
+            positions[i + 1] = positions[i] + rotations[i].apply(self._bone_offsets[i])
+
+        return positions
+
+    def bone_world_rotations(
+        self,
+        arm_aa: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+    ) -> list[Rotation]:
+        """World rotations transforming each arm-chain bone, in FK convention.
+
+        Entry *i* is the accumulated rotation applied to ``bone_offsets[i]``, so
+        the four entries carry the [spine3→collar, clavicle, upper-arm, forearm]
+        bones. Unlike a frame built from joint positions, these have no
+        up-reference to flip and carry the bone's roll about its own axis.
+
+        Args:
+            arm_aa:    ``(3, 3)`` axis-angle for [shoulder, elbow, wrist].
+            spine3_aa: ``(3,)`` world axis-angle of spine3 (default identity).
+        """
+        arm_aa = np.asarray(arm_aa, dtype=np.float64)
+        spine3_aa = (
+            np.asarray(spine3_aa, dtype=np.float64)
+            if spine3_aa is not None
+            else np.zeros(3)
+        )
+        # Build full 4-joint array: [collar, shoulder, elbow, wrist]
+        full_aa = np.concatenate([self.collar_aa[None], arm_aa], axis=0)
+
+        rotations: list[Rotation] = []
         t_rot = Rotation.from_rotvec(spine3_aa)
         for i in range(4):
             t_rot = t_rot * Rotation.from_rotvec(full_aa[i])
-            positions[i + 1] = positions[i] + t_rot.apply(self._bone_offsets[i])
-
-        return positions
+            rotations.append(t_rot)
+        return rotations
 
     def fk_batch(
         self,
@@ -646,3 +695,207 @@ class SmplLeftArmFK:
             if global_i < 22:
                 all_pos[global_i] = arm_pos[local_i]
         return all_pos
+
+
+def _shortest_arc_rotvecs(v_from: np.ndarray, v_to: np.ndarray) -> np.ndarray:
+    """Minimal rotations taking unit vectors ``v_from`` onto ``v_to``, batched.
+
+    Both inputs are ``(..., 3)`` and broadcast against each other. Antiparallel
+    pairs (axis undefined) rotate by pi about an arbitrary perpendicular.
+    """
+    v_from, v_to = np.broadcast_arrays(v_from, v_to)
+    axis = np.cross(v_from, v_to)
+    sin = np.linalg.norm(axis, axis=-1)
+    cos = np.sum(v_from * v_to, axis=-1)
+    angle = np.arctan2(sin, cos)
+    direction = axis / np.maximum(sin, 1e-12)[..., None]
+    anti = (sin < 1e-12) & (cos < 0.0)
+    if np.any(anti):
+        perp = np.cross(v_from, _WORLD_UP)
+        fallback = np.cross(v_from, np.array([0.0, 1.0, 0.0]))
+        weak = np.linalg.norm(perp, axis=-1, keepdims=True) < 1e-8
+        perp = np.where(weak, fallback, perp)
+        perp = perp / np.linalg.norm(perp, axis=-1, keepdims=True)
+        direction = np.where(anti[..., None], perp, direction)
+    return direction * angle[..., None]
+
+
+def project_forearm_frames(
+    fk: SmplLeftArmFK,
+    ee_pos: np.ndarray,
+    forearm_rot: np.ndarray,
+    grasp_offset: np.ndarray,
+    q_ref: np.ndarray,
+    spine3_pos: np.ndarray | None = None,
+    spine3_aa: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project grasp-implied forearm frames onto the arm manifold, batched.
+
+    A rigid grasp maps a robot end-effector pose to a forearm frame, but an
+    arbitrary ee pose is generally not one the attached arm can produce: with
+    the clavicle frozen the shoulder is fixed, the elbow must sit at upper-arm
+    length from it, and the forearm cannot roll about its own axis. The
+    projection is anchored on the gripper *position* — the component of the
+    grasp a robot holding the forearm couples firmly, while orientation slips —
+    so it predicts what the coupled arm actually does: the elbow goes to the
+    nearest point that keeps both the upper-arm length and the rigid
+    elbow-to-gripper distance (the intersection circle of the two spheres),
+    the forearm rotation is minimally re-anchored so the gripper stays at the
+    commanded ee position, and forearm roll is dropped. The residual is how far
+    the implied frame was from the manifold — the motion the grasp cannot
+    transmit.
+
+    The slot reconstruction mirrors :func:`anatomical_elbow_wrist_slots`
+    (recovered shoulder rotation on the elbow slot, pure-hinge wrist slot),
+    vectorized over the batch; the clavicle slot is ``q_ref``'s throughout.
+
+    Args:
+        ee_pos:       ``(..., 3)`` commanded gripper positions, SMPL frame.
+        forearm_rot:  ``(..., 3, 3)`` implied forearm bone rotations
+                      (ee rotation composed with the inverse grasp rotation),
+                      SMPL frame.
+        grasp_offset: ``(3,)`` gripper origin in the forearm frame
+                      (:attr:`MeasuredGrasp.position` — forearm-local, so the
+                      same coordinates in SMPL and pybullet usage).
+        q_ref:        ``(7,)`` current configuration (clavicle source).
+        spine3_pos:   ``(3,)`` torso anchor shared with the planner.
+        spine3_aa:    ``(3,)`` torso rotation shared with the planner.
+
+    Returns:
+        Tuple of ``(..., 3, 3)`` arm axis-angles, ``(..., 3)`` projected wrist
+        positions, and ``(...,)`` residuals (elbow projection metres +
+        untransmitted rotation radians).
+    """
+    ee_pos = np.asarray(ee_pos, dtype=np.float64)
+    batch = ee_pos.shape[:-1]
+    flat_ee = ee_pos.reshape(-1, 3)
+    flat_rot = Rotation.from_matrix(
+        np.asarray(forearm_rot, dtype=np.float64).reshape(-1, 3, 3)
+    )
+    grasp_offset = np.asarray(grasp_offset, dtype=np.float64)
+    grasp_dist = float(np.linalg.norm(grasp_offset))
+    q_ref = np.asarray(q_ref, dtype=np.float64)
+
+    aa_ref = q_to_arm_aa(q_ref, fk.elbow_hinge_axis)
+    shoulder_world = fk.bone_world_rotations(aa_ref, spine3_aa)[1]
+    shoulder_pos = fk.fk(aa_ref, spine3_pos, spine3_aa)[2]
+    upper_offset, forearm_offset = fk._bone_offsets[2], fk._bone_offsets[3]
+    upper_len = float(np.linalg.norm(upper_offset))
+    forearm_len = float(np.linalg.norm(forearm_offset))
+    tpose_upper = upper_offset / upper_len
+    tpose_forearm = forearm_offset / forearm_len
+    hinge = fk.elbow_hinge_axis
+
+    flat_elbow = flat_ee - flat_rot.apply(grasp_offset)
+    # Elbow: nearest point on the two-sphere intersection circle
+    # (|elbow − shoulder| = upper_len and |elbow − ee| = grasp_dist) to the
+    # implied elbow; clamped along the shoulder→ee axis when the spheres do
+    # not meet (gripper pulled beyond reach or inside it).
+    to_ee = flat_ee - shoulder_pos
+    dist_ee = np.maximum(np.linalg.norm(to_ee, axis=-1), 1e-9)
+    axis_hat = to_ee / dist_ee[..., None]
+    along = np.clip(
+        (upper_len**2 - grasp_dist**2 + dist_ee**2) / (2.0 * dist_ee),
+        -upper_len,
+        upper_len,
+    )
+    radius = np.sqrt(np.maximum(upper_len**2 - along**2, 0.0))
+    center = shoulder_pos + along[..., None] * axis_hat
+    offset = flat_elbow - center
+    perp = offset - np.sum(offset * axis_hat, axis=-1, keepdims=True) * axis_hat
+    perp_len = np.linalg.norm(perp, axis=-1, keepdims=True)
+    fallback = np.cross(axis_hat, _WORLD_UP)
+    weak = np.linalg.norm(fallback, axis=-1, keepdims=True) < 1e-8
+    fallback = np.where(weak, np.cross(axis_hat, np.array([0.0, 1.0, 0.0])), fallback)
+    fallback = fallback / np.linalg.norm(fallback, axis=-1, keepdims=True)
+    perp_dir = np.where(perp_len > 1e-9, perp / np.maximum(perp_len, 1e-9), fallback)
+    elbow_proj = center + radius[..., None] * perp_dir
+
+    # Minimal rotation keeping the gripper on the commanded ee position.
+    grip_implied = flat_ee - flat_elbow
+    grip_proj = flat_ee - elbow_proj
+    if grasp_dist > 1e-9:
+        anchor = Rotation.from_rotvec(
+            _shortest_arc_rotvecs(
+                grip_implied
+                / np.maximum(np.linalg.norm(grip_implied, axis=-1, keepdims=True), 1e-9),
+                grip_proj
+                / np.maximum(np.linalg.norm(grip_proj, axis=-1, keepdims=True), 1e-9),
+            )
+        )
+        flat_rot = anchor * flat_rot
+
+    wrist_proj = elbow_proj + flat_rot.apply(forearm_offset)
+    u = (elbow_proj - shoulder_pos) / upper_len
+    f = (wrist_proj - elbow_proj) / forearm_len
+
+    r_up = Rotation.from_rotvec(_shortest_arc_rotvecs(tpose_upper, u))
+    normal = np.cross(u, f)
+    normal_len = np.linalg.norm(normal, axis=-1)
+    normal = normal / np.maximum(normal_len, 1e-12)[..., None]
+    hinge_now = r_up.apply(hinge)
+    theta = np.arctan2(
+        np.sum(np.cross(hinge_now, normal) * u, axis=-1),
+        np.sum(hinge_now * normal, axis=-1),
+    )
+    theta = np.where(normal_len < 1e-8, 0.0, theta)
+    elbow_world = Rotation.from_rotvec(theta[..., None] * u) * r_up
+    rest_forearm = elbow_world.apply(tpose_forearm)
+    wrist_world = Rotation.from_rotvec(_shortest_arc_rotvecs(rest_forearm, f)) * (
+        elbow_world
+    )
+
+    elbow_slot = (shoulder_world.inv() * elbow_world).as_rotvec()
+    wrist_slot = (elbow_world.inv() * wrist_world).as_rotvec()
+    arm_aa = np.stack(
+        (np.broadcast_to(q_ref[Q_CLAVICLE], elbow_slot.shape), elbow_slot, wrist_slot),
+        axis=-2,
+    )
+
+    # After the anchor rotation the implied and reconstructed rotations agree
+    # on the forearm direction, so their relative rotation is the roll a
+    # parallel-jaw grasp cannot transmit; the anchor swing itself shows up in
+    # the elbow displacement term.
+    untransmitted = np.linalg.norm((flat_rot.inv() * wrist_world).as_rotvec(), axis=-1)
+    residual = np.linalg.norm(flat_elbow - elbow_proj, axis=-1) + untransmitted
+    return (
+        arm_aa.reshape(*batch, 3, 3),
+        wrist_proj.reshape(*batch, 3),
+        residual.reshape(batch),
+    )
+
+
+def q_reaching_wrist(
+    fk: SmplLeftArmFK,
+    wrist_target: np.ndarray,
+    q_seed: np.ndarray,
+    spine3_pos: np.ndarray | None = None,
+    spine3_aa: np.ndarray | None = None,
+    posture_weight: float = 0.05,
+) -> np.ndarray:
+    """``(7,)`` arm configuration whose wrist sits at ``wrist_target``.
+
+    Inverse of the Cartesian goal the MPC tracks, for showing a goal *pose*
+    where the goal itself is only a point: a wrist position leaves the arm's
+    posture underdetermined (7 DOF for 3 constraints), so the fit is pulled
+    toward ``q_seed`` by ``posture_weight`` and returns the nearest reaching
+    configuration rather than an arbitrary branch. An out-of-reach target
+    yields the closest the arm can get.
+
+    Args:
+        wrist_target:   ``(3,)`` world wrist position (*not* spine3-relative).
+        q_seed:         ``(7,)`` configuration to stay near — normally the
+                        arm's current one.
+        posture_weight: Pull toward ``q_seed``, in radians per metre of wrist
+                        error.
+    """
+    from scipy.optimize import least_squares  # pylint: disable=import-outside-toplevel
+
+    wrist_target = np.asarray(wrist_target, dtype=np.float64)
+    q_seed = np.asarray(q_seed, dtype=np.float64)
+
+    def residual(q: np.ndarray) -> np.ndarray:
+        wrist = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), spine3_pos, spine3_aa)[4]
+        return np.concatenate([wrist - wrist_target, posture_weight * (q - q_seed)])
+
+    return np.asarray(least_squares(residual, q_seed).x, dtype=np.float64)

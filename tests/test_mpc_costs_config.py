@@ -189,8 +189,10 @@ class _FakeSequenceLlmModel:
                 "description": f"fake generated cost {self.calls}",
                 "params": {"weight": 1.0 if self.calls == 1 else -1.0},
                 "code": (
+                    # Shoulder slot, not clavicle: the reference rollout must be
+                    # able to move the scored DOF, and plans freeze the clavicle.
                     "def cost(q_trajs, context, params):\n"
-                    "    future = q_trajs[:, 1:, 0, 0]\n"
+                    "    future = q_trajs[:, 1:, 1, 0]\n"
                     "    return params['weight'] * np.mean(future ** 2, axis=1)\n"
                 ),
             }
@@ -1360,7 +1362,7 @@ def test_mdm_playback_eases_in_from_live_pose() -> None:
 def test_mdm_mpc_resumes_toward_final_goal_after_playback() -> None:
     np.random.seed(0)
     frames = np.zeros((2, 3, 3), dtype=np.float64)  # trivial trajectory at origin
-    final_goal = np.array([0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0])
+    final_goal = np.array([0.0, 0.0, 0.0, 0.0, 0.6, 0.0, 0.0])
     mpc = LeftArmMPCMDM(
         goals=[final_goal],
         horizon=5,

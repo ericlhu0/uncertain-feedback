@@ -1,0 +1,82 @@
+env: real
+env_params:
+  robot: kinova_gen3
+  robot_max_joint_delta: 0.2
+  # Keep IK solutions inside the real controller's soft joint limits
+  # (joint_limit_padding_deg: 15.0 = 0.262 rad in config_tuned.yaml) with a
+  # small margin — commands in the padding band are rejected by its checks.
+  robot_joint_limit_padding: 0.27
+  # emprise-gen3-controller ZMQ server (launch_server.py) on this host. Set to
+  # null to close the loop on the live person without commanding the arm — do
+  # that dry run first.
+  real_mirror_host: "127.0.0.1"
+  # real_mirror_host: "192.168.2.68"
+  # Prompt the operator once before the arm starts tracking. Nothing is moved at
+  # startup — the grasp must already be taken. Set false only for headless/mock
+  # runs.
+  real_mirror_confirm_start: true
+  # Track targets with joint-space impedance instead of stiff position control —
+  # the arm yields to the person. Gains live server-side in config_tuned.yaml.
+  # Set to position_joint (the default) for stiff tracking.
+  control_mode: compliant_joint
+  # OptiTrack PC running Motive. Its streaming Local Interface must be this
+  # LAN address, not loopback, or no packets leave that machine.
+  mocap_host: "192.168.2.243"
+  # Motive rigid-body streaming ids. robot_base fixes where the robot stands;
+  # collar_right closes the last DOF — the measured left->right collar axis is
+  # the torso's facing, so the person's orientation relative to the robot is
+  # measured rather than assumed. It is read at calibration only.
+  mocap_rigid_bodies:
+    robot_base: 1
+    collar: 2
+    collar_right: 6
+    shoulder: 3
+    elbow: 4
+    wrist: 5
+  # Hold the last valid pose through tracking dropouts up to this long (s),
+  # then raise and halt.
+  mocap_hold_timeout: 0.5
+  # Live pybullet window: the measured person as an SMPL mesh next to the robot,
+  # both in the registered frame. Needs a display — set false when running
+  # headless (over ssh without X).
+  live_view: true
+  # Human-mesh refresh rate. Each refresh replaces the whole mesh (~140 ms in the
+  # GUI) and blocks the MPC step, so keep it low; the robot still animates every
+  # step.
+  live_view_fps: 5
+  # Draw each planned step in the live view as it is solved — measured person,
+  # measured robot base, measured grasp — and wait for approval before the first
+  # command reaches the arm. Needs live_view. The robot and arm chain move every
+  # step; the mesh refreshes at live_view_fps.
+  preview_plan: true
+planner: arm_mpc_cartesian_no_mdm_ik_gated
+# Human-action sampling as in arm_mpc_cartesian_no_mdm_real.yaml, but rollouts
+# whose first grasp_residual_frames frames imply a gripper pose the robot
+# cannot IK to exactly (pose error above max_grasp_ik_residual, metres +
+# radians) are discarded outright. This uses the real env's analytical Gen3
+# IK and padded controller joint box, seeded through each rollout. The floor is
+# IK convergence, not model mismatch, so the threshold sits near zero.
+max_grasp_ik_residual: 0.001
+grasp_residual_frames: 3
+# Planner knobs match arm_mpc_cartesian_no_mdm_real.yaml.
+steps: 1000
+horizon: 10
+n_mpc_samples: 1000
+max_angle_delta: 0.01
+goal_threshold: 0.15
+pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
+
+# Demo-runner "base1" initial pose ([shoulder, elbow, wrist] axis-angles).
+# The run starts from the *measured* arm configuration — every row is
+# overwritten by mocap (the registration yaw comes from the collar-to-collar
+# axis, not from any slot here).
+arm:
+  - [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783]
+  - [0.6868865380518193, -0.18, -0.11006289820501858]
+  - [0.035651850950680734, -1.23, 0.7515284911778386]
+
+cartesian:
+  # Demo-runner "hits limit 1" goal.
+  goals:
+    - [-0.10, 0.05, 0.15]
+  threshold: 0.05

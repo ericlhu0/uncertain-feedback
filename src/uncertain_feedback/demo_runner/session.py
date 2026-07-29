@@ -1285,9 +1285,7 @@ class Session:
             raise ValueError("Generate a cost for the selected cluster first.")
         correction = traj.scaled_correction.copy()
         self.commit_round()
-        cutoff = max(
-            1, round(len(correction) * _feedback_cfg(rig).trajectory_fraction)
-        )
+        cutoff = max(1, round(len(correction) * _feedback_cfg(rig).trajectory_fraction))
         correction = correction[:cutoff]
         traj.mpc.set_mdm_goal(correction[-1])
         traj.mpc.push_trajectory(correction)

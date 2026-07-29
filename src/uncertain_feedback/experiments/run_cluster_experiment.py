@@ -99,9 +99,7 @@ def main() -> None:
         if q_history:
             q = q_history[-1]
 
-    mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames
-    )
+    mdm_frames = args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames
     feedback_text = resolve_feedback_text(args.text, setup.user)
     cluster_selector = (
         (lambda means: choose_cluster(setup.user, setup.cost_context, means))

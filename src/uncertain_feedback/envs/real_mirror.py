@@ -112,6 +112,7 @@ class RealArmMirror:
         confirm_start: bool = True,
         control_mode: str = "position_joint",
     ) -> "RealArmMirror":
+        """Open the ZMQ link to an emprise-gen3-controller server on ``host``."""
         return cls(
             ArmController.connect(host, state_port=state_port, cmd_port=cmd_port),
             confirm_start=confirm_start,

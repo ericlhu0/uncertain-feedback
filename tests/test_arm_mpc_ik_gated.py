@@ -471,7 +471,9 @@ def test_ik_gated_mdm_planner_tracks_playback_then_reaches_goal() -> None:
     mpc.push_trajectory(frames, current_q=q0)
     assert _playback(mpc).in_playback()
     frames_kept = _playback(mpc)._frames
-    assert frames_kept is not None and len(frames_kept) == 8  # nothing dropped: all reachable
+    assert (
+        frames_kept is not None and len(frames_kept) == 8
+    )  # nothing dropped: all reachable
 
     q = q0
     for _ in range(80):

@@ -95,6 +95,7 @@ class ExecutionEnv(ABC):
         before anything moves. Default: nothing to show, so proceed without
         rolling anything out.
         """
+        _ = plan
         return True
 
     @abstractmethod

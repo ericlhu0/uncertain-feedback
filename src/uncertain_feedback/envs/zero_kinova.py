@@ -15,6 +15,7 @@ from uncertain_feedback.envs.real_mirror import RealArmMirror
 
 
 def main() -> None:
+    """Send the Gen3 to its zero configuration over the mirror link."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1", help="ZMQ server host")
     parser.add_argument("--state-port", type=int, default=5555)

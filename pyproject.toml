@@ -146,6 +146,9 @@ module = [
     "smplx",
     "tqdm.*",
     "pybullet",
+    # ZMQ-client dep whose checkout is absent on non-rig hosts.
+    "emprise_gen3_controller",
+    "emprise_gen3_controller.*",
 ]
 ignore_missing_imports = true
 

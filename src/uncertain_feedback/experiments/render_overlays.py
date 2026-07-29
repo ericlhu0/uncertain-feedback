@@ -62,9 +62,7 @@ def main() -> None:
         if q_history:
             q = q_history[-1]
 
-    mdm_frames = (
-        args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames
-    )
+    mdm_frames = args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames
     current_pose = setup.gen.build_pose_from_arm_aa(
         setup.initial_pose,
         q_to_arm_aa(q, setup.fk.elbow_hinge_axis),

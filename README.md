@@ -399,8 +399,11 @@ optional YAML key `env`:
   the source of truth — physics, mannequin read-back, and planning all stay
   simulated. With mirroring on, the sim robot plans against the controller's
   enforced joint-limit table (narrower than the kortex URDF's) so every
-  mirrored command passes the controller's safety checks. Start the server
-  first from the controller repo on the machine that reaches the robot:
+  mirrored command passes the controller's safety checks. The controller's
+  client library is not a project dependency (the private repo only exists on
+  rig hosts): check it out beside this repo and install it into the venv with
+  `uv pip install -e ../../emprise-gen3-controller` after `uv sync`. Start the
+  server first from the controller repo on the machine that reaches the robot:
 
   ```
   cd ~/emprise-gen3-controller

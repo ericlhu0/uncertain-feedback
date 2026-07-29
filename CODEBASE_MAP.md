@@ -561,6 +561,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
   `conda run` subprocess (`kimodo/_kimodo_inference_worker.py`), mirroring the SAM/MHR
   worker pattern. Needs gated HF access to `meta-llama/Meta-Llama-3-8B-Instruct`.
 - **OpenAI** — used for LLM cost generation (`llm/openai_model.py`)
+- **emprise-gen3-controller** — private lab repo driving the real Kinova Gen3 (`envs/real_mirror.py`); not a project dependency — rig hosts install it with `uv pip install -e ../../emprise-gen3-controller` after `uv sync`
 - **sklearn** — KMeans + AgglomerativeClustering in `clustering/base.py`, PCA in `clustering/path_pca_clusterer.py`
 - **smplx** — SMPL model loading
 - **detectron2** — human pose estimation in data collection worker

@@ -298,9 +298,6 @@ trajectory-corpus CSVs, and the demo runner graphs/penalty field. In particular,
 shoulder block `q[3:6]`; clavicle rotation `q[0:3]` does not contribute.
 `shoulder_elevation` remains one of the five shared features.
 
-To compare multiple LLM costs across UQ clusters, use the experiment runner
-instead (see [Running Cluster Experiments](#running-cluster-experiments)).
-
 Use the runner from the repo root:
 ```
 uv run python src/uncertain_feedback/planners/run.py --mpc-config path/to/mpc.yaml
@@ -1064,8 +1061,8 @@ outside the post-stroke flexor synergy ([Hadjiosif et al., 2024](https://pmc.ncb
   the most comfortable cluster mean), taking precedence over `feedback.uq.auto_cluster`
   and the interactive picker.
 
-The same hidden bounds are the evaluation ground truth for the
-[transfer experiment](#simulated-user-transfer-experiment).
+The same hidden bounds are the evaluation ground truth for the method-level
+experiments that will live in the repo-root `evaluation/` directory.
 
 ### MDM + UQ Config
 Save as `src/uncertain_feedback/planners/mpc/configs/mpc_mdm_uq.yaml`:
@@ -1246,46 +1243,7 @@ into shoulder rotation plus a scalar elbow-flexion angle while preserving arm
 joint positions.
 
 
-## Running Simulated-User Experiments
-
-Experiments live separately from a single run, under
-`src/uncertain_feedback/experiments/`. The default experiment runs one simulated
-persona with one cost-generation backend on the original goal only: initial
-rollout, hidden-cost trigger, MDM/UQ candidates, oracle cluster selection, one
-generated cost, and original-goal evaluation (`base`, `tracking`, `generated`,
-`oracle`). It requires `feedback:` (with `uq:`) and `cartesian:` sections, `llm_cost.enabled: true`,
-and a persona with hidden bounds:
-
-```bash
-uv run python src/uncertain_feedback/experiments/run_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
-  --persona adhesive_capsulitis \
-  --backend agent \
-  --save-video
-```
-
-`--persona` defaults to the config's `user:` key, and `--backend` defaults to
-`llm_cost.backend`. Artifacts go to `experiment_artifacts/<timestamp>/`,
-including `experiment_summary.json`.
-
-The older per-cluster comparison remains available as an explicit cluster
-experiment. It drives a UQ planner to the feedback point, extracts every cluster,
-generates one cost per cluster with the selected backend, rolls each one out
-headlessly, and writes `comparison_summary.json`. For Cartesian experiments,
-each cluster entry also contains a `hidden_cost_evaluation` comparing `base`,
-`oracle`, and that cluster's `generated` cost on the original goal:
-
-```bash
-uv run python src/uncertain_feedback/experiments/run_cluster_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm.yaml \
-  --text "raise my left arm" \
-  --backend llm
-```
-
-Add `--rollout-steps N` to cap the per-cluster rollout length (defaults to
-`steps - text_time`), and `--save-video` to render each rollout to an MP4.
-
-### Comparing cost-generation backends
+## Cost-generation backends
 
 `llm_cost.backend` selects how the cost is generated:
 
@@ -1325,42 +1283,12 @@ pins `gpt-5.6-sol`.
   config or its `user`/`persona_goals` metadata. Legacy round states are sanitized
   while being staged for combination.
 
-The backend experiment is the orthogonal axis: it holds the correction fixed (the
-**chosen** UQ cluster) and generates a cost with each backend (`llm` / `turns` /
-`agent`), then scores them all on the same rollout-vs-MDM L2 metric and writes
-a `backend_comparison.json` ranking. Each backend entry also includes a
-`hidden_cost_evaluation` comparing `base`, `oracle`, and `generated` using the
-simulated user's hidden cost and original Cartesian goal. It requires
-`feedback:` (with `uq:`) and `cartesian:` sections (the scorer needs a
-persistent Cartesian goal) and `llm_cost.enabled: true`:
-
-```bash
-uv run python src/uncertain_feedback/experiments/run_backend_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm.yaml \
-  --text "raise my left arm" \
-  --backends turns agent \
-  --save-video
-```
-
-Pass the neutral base config (`mdm_llm.yaml`), not a
-backend-specific one — the experiment sets `llm_cost.backend` itself for each
-backend. All other `llm_cost` settings (`model`, `max_turns`, `use_images`, and
-`codex_cmd` for the `agent` backend) come from that config, so
-make sure its `codex_cmd` works on this host and that Bubblewrap is installed. The
-configured Codex sandbox may be `danger-full-access` because Codex itself runs inside
-the outer restricted namespace. Use `--backends llm turns` to
-compare a subset, `--rollout-steps N` and
-`--save-video` to render an MP4 per backend. With image feedback enabled,
-`--save-video` also saves the rollout videos for every intermediate `turns` and
-`agent` candidate cost. A backend that fails to produce a cost (e.g. `codex`
-unavailable) is recorded as failed and the rest still rank.
-
 Every generated LLM-cost artifact directory also includes
 `reference_with_correction.mp4`, a video of the target reference trajectory that
 contains the correction (`full_correction_traj` when available, otherwise the
 MDM correction segment).
 
-#### Visual cost feedback (turns / agent)
+### Visual cost feedback (turns / agent)
 
 When `llm_cost.use_images: true`, the iterating backends refine the cost against
 **two rendered comparisons** — a spatial rollout-vs-correction overlay (red "cost
@@ -1384,7 +1312,7 @@ score, which is still kept for selection and ranking:
   also be run standalone to re-render any candidate:
 
   ```bash
-  uv run python src/uncertain_feedback/experiments/render_cost_comparison.py \
+  uv run python src/uncertain_feedback/evaluation_mechanism/render_cost_comparison.py \
     --state <run_dir>/agent/state.pkl \
     --response <run_dir>/agent/response.json \
     --out comparison.png \
@@ -1402,127 +1330,10 @@ score, which is still kept for selection and ranking:
 
 With `use_images: false` both backends fall back to score-only text feedback.
 
-### Simulated-user transfer experiment
+### Accepted-pose evidence from the executed-trajectory corpus
 
-The transfer experiment closes the evaluation loop with a **hidden ground
-truth**: a simulated care recipient (`src/uncertain_feedback/simulated_users/`)
-holds a clinically motivated ROM restriction the cost generator never sees. The
-persona decides when feedback is given (the first step the initial plan violates
-the hidden cost), what is said (its fixed feedback line — `--text` is ignored),
-and which UQ cluster it picks: transfer experiments score each scaled raw
-cluster mean with the hidden oracle cost and choose the lowest-scoring option.
-The generated cost is then evaluated by rolling out to the **original goal and
-each held-out `transfer.goals` entry** and measuring hidden-cost violation plus goal
-completion — so a cost only wins by generalizing beyond the correction it was
-generated from.
-
-```bash
-uv run python src/uncertain_feedback/experiments/run_transfer_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
-  --save-video
-```
-
-The persona comes from the config's `user:` key (the example config sets
-`adhesive_capsulitis`); `--persona` takes one or more persona names to run, and
-`--all-personas` runs every persona with hidden bounds. Each persona gets its
-own timestamped artifact dir, reusing one loaded MDM setup. With `--save-video`,
-iterating cost backends also save candidate rollout artifacts under
-`cost_generation/`.
-Personas: `adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
-`stroke_flexor_synergy` (active-effort pose proxy),
-`out_of_synergy_reach_preference` (soft preference for progressively more elbow extension with elevation),
-`triceps_long_head_contracture` (maximum elbow flexion falls with elevation),
-`biceps_long_head_contracture` (minimum elbow flexion rises with shoulder extension),
-`brachial_plexus_mechanosensitivity` (minimum elbow flexion rises with abduction),
-and `cross_body_pain`
-(pose-dependent bound: tolerable elevation drops linearly as the upper arm
-adducts past the midline) — the unrestricted default is rejected. Requires `feedback:` (with `uq:`) and `cartesian:` sections, `llm_cost.enabled: true`,
-`cartesian.goals`, and a `transfer:` block:
-
-```yaml
-transfer:
-  goals:                     # held-out spine3-relative wrist targets
-    - [-0.25, 0.0, -0.05]
-corrections:
-  trigger_threshold: 0.02    # hidden-cost violation (rad) at which the user interrupts
-```
-
-Because the experiment runs one persona at a time, each restriction needs its
-own goal geometry to make the default plan visibly require a correction. An
-optional `persona_goals:` block overrides the correction goal and transfer goals
-for the active persona (falling back to the top-level `cartesian.goals` /
-`transfer.goals` for personas without an entry). Goals sit inside the
-constraint-compliant reach envelope: the constraint-respecting solution reaches
-the goal, while the default plan reaches the same target by violating the
-restriction (frozen shoulder raises the upper arm; flexor synergy straightens
-the elbow), so the correction is "reach it a different way," not "give up":
-
-```yaml
-persona_goals:
-  adhesive_capsulitis:       # frozen shoulder: base raises the upper arm; compliant keeps it low
-    cartesian: [[0.42, 0.30, 0.12]]                                    # low-hand lateral (hand not overhead)
-    transfer:  [[0.50, 0.20, 0.10], [0.11, 0.44, 0.26], [-0.04, 0.42, 0.18]]
-  stroke_flexor_synergy:     # flexor synergy: base straightens the elbow; compliant keeps it bent
-    cartesian: [[0.42, 0.48, 0.12]]
-    transfer:  [[0.18, 0.52, 0.14], [0.13, 0.50, 0.28], [-0.04, 0.48, 0.18]]
-```
-
-Artifacts go to `transfer_artifacts/<timestamp>/`: `initial_rollout.npy`,
-`cluster_options.png` (the UQ cluster candidates the simulated user chose among,
-chosen cluster highlighted), the cost-generation directory (same layout as a
-live run), per-condition rollouts
-(`base/`, `tracking/`, `generated/`, `oracle/`, with MP4s under `--save-video`),
-and `transfer_summary.json` with per-condition per-goal metrics
-(`mean_violation`, `max_violation`, `frac_frames_violated`, `goal_reach`) plus
-`cluster_selection_method` and `cluster_oracle_scores` for the UQ options.
-`tracking` (following the correction trajectory directly) is only defined for
-the original goal; on transfer goals it is identical to `base` — that contrast
-is the argument for persisting a cost function rather than a trajectory.
-
-### Multi-round pose-dependent experiment
-
-The multi-round experiment treats every entry in `cartesian.goals` as the next
-goal for the same care recipient. Each triggered round still runs the normal
-single-round generator against the hand-authored base comfort costs. From the
-second triggered round onward, a Codex combinator replays every round's feedback,
-trajectories, summaries, images, and generated cost to author one unified cost.
-The unified cost replaces earlier generated costs; generated terms are never
-stacked.
-
-The example config includes two base-vs-oracle-screened pose-dependent scenarios
-using `demo_pose_v3.pt` (initial spine3-relative wrist position approximately
-`[0.356, -0.091, 0.316]`). Coordinates below are spine3-relative wrist goals:
-
-| Persona | Round 1 | Round 2 | Round 3 purpose |
-|---|---|---|---|
-| `triceps_long_head_contracture` | `[0.25, 0.32, 0.15]` | `[-0.05, 0.40, 0.15]` (across body) | `[0.10, 0.10, 0.25]`: low close reach that rejects an overly global elbow-extension rule |
-| `cross_body_pain` | `[-0.04, 0.45, 0.15]` | `[-0.12, 0.25, 0.25]` | `[0.42, 0.48, 0.12]`: high lateral reach that rejects an overly global elevation cap |
-
-The first two goals deliberately sample different parts of each hidden diagonal
-boundary. The third is a comfortable generalization goal on the allowed side of
-the boundary, chosen to expose a simpler but overrestrictive rule. A sufficiently
-good generator may infer the coupled preference after the
-first correction; if it overfits that observation, the second violation supplies
-the contrasting evidence needed by the multi-round combinator.
-
-```bash
-uv run python src/uncertain_feedback/experiments/run_multi_round_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_multiround.yaml \
-  --persona stroke_flexor_synergy \
-  --save-video
-```
-
-Artifacts go to `multi_round_artifacts/<timestamp>/`. Each `round_<k>/` contains
-the initial rollout, correction, pickled evaluation state, cluster overlay, and
-unchanged per-round `cost_generation/` artifacts. `history.json` is the durable
-full-context round history. Each `combine_round_<k>/` contains the unified cost,
-iteration log, per-round comparison images, and `scores.json`. Final
-base/generated/oracle rollouts are evaluated for every goal, and
-`hidden_bounds_goal_<k>.png` plots those trajectories against the persona's true
-forbidden region; for coupled personas this is the direct visual check that the
-learned pose-dependent anchors follow the hidden diagonal boundary.
-
-`trajectory_corpus/` holds one entry per goal — the goal's full executed
+Every backend also grounds itself in an **executed-trajectory corpus**. A
+session's `trajectory_corpus/` holds one entry per goal — the goal's full executed
 rollout as canonical `(T, 7)` q states (`traj_<i>.npy`) plus a per-frame
 joint-feature `traj_<i>_features.csv`
 — recorded in `manifest.json`. Each manifest entry carries `goal`, `n_frames`,
@@ -1539,57 +1350,18 @@ trajectory and feature files are copied into its task workspace and the oracle-d
 The original manifest remains unchanged for the demo UI and session history; only
 explicit round instructions enter the agent prompt.
 
-### Automated simulated-user episodes
+## Method-level evaluation
 
-The episode experiment fully automates the care recipient: instead of one
-static `feedback_text`, the persona reacts to what the robot is actually doing.
-Once per episode an oracle path (base MPC + the hidden cost, from the initial
-pose) is rolled out as the user's internal ideal. Whenever the robot's motion
-triggers discomfort, a deterministic attribution step contrasts the robot's
-nominal continuation (`simulated_user.nominal_steps` base-MPC steps) with the
-nearest oracle window, the configured verbalizer phrases the contrast, and the
-oracle-path chooser picks the cluster and magnitude whose endpoint leaves the
-least oracle path remaining (painful candidates filtered at the trigger
-threshold). After cost generation the run resumes toward the goal with the
-generated cost installed; renewed discomfort re-triggers the loop (from the
-second round through the multi-round Codex combinator) until the goal is
-reached cleanly, the verbalizer has nothing left to say, or
-`simulated_user.max_rounds` is hit (logged as a capped failure).
+Scripts that evaluate the *whole* pipeline end to end live in the repo-root
+`evaluation/` directory, outside `src/`. It is currently an empty placeholder: the
+previous runners under `src/uncertain_feedback/experiments/` were removed in the
+stage-package refactor and will be rewritten there on top of the per-stage façades
+(`motion_generators`, `uncertainty`, `cost_generation`, `evaluation_mechanism`,
+`planners.mpc.rollout`, `simulated_users`). See `evaluation/README.md`.
 
-```bash
-uv run python src/uncertain_feedback/experiments/run_episode_experiment.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_multiround.yaml \
-  --persona cross_body_pain \
-  --save-video
-```
-
-Requires `feedback:` (with `uq:`) and `cartesian:` sections, `llm_cost.enabled: true`, and an MDM
-pose; the episode uses the first `cartesian.goals` entry (after
-`persona_goals` overrides). The optional `simulated_user` config block
-controls the automated user:
-
-```yaml
-simulated_user:
-  verbalizer: everyday   # vague | everyday (default) | joint_resolved | visual
-  seed: 0                # rng seed for everyday's sampled phrasing
-  max_rounds: 3          # feedback rounds before the episode is capped
-  magnitudes: [0.5, 0.75, 1.0, 1.25, 1.5]   # chooser magnitude grid
-  nominal_steps: 20      # base-MPC continuation length used for attribution
-```
-
-The `visual` verbalizer additionally needs `llm_cost.model` and
-`OPENAI_API_KEY`: a VLM sees renders of the arm at the trigger pose and at the
-end of the oracle window and answers in the persona's voice; responses are
-cached under `episode_artifacts/<timestamp>/visual_cache/` keyed by episode
-and round, so reruns never call the API.
-
-Artifacts go to `episode_artifacts/<timestamp>/`: `oracle_path.npy`, the
-initial rollout, per-round `round_<k>/` directories (nominal plan, correction,
-continuation, `round_summary.json` with the full `CorrectionIntent`, utterance
-text + sampled form, and `ChoiceResult` scores/acceptability/magnitude),
-`executed.npy` (+ MP4 with `--save-video`), and `episode_summary.json` with
-joint success, rounds used, and the capped flag.
-
+Note the in-`src` package `evaluation_mechanism/` is a different thing: it is how the
+method scores its *own* generated cost functions, and the `agent` backend's sandbox
+imports it at runtime.
 
 ## Demo runner web tool
 
@@ -1758,8 +1530,7 @@ Stages (each stage's controls unlock once the previous one ran):
    rerunning cost generation. This refresh recovery uses the live server session;
    restarting the server still clears the pending action.
 
-4. **Multi-round feedback** — interactive version of the multi-round
-   experiment above. *Commit round* records the last generated cost as a
+4. **Multi-round feedback** — *Commit round* records the last generated cost as a
    feedback round (goal, feedback text, trigger pose, cost, pickled eval
    state). With ≥2 committed rounds, *Combine rounds (codex)* runs the
    `CombineCostGenerator` over all rounds and installs the resulting unified

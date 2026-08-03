@@ -21,16 +21,25 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
 from uncertain_feedback.consts import MDM_ROOT
+from uncertain_feedback.cost_generation import (
+    CombineCostGenerator,
+    CostRound,
+    artifact_run_dir,
+    build_motion_summaries,
+    create_cost_generator,
+    render_prompt_images,
+)
 from uncertain_feedback.envs import make_env
 from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.envs.robot_preview import RobotPlanPreviewEnv
+from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.correction_session import (
@@ -43,24 +52,22 @@ from uncertain_feedback.planners.interactive import OperatorPause
 from uncertain_feedback.planners.mpc import ArmMPC, SmplLeftArmFK
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
-    CombineCostGenerator,
     CompositeTrajectoryCost,
-    CostRound,
-    EvalState,
     GeneratedPythonCost,
     LearnablePreferenceCost,
     MpcCostContext,
-    artifact_run_dir,
     build_extra_costs,
     build_generated_cost_context,
-    build_motion_summaries,
-    create_cost_generator,
-    render_prompt_images,
     replace_cost_in_composite,
     replace_generated_costs,
     update_preference_cost,
 )
 from uncertain_feedback.planners.mpc.kinematics import q_reaching_wrist, q_to_arm_aa
+from uncertain_feedback.planners.mpc.rollout import (
+    assemble_full_correction_traj,
+    rollout_reference_trajectory,
+    run_planning_loop,
+)
 from uncertain_feedback.simulated_users import (
     SimulatedUser,
     choose_cluster,
@@ -567,137 +574,6 @@ def build_run(
     )
 
 
-@dataclass
-class LoopResult:
-    """Joint configs visited by :func:`run_planning_loop`."""
-
-    q_history: list[np.ndarray]
-    error: str | None = None
-    reached_goal: bool = False
-
-
-StepHook = Callable[[int, np.ndarray, list[np.ndarray]], None]
-
-
-def run_planning_loop(
-    mpc: ArmMPC,
-    q0: np.ndarray,
-    n_steps: int,
-    *,
-    on_pre_step: StepHook | None = None,
-    on_post_step: StepHook | None = None,
-    stop_on_runtime_error: bool = False,
-    stop_at_goal: bool = True,
-    progress: bool = False,
-    progress_desc: str = "MPC",
-) -> LoopResult:
-    """Step ``mpc`` forward up to ``n_steps``, returning the visited joint configs.
-
-    This is the single stepping primitive shared by the live single run and the
-    headless per-cluster experiment rollouts. The planner drives its own
-    live/captured visualization (per the ``visualize``/``capture`` flags it was
-    built with), so a live and a saved rollout share one rendering path.
-
-    ``on_pre_step(step, q, q_history)`` runs before each ``mpc.step`` (the single
-    run uses it to trigger MDM/LLM generation at ``text_time``); ``on_post_step``
-    runs after (deferred LLM install, or per-step bookkeeping like frame colors).
-    ``q_history`` holds the configs visited so far. With ``stop_on_runtime_error``
-    a ``RuntimeError`` from ``mpc.step`` ends the loop and is recorded on the
-    result instead of propagating.
-
-    With ``stop_at_goal`` (the default), the loop ends as soon as the planner
-    reports it has reached its final goal (``mpc.goal_reached``) and any MDM
-    correction has finished playing (``mpc.mdm_ready_to_terminate``), rather than
-    always running the full ``n_steps`` and idling at the goal. ``n_steps`` is
-    therefore an upper bound. ``LoopResult.reached_goal`` records whether the loop
-    stopped this way.
-
-    Each ``mpc.step`` realizes its commanded configuration through the
-    planner's execution env, so ``q_history`` records achieved configurations.
-    """
-    q = np.asarray(q0, dtype=np.float64).copy()
-    q_history: list[np.ndarray] = []
-    iterator: Iterable[int] = range(n_steps)
-    if progress:
-        from tqdm import (  # type: ignore[import-untyped]  # pylint: disable=import-outside-toplevel
-            tqdm,
-        )
-
-        iterator = tqdm(iterator, desc=progress_desc, unit="step")
-    error: str | None = None
-    reached_goal = False
-    for step in iterator:
-        if on_pre_step is not None:
-            on_pre_step(step, q, q_history)
-        try:
-            q = mpc.step(q)
-        except RuntimeError as exc:
-            if not stop_on_runtime_error:
-                raise
-            error = str(exc)
-            break
-        q_history.append(q.copy())
-        if on_post_step is not None:
-            on_post_step(step, q, q_history)
-        # Stop once the goal is reached (and any correction has finished), so the
-        # rollout doesn't idle at the goal for the remaining step budget.
-        if stop_at_goal and mpc.mdm_ready_to_terminate and mpc.goal_reached(q):
-            reached_goal = True
-            break
-    return LoopResult(q_history=q_history, error=error, reached_goal=reached_goal)
-
-
-def _rollout_reference_trajectory(
-    cfg: MpcRunConfig,
-    current_q: np.ndarray,
-    context: MpcCostContext,
-    base_extra_costs: CompositeTrajectoryCost,
-    body_pos: np.ndarray | None,
-    spine3_pos: np.ndarray | None,
-    spine3_aa: np.ndarray | None,
-    on_step: Callable[[np.ndarray, np.ndarray | None], None] | None = None,
-) -> np.ndarray | None:
-    """Roll the MPC toward its original Cartesian goal, ignoring the correction.
-
-    Builds a headless goal-space-only :class:`ArmMPC` from ``current_q`` carrying only
-    the configured comfort costs (no feedback correction, no LLM-generated cost) and
-    steps it toward ``cfg.cartesian.goals`` so the cost generator can see what the arm
-    was driving toward before the correction — and avoid blocking it. With no feedback
-    phase (``mdm_ready_to_terminate`` is always ``True``) the loop stops as soon as the
-    wrist reaches the goal, so the trajectory ends at the goal rather than idling there
-    for the full ``cfg.steps``. Returns ``(T, 7)``, or ``None`` without a persistent
-    Cartesian goal.
-    """
-    if cfg.cartesian is None:
-        return None
-
-    planner = ArmMPC(
-        horizon=cfg.horizon,
-        n_mpc_samples=cfg.n_mpc_samples,
-        max_angle_delta=cfg.max_angle_delta,
-        visualize=False,
-        fk=context.fk,
-        spine3_pos=spine3_pos,
-        spine3_aa=spine3_aa,
-        body_pos=body_pos,
-        extra_costs=base_extra_costs,
-        seed=cfg.seed,
-        initial_q=current_q,
-        cartesian=cfg.cartesian,
-    )
-    q0 = np.asarray(current_q, dtype=np.float64).copy()
-    result = run_planning_loop(
-        planner,
-        q0,
-        max(1, cfg.steps),
-        on_post_step=(
-            None if on_step is None else lambda _step, q, _history: on_step(q, None)
-        ),
-        stop_on_runtime_error=True,
-    )
-    return np.asarray([q0, *result.q_history], dtype=np.float64)
-
-
 def _preview_env(setup: RunSetup) -> RobotPlanPreviewEnv:
     """Kinematic double of the run's robot env, frozen at the measured state.
 
@@ -818,7 +694,7 @@ def _rollout_human_reference_trajectory(
     on_step: Callable[[np.ndarray, np.ndarray | None], None],
 ) -> None:
     """Roll a plain human-action Cartesian planner offline, kinematically."""
-    _rollout_reference_trajectory(
+    rollout_reference_trajectory(
         cfg,
         setup.q0,
         setup.cost_context,
@@ -888,79 +764,6 @@ def preview_planned_trajectory(cfg: MpcRunConfig, setup: RunSetup) -> bool:
         rollout(cfg, setup, on_step)
 
     return setup.env.preview(plan)
-
-
-def _assemble_full_correction_traj(
-    cfg: MpcRunConfig,
-    q_history: list[np.ndarray],
-    correction_traj: np.ndarray,
-    context: MpcCostContext,
-    base_extra_costs: CompositeTrajectoryCost,
-    body_pos: np.ndarray | None,
-    spine3_pos: np.ndarray | None,
-    spine3_aa: np.ndarray | None,
-) -> np.ndarray:
-    """Assemble the entire corrected path: history → correction → goal continuation.
-
-    This is the target shown (green) in the cost-feedback comparison so the cost
-    generator sees the whole intended trajectory, not just the MDM correction
-    segment. The three segments are the executed pre-correction history, the MDM
-    correction itself, and a comfort-only goal-seeking continuation rolled from the
-    correction's endpoint (so the arm still reaches the goal afterwards). The
-    continuation is empty for planners without a Cartesian goal, leaving just
-    history + correction. The duplicated seam frame at the correction endpoint is
-    dropped.
-    """
-    correction_traj = np.asarray(correction_traj, dtype=np.float64)
-    if correction_traj.shape[-2:] == (3, 3):
-        correction_traj = context.fk.arm_aa_to_q_batch(correction_traj, spine3_aa)
-    segments: list[np.ndarray] = []
-    if q_history:
-        segments.append(np.asarray(q_history, dtype=np.float64))
-    segments.append(correction_traj)
-    post = _rollout_reference_trajectory(
-        cfg,
-        correction_traj[-1],
-        context,
-        base_extra_costs,
-        body_pos,
-        spine3_pos,
-        spine3_aa,
-    )
-    if post is not None and len(post) > 1:
-        segments.append(post[1:])
-    return np.concatenate(segments, axis=0)
-
-
-def _make_cost_eval_rollout(
-    cfg: MpcRunConfig,
-    current_q: np.ndarray,
-    context: MpcCostContext,
-    base_extra_costs: CompositeTrajectoryCost,
-    body_pos: np.ndarray | None,
-    spine3_pos: np.ndarray | None,
-    spine3_aa: np.ndarray | None,
-) -> Callable[[GeneratedPythonCost], np.ndarray | None]:
-    """Return a closure rolling the goal-seeking MPC with a candidate cost installed.
-
-    The returned function appends the candidate generated cost to the comfort costs
-    and rolls toward the original Cartesian goal (reusing
-    :func:`_rollout_reference_trajectory`), yielding the ``(T, 3, 3)`` trajectory the
-    cost evaluator compares against the MDM correction. Returns ``None`` for planners
-    without a persistent Cartesian goal. Each call builds a fresh headless planner, so
-    the live MPC's goals/warm-start are untouched.
-    """
-
-    def rollout(cost: GeneratedPythonCost) -> np.ndarray | None:
-        extra = _append_extra_cost(base_extra_costs, cost)
-        rollout_q = _rollout_reference_trajectory(
-            cfg, current_q, context, extra, body_pos, spine3_pos, spine3_aa
-        )
-        if rollout_q is None:
-            return None
-        return q_to_arm_aa(rollout_q, context.fk.elbow_hinge_axis)
-
-    return rollout
 
 
 def run_repeated_correction_session(
@@ -1109,7 +912,7 @@ def run_repeated_correction_session(
                 highlight_label = uqr.chosen_label
             reference_q = old_suffix
             if reference_q is None:
-                reference_q = _rollout_reference_trajectory(
+                reference_q = rollout_reference_trajectory(
                     cfg,
                     q,
                     setup.cost_context,
@@ -1126,7 +929,7 @@ def run_repeated_correction_session(
             cartesian_threshold = (
                 cfg.cartesian.threshold if cfg.cartesian is not None else 0.05
             )
-            full_correction_q = _assemble_full_correction_traj(
+            full_correction_q = assemble_full_correction_traj(
                 cfg,
                 list(q_history),
                 llm_traj,

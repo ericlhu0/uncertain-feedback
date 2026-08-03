@@ -14,7 +14,11 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
 from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
-from uncertain_feedback.simulated_users.base import SimulatedUser, compute_violations
+from uncertain_feedback.simulated_users.base import (
+    HiddenCostTerm,
+    SimulatedUser,
+    compute_violations,
+)
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
 
@@ -82,3 +86,24 @@ def choose_correction(
     assert fallback is not None
     label, magnitude = fallback
     return ChoiceResult(label, magnitude, acceptable, scores, True)
+
+
+def oracle_cluster_scores(
+    user: SimulatedUser,
+    context: MpcCostContext,
+    cluster_means: dict[int, np.ndarray],
+    scale: float,
+) -> dict[int, float]:
+    """Hidden-cost score for each cluster mean at the given magnitude."""
+    oracle_cost = HiddenCostTerm(user=user, context=context)
+    return {
+        label: float(
+            oracle_cost(
+                np.expand_dims(
+                    scale_trajectory(np.asarray(traj, dtype=np.float64), scale),
+                    axis=0,
+                )
+            )[0]
+        )
+        for label, traj in cluster_means.items()
+    }

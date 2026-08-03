@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 from sklearn.decomposition import PCA
 
-from uncertain_feedback.planners.mpc.costs import resample_equidistant
+from uncertain_feedback.planners.mpc.arm_features import resample_equidistant
 from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
 from uncertain_feedback.uncertainty.clustering.base import (
     TrajectoryClusterer,

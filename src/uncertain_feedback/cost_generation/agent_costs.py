@@ -29,19 +29,19 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, TextIO
 
-from uncertain_feedback.planners.mpc.costs.cost_generator import (
-    CostGenerator,
-    evaluate_candidate_cost,
-    rank_candidate_cost,
-)
-from uncertain_feedback.planners.mpc.costs.generated import (
-    GeneratedCostValidationError,
-    GeneratedPythonCost,
-)
-from uncertain_feedback.planners.mpc.costs.prompts import (
+from uncertain_feedback.cost_generation.base import CostGenerator
+from uncertain_feedback.cost_generation.prompts import (
     build_staged_task_body,
     corpus_grounding_note,
     corpus_task_section,
+)
+from uncertain_feedback.evaluation_mechanism import (
+    evaluate_candidate_cost,
+    rank_candidate_cost,
+)
+from uncertain_feedback.planners.mpc.costs import (
+    GeneratedCostValidationError,
+    GeneratedPythonCost,
 )
 
 _RESPONSE_FILE = "response.json"
@@ -53,14 +53,17 @@ _STAGE_LOG_FILE = "stage_log.md"
 _CODEX_POLL_INTERVAL_SECONDS = 30.0
 _CODEX_TIMEOUT_SECONDS = 30.0 * 60.0
 _CODEX_TERMINATE_GRACE_SECONDS = 5.0
-_RENDER_SCRIPT = (
-    Path(__file__).resolve().parents[3] / "experiments" / "render_cost_comparison.py"
-)
-_REPO_ROOT = _RENDER_SCRIPT.parents[3]
+_PACKAGE_DIR = Path(__file__).resolve().parents[1]  # src/uncertain_feedback
+_RENDER_SCRIPT = _PACKAGE_DIR / "evaluation_mechanism" / "render_cost_comparison.py"
+_REPO_ROOT = _PACKAGE_DIR.parents[1]
 _SANDBOX_WORKSPACE = Path("/tmp/workspace")
 _SANDBOX_RUNTIME = Path("/tmp/runtime")
 _SANDBOX_VENV = Path("/tmp/venv")
 _SANDBOX_CODEX_HOME = Path("/tmp/codex-home")
+_SANDBOX_RENDER_SCRIPT = (
+    f"{_SANDBOX_RUNTIME}/src/uncertain_feedback/evaluation_mechanism/"
+    "render_cost_comparison.py"
+)
 
 _CODEX_INSTRUCTION = (
     "Read TASK.md in this directory. Load every local image path listed there "
@@ -294,8 +297,7 @@ class AgentCostGenerator(CostGenerator):
                 "actually steers the arm by running, from this directory:\n\n"
                 "```\n"
                 f"{_SANDBOX_VENV}/bin/python "
-                f"{_SANDBOX_RUNTIME}/src/uncertain_feedback/experiments/"
-                "render_cost_comparison.py "
+                f"{_SANDBOX_RENDER_SCRIPT} "
                 f"--state {_STATE_FILE} --response {_RESPONSE_FILE} "
                 f"--out {_COMPARISON_FILE} --angles-out {_ANGLES_FILE}"
                 f"{archive_args}\n"
@@ -337,15 +339,21 @@ class AgentCostGenerator(CostGenerator):
         # ``envs`` is staged because mpc.py imports ExecutionEnv at module level;
         # its meshes are skipped since nothing here constructs a sim env.
         ignored = shutil.ignore_patterns("__pycache__", "*artifacts*", "assets")
-        for directory in ("planners", "uncertainty", "utils", "envs"):
+        # ``cost_generation`` is deliberately absent: the sandbox must not see the
+        # prompts or the backends. The render script rides in the
+        # ``evaluation_mechanism`` copytree.
+        for directory in (
+            "planners",
+            "uncertainty",
+            "utils",
+            "envs",
+            "evaluation_mechanism",
+        ):
             shutil.copytree(
                 source / directory,
                 package / directory,
                 ignore=ignored,
             )
-        experiments = package / "experiments"
-        experiments.mkdir()
-        shutil.copy2(_RENDER_SCRIPT, experiments / _RENDER_SCRIPT.name)
 
     def _isolated_command(  # pylint: disable=too-many-locals
         self,

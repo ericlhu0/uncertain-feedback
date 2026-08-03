@@ -14,9 +14,13 @@ import pytest
 import yaml
 from scipy.spatial.transform import Rotation
 
+from uncertain_feedback.cost_generation import (
+    artifact_run_dir,
+    build_motion_summaries,
+    create_cost_generator,
+    render_prompt_images,
+)
 from uncertain_feedback.envs.base import ExecutionEnv
-from uncertain_feedback.experiments import cluster_comparison
-from uncertain_feedback.experiments.transfer_experiment import _choose_oracle_cluster
 from uncertain_feedback.planners import run as planner_run
 from uncertain_feedback.planners.mpc import ArmMPC, CartesianConfig, FeedbackConfig
 from uncertain_feedback.planners.mpc.action_spaces import RolloutBatch
@@ -31,12 +35,10 @@ from uncertain_feedback.planners.mpc.costs import (
     ShoulderAbductionAngleCost,
     build_extra_costs,
     build_generated_cost_context,
-    build_motion_summaries,
     compute_elbow_flexion_angles,
     compute_elbow_heights,
     compute_shoulder_abduction_angles,
     parse_llm_cost_response,
-    render_prompt_images,
     update_elbow_cost,
     update_preference_cost,
 )
@@ -46,13 +48,14 @@ from uncertain_feedback.planners.mpc.kinematics import (
     SmplLeftArmFK,
     q_to_arm_aa,
 )
+from uncertain_feedback.planners.mpc.rollout import run_planning_loop
 from uncertain_feedback.simulated_users import (
     HiddenCostTerm,
     JointBoxLimit,
     SimulatedUser,
     compute_violations,
 )
-from uncertain_feedback.uncertainty import UqClusterResult, UqConfig
+from uncertain_feedback.uncertainty import UqConfig
 from uncertain_feedback.uncertainty.cluster_picker import ClusterPickResult
 from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
@@ -186,30 +189,6 @@ class _FakeLlmModel:
         if "Runtime API" not in text_input:
             return "The arm moves upward in an arc."
         return self.response
-
-
-class _FakeSequenceLlmModel:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def get_full_output(self, text_input: str, image_input=None) -> str:
-        del image_input
-        if "Runtime API" not in text_input:
-            return "The arm moves upward."
-        self.calls += 1
-        return json.dumps(
-            {
-                "description": f"fake generated cost {self.calls}",
-                "params": {"weight": 1.0 if self.calls == 1 else -1.0},
-                "code": (
-                    # Shoulder slot, not clavicle: the reference rollout must be
-                    # able to move the scored DOF, and plans freeze the clavicle.
-                    "def cost(q_trajs, context, params):\n"
-                    "    future = q_trajs[:, 1:, 1, 0]\n"
-                    "    return params['weight'] * np.mean(future ** 2, axis=1)\n"
-                ),
-            }
-        )
 
 
 class _FakePositionGenerator:
@@ -1651,40 +1630,6 @@ def test_uq_position_picker_uses_refined_subset_mean(monkeypatch) -> None:
     np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
 
 
-def test_transfer_oracle_cluster_selection_uses_scaled_raw_options() -> None:
-    context = _cost_context(SmplLeftArmFK())
-    safe = np.zeros((3, 3, 3), dtype=np.float64)
-    unsafe = np.zeros((3, 3, 3), dtype=np.float64)
-    safe[:, 1, 0] = [0.0, 0.04, 0.08]
-    unsafe[:, 1, 0] = [0.0, 0.4, 0.6]
-
-    chosen, scores = _choose_oracle_cluster(
-        _joint_limit_user(),
-        context,
-        {5: unsafe, 2: safe},
-        scale=0.5,
-    )
-
-    assert chosen == 2
-    assert scores[2] == pytest.approx(0.0)
-    assert scores[5] > scores[2]
-
-
-def test_transfer_oracle_cluster_selection_tiebreaks_by_label() -> None:
-    context = _cost_context(SmplLeftArmFK())
-    cluster = np.zeros((3, 3, 3), dtype=np.float64)
-
-    chosen, scores = _choose_oracle_cluster(
-        _joint_limit_user(),
-        context,
-        {7: cluster, 3: cluster.copy()},
-        scale=0.5,
-    )
-
-    assert chosen == 3
-    assert scores[3] == pytest.approx(scores[7])
-
-
 def test_hidden_joint_limits_accept_canonical_arm_q() -> None:
     fk = SmplLeftArmFK()
     context = _cost_context(fk)
@@ -1740,7 +1685,7 @@ llm_cost:
 
 
 def test_llm_artifact_run_dir_resolves_relative_to_base_dir(tmp_path) -> None:
-    run_dir = planner_run.artifact_run_dir(
+    run_dir = artifact_run_dir(
         tmp_path,
         Path("llm_cost_artifacts"),
     )
@@ -2126,10 +2071,10 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
         artifact_dir=tmp_path / "artifacts",
     )
 
-    run_dir = planner_run.artifact_run_dir(tmp_path, llm_cfg.artifact_dir)
+    run_dir = artifact_run_dir(tmp_path, llm_cfg.artifact_dir)
     summaries = build_motion_summaries(generated_context)
     images = render_prompt_images(generated_context, run_dir / "images")
-    generator = planner_run.create_cost_generator(
+    generator = create_cost_generator(
         llm_cfg,
         generated_context,
         "raise the elbow",
@@ -2158,96 +2103,6 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
     assert fake_model.received_images is not None
 
 
-def test_llm_cluster_experiment_generates_bundle_and_rollout_per_cluster(
-    tmp_path,
-) -> None:
-    cfg = load_mpc_config(
-        _write_config(
-            tmp_path,
-            """
-steps: 4
-horizon: 2
-n_mpc_samples: 3
-max_angle_delta: 0.001
-feedback:
-  trajectory_fraction: 1.0
-  uq:
-    diffusion_samples: 4
-cartesian:
-  goals:
-    - [0.0, 0.0, 0.0]
-llm_cost:
-  enabled: true
-  artifact_dir: artifacts
-  use_images: false
-""",
-        )
-    )
-    fk = SmplLeftArmFK()
-    context = _cost_context(fk)
-    cluster_means = {
-        0: np.zeros((3, 3, 3), dtype=np.float64),
-        1: np.full((3, 3, 3), 0.05, dtype=np.float64),
-    }
-    uq_result = UqClusterResult(
-        chosen_label=1,
-        labels=np.array([0, 0, 1, 1], dtype=np.intp),
-        cluster_means=cluster_means,
-    )
-    mpc = ArmMPC()
-    fake_model = _FakeSequenceLlmModel()
-
-    selected = cluster_comparison.run_cluster_comparison(
-        mpc,
-        cfg,
-        "prefer the demonstrated shape",
-        uq_result,
-        np.zeros(Q_DIM, dtype=np.float64),
-        [],
-        context,
-        tmp_path,
-        history_window=5,
-        rollout_steps=2,
-        body_pos=None,
-        spine3_pos=fk.tpose_spine3_pos,
-        spine3_aa=np.zeros(3, dtype=np.float64),
-        initial_q=np.zeros(Q_DIM, dtype=np.float64),
-        llm_model_factory=lambda _model_name: fake_model,
-        user=_joint_limit_user(),
-    )
-
-    assert selected is not None
-    assert fake_model.calls == 2
-    assert len(mpc._extra_costs.terms()) == 1
-    root_dirs = list((tmp_path / "artifacts").iterdir())
-    assert len(root_dirs) == 1
-    root = root_dirs[0]
-    assert (root / "selected_cluster.txt").read_text(encoding="utf-8").strip() == "1"
-    for label in (0, 1):
-        cluster_dir = root / f"cluster_{label}"
-        assert (cluster_dir / "interpret_prompt.txt").exists()
-        assert (cluster_dir / "ground_prompt.txt").exists()
-        assert (cluster_dir / "author_prompt.txt").exists()
-        assert (cluster_dir / "cost.py").exists()
-        assert (cluster_dir / "rollout.npy").exists()
-        assert (cluster_dir / "metrics.json").exists()
-        rollout = np.load(cluster_dir / "rollout.npy")
-        assert rollout.shape == (3, Q_DIM)
-    with open(root / "comparison_summary.json", encoding="utf-8") as f:
-        summary = json.load(f)
-    assert summary["selected_cluster"] == 1
-    assert summary["cluster_ids"] == [0, 1]
-    assert set(summary["clusters"]) == {"0", "1"}
-    assert summary["clusters"]["0"]["validation"]["ok"] is True
-    assert summary["clusters"]["1"]["rollout_metrics"]["steps_completed"] == 2
-    for label in ("0", "1"):  # type: ignore[assignment]
-        evaluation = summary["clusters"][label]["hidden_cost_evaluation"]
-        assert set(evaluation) == {"base", "oracle", "generated"}
-        for condition in evaluation.values():
-            assert "mean_violation" in condition["goal_0"]
-            assert "goal_reach" in condition["goal_0"]
-
-
 def test_planning_loop_stops_when_cartesian_goal_reached() -> None:
     fk = SmplLeftArmFK()
     arm0 = np.zeros((3, 3), dtype=np.float64)
@@ -2264,7 +2119,7 @@ def test_planning_loop_stops_when_cartesian_goal_reached() -> None:
         cartesian=CartesianConfig(goals=[goal], threshold=0.12),
     )
 
-    result = planner_run.run_planning_loop(planner, q0, 300, stop_on_runtime_error=True)
+    result = run_planning_loop(planner, q0, 300, stop_on_runtime_error=True)
 
     # Stops well before the 300-step budget once the wrist is within threshold.
     assert result.reached_goal is True
@@ -2295,7 +2150,7 @@ def test_planning_loop_waits_for_mdm_correction_before_stopping() -> None:
     assert planner.goal_reached(q0) is True  # goal trivially satisfied at the start
     assert planner.mdm_ready_to_terminate is False  # but a correction is still queued
 
-    result = planner_run.run_planning_loop(planner, q0, 100, stop_on_runtime_error=True)
+    result = run_planning_loop(planner, q0, 100, stop_on_runtime_error=True)
 
     # The loop ran the 8 playback frames before stopping, not stopping at step 1.
     assert result.reached_goal is True
@@ -2336,7 +2191,7 @@ def test_planning_loop_runs_cartesian_phase_after_correction_then_stops() -> Non
     planner.set_mdm_goal(fk.arm_aa_to_q(playback[-1]))
     planner.push_trajectory(playback)
 
-    result = planner_run.run_planning_loop(planner, q0, 300, stop_on_runtime_error=True)
+    result = run_planning_loop(planner, q0, 300, stop_on_runtime_error=True)
 
     assert result.reached_goal is True
     # Cartesian phase ran AFTER the 4 playback frames, then stopped before the budget.

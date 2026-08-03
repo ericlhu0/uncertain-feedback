@@ -4,8 +4,9 @@ The ``agent`` (codex) backend authors the cost in its own subprocess, so it can'
 share the live MPC objects the in-process backends use to roll out and score a
 candidate. :class:`EvalState` bundles exactly the picklable inputs needed to
 rebuild the rollout closure and the generated-cost context in a fresh process. The
-generator pickles it next to the task; ``experiments/render_cost_comparison.py``
-loads it to render the rollout-vs-correction overlay codex inspects each turn.
+generator pickles it next to the task;
+``evaluation_mechanism/render_cost_comparison.py`` loads it to render the
+rollout-vs-correction overlay codex inspects each turn.
 
 ``SmplLeftArmFK`` (carried via :class:`MpcCostContext`) and the comfort cost terms
 are plain numpy / dataclasses, so the pickle round-trips. The full run config is

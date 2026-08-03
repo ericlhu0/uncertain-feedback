@@ -136,6 +136,29 @@ def shoulder_abduction_angles(
     return arm_feature_series(trajectory, context)["shoulder_elevation"]
 
 
+def resample_equidistant(traj: np.ndarray, n: int) -> np.ndarray:
+    """Resample a ``(T, ...)`` trajectory to ``n`` points equidistant in joint-space
+    arclength.
+
+    Removes timing entirely — speed differences and dwell frames carry no signal
+    here (MDM frames and MPC steps are on different clocks, and MDM output is
+    systematically slower than a fresh rollout), so trajectories compare purely by
+    path. A stationary trajectory becomes its pose repeated ``n`` times.
+    """
+    traj = np.asarray(traj, dtype=np.float64)
+    flat = traj.reshape(traj.shape[0], -1)
+    segments = np.linalg.norm(np.diff(flat, axis=0), axis=1)
+    arclength = np.concatenate([[0.0], np.cumsum(segments)])
+    if arclength[-1] <= 0.0:
+        return np.repeat(traj[:1], n, axis=0)
+    targets = np.linspace(0.0, arclength[-1], n)
+    out = np.stack(
+        [np.interp(targets, arclength, flat[:, i]) for i in range(flat.shape[1])],
+        axis=1,
+    )
+    return out.reshape((n, *traj.shape[1:]))
+
+
 def _tpose_bone_axis(fk: SmplLeftArmFK, start_idx: int, end_idx: int) -> np.ndarray:
     tpose = fk.tpose_joints
     axis = tpose[end_idx] - tpose[start_idx]

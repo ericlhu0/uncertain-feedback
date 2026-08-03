@@ -1,7 +1,7 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-29
-**Branch:** real-env
+**Last updated:** 2026-07-30
+**Branch:** full-agent
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
 
@@ -24,6 +24,7 @@ The system takes a **natural-language prompt** (e.g. "raise my left arm") and pr
 
 ```
 uncertain-feedback/
+├── evaluation/                       # Method-level evaluation (outside src/): scripts the researcher runs to evaluate the whole pipeline. Placeholder README only — the deleted experiments/ runners will be rewritten here on the stage façades
 ├── src/uncertain_feedback/
 │   ├── consts.py                     # Project-wide paths (MDM_ROOT, weights)
 │   ├── planners/
@@ -35,21 +36,11 @@ uncertain-feedback/
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
 │   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants
 │   │       ├── arm_features.py        # Canonical q conversion + shared anatomical arm features
-│   │       ├── costs/                # Cost package (public surface: mpc.costs)
-│   │       │   ├── __init__.py       # Re-exports the public cost API
+│   │       ├── costs/                # Planner cost package (public surface: mpc.costs)
+│   │       │   ├── __init__.py       # Re-exports the planner-side cost API
 │   │       │   ├── base.py           # Cost terms + registry + preference learning
-│   │       │   ├── generated.py      # Runtime context, cost compile/exec, summaries, image render
-│   │       │   ├── cost_generator.py # CostGenerator base + create_cost_generator factory + scoring
-│   │       │   ├── llm_costs.py      # backend: llm (interpret→ground→author, single pass) + re-exports
-│   │       │   ├── turns_costs.py    # backend: turns (fixed interpret, ground+author refinement)
-│   │       │   ├── agent_costs.py    # backend: agent (codex CLI)
-│   │       │   ├── combine_costs.py  # Multi-round history + unified replacement-cost agent
-│   │       │   ├── cost_feedback.py  # EvalState (picklable rollout state for agent backend)
-│   │       │   └── prompts/          # Staged prompt text files
-│   │       │       ├── __init__.py   # staged prompt builders + image placeholder substitution
-│   │       │       ├── runtime_api.txt       # Shared technical contract
-│   │       │       ├── output_contract.txt   # Shared output rules
-│   │       │       └── stages/       # interpret.txt, ground.txt, author.txt, refine.txt, combine.txt
+│   │       │   └── generated.py      # Compiled-cost runtime: context, compile/exec, response parsing
+│   │       ├── rollout.py            # Headless rollout primitives: run_planning_loop, rollout_reference_trajectory, assemble_full_correction_traj, make_cost_eval_rollout, rollout_to_goal, goal_reach
 │   │       ├── mpc.py                # ArmMPC — the one planner class, composed from the module slots below
 │   │       ├── action_spaces/        # ActionSpace ABC + RolloutBatch/StageCost contract
 │   │       │   ├── base.py           # ABC: rollouts/shape_costs/command/execute/hold
@@ -71,8 +62,8 @@ uncertain-feedback/
 │   │           ├── mdm_llm.yaml
 │   │           ├── mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
 │   │           ├── mdm_llm_agent.yaml  # backend: agent (codex CLI)
-│   │           ├── mdm_llm_transfer.yaml  # simulated-user transfer experiment
-│   │           ├── mdm_llm_multiround.yaml # pose-dependent multi-round experiment
+│   │           ├── mdm_llm_transfer.yaml  # persona + transfer goals (demo-runner config; transfer goals await the evaluation/ rewrite)
+│   │           ├── mdm_llm_multiround.yaml # pose-dependent multi-round goal sequence
 │   │           ├── mdm_llm_real.yaml  # full method on env: real, for --interactive live corrections
 │   │           ├── mdm_ik_gated_real.yaml  # full method on env: real with every robot-facing step IK-screened + compliant_joint
 │   │           ├── plain.yaml
@@ -86,20 +77,25 @@ uncertain-feedback/
 │   │           ├── ik_gated_replay.yaml  # the IK-gated planner on env: real driven from a saved RealRecording — no hardware, display, or network
 │   │           ├── robot_mannequin_kinova.yaml  # robot-action sampler rehearsal on sim_mannequin
 │   │           └── mdm_robot_real.yaml  # full method with the robot-action sampler on env: real
-│   ├── experiments/                  # Multi-run experiment machinery (separate from a single run)
-│   │   ├── experiment_pipeline.py    # Staged simulated-user experiment core (trigger, UQ, cost, eval)
-│   │   ├── run_experiment.py         # CLI: one persona + one backend on the original goal
-│   │   ├── cluster_comparison.py     # Per-cluster rollout + hidden-cost condition evaluation
-│   │   ├── run_cluster_experiment.py # CLI entry point for per-cluster comparison experiments
-│   │   ├── backend_comparison.py     # Per-backend proxy score + hidden-cost condition evaluation
-│   │   ├── run_backend_experiment.py # CLI entry point for per-backend comparison experiments
-│   │   ├── transfer_experiment.py    # Adds held-out transfer-goal eval around experiment_pipeline
-│   │   ├── run_transfer_experiment.py # CLI entry point for simulated-user transfer experiments
-│   │   ├── trajectory_corpus.py      # TrajectoryCorpus: per-session on-disk log of executed trajectories (npy + per-frame feature csv + manifest.json)
-│   │   ├── multi_round_experiment.py # Multi-goal feedback history + cost combination loop (logs every goal's executed rollout to trajectory_corpus/ and threads corpus_dir into both codex generators)
-│   │   ├── run_multi_round_experiment.py # CLI entry point for multi-round experiments
-│   │   ├── episode_loop.py           # Automated simulated-user episode: oracle path → trigger → attribute → verbalize → choose → cost gen → re-trigger loop
-│   │   ├── run_episode_experiment.py # CLI entry point for automated simulated-user episodes
+│   ├── cost_generation/              # Stage: correction context → executable cost code
+│   │   ├── __init__.py               # Stage façade
+│   │   ├── generate.py               # generate_cost_for_cluster: the stage entry point + CostGenerationResult
+│   │   ├── base.py                   # CostGenerator base + create_cost_generator factory + artifact_run_dir
+│   │   ├── llm_costs.py              # backend: llm (interpret→ground→author, single pass)
+│   │   ├── turns_costs.py            # backend: turns (fixed interpret, ground+author refinement)
+│   │   ├── agent_costs.py            # backend: agent (codex CLI) + the Bubblewrap staging
+│   │   ├── combine_costs.py          # CostRound history + unified replacement-cost agent
+│   │   ├── summaries.py              # Prompt summaries JSON + overlay image rendering
+│   │   ├── corpus.py                 # TrajectoryCorpus: per-session on-disk log of executed trajectories (npy + per-frame feature csv + manifest.json)
+│   │   └── prompts/                  # Staged prompt text files
+│   │       ├── __init__.py           # staged prompt builders + image placeholder substitution
+│   │       ├── runtime_api.txt       # Shared technical contract
+│   │       ├── output_contract.txt   # Shared output rules
+│   │       └── stages/               # interpret.txt, ground.txt, author.txt, refine.txt, combine.txt
+│   ├── evaluation_mechanism/         # How the method scores its own generated costs (LLM-facing)
+│   │   ├── __init__.py               # Façade
+│   │   ├── eval_state.py             # EvalState/EvalMpcConfig (picklable rollout state for agent backend)
+│   │   ├── scoring.py                # CostRanking, rank/evaluate/goal-reach, evaluate_and_render
 │   │   └── render_cost_comparison.py # CLI the agent backend runs to render rollout-vs-correction overlay
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator
@@ -152,7 +148,7 @@ uncertain-feedback/
 │   │   ├── attribution.py            # attribute_correction: nominal-vs-oracle-window contrast → CorrectionIntent
 │   │   ├── verbalizers.py            # vague/everyday/joint_resolved verbalizers + VERBALIZERS registry
 │   │   ├── visual.py                 # VisualVerbalizer: VLM speaks from rendered pose images, disk-cached
-│   │   ├── chooser.py                # choose_correction: oracle-path lexicographic cluster+magnitude chooser
+│   │   ├── chooser.py                # choose_correction: oracle-path lexicographic cluster+magnitude chooser; oracle_cluster_scores
 │   │   ├── personas.py               # Clinically motivated personas (PERSONAS registry)
 │   │   └── viz.py                    # render_hidden_bounds: shaded forbidden regions + trajectories
 │   ├── data_collection/
@@ -283,7 +279,7 @@ SmplLeftArmMPC / subclass
             ElbowHeightCost
             ElbowFlexionAngleCost
             ShoulderAbductionAngleCost
-            GeneratedPythonCost [costs/llm_costs.py]
+            GeneratedPythonCost [costs/generated.py]
     │
     ▼  next_q (7,) each step; converted to (3,3) arm aa for visualization
     │
@@ -329,7 +325,7 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 
 ---
 
-## 6. Cost System (`costs/base.py`)
+## 6. Cost System (`planners/mpc/costs/base.py`)
 
 ### Cost term protocol
 
@@ -366,40 +362,38 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 
 ---
 
-## 7. LLM Cost Pipeline (`costs/llm_costs.py`)
+## 7. LLM Cost Pipeline (`cost_generation/`)
 
 When `llm_cost.enabled: true` in the YAML:
 
-1. `build_motion_summaries()` — text summaries of recent MPC steps and the MDM trajectory, plus rollout-labeled chosen-vs-marked-wrong terminal joint-feature comparisons when explicitly rejected UQ candidates are available
-2. `render_prompt_images()` — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
-3. Staged prompt builders (in `costs/prompts/__init__.py`) assemble `interpret` (instruction + images + compact summary), `ground` (interpretation + full summaries), and `author` (numeric spec + `runtime_api.txt`/`output_contract.txt`) prompts from `costs/prompts/stages/*.txt`
+1. `build_motion_summaries()` (`cost_generation/summaries.py`) — text summaries of recent MPC steps and the MDM trajectory, plus rollout-labeled chosen-vs-marked-wrong terminal joint-feature comparisons when explicitly rejected UQ candidates are available
+2. `render_prompt_images()` (`cost_generation/summaries.py`) — delegates to `ArmVisualizer.render_trajectory_overlay()` for the 3-view overlay (optional)
+3. Staged prompt builders (in `cost_generation/prompts/__init__.py`) assemble `interpret` (instruction + images + compact summary), `ground` (interpretation + full summaries), and `author` (numeric spec + `runtime_api.txt`/`output_contract.txt`) prompts from `cost_generation/prompts/stages/*.txt`
 4. LLM (OpenAI, configurable model) streams its opt-in reasoning summary to stdout, then returns final author JSON: `{description, code, params, explanation, recipient_explanation}`
 5. `parse_llm_cost_response()` → `LlmCostResponse`
 6. `GeneratedPythonCost.__post_init__()` → `compile_generated_cost()` compiles the code snippet
 7. `GeneratedCostContext` provides the runtime sandbox: `fk`, `spine3_pos/aa`, `current_q`, `mdm_traj`, `recent_q`, and FK helper methods
 8. Artifacts (stage prompts/responses, `stage_log.md`, images, cost.py, `reference_with_correction.mp4`) saved to `llm_cost_artifacts/<timestamp>/`; `CostGenerator.save_rationale()` also writes `rationale.json`, chaining the instruction, self-reported modality evidence, grounded terms and per-number sources, final explanations, and the winning `CostRanking` table (or `null` when unavailable)
 
-**LLM cost cluster experiment** (`llm_cost.cluster_experiment.enabled`): runs the LLM cost on each cluster's mean trajectory for `rollout_steps` steps and uses costs to rank / auto-select clusters.
-
-### Cost-generation backends (`costs/cost_generator.py`)
+### Cost-generation backends (`cost_generation/base.py`)
 
 `create_cost_generator()` selects one of three iteration mechanisms via `llm_cost.backend`; all share the staged prompting strategy and `CostGenerator` (stage helpers, compile/validate, save, install):
 
 - `llm` (`llm_costs.py`) — single-pass staged calls: interpret → ground → author; only the author output is parsed/compiled. Stage prompt/response pairs are aggregated in `stage_log.md`; the authored cost is ranked for `rationale.json`.
 - `turns` (`turns_costs.py`) — interprets once, then runs a stateful ground+author conversation; keeps the best cost by ranking consistency (`rank_candidate_cost`, falling back to the L2 rollout score when the context has no comparison trajectories). `stage_log.md` includes the interpretation plus each refine turn's prompt snapshot and response, and the winning turn's ranking is copied into `rationale.json`.
 - `agent` (`agent_costs.py`) — delegates the staged method to the `codex` CLI, which emits the same `response.json` and must write `stage_log.md` with Stage 1 / Stage 2 / Stage 3 responses; those sections are parsed leniently for `rationale.json` and the final cost is ranked locally.
-- `CombineCostGenerator` (`combine_costs.py`) is constructed directly by the multi-round experiment, not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its user-visible Codex agent output is teed live to stdout (and therefore the Demo Runner console) while remaining in `codex.log`. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`. Each `CostRound` also carries the round's root-to-leaf `cluster_labels` path and generation evidence chain — `description`, `explanation`, `interpretation` (stage-1 response), `grounding` (stage-2 response), all defaulted to `""` — populated from the round's `rationale.json` (via `CostGenerationResult`/`_rationale_fields` in `experiment_pipeline.py`) and rendered under a "Why this cost was generated:" block in the combine prompt (`build_combine_task_body`, empty fields skipped).
+- `CombineCostGenerator` (`combine_costs.py`) is constructed directly by its caller (the Demo Runner's multi-round flow), not selected as a backend. It replays all successful `CostRound` contexts and replaces every prior `GeneratedPythonCost` with one unified constant or pose-dependent cost. Its user-visible Codex agent output is teed live to stdout (and therefore the Demo Runner console) while remaining in `codex.log`. Its `scores.json` evaluates that same cost independently against every round's pickled `EvalState`. Each `CostRound` also carries the round's root-to-leaf `cluster_labels` path and generation evidence chain — `description`, `explanation`, `interpretation` (stage-1 response), `grounding` (stage-2 response), all defaulted to `""` — populated from the round's `rationale.json` (via `CostGenerationResult`/`_rationale_fields` in `cost_generation/generate.py`) and rendered under a "Why this cost was generated:" block in the combine prompt (`build_combine_task_body`, empty fields skipped).
 - Every generator accepts an optional `corpus_dir: Path | None` threaded from `generate_cost_for_cluster` through `create_cost_generator`. `llm` and `turns` receive per-entry accepted-pose feature ranges in their grounding prompt; agent/combine retain the staged per-frame corpus workflow. Shared `CostGenerator` validation evaluates each authored cost on stationary two-frame rollouts of every pose before `comfortable_until` and rejects the cost if any accepted pose receives positive cost. `None` leaves non-corpus callers unchanged.
 
 ### Cost evaluation & visual feedback
 
-- `rank_candidate_cost()` (`cost_generator.py`) evaluates a candidate cost by **ranking consistency**: the cost is applied directly to the trajectories whose preference order the user revealed — the chosen correction (`mdm_traj`) must cost strictly less than the original plan (`reference_traj`) and every UQ cluster the Demo Runner user explicitly marked wrong (`context.rejected_trajs`). Unmarked non-chosen clusters are dropped from summaries, images, and ranking; automated/simulated-user paths pass no negatives and rank only against the reference plan. All comparison trajectories are first resampled to equidistant joint-space-arclength points (`resample_equidistant`) so only the path matters, not timing (MDM output is systematically slower than a fresh rollout — timing is a pipeline artifact, not intent), then compared after z-normalization. Returns a `CostRanking` (rank accuracy + normalized margin + inert flag + explicit original-plan-improvement flag; `sort_key` orders candidates), or `None` when the context has no comparison trajectories — then `turns` falls back to the L2 rollout score. Every generator backend rejects rather than installs a cost whose chosen-correction score is not strictly lower than its original-plan score. The Demo Runner threads its per-level `undesirable_labels` into `generate_cost_for_cluster`; `build_motion_summaries` exposes rollout-labeled `candidate_comparison` entries containing chosen, current, original-plan, and per-marked-wrong-cluster terminal values and deltas.
-- `evaluate_candidate_cost()` rolls the goal-seeking MPC with a candidate cost installed (`_make_cost_eval_rollout` in `run.py`) and returns the mean FK-position L2 distance to the MDM correction (`_score_rollout`; both trajectories resampled equidistant-in-arclength, so the score is path-only). Lower is better; `inf` when the planner has no Cartesian goal. Drives the `backend_comparison.json` ranking and the `turns` fallback.
+- `rank_candidate_cost()` (`evaluation_mechanism/scoring.py`) evaluates a candidate cost by **ranking consistency**: the cost is applied directly to the trajectories whose preference order the user revealed — the chosen correction (`mdm_traj`) must cost strictly less than the original plan (`reference_traj`) and every UQ cluster the Demo Runner user explicitly marked wrong (`context.rejected_trajs`). Unmarked non-chosen clusters are dropped from summaries, images, and ranking; automated/simulated-user paths pass no negatives and rank only against the reference plan. All comparison trajectories are first resampled to equidistant joint-space-arclength points (`resample_equidistant`, now in `planners/mpc/arm_features.py`) so only the path matters, not timing (MDM output is systematically slower than a fresh rollout — timing is a pipeline artifact, not intent), then compared after z-normalization. Returns a `CostRanking` (rank accuracy + normalized margin + inert flag + explicit original-plan-improvement flag; `sort_key` orders candidates), or `None` when the context has no comparison trajectories — then `turns` falls back to the L2 rollout score. Every generator backend rejects rather than installs a cost whose chosen-correction score is not strictly lower than its original-plan score. The Demo Runner threads its per-level `undesirable_labels` into `generate_cost_for_cluster`; `build_motion_summaries` exposes rollout-labeled `candidate_comparison` entries containing chosen, current, original-plan, and per-marked-wrong-cluster terminal values and deltas.
+- `evaluate_candidate_cost()` rolls the goal-seeking MPC with a candidate cost installed (`make_cost_eval_rollout` in `planners/mpc/rollout.py`) and returns the mean FK-position L2 distance to the MDM correction (`_score_rollout`; both trajectories resampled equidistant-in-arclength, so the score is path-only). Lower is better; `inf` when the planner has no Cartesian goal. Drives the `turns` fallback.
 - **Goal-reachability check** (`goal_reach_report()`): because ranking/`_score_rollout` grade only against the correction preferences, a cost can score well while stopping the arm short of the goal. `goal_reach_report(context, rollout)` reproduces the MPC's own `ArmMPC.goal_reached` criterion (FK the final rollout frame, spine3-relative wrist vs `context.cartesian_goal` within `context.cartesian_threshold`), returning `{reached, distance, threshold}` (or `None` for non-Cartesian planners). The goal + threshold are threaded onto `GeneratedCostContext` via `build_generated_cost_context` / `EvalState`. This is gated on `goal_conflict` (`parse_goal_conflict()` reads the stage-1 flag): only when stage one judged the goal reachable does missing it count against a candidate. In the `turns` backend selection is keyed on `(reach_rank, *ranking.sort_key)` so a goal-reaching candidate beats a non-reaching one and ranking consistency orders candidates within that, and each turn's feedback tells the model whether the goal was reached; in the `agent` backend `render_cost_comparison.py` prints a `goal reached:` line and `TASK.md` instructs codex to keep revising until the goal is reached (unless it conflicts).
 - `CostGenerator.begin()` writes `reference_with_correction.mp4` into every generated-cost artifact directory using `context.full_correction_traj` when present, falling back to `context.mdm_traj`.
-- `evaluate_and_render()` does the **same single rollout** and additionally renders `ArmVisualizer.render_cost_feedback_overlay()` — a rollout (red) vs target-corrected-path (green) overlay — returning `(score, image_path)`. When an `angle_path` is passed it also renders `ArmVisualizer.render_joint_angle_comparison()` — a joint-angle-over-time graph (one subplot per anatomical joint feature; green target vs red rollout, per-frame series from `build_joint_angle_series()`) — so the model sees the temporal shape of the motion, not just endpoints. The green target is `context.full_correction_traj` when present (the **entire** intended path: pre-correction history → MDM correction → comfort-only continuation to the goal, assembled once in `run.py:_assemble_full_correction_traj` and threaded through `build_generated_cost_context` / `EvalState`), falling back to the MDM correction segment (`mdm_traj`) alone. The score (`_score_rollout`) still measures distance to the MDM correction segment only. It can also persist the exact rollout array and MP4 used for that feedback image. When `use_images` is on:
-  - `turns` feeds `turn_<i>/comparison.png` + `turn_<i>/angles.png` + score back through the conversation each turn; backend experiments with `--save-video` also write `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
-  - `agent` self-iterates: `EvalState` (`costs/cost_feedback.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Before serialization, the full `MpcRunConfig` is reduced to frozen `EvalMpcConfig`, which retains only operational rollout fields (Cartesian goals/threshold, step/sampling parameters, seed, and a `has_constraints` flag — constrained rollouts need the env's robot IK, which cannot ride a pickle, so their candidates are not scoreable); `user`, `persona_goals`, and all other config metadata are absent. Combine staging always load/re-saves each round state so sessions stay sanitized. Codex runs `experiments/render_cost_comparison.py` (writing both `comparison.png` and `angles.png`) to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
+- `evaluate_and_render()` does the **same single rollout** and additionally renders `ArmVisualizer.render_cost_feedback_overlay()` — a rollout (red) vs target-corrected-path (green) overlay — returning `(score, image_path)`. When an `angle_path` is passed it also renders `ArmVisualizer.render_joint_angle_comparison()` — a joint-angle-over-time graph (one subplot per anatomical joint feature; green target vs red rollout, per-frame series from `_joint_angle_series()`) — so the model sees the temporal shape of the motion, not just endpoints. The green target is `context.full_correction_traj` when present (the **entire** intended path: pre-correction history → MDM correction → comfort-only continuation to the goal, assembled once by `planners/mpc/rollout.py:assemble_full_correction_traj` and threaded through `build_generated_cost_context` / `EvalState`), falling back to the MDM correction segment (`mdm_traj`) alone. The score (`_score_rollout`) still measures distance to the MDM correction segment only. It can also persist the exact rollout array and MP4 used for that feedback image. When `use_images` is on:
+  - `turns` feeds `turn_<i>/comparison.png` + `turn_<i>/angles.png` + score back through the conversation each turn; callers passing `save_candidate_videos` also write `turn_<i>/rollout.npy` and `turn_<i>/rollout.mp4`.
+  - `agent` self-iterates: `EvalState` (`evaluation_mechanism/eval_state.py`, picklable bundle that rebuilds the rollout + context off-process) is saved to `state.pkl`, the initial overlay paths are listed as text in `TASK.md`, and codex is instructed to load those local image files and append image observations, revision rationale, and the final stop reason to `ITERATION_LOG.md`. Before serialization, the full `MpcRunConfig` is reduced to frozen `EvalMpcConfig`, which retains only operational rollout fields (Cartesian goals/threshold, step/sampling parameters, seed, and a `has_constraints` flag — constrained rollouts need the env's robot IK, which cannot ride a pickle, so their candidates are not scoreable); `user`, `persona_goals`, and all other config metadata are absent. Combine staging always load/re-saves each round state so sessions stay sanitized. Codex runs `evaluation_mechanism/render_cost_comparison.py` (writing both `comparison.png` and `angles.png`) to render and inspect its own rollout before finalizing `response.json`; the wrapper appends `ITERATION_LOG.md` into `codex.log`. With `--archive-dir` and `--save-video`, each self-check is archived under `candidate_<i>/` with JSON, score, rollout, and MP4 artifacts.
 
 ---
 
@@ -434,9 +428,9 @@ When `llm_cost.enabled: true` in the YAML:
 | `cartesian.*`          | CartesianConfig | Presence enables the Cartesian goal space: `goals` (non-empty list of [x,y,z]), `threshold` |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
-| `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets); legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
-| `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments (applied by `experiment_pipeline.apply_persona_goals`; falls back to top-level goals when absent). Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
-| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings (`run_episode_experiment.py`): `verbalizer` (`vague` \| `everyday` [default] \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20) |
+| `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets). Like `persona_goals`, still parsed but not consumed after the experiment-runner removal; the repo-root `evaluation/` rewrite will use it. Legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
+| `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments. Parsed and available on `MpcRunConfig`, but no code applies it since the experiment runners were removed — the method-level experiments in repo-root `evaluation/` will consume it. Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
+| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings, consumed by the method-level experiments to be rewritten in repo-root `evaluation/`: `verbalizer` (`vague` \| `everyday` [default] \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20) |
 
 ---
 
@@ -533,13 +527,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 |-------------------------------------------------------|--------------------------------------|
 | `uv run python src/.../planners/run.py --mpc-config <yaml>` | Single MPC run (plan → language correction → finish) |
 | `uv run python src/.../planners/run.py --mpc-config <yaml> --interactive` | Same run, but each correction's trigger and text come from the operator mid-run (`OperatorPause`); `text_time`/`--text` ignored. Full method on the real rig: `mdm_llm_real.yaml` |
-| `uv run python src/.../experiments/run_experiment.py --mpc-config <yaml> [--persona <name>] [--backend agent]` | One simulated-user persona/backend experiment on the original goal |
-| `uv run python src/.../experiments/run_cluster_experiment.py --mpc-config <yaml>` | Per-cluster cost comparison with base/oracle/generated hidden-cost evaluation for Cartesian goals |
-| `uv run python src/.../experiments/run_backend_experiment.py --mpc-config <yaml> [--persona <name>]` | Per-backend (llm/turns/agent) cost comparison with base/oracle/generated hidden-cost evaluation |
-| `uv run python src/.../experiments/run_transfer_experiment.py --mpc-config <yaml> [--persona <name>]` | Simulated-user transfer experiment (hidden-cost evaluation on held-out goals); persona defaults to the config's `user:` |
-| `uv run python src/.../experiments/run_multi_round_experiment.py --mpc-config <yaml> [--persona <name>]` | Multi-round cost experiment; `cartesian.goals` is the ordered round sequence and successful feedback contexts are unified into one replacement cost |
-| `uv run python src/.../experiments/run_episode_experiment.py --mpc-config <yaml> [--persona <name>] [--save-video]` | Automated simulated-user episode: reactive verbalized feedback + oracle-path cluster choice + re-trigger loop until the goal is reached cleanly |
-| `uv run python src/.../experiments/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
+| `uv run python src/.../evaluation_mechanism/render_cost_comparison.py --state state.pkl --response response.json --out cmp.png [--angles-out angles.png] [--archive-dir candidates --save-video]` | Render/archive a candidate cost rollout vs the correction — spatial overlay plus optional joint-angle-over-time graph (agent backend self-service tool) |
 | `uv run python src/.../demo_runner/server.py [--mpc-config <yaml>] [--trajectory-configs-file <json>] [--port 6781]` | Browser tool (run from the repo root; artifact root is CWD-relative). Named initial-pose and goal libraries persist through `/api/trajectory-configs/<kind>`; clicking the header summary opens a dropdown to start/resume/delete sessions (one locked persona), the corpus panel browses/deletes executed evidence, and session-owned rounds/unified costs carry into successive trajectories; sessions persist to `session.json` and are resumable after restart (`/api/session/start`, `/api/sessions`, `/api/session/resume`, `DELETE /api/sessions/<name>`, `DELETE /api/corpus/<i>`); cluster selection exposes `/api/pick_cluster` and the explicit-negative `/api/mark_cluster`; pending-cost and committed-round payloads include `rationale`, rendered as *why this cost*, while `/api/artifact/<path>` serves their `rationale.json`/`stage_log.md` files from the demo artifact root (see README). Both **demo** and **dev** use a collapsible Scenario configuration above the guided Trajectory decision → Language correction → Cost generation → Apply feedback stages; it auto-collapses on trajectory start while Start/Exit and live status remain visible. The right column begins with persistent pending/active cost summaries whose disclosures show the generated Python; a unified cost replaces individual round entries after combination. Runner-only `/api/live_trajectory/start`, `/step`, and `/apply_round` routes animate initial and post-cost MPC execution one frame at a time until discomfort or completion; tab 3 streams cost-generation progress and the opt-in OpenAI reasoning summary through `/api/logs` character cursors. Scenario always exposes saved start-pose/goal selection, the decision stage chooses correction or ignore/continue, cluster selection remains in Language correction until its explicit Next action, and completed cost generation similarly waits for an explicit Next action before Apply feedback; refinement and Exclude controls remain available in both modes, cluster oracle/violation diagnostics are dev-only, completed stages are reviewable, and repeated feedback returns to the decision. Dev exposes advanced controls inside this organization; demo hides scenario authoring, bound dragging, sampling knobs, cost backend/code in the workflow panel, corpus, and console. The Cost functions panel's Combine rounds (codex) action is visible in both modes. The choice persists in `localStorage`. Every session records a beat stream to `<session>/replay/` (`index.json` + one `NNNN_<kind>.json` per beat, each with the payload the UI received and a per-beat persona snapshot); `GET /api/replay/<name>` and `/api/replay/<name>/<i>` serve it, and Replay steps through it with no MDM/LLM/MPC calls while synchronizing the stage navigator |
 | `uv run python src/.../sample_leftarm.py`             | Standalone MDM generation            |
 | `uv run python src/.../data_collection/labeler.py`    | Browser labeling UI                  |
@@ -577,7 +565,7 @@ part of every run: `build_run` resolves the `user:` config key via
 `unrestricted` persona has no bounds). Restricted users default the MDM
 instruction to their `feedback_text` (`resolve_feedback_text` in
 `planners/run.py`) and, with `uq.user_cluster: true`, pick the UQ cluster.
-The hidden bounds are the evaluation ground truth in headless experiments
+The hidden bounds are the evaluation ground truth for method-level evaluation
 (never shown to the cost generator).
 
 - `HiddenBound` — one restriction over a shared joint feature (radians):
@@ -607,8 +595,9 @@ The hidden bounds are the evaluation ground truth in headless experiments
 - Behaviors: `first_violation_step()` (feedback trigger), `choose_cluster()`
   (picks the most comfortable UQ cluster mean), `violation_metrics()`
   (mean/max/frac violated — evaluation metric), `HiddenCostTerm` (oracle
-  planner cost adapter implementing `TrajectoryCost`; also used by transfer
-  experiments to score scaled raw UQ cluster options before cost generation).
+  planner cost adapter implementing `TrajectoryCost`; also backs
+  `oracle_cluster_scores()` in `chooser.py`, which scores scaled raw UQ cluster
+  options before cost generation).
 - `attribute_correction()` (`attribution.py`) — deterministic feedback
   attribution for the automated episode loop: joins the trigger pose to the
   nearest oracle-path waypoint (`j ≥ min_join`), contrasts the robot's nominal
@@ -711,7 +700,7 @@ The hidden bounds are the evaluation ground truth in headless experiments
 
 All backends implement the `MotionGenerator` ABC (`motion_generators/base.py`) and are
 selected by the `motion_generator` YAML key via the `MOTION_GENERATOR_BUILDERS` registry
-in `motion_generators/__init__.py` (mirrors the `COST_BUILDERS` pattern). Planners/experiments
+in `motion_generators/__init__.py` (mirrors the `COST_BUILDERS` pattern). Callers
 hold a `MotionGenerator` and call its methods; the per-backend "pose" array is treated as
 opaque.
 

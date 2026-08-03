@@ -8,11 +8,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from uncertain_feedback.cost_generation.generate import _rejected_candidate_trajs
 from uncertain_feedback.demo_runner import session as demo_session
 from uncertain_feedback.demo_runner.session import Session
-from uncertain_feedback.experiments.experiment_pipeline import (
-    _rejected_candidate_trajs,
-)
 from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.simulated_users import SimulatedUser

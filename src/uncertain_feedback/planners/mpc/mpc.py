@@ -301,7 +301,7 @@ class ArmMPC:
     def goal_reached(self, q: np.ndarray) -> bool:
         """Whether ``q`` has reached the final goal so the rollout can end.
 
-        :func:`~uncertain_feedback.planners.run.run_planning_loop` polls this
+        :func:`~uncertain_feedback.planners.mpc.rollout.run_planning_loop` polls this
         (together with :attr:`mdm_ready_to_terminate`) to stop early. Always
         ``False`` without a goal space (a pure-feedback rollout runs its full
         step budget).

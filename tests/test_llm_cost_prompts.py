@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uncertain_feedback.planners.mpc.costs.prompts import (
+from uncertain_feedback.cost_generation.prompts import (
     IMAGE_PLACEHOLDERS,
     build_author_prompt,
     build_combine_task_body,

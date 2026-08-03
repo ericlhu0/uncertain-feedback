@@ -198,7 +198,7 @@ three orthographic views side-by-side, a translucent static reference body, the
 
 ### 6a. Prompt-grounding overlays — `render_cluster_contrast_overlay`
 
-Produced by `render_prompt_images(...)` (in `generated.py`), wired in `run.py`. Up to
+Produced by `render_prompt_images(...)` (in `summaries.py`), wired in `run.py`. Up to
 three separately-readable PNGs, each keyed to a placeholder (§2):
 
 - **`current.png`** (`current_cluster_traj_img`): chosen cluster only — **blue-gradient
@@ -281,7 +281,7 @@ construction, JSON parse/compile/smoke-test, artifact saving, and installation.
   `response.json` itself. It must also write `stage_log.md` with Stage 1, Stage 2, and
   Stage 3 responses; that file is appended to `codex.log`. When an `EvalState` is
   available it also drops `state.pkl` + points codex at
-  `experiments/render_cost_comparison.py` so codex can roll out, render
+  `evaluation_mechanism/render_cost_comparison.py` so codex can roll out, render
   `comparison.png`/`angles.png`, and iterate — logging each visual comparison in a
   required `ITERATION_LOG.md`.
 
@@ -378,12 +378,14 @@ The stale `defaults to "default"` docstring comment is also now fixed (reads `"1
 | `prompts/runtime_api.txt` | shared API contract (§4) |
 | `prompts/output_contract.txt` | shared hard requirements + JSON schema (§5) |
 | `prompts/stages/*.txt` | interpret / ground / author / refine heads (§3) |
-| `cost_generator.py` | base class, factory, scoring, `evaluate_and_render` |
+| `base.py` | base class, factory |
+| `../evaluation_mechanism/scoring.py` | scoring, `evaluate_and_render` |
 | `llm_costs.py` | single-pass staged backend |
 | `turns_costs.py` | multi-turn conversational backend (fixed interpret, ground+author refine) |
 | `agent_costs.py` | codex-CLI agent backend, `TASK.md` authoring |
-| `generated.py` | runtime context, cost compile/exec, summaries, `render_prompt_images` |
-| `cost_feedback.py` | `EvalState` — picklable rollout state for the off-process agent |
+| `../planners/mpc/costs/generated.py` | runtime context, cost compile/exec |
+| `summaries.py` | summaries JSON, `render_prompt_images` |
+| `../evaluation_mechanism/eval_state.py` | `EvalState` — picklable rollout state for the off-process agent |
 | `utils/plot.py` | `render_cluster_contrast_overlay`, `render_cost_feedback_overlay`, `render_joint_angle_comparison` |
-| `planners/run.py` (~763–839) | wiring: builds context/summaries/images, selects backend |
+| `generate.py` (`generate_cost_for_cluster`) | wiring: builds context/summaries/images, selects backend |
 | `planners/mpc/config.py` (`LlmCostConfig`) | config knobs & defaults |

@@ -9,15 +9,17 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from uncertain_feedback.planners.mpc.costs.agent_costs import AgentCostGenerator
-from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
-from uncertain_feedback.planners.mpc.costs.cost_generator import evaluate_candidate_cost
-from uncertain_feedback.planners.mpc.costs.generated import (
+from uncertain_feedback.cost_generation.agent_costs import (
+    _SANDBOX_RENDER_SCRIPT,
+    AgentCostGenerator,
+)
+from uncertain_feedback.cost_generation.prompts import build_combine_task_body
+from uncertain_feedback.evaluation_mechanism import EvalState, evaluate_candidate_cost
+from uncertain_feedback.planners.mpc.costs import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
     replace_generated_costs,
 )
-from uncertain_feedback.planners.mpc.costs.prompts import build_combine_task_body
 
 _COMBINE_TIMEOUT_SECONDS = 60.0 * 60.0
 
@@ -207,8 +209,7 @@ class CombineCostGenerator(AgentCostGenerator):
         for round_ in self.rounds:
             commands.append(
                 "/tmp/venv/bin/python "
-                "/tmp/runtime/src/uncertain_feedback/experiments/"
-                "render_cost_comparison.py "
+                f"{_SANDBOX_RENDER_SCRIPT} "
                 f"--state inputs/round_{round_.index:02d}/state.pkl "
                 "--response response.json "
                 f"--out comparison_round_{round_.index}.png "

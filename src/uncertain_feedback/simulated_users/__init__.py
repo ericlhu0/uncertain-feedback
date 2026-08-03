@@ -23,7 +23,11 @@ from uncertain_feedback.simulated_users.base import (
     first_violation_step,
     violation_metrics,
 )
-from uncertain_feedback.simulated_users.chooser import ChoiceResult, choose_correction
+from uncertain_feedback.simulated_users.chooser import (
+    ChoiceResult,
+    choose_correction,
+    oracle_cluster_scores,
+)
 from uncertain_feedback.simulated_users.personas import PERSONAS, get_persona
 from uncertain_feedback.simulated_users.verbalizers import (
     VERBALIZERS,
@@ -60,6 +64,7 @@ __all__ = [
     "compute_violations",
     "feature_series",
     "first_violation_step",
+    "oracle_cluster_scores",
     "violation_metrics",
     "PERSONAS",
     "get_persona",

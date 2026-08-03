@@ -9,7 +9,7 @@ refines ``response.json``, and repeats.
 
 Run as::
 
-    uv run python src/uncertain_feedback/experiments/render_cost_comparison.py \
+    uv run python src/uncertain_feedback/evaluation_mechanism/render_cost_comparison.py \
         --state state.pkl --response response.json --out comparison.png
 """
 
@@ -20,11 +20,13 @@ import json
 import shutil
 from pathlib import Path
 
-from uncertain_feedback.planners.mpc.costs import (
+from uncertain_feedback.evaluation_mechanism import (
     EvalState,
-    GeneratedPythonCost,
     evaluate_and_render,
     goal_reach_report,
+)
+from uncertain_feedback.planners.mpc.costs import (
+    GeneratedPythonCost,
     parse_llm_cost_response,
 )
 

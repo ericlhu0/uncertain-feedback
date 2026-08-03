@@ -25,15 +25,15 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from uncertain_feedback.demo_runner.core import _LOG_PREFIX, _log, persona_to_json
-from uncertain_feedback.experiments.experiment_pipeline import (
+from uncertain_feedback.cost_generation import (
+    CombineCostGenerator,
     CostGenerationResult,
+    CostRound,
     generate_cost_for_cluster,
-    goal_reach,
-    oracle_cluster_scores,
-    rollout_to_goal,
 )
-from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
+from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
+from uncertain_feedback.demo_runner.core import _LOG_PREFIX, _log, persona_to_json
+from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
     TriggerReason,
@@ -45,16 +45,18 @@ from uncertain_feedback.planners.mpc.arm_features import (
     canonical_arm_q,
 )
 from uncertain_feedback.planners.mpc.costs import (
-    CombineCostGenerator,
     CompositeTrajectoryCost,
-    CostRound,
+    GeneratedPythonCost,
     generated_cost_feature_dependencies,
     replace_generated_costs,
 )
-from uncertain_feedback.planners.mpc.costs.cost_feedback import EvalState
-from uncertain_feedback.planners.mpc.costs.generated import GeneratedPythonCost
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
-from uncertain_feedback.planners.run import _assemble_full_correction_traj
+from uncertain_feedback.planners.mpc.rollout import (
+    assemble_full_correction_traj,
+    goal_reach,
+    rollout_to_goal,
+)
+from uncertain_feedback.simulated_users import oracle_cluster_scores
 from uncertain_feedback.simulated_users.base import (
     HiddenCostTerm,
     SimulatedUser,
@@ -1124,7 +1126,7 @@ class Session:
         cost_set = CompositeTrajectoryCost([*extra.terms(), cost])
         t0 = time.perf_counter()
         _log("assembling the chosen corrected path with the generated cost")
-        rollout = _assemble_full_correction_traj(
+        rollout = assemble_full_correction_traj(
             cfg_goal,
             traj.q_history,
             traj.scaled_correction,

@@ -8,15 +8,15 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 
+from uncertain_feedback.cost_generation import CostRound
+from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
 from uncertain_feedback.demo_runner import session as demo_session
 from uncertain_feedback.demo_runner.core import DemoRig
 from uncertain_feedback.demo_runner.session import ClusterLevel, Session
-from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    CostRound,
     MpcCostContext,
 )
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK

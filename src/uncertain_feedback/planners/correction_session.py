@@ -11,11 +11,12 @@ import numpy as np
 from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost, MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.mpc.rollout import run_planning_loop
 from uncertain_feedback.simulated_users import SimulatedUser, compute_violations
 
 if TYPE_CHECKING:
-    from uncertain_feedback.planners.mpc.costs import CostRound
-    from uncertain_feedback.planners.run import LoopResult
+    from uncertain_feedback.cost_generation.combine_costs import CostRound
+    from uncertain_feedback.planners.mpc.rollout import LoopResult
 
 TriggerReason = Literal["text_time", "discomfort", "operator"]
 
@@ -125,8 +126,6 @@ class CorrectionSession:
         progress_desc: str = "MPC",
     ) -> CorrectionTrajectoryResult:
         """Roll out ``n_steps``, pausing for a round whenever the trigger fires."""
-        from uncertain_feedback.planners.run import run_planning_loop
-
         automatic = bool(self.user.bounds and self.user.feedback_text)
         trigger = CorrectionTrigger(
             threshold=self.trigger_threshold,

@@ -9,6 +9,7 @@ from typing import cast
 
 import numpy as np
 
+from uncertain_feedback.cost_generation import CostRound
 from uncertain_feedback.demo_runner import server as demo_server
 from uncertain_feedback.demo_runner import session as demo_session
 from uncertain_feedback.demo_runner.core import DemoRig
@@ -19,7 +20,6 @@ from uncertain_feedback.demo_runner.session import (
 )
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    CostRound,
     MpcCostContext,
     build_generated_cost_context,
 )

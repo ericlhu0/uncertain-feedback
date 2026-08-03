@@ -23,8 +23,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
 from uncertain_feedback.envs import make_env
-from uncertain_feedback.experiments.trajectory_corpus import TrajectoryCorpus
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.arm_features import (

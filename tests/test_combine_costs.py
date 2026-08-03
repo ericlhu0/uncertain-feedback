@@ -16,19 +16,18 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from uncertain_feedback.cost_generation import CombineCostGenerator, CostRound
+from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.costs import (
-    CombineCostGenerator,
     CompositeTrajectoryCost,
-    CostRound,
-    EvalState,
+    GeneratedCostContext,
     GeneratedPythonCost,
     JointLimitCost,
     MpcCostContext,
     build_generated_cost_context,
     replace_generated_costs,
 )
-from uncertain_feedback.planners.mpc.costs.generated import GeneratedCostContext
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 _CODE = (

@@ -26,6 +26,7 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_body_pose_to_arm_aa,
     smpl_positions_batch_to_body_pose,
 )
+from uncertain_feedback.motion_generators.steering import SteeringEvent, SteeringSpec
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 
@@ -41,6 +42,15 @@ class MotionGenerator(ABC):
 
     def __init__(self) -> None:
         self._fk: SmplLeftArmFK = SmplLeftArmFK()
+
+    @property
+    def last_steering_events(self) -> tuple[SteeringEvent, ...]:
+        """Steering diagnostics from the most recent generation.
+
+        Empty for backends that do not implement ``steering`` and for unsteered
+        generations.
+        """
+        return ()
 
     # ------------------------------------------------------------------
     # Abstract interface (backend-specific pose representation)
@@ -78,6 +88,8 @@ class MotionGenerator(ABC):
         num_frames: int | None = None,
         frozen_body: bool = False,
         spine3_aa: np.ndarray | None = None,
+        *,
+        steering: SteeringSpec | None = None,
     ) -> np.ndarray:
         """Generate a left-arm axis-angle trajectory from text.
 
@@ -94,6 +106,8 @@ class MotionGenerator(ABC):
         num_samples: int = 1,
         num_frames: int | None = None,
         frozen_body: bool = False,
+        *,
+        steering: SteeringSpec | None = None,
     ) -> np.ndarray:
         """Generate samples and return ``(num_samples, n_frames, 22, 3)`` SMPL positions."""
 

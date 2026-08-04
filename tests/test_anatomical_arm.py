@@ -176,6 +176,40 @@ def test_all_arm_features_match_for_q_and_decoded_boundary_states() -> None:
         np.testing.assert_allclose(q_features[name], boundary_features[name], atol=1e-9)
 
 
+def test_torch_position_features_match_arm_feature_series() -> None:
+    """The steering cost's position-space features agree with the repo's.
+
+    Only for an upright torso: ``flexion_elevation`` measures elevation from
+    world-down while ``arm_feature_series`` measures it from torso-down, so the
+    fixture pins ``spine3_aa`` to zero. Elbow flexion is frame-invariant and
+    matches for any anchor.
+    """
+    import torch
+
+    from uncertain_feedback.motion_generators.mdm.torch_features import (
+        flexion_elevation,
+    )
+
+    fk = SmplLeftArmFK()
+    context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    q = np.random.default_rng(11).uniform(-0.6, 0.6, size=(24, Q_DIM))
+    positions = fk.fk_batch(
+        q_to_arm_aa(q, fk.elbow_hinge_axis), context.spine3_pos, context.spine3_aa
+    )  # (N, 5, 3)
+
+    flexion, elevation = flexion_elevation(
+        *(torch.tensor(positions[:, idx], dtype=torch.float64) for idx in (2, 3, 4))
+    )
+
+    expected = arm_feature_series(q, context)
+    np.testing.assert_allclose(flexion.numpy(), expected["elbow_flexion"], atol=1e-6)
+    np.testing.assert_allclose(
+        elevation.numpy(), expected["shoulder_elevation"], atol=1e-6
+    )
+
+
 def test_raw_arm_conversion_preserves_fk_positions() -> None:
     fk = SmplLeftArmFK()
     rng = np.random.default_rng(3)

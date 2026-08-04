@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
+from uncertain_feedback.motion_generators.steering import SteeringConfig, SteeringSpec
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
 from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster,
@@ -42,6 +43,8 @@ class UqConfig:
     # Delegate cluster selection to the configured simulated user (takes effect
     # only when the user has hidden bounds).
     user_cluster: bool = False
+    # Steer diffusion sampling toward the user's cost model (default: off).
+    steering: SteeringConfig = SteeringConfig()
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,7 @@ class UqSelector:
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
+        steering: SteeringSpec | None = None,
     ) -> UqClusterResult:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
@@ -126,7 +130,12 @@ class UqSelector:
                         tuple whose magnitude overrides ``default_scale``
                         (used by simulated-user experiments). Takes precedence
                         over ``auto_cluster`` and the interactive picker.
+            steering:   Optional cost-steering spec forwarded to the generator,
+                        biasing the drawn samples toward the user's cost model.
         """
+        steer_kwargs: dict[str, Any] = (
+            {} if steering is None else {"steering": steering}
+        )
         print(f"Generating {self._n_diffusion_samples} motion samples for: '{text}' …")
         generation_t0 = time.perf_counter()
         use_position_uq = getattr(self._clusterer, "supports_positions", False)
@@ -142,6 +151,7 @@ class UqSelector:
                 num_samples=self._n_diffusion_samples,
                 num_frames=mdm_frames,
                 frozen_body=frozen_body,
+                **steer_kwargs,
             )  # (n_diffusion_samples, n_frames, 22, 3)
             trajectories = None
         else:
@@ -153,6 +163,7 @@ class UqSelector:
                 num_frames=mdm_frames,
                 frozen_body=frozen_body,
                 spine3_aa=base_spine_aa,
+                **steer_kwargs,
             )  # (n_diffusion_samples, n_frames, 3, 3)
         print(
             f"[timing] MDM generation pipeline: {time.perf_counter() - generation_t0:.3f}s"

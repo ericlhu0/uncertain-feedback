@@ -34,6 +34,7 @@ from uncertain_feedback.cost_generation import (
 from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
 from uncertain_feedback.demo_runner.core import _LOG_PREFIX, _log, persona_to_json
 from uncertain_feedback.evaluation_mechanism import EvalState
+from uncertain_feedback.motion_generators.steering import SteeringSpec
 from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
     TriggerReason,
@@ -782,6 +783,31 @@ class Session:
 
     # --- MDM / clustering -------------------------------------------------
 
+    def _steering_spec(self) -> SteeringSpec | None:
+        """Compile this session's persona into a diffusion-steering spec.
+
+        Rebuilt per generation so a persona swapped in by ``update_persona``
+        steers the next round.
+        """
+        rig = self.rig
+        uq = _feedback_cfg(rig).uq
+        if uq is None or uq.steering.mode == "off":
+            return None
+        # pylint: disable=import-outside-toplevel
+        from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
+
+        if not isinstance(rig.gen, MdmMotionGenerator):
+            _log("steering: unsupported backend, sampling unsteered")
+            return None
+        cost = rig.gen.build_user_steering_cost(self.user)
+        if cost is None:
+            _log(
+                f"steering: no supported bounds for {self.user.name}, "
+                "sampling unsteered"
+            )
+            return None
+        return SteeringSpec(cost=cost, config=uq.steering, seed=rig.cfg.seed)
+
     def generate(
         self,
         prompt: str,
@@ -799,6 +825,8 @@ class Session:
         start_pose = rig.gen.build_pose_from_arm_aa(
             rig.initial_hml_pose, _arm_aa(rig, q_start)
         )
+        spec = self._steering_spec()
+        steer_kwargs: dict[str, Any] = {} if spec is None else {"steering": spec}
         t0 = time.perf_counter()
         _log(f"MDM generation: {n_samples} samples for {prompt!r}")
         traj.samples = rig.gen.generate_left_arm_position_samples(
@@ -806,8 +834,21 @@ class Session:
             start_pose=start_pose,
             num_samples=n_samples,
             num_frames=_feedback_cfg(rig).frames,
+            **steer_kwargs,
         )
         _log(f"MDM generation done in {time.perf_counter() - t0:.1f}s")
+        if spec is not None:
+            _log(f"steering mode {spec.config.mode}")
+            for event in rig.gen.last_steering_events:
+                _log(
+                    f"steering step {event.step}: cost {event.cost_mean:.4f}, "
+                    f"violating {event.frac_violating:.0%}, ess {event.ess:.1f}"
+                    + (
+                        ""
+                        if event.unique_ancestors is None
+                        else f", ancestors {event.unique_ancestors}"
+                    )
+                )
         traj.prompt = prompt
         traj.cluster_levels = []
         return self.recluster(n_clusters, scale, clusterer)

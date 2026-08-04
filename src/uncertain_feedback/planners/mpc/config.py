@@ -19,6 +19,7 @@ from typing import Any
 
 import yaml
 
+from uncertain_feedback.motion_generators.steering import SteeringConfig
 from uncertain_feedback.planners.mpc.action_spaces import RobotActionsConfig
 from uncertain_feedback.planners.mpc.constraints import CONSTRAINT_BUILDERS
 from uncertain_feedback.planners.mpc.costs import available_cost_names
@@ -251,6 +252,30 @@ def _str_list(value: Any, name: str) -> list[str]:
     return out
 
 
+def _parse_steering(data: dict[str, Any]) -> SteeringConfig:
+    steps = data.get("resample_steps")
+    return SteeringConfig(
+        mode=str(data.get("mode", "off")),
+        resample_steps=(
+            SteeringConfig.resample_steps
+            if steps is None
+            else tuple(
+                _nonnegative_int(step, "feedback.uq.steering.resample_steps")
+                for step in steps
+            )
+        ),
+        temperature=_float(
+            data.get("temperature", 0.5), "feedback.uq.steering.temperature"
+        ),
+        guide_from=_nonnegative_int(
+            data.get("guide_from", 10), "feedback.uq.steering.guide_from"
+        ),
+        guidance_weight=_float(
+            data.get("guidance_weight", 1e5), "feedback.uq.steering.guidance_weight"
+        ),
+    )
+
+
 def _parse_uq(data: dict[str, Any]) -> UqConfig:
     return UqConfig(
         diffusion_samples=_positive_int(
@@ -263,6 +288,9 @@ def _parse_uq(data: dict[str, Any]) -> UqConfig:
         ),
         scale=_float(data.get("scale", 1.0), "feedback.uq.scale"),
         user_cluster=_bool(data.get("user_cluster", False), "feedback.uq.user_cluster"),
+        steering=_parse_steering(
+            _mapping(data.get("steering", {}), "feedback.uq.steering")
+        ),
     )
 
 

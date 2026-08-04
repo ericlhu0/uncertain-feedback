@@ -127,6 +127,14 @@ with a `_v<N>` version tag in the filename; bumping `_CACHE_VERSION` in `build_m
 (done whenever the pose-estimation/conversion changes) invalidates old entries automatically.
 Cache files without a version tag predate the 2026-06-29 chirality fix and are mirrored; delete them.
 
+3b. (Optional) Build a speed-variant dataset instead — retimes each cached segment into
+fast / normal / slow variants plus a conditional variant that slows while the wrist is
+above the shoulder, with matching speed-language captions. Reads the `mdm_cache`
+positions directly, so steps 1–3 must have run (and cached) at least once:
+```
+uv run python src/uncertain_feedback/data_collection/build_speed_dataset.py --output_dir ./speed_mdm_dataset/
+```
+
 4. Fine-tune motion-diffusion-model
 First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` (or whatever was created with the trajectory editor web ui) to `.../HumanML3D`
 
@@ -319,7 +327,7 @@ presence of top-level YAML sections, one per module slot:
 | Section | Module | Absent means |
 |---|---|---|
 | `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
-| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`) | no correction phase |
+| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`) | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
 
@@ -1083,6 +1091,12 @@ feedback:
     clusterer: agglo_end_pose  # kmeans_end_pose | agglo_end_pose | agglo_path_pca | agglo_t2m
     auto_cluster: null
     scale: 1.0  # default motion-magnitude scale for the chosen cluster
+    steering:
+      mode: "off"           # off | resample | cg
+      resample_steps: [15, 25, 35, 45]
+      temperature: 0.5
+      guide_from: 10          # cg only
+      guidance_weight: 1.0e5  # cg only
 
 cartesian:
   goals:
@@ -1106,6 +1120,35 @@ the MPC planner keeps its injected clusterer):
   cd src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model
   bash prepare/download_t2m_evaluators.sh  # needs gdown
   ```
+
+#### Steering diffusion sampling toward the user's cost (`feedback.uq.steering`)
+
+`mode: "off"` (the default, and what every checked-in config ships) samples MDM
+exactly as before. The other two modes bias sampling toward the configured
+simulated user's hidden bounds, so the candidates that reach clustering already
+respect the user's constraints. The cost is compiled from the persona's
+`elbow_flexion` / `shoulder_elevation` bounds and read off each denoising step's
+`x̂0` prediction; `JointBoxLimit` and bounds on other features are skipped (named
+in a log line). Only the MDM backend supports steering — kimodo raises.
+
+- **`resample`** (recommended default): at each `resample_steps` index, score
+  every chain and resample the population with weights
+  `softmax(-z(cost)/temperature)`. Cost-agnostic (the cost need not be
+  differentiable), effectively free at N=500, and it can only reweight motions
+  MDM was already willing to produce — so samples stay on-manifold. In the
+  triceps stress scenario this took oracle violations from 28% of samples to 0%
+  with cluster diversity preserved (endpoint spread slightly *up*).
+- **`cg`** (classifier guidance): from `guide_from` on, nudge the reverse
+  diffusion mean by `-guidance_weight · ∇ₓ cost(x̂0)`. Roughly doubles sampling
+  time (≈5 s → ≈9.5 s at N=500 × 50 frames) and `guidance_weight` needs
+  per-cost calibration — the useful band is 1e4–1e5 — but it handles the case
+  `resample` cannot: a prompt that genuinely contradicts the cost.
+
+Each scoring step is logged (`cost`, fraction violating, ESS, surviving
+ancestors). When the first event shows ~every sample violating *and* an ESS
+collapse, the log carries an explicit conflict warning: the prompt and the cost
+disagree, resampling harder will only collapse diversity, and the options are
+`mode: cg` or rewording the correction. Nothing escalates automatically.
 
 In the interactive picker, each cluster panel has a **magnitude** slider
 (range 0.0–2.0) that scales that trajectory's motion up or down while

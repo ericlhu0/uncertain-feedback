@@ -41,6 +41,7 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_body_pose_to_positions,
     smpl_body_pose_to_spine3_aa,
 )
+from uncertain_feedback.motion_generators.steering import SteeringSpec
 
 _FPS = 30  # kimodo's native frame rate (model config.yaml: fps=30)
 
@@ -127,10 +128,16 @@ class KimodoMotionGenerator(MotionGenerator):
         num_frames: int | None = None,
         frozen_body: bool = False,
         spine3_aa: np.ndarray | None = None,
+        *,
+        steering: SteeringSpec | None = None,
     ) -> np.ndarray:
         if frozen_body:
             raise NotImplementedError(
                 "frozen_body is not supported with the kimodo backend."
+            )
+        if steering is not None:
+            raise NotImplementedError(
+                "steering is not supported with the kimodo backend."
             )
         self._align_fk_collar_to_pose(start_pose)
         n_frames = self._resolve_frames(motion_length_seconds, num_frames)
@@ -155,10 +162,16 @@ class KimodoMotionGenerator(MotionGenerator):
         num_samples: int = 1,
         num_frames: int | None = None,
         frozen_body: bool = False,
+        *,
+        steering: SteeringSpec | None = None,
     ) -> np.ndarray:
         if frozen_body:
             raise NotImplementedError(
                 "frozen_body is not supported with the kimodo backend."
+            )
+        if steering is not None:
+            raise NotImplementedError(
+                "steering is not supported with the kimodo backend."
             )
         self._align_fk_collar_to_pose(start_pose)
         n_frames = self._resolve_frames(motion_length_seconds, num_frames)

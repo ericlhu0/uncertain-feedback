@@ -140,7 +140,6 @@ module = [
     "torch.*",
     "sklearn.*",
     "yaml",
-    "kimodo.*",
     "train.*",
     "smplx",
     "tqdm.*",

@@ -133,7 +133,6 @@ class MpcRunConfig:
     feedback: FeedbackConfig | None = None
     constraints: dict[str, Any] = field(default_factory=dict)
     robot_actions: RobotActionsConfig | None = None
-    num_denoising_steps: int | None = None  # kimodo DDIM steps; None = backend default
     preference_learning: bool = True
     preference_alpha: float = 0.5
     preference_window: int = 50
@@ -525,11 +524,6 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             ),
         ),
         seed=_nonnegative_int(data.get("seed", 0), "seed"),
-        num_denoising_steps=(
-            None
-            if data.get("num_denoising_steps") is None
-            else _positive_int(data["num_denoising_steps"], "num_denoising_steps")
-        ),
         preference_learning=_bool(
             data.get("preference_learning", True), "preference_learning"
         ),

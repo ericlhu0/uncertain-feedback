@@ -175,7 +175,6 @@ class DemoRig:
         self.gen = make_motion_generator(
             self.cfg.motion_generator,
             None,
-            self.cfg.num_denoising_steps,
             seed=self.cfg.seed,
             lock_seed=self.cfg.motion_generator == "mdm",
         )

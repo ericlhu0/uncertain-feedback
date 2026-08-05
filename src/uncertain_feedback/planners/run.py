@@ -99,7 +99,6 @@ def _load_initial_pose_state(
     config_pose: Path | None = None,
     motion_generator: str = "mdm",
     motion_generator_factory: Callable[[Path | None], MotionGenerator] | None = None,
-    num_denoising_steps: int | None = None,
     seed: int | None = None,
 ) -> tuple[MotionGenerator | None, _InitialPoseState]:
     """Load the optional HML pose used to initialize all planner variants.
@@ -115,9 +114,7 @@ def _load_initial_pose_state(
         return None, _InitialPoseState.tpose()
 
     factory = motion_generator_factory or (
-        lambda mp: make_motion_generator(
-            motion_generator, mp, num_denoising_steps, seed=seed
-        )
+        lambda mp: make_motion_generator(motion_generator, mp, seed=seed)
     )
     gen = factory(args.model_path)
     hml_pose = gen.load_pose(pose_path)
@@ -458,7 +455,6 @@ def build_run(
         cfg.pose,
         motion_generator=cfg.motion_generator,
         motion_generator_factory=motion_generator_factory,
-        num_denoising_steps=cfg.num_denoising_steps,
         seed=cfg.seed,
     )
     if cfg.arm is not None:

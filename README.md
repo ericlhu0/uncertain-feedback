@@ -216,56 +216,6 @@ uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
 All paths are relative to wherever you invoke the script. Output videos are saved under `save/my_finetuned_v1/edit_*/` inside `motion-diffusion-model/`. (1s = 20 frames)
 
 
-## Kimodo backend setup
-
-[Kimodo](https://github.com/nv-tlabs/kimodo) (NVIDIA) is an optional second
-text-to-motion backend. It pins `pydantic>=2` and `transformers==5.1.0`, which conflict
-with the main environment, so it lives in its own conda env and is called via a subprocess
-worker (`motion_generators/kimodo/_kimodo_inference_worker.py`).
-
-**1. Hugging Face / Llama-3 access** (kimodo's text encoder uses gated
-`meta-llama/Meta-Llama-3-8B-Instruct`):
-- Accept the license at https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct
-- Create a read token at https://huggingface.co/settings/tokens
-- `hf auth login` (or write the token to `~/.cache/huggingface/token`)
-
-**2. Create the isolated env and install kimodo** (env name must match
-`KIMODO_CONDA_ENV`, default `kimodo`):
-```bash
-conda create -n kimodo python=3.10 -y
-conda install -n kimodo -y -c conda-forge cmake cxx-compiler   # kimodo C++ extension
-# Install a torch build matching your GPU (cu128 for Blackwell sm_120):
-conda run -n kimodo pip install torch --index-url https://download.pytorch.org/whl/cu128
-conda run -n kimodo pip install "git+https://github.com/nv-tlabs/kimodo.git"
-```
-Model weights download automatically on first use. Set `TEXT_ENCODER_DEVICE=cpu` to cut
-VRAM from ~17 GB to <3 GB.
-
-**3. Run** any MDM-backed planner with `motion_generator: kimodo` in its YAML, e.g.:
-```bash
-uv run python src/uncertain_feedback/planners/run.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/kimodo.yaml
-```
-The kimodo start pose is a SMPL `body_pose (21,3)` `.npy` (`motion_generators/kimodo/start_pose.npy`). The wrapper converts it through the same FK used by the visualizer; the worker retargets that pose onto Kimodo's skeleton and applies the resulting positions and global rotations as the frame-0 Kimodo constraint. `--frozen-body` is not supported with `motion_generator: kimodo`.
-
-**Generation speed.** Kimodo's text encoder is an 8B LLM2Vec model. With no encoder
-server reachable on `127.0.0.1:9550` it loads locally, and `TEXT_ENCODER_DEVICE=cpu`
-(auto-set when VRAM < 18 GB) runs it on CPU — slow per prompt. The worker encodes the
-(shared) prompt once per call regardless of `feedback.uq.diffusion_samples`, so generation time is
-dominated by the one-time ~85 s model load plus diffusion, not the sample count. To speed
-diffusion, lower `num_denoising_steps` (top-level YAML key, kimodo only; default 100,
-try 30-50 for a quality/speed trade).
-
-To generate only a kimodo motion and render it to video, without MPC:
-```bash
-TEXT_ENCODER_DEVICE=cpu uv run python src/uncertain_feedback/motion_generators/kimodo/generate_motion.py \
-  --text "raise my left arm" \
-  --num-frames 100 \
-  --output-npz kimodo_motion.npz \
-  --output-video kimodo_motion.mp4 \
-  --start-pose src/uncertain_feedback/motion_generators/kimodo/start_pose_kimodo.npy
-```
-
 ## Running a Single MPC Run
 
 `run.py` performs one end-to-end run: plan with sampling MPC, inject the first
@@ -344,12 +294,12 @@ sequence.
 ### Motion-generation backend (`motion_generator`)
 
 The text-to-motion backend is selected by the optional YAML key `motion_generator`:
-- `mdm` (default): the in-process Motion Diffusion Model (see Getting Started).
-- `kimodo`: NVIDIA's [kimodo](https://github.com/nv-tlabs/kimodo) SMPL-X model, run in an
-  isolated conda env via a subprocess worker (see [Kimodo backend setup](#kimodo-backend-setup)).
+- `mdm` (default, currently the only backend): the in-process Motion Diffusion
+  Model (see Getting Started).
 
-Both backends expose the same interface, so any config with a `feedback:`
-section works with either by setting `motion_generator:` in its config.
+Backends expose the shared `MotionGenerator` interface, so any config with a
+`feedback:` section works with any backend registered in
+`MOTION_GENERATOR_BUILDERS`.
 
 ### Execution environment (`env`)
 
@@ -1129,7 +1079,7 @@ simulated user's hidden bounds, so the candidates that reach clustering already
 respect the user's constraints. The cost is compiled from the persona's
 `elbow_flexion` / `shoulder_elevation` bounds and read off each denoising step's
 `x̂0` prediction; `JointBoxLimit` and bounds on other features are skipped (named
-in a log line). Only the MDM backend supports steering — kimodo raises.
+in a log line). Steering is implemented by the MDM backend; other backends raise.
 
 - **`resample`** (recommended default): at each `resample_steps` index, score
   every chain and resample the population with weights
@@ -1427,8 +1377,8 @@ Then open `http://127.0.0.1:6781`. The config supplies the pose, MPC settings,
 UQ defaults, `feedback.frames`, per-persona goal presets, and the `llm_cost` backend
 used by the cost-generation stage. With the default config, cost generation
 starts on `llm (single-pass)`; the backend dropdown can still select `turns` or
-`agent`. When `motion_generator: mdm`, the top-level `seed` is reset before each
-MDM generation request, so identical demo inputs reproduce the same samples.
+`agent`. The top-level `seed` is reset before each MDM generation request, so
+identical demo inputs reproduce the same samples.
 
 **Demo vs dev mode.** The header button toggles between them and the choice
 persists in `localStorage` (demo is the default). Both modes use the same

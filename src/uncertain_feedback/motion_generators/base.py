@@ -2,8 +2,8 @@
 
 A :class:`MotionGenerator` turns a natural-language prompt into a left-arm
 trajectory the MPC can track. Backends differ in their internal pose
-representation (e.g. MDM uses HML263 feature vectors, kimodo uses SMPL
-``body_pose``), so callers treat the ``pose`` arrays returned by
+representation (e.g. MDM uses HML263 feature vectors), so callers treat the
+``pose`` arrays returned by
 :meth:`load_pose` / :meth:`build_pose_from_arm_aa` as opaque: they load a
 pose, decode it, optionally patch the arm configuration into it, and pass it
 back as ``start_pose`` — never inspecting its contents.

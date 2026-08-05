@@ -1079,7 +1079,14 @@ simulated user's hidden bounds, so the candidates that reach clustering already
 respect the user's constraints. The cost is compiled from the persona's
 `elbow_flexion` / `shoulder_elevation` bounds and read off each denoising step's
 `x̂0` prediction; `JointBoxLimit` and bounds on other features are skipped (named
-in a log line). Steering is implemented by the MDM backend; other backends raise.
+in a log line). Steering is implemented by the MDM backend; with any other
+backend the run logs a skip and samples unsteered, as it does when the persona
+has no supported bounds (e.g. `user: unrestricted`, the default).
+
+The key applies to both frontends: `run.py` steers every UQ correction round
+with the YAML mode, and the demo runner's stage-2 **Steering** dropdown starts
+at the YAML mode and can override it per generation (the other knobs stay
+YAML-only).
 
 - **`resample`** (recommended default): at each `resample_steps` index, score
   every chain and resample the population with weights
@@ -1489,7 +1496,11 @@ Stages (each stage's controls unlock once the previous one ran):
    violates) and clusters them (*Re-cluster* reuses cached samples at the
    currently displayed refinement level). The *Clusterer* dropdown selects the
    clustering method (see `feedback.uq.clusterer` above; initial value from the config)
-   and applies on the next Generate/Re-cluster/Refine. Each cluster is
+   and applies on the next Generate/Re-cluster/Refine. The *Steering* dropdown
+   (off / resample / cg) steers the next *Generate* toward the persona's hidden
+   bounds (see `feedback.uq.steering` above; initial value from the config's
+   mode, other steering knobs stay YAML-only); scoring events and any
+   prompt/cost conflict warning appear in the log panel. Each cluster is
    represented by its medoid — an actual MDM sample — rather than the
    elementwise mean. Every
    cluster option is automatically integrated into the full corrected

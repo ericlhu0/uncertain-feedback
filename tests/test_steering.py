@@ -2,13 +2,16 @@
 
 Covers the sampler-agnostic pieces: the particle resampler and its diagnostics
 (``steering.py``), the torch mirror of the hidden-bound math that produces the
-steering cost (``mdm/torch_features.py``), and the YAML plumbing that turns a
-``feedback.uq.steering`` block into a :class:`SteeringConfig`.
+steering cost (``mdm/torch_features.py``), the YAML plumbing that turns a
+``feedback.uq.steering`` block into a :class:`SteeringConfig`, and the
+forwarding of a :class:`SteeringSpec` through the planner's UQ query path.
 """
 
 # pylint: disable=missing-function-docstring
 
 from __future__ import annotations
+
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -16,9 +19,11 @@ import pytest
 from uncertain_feedback.motion_generators.steering import (
     SteeringConfig,
     SteeringEvent,
+    SteeringSpec,
     conflict_warning,
     resample_indices,
 )
+from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.simulated_users.base import (
     CoupledBound,
@@ -28,6 +33,8 @@ from uncertain_feedback.simulated_users.base import (
     SimulatedUser,
 )
 from uncertain_feedback.simulated_users.personas import get_persona
+from uncertain_feedback.uncertainty import UqConfig
+from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
 
 
 def _features(seed: int = 0, n: int = 4, t: int = 7) -> dict[str, np.ndarray]:
@@ -337,3 +344,66 @@ def test_uq_config_parses_an_explicit_steering_block(tmp_path) -> None:
         guide_from=5,
         guidance_weight=1e4,
     )
+
+
+class _SteeringCaptureGenerator:
+    """Minimal position-path fake that records the ``steering`` kwarg."""
+
+    def __init__(self) -> None:
+        self.received_steering: SteeringSpec | None = None
+
+    def generate_left_arm_position_samples(
+        self,
+        text: str,
+        start_pose: np.ndarray | None = None,
+        num_samples: int = 1,
+        num_frames: int | None = None,
+        frozen_body: bool = False,
+        *,
+        steering: SteeringSpec | None = None,
+    ) -> np.ndarray:
+        _ = text, start_pose, num_frames, frozen_body
+        self.received_steering = steering
+        return np.zeros((num_samples, 3, 22, 3))
+
+    def smpl_positions_to_left_arm_trajectory(
+        self,
+        positions: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        _ = positions, spine3_aa
+        return np.zeros((3, 3, 3))
+
+
+class _OneClusterer(TrajectoryClusterer):
+    def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
+        raise AssertionError("unused")
+
+    def cluster(self, trajectories: np.ndarray) -> np.ndarray:
+        raise AssertionError("position path should call cluster_positions")
+
+    def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
+        return np.zeros(positions.shape[0], dtype=np.intp)
+
+
+def test_query_mdm_with_uncertainty_forwards_the_steering_spec() -> None:
+    gen = _SteeringCaptureGenerator()
+    mpc = ArmMPC(
+        feedback=FeedbackConfig(uq=UqConfig(diffusion_samples=2)),
+        clusterer=_OneClusterer(n_clusters=1),
+    )
+    spec = SteeringSpec(cost=lambda x0: x0, config=SteeringConfig(mode="resample"))
+
+    mpc.query_mdm_with_uncertainty(
+        cast(Any, gen), "raise my left arm", start_pose=np.zeros(263), auto_cluster=0
+    )
+    assert gen.received_steering is None
+
+    mpc.query_mdm_with_uncertainty(
+        cast(Any, gen),
+        "raise my left arm",
+        start_pose=np.zeros(263),
+        auto_cluster=0,
+        steering=spec,
+    )
+    assert gen.received_steering is spec

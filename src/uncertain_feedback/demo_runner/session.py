@@ -34,7 +34,10 @@ from uncertain_feedback.cost_generation import (
 from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
 from uncertain_feedback.demo_runner.core import _LOG_PREFIX, _log, persona_to_json
 from uncertain_feedback.evaluation_mechanism import EvalState
-from uncertain_feedback.motion_generators.steering import SteeringSpec
+from uncertain_feedback.motion_generators.steering import (
+    SteeringSpec,
+    build_steering_spec,
+)
 from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
     TriggerReason,
@@ -783,30 +786,20 @@ class Session:
 
     # --- MDM / clustering -------------------------------------------------
 
-    def _steering_spec(self) -> SteeringSpec | None:
+    def _steering_spec(self, mode: str) -> SteeringSpec | None:
         """Compile this session's persona into a diffusion-steering spec.
 
-        Rebuilt per generation so a persona swapped in by ``update_persona``
-        steers the next round.
+        ``mode`` (the browser's per-generation choice) overrides the config's
+        mode; the remaining knobs stay YAML-driven. Rebuilt per generation so a
+        persona swapped in by ``update_persona`` steers the next round.
         """
         rig = self.rig
         uq = _feedback_cfg(rig).uq
-        if uq is None or uq.steering.mode == "off":
+        if uq is None or mode == "off":
             return None
-        # pylint: disable=import-outside-toplevel
-        from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
-
-        if not isinstance(rig.gen, MdmMotionGenerator):
-            _log("steering: unsupported backend, sampling unsteered")
-            return None
-        cost = rig.gen.build_user_steering_cost(self.user)
-        if cost is None:
-            _log(
-                f"steering: no supported bounds for {self.user.name}, "
-                "sampling unsteered"
-            )
-            return None
-        return SteeringSpec(cost=cost, config=uq.steering, seed=rig.cfg.seed)
+        return build_steering_spec(
+            rig.gen, self.user, replace(uq.steering, mode=mode), rig.cfg.seed
+        )
 
     def generate(
         self,
@@ -815,6 +808,7 @@ class Session:
         n_clusters: int,
         scale: float,
         clusterer: str = "agglo_end_pose",
+        steering_mode: str = "off",
     ) -> dict[str, Any]:
         """Sample MDM corrections for ``prompt``, cluster them, and scale each cluster mean."""
         traj = self.trajectory
@@ -825,7 +819,7 @@ class Session:
         start_pose = rig.gen.build_pose_from_arm_aa(
             rig.initial_hml_pose, _arm_aa(rig, q_start)
         )
-        spec = self._steering_spec()
+        spec = self._steering_spec(steering_mode)
         steer_kwargs: dict[str, Any] = {} if spec is None else {"steering": spec}
         t0 = time.perf_counter()
         _log(f"MDM generation: {n_samples} samples for {prompt!r}")

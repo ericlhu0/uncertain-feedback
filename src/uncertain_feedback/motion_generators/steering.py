@@ -32,6 +32,9 @@ import numpy as np
 if TYPE_CHECKING:
     from torch import Tensor
 
+    from uncertain_feedback.motion_generators.base import MotionGenerator
+    from uncertain_feedback.simulated_users.base import SimulatedUser
+
 STEERING_MODES = ("off", "resample", "cg")
 
 
@@ -87,6 +90,32 @@ class SteeringSpec:
     cost: Callable[[Tensor], Tensor]
     config: SteeringConfig
     seed: int = 0
+
+
+def build_steering_spec(
+    gen: MotionGenerator,
+    user: SimulatedUser,
+    config: SteeringConfig,
+    seed: int,
+) -> SteeringSpec | None:
+    """Compile ``user``'s bounds into a steering spec, or ``None`` if unsteerable.
+
+    Skips (with a printed reason) when the backend does not implement steering
+    or the persona has no bounds the torch feature path supports.
+    """
+    if config.mode == "off":
+        return None
+    # pylint: disable=import-outside-toplevel
+    from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
+
+    if not isinstance(gen, MdmMotionGenerator):
+        print("steering: unsupported backend, sampling unsteered")
+        return None
+    cost = gen.build_user_steering_cost(user)
+    if cost is None:
+        print(f"steering: no supported bounds for {user.name}, sampling unsteered")
+        return None
+    return SteeringSpec(cost=cost, config=config, seed=seed)
 
 
 def resample_indices(

@@ -42,6 +42,7 @@ from uncertain_feedback.envs.robot_preview import RobotPlanPreviewEnv
 from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.motion_generators.base import MotionGenerator
+from uncertain_feedback.motion_generators.steering import build_steering_spec
 from uncertain_feedback.planners.correction_session import (
     CorrectionRoundResult,
     CorrectionSession,
@@ -863,6 +864,11 @@ def run_repeated_correction_session(
                 if feedback_cfg.uq.user_cluster and setup.user.bounds
                 else None
             )
+            spec = build_steering_spec(
+                gen, setup.user, feedback_cfg.uq.steering, cfg.seed
+            )
+            if spec is not None:
+                print(f"steering: mode {spec.config.mode}")
             traj = mpc.query_mdm_with_uncertainty(
                 gen,
                 feedback_text,
@@ -873,6 +879,7 @@ def run_repeated_correction_session(
                 mdm_frames=mdm_frames,
                 frozen_body=args.frozen_body,
                 cluster_selector=selector,
+                steering=spec,
             )
             cutoff = max(1, round(len(traj) * mpc.trajectory_fraction))
             llm_traj = setup.fk.arm_aa_to_q_batch(

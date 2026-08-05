@@ -1135,6 +1135,7 @@ async function generate() {
     n_clusters: +$("n-clusters").value,
     scale: getScale(),
     clusterer: $("clusterer-select").value,
+    steering_mode: $("steering-select").value,
   }, "generating MDM samples + assembling cluster paths (this can take minutes)");
   $("recluster").disabled = false;
   applyClusterPayload(data);
@@ -3005,6 +3006,7 @@ async function main() {
   $("n-samples").value = INIT.uq.diffusion_samples;
   $("n-clusters").value = INIT.uq.n_clusters;
   $("clusterer-select").value = INIT.uq.clusterer;
+  $("steering-select").value = INIT.uq.steering_mode;
   $("scale").value = INIT.uq.scale;
   $("scale-num").value = INIT.uq.scale;
   $("cost-backend").value = INIT.cost_backend;

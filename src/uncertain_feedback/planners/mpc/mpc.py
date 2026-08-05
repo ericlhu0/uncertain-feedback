@@ -59,6 +59,7 @@ from uncertain_feedback.uncertainty.uq_selector import UqClusterResult, UqSelect
 
 if TYPE_CHECKING:
     from uncertain_feedback.motion_generators.base import MotionGenerator
+    from uncertain_feedback.motion_generators.steering import SteeringSpec
     from uncertain_feedback.utils.plot import ArmVisualizer
 
 
@@ -500,6 +501,7 @@ class ArmMPC:
         cluster_selector: (
             Callable[[dict[int, np.ndarray]], int | tuple[int, float]] | None
         ) = None,
+        steering: SteeringSpec | None = None,
     ) -> np.ndarray:
         """Generate multiple MDM samples, cluster, pick, and queue the mean.
 
@@ -522,6 +524,7 @@ class ArmMPC:
             frozen_body=frozen_body,
             default_scale=default_scale,
             cluster_selector=cluster_selector,
+            steering=steering,
             trajectory_fraction=feedback.trajectory_fraction,
             spine3_pos=self._spine3_pos,
             spine3_aa=self._spine3_aa,

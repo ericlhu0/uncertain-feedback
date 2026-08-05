@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-08-04
+**Last updated:** 2026-08-05
 **Branch:** mdm-steering
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -99,7 +99,7 @@ uncertain-feedback/
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator
 │   │   ├── base.py                   # MotionGenerator ABC (shared backend interface)
-│   │   ├── steering.py               # Diffusion steering: SteeringConfig/Spec/Event, particle resampler, classifier-guidance cond_fn, conflict diagnostic (torch-free — imported at config-parse time)
+│   │   ├── steering.py               # Diffusion steering: SteeringConfig/Spec/Event, build_steering_spec (shared persona→spec guard chain), particle resampler, classifier-guidance cond_fn, conflict diagnostic (torch-free — imported at config-parse time)
 │   │   └── mdm/
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
 │   │       ├── torch_features.py     # Differentiable arm features + hidden-bound cost read off x̂0 (the steering signal; imports torch at module scope, so consumers import it lazily)
@@ -424,7 +424,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `arm`                  | 3×3 list? | Initial left-arm `[shoulder, elbow, wrist]` axis-angle override on top of `pose` (same semantics as `--arm`, which wins when both are given) |
 | `feedback.*`           | FeedbackConfig | Presence enables the MDM feedback method. `max_playback_delta` (max per-joint rotation, radians, per step while following the MDM trajectory, default 0.05 — rate limit easing the initial jump into the trajectory and any large frame-to-frame jump), `trajectory_fraction` (fraction of MDM frames to enqueue, default 1.0), `frames` (exact MDM frames to generate; null = generator default), `text_time` (step at which the scripted correction triggers), and a nested optional `uq:` (below). |
 | `feedback.uq.*`        | UqConfig | Presence enables the UQ layer: `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose [default] \| agglo_path_pca \| agglo_t2m; Demo Runner dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
-| `feedback.uq.steering.*` | SteeringConfig | Cost-steered diffusion sampling (§14). `mode` (`off` [default] \| `resample` \| `cg`), `resample_steps` (denoising-loop indices at which to score and resample, default `[15, 25, 35, 45]`), `temperature` (softmax temperature over z-scored costs, default 0.5 — scale-free, transfers across costs), `guide_from` (cg only: first guided loop index, default 10), `guidance_weight` (cg only: λ on the cost gradient, default 1e5; useful band 1e4–1e5, needs per-cost calibration). Validated in `SteeringConfig.__post_init__`; checked-in configs ship `mode: "off"`. |
+| `feedback.uq.steering.*` | SteeringConfig | Cost-steered diffusion sampling (§14). `mode` (`off` [default] \| `resample` \| `cg`), `resample_steps` (denoising-loop indices at which to score and resample, default `[15, 25, 35, 45]`), `temperature` (softmax temperature over z-scored costs, default 0.5 — scale-free, transfers across costs), `guide_from` (cg only: first guided loop index, default 10), `guidance_weight` (cg only: λ on the cost gradient, default 1e5; useful band 1e4–1e5, needs per-cost calibration). Validated in `SteeringConfig.__post_init__`; checked-in configs ship `mode: "off"`. Honored by both frontends; the demo runner's Steering dropdown overrides `mode` per generation. |
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
@@ -733,7 +733,13 @@ it; a backend that does not support steering raises `NotImplementedError` for a 
 spec (as it may for `frozen_body`). A `SteeringSpec` bundles a `cost` (normalized `x̂0 (N,263,1,T)` → `(N,)`; built
 by `MdmMotionGenerator.build_user_steering_cost(user)` from the persona's bounds, §6), a
 `SteeringConfig`, and a `seed`. Nothing steers unless the config says so — `mode: "off"` is
-the default everywhere.
+the default everywhere. `build_steering_spec(gen, user, config, seed)` (same module) is the
+shared guard chain both frontends compile a spec through: `mode: "off"` → `None`; non-MDM
+backend or a persona without supported bounds → printed skip + `None` (unsteered sampling).
+The demo runner calls it per generation from `Session._steering_spec` with the browser's
+Steering-dropdown mode substituted into the YAML config; `run.py` calls it per correction
+round in `handle_correction` and threads the spec through
+`ArmMPC.query_mdm_with_uncertainty(steering=...)` → `UqSelector.query`.
 
 `MdmMotionGenerator._sample_hml` writes the denoising loop out instead of calling
 `p_sample_loop`, so steering can see each step's `x̂0`. Unsteered it is byte-equivalent to
@@ -749,7 +755,8 @@ so a steered and an unsteered run at the same seed start from identical noise.
 
 Each scoring step appends a `SteeringEvent` (`step`, `cost_mean`, `frac_violating`, `ess`,
 `unique_ancestors` — `None` in cg mode) to `gen.last_steering_events`; the demo runner logs
-them. On the first event, `conflict_warning` fires when essentially every sample violates the
+them per event, and the sampler itself prints the conflict warning (so CLI runs see it too).
+On the first event, `conflict_warning` fires when essentially every sample violates the
 cost *and* the effective sample size has collapsed: that means the prompt and the cost
 conflict, so resampling harder only destroys diversity. It is a diagnostic only — nothing
 auto-escalates; switching to `mode: cg` is the operator's call.

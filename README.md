@@ -1363,11 +1363,35 @@ explicit round instructions enter the agent prompt.
 ## Method-level evaluation
 
 Scripts that evaluate the *whole* pipeline end to end live in the repo-root
-`evaluation/` directory, outside `src/`. It is currently an empty placeholder: the
-previous runners under `src/uncertain_feedback/experiments/` were removed in the
-stage-package refactor and will be rewritten there on top of the per-stage façades
+`evaluation/` directory, outside `src/`, structured as **benchmarks × approaches ×
+metrics** with hydra configs (see `evaluation/README.md` for the full guide and the
+paper-experiment → config mapping). Built on the per-stage façades
 (`motion_generators`, `uncertainty`, `cost_generation`, `evaluation_mechanism`,
-`planners.mpc.rollout`, `simulated_users`). See `evaluation/README.md`.
+`planners.mpc.rollout`, `simulated_users`).
+
+CPU-only smoke run (no MDM, no LLM):
+
+```
+uv run python evaluation/run_single_experiment.py approach=edit_baseline \
+    approach.learning=none benchmark=smoke mpc_config=evaluation/conf/mpc_smoke.yaml
+```
+
+Single experiment / sweep / aggregation:
+
+```
+uv run python evaluation/run_single_experiment.py approach=full benchmark=personas_core
+uv run python evaluation/run_single_experiment.py -m seed=0,1,2 \
+    approach=full,no_steering benchmark=abstraction_sweep
+uv run python evaluation/analyze_results.py multirun/ --out evaluation_analysis/
+```
+
+Approaches: `full`, `no_steering`, `immediate_only`, `no_learning` (SystemApproach
+ablations over `learning` and `steering_mode`) and `edit_baseline` (predefined
+parameterized edits, no text-to-motion model). Benchmarks: `smoke`,
+`personas_core`, `abstraction_sweep` (verbalizer sweep), `lifelong` (per-persona
+goal sequences; pair with `mpc_config=...mdm_llm_transfer.yaml`). Outputs land in
+hydra's `outputs/`/`multirun/` dirs as `results.csv` (per feedback round) and
+`episodes.csv` (per episode), plus per-round `.npy`/cost artifacts.
 
 Note the in-`src` package `evaluation_mechanism/` is a different thing: it is how the
 method scores its *own* generated cost functions, and the `agent` backend's sandbox

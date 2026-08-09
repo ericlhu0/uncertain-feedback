@@ -1,0 +1,4 @@
+_target_: evaluation.approaches.edit_baseline.ParameterizedEditApproach
+name: edit_baseline
+learning: immediate
+edit_delta: 0.4

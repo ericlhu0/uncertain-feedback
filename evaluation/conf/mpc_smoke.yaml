@@ -1,0 +1,24 @@
+# CPU-only MpcRunConfig for harness smoke runs: no MDM pose, no LLM.
+# Pair with approach=edit_baseline (requires_generator: false) and
+# approach.learning=none.
+steps: 80
+horizon: 8
+n_mpc_samples: 64
+max_angle_delta: 0.02
+arm:
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
+
+corrections:
+  trigger_threshold: 0.02
+
+cartesian:
+  goals:
+    - [-0.18, 0.40, 0.34]
+  threshold: 0.05
+
+preference_learning: false
+
+llm_cost:
+  enabled: false

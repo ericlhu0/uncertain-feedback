@@ -1,0 +1,5 @@
+_target_: evaluation.approaches.keypoint_baseline.KeypointApproach
+name: llm_keypoint
+# Same learning stage as the system arms: the arm isolates the grounding stage.
+learning: immediate
+displacement_cap: 0.4

@@ -1,0 +1,23 @@
+defaults:
+  - _self_
+  - approach: full
+  - benchmark: smoke
+
+seed: 0
+# MpcRunConfig YAML (planner, feedback/uq, llm_cost); repo-root relative.
+mpc_config: src/uncertain_feedback/planners/mpc/configs/mdm_llm.yaml
+# Truncate the benchmark's task list (debugging aid).
+max_tasks: null
+# Override simulated_user.chooser (intent_aligned | progress | random).
+sim_chooser: null
+
+# run/sweep dirs are anchored to the launch cwd: the MDM loader os.chdir()s
+# into its submodule, which would otherwise relocate later jobs' output dirs.
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${oc.env:PWD}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${oc.env:PWD}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}

@@ -1,0 +1,4 @@
+_target_: evaluation.approaches.system.SystemApproach
+name: immediate_only
+learning: immediate
+steering_mode: "off"

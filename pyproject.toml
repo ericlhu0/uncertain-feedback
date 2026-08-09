@@ -72,7 +72,8 @@ develop = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["uncertain_feedback*", "evaluation*"]
 
 [tool.setuptools.package-data]
 uncertain_feedback = [

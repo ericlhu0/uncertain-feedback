@@ -1,0 +1,8 @@
+# Exp A backbone: every bounded persona, everyday feedback, one goal each.
+_target_: evaluation.benchmarks.base.InteractionBenchmark
+name: personas_core
+personas: null
+verbalizers: [everyday]
+use_persona_goals: true
+max_goals: 1
+max_rounds: 3

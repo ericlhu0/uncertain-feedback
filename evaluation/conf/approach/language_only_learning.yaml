@@ -1,0 +1,7 @@
+_target_: evaluation.approaches.system.SystemApproach
+name: language_only_learning
+learning: immediate
+steering_mode: "off"
+# Ablation: costs are authored from the utterance + nominal plan only; the
+# selected correction motion never reaches the cost generator.
+learn_from: nominal

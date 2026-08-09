@@ -24,7 +24,16 @@ The system takes a **natural-language prompt** (e.g. "raise my left arm") and pr
 
 ```
 uncertain-feedback/
-├── evaluation/                       # Method-level evaluation (outside src/): scripts the researcher runs to evaluate the whole pipeline. Placeholder README only — the deleted experiments/ runners will be rewritten here on the stage façades
+├── evaluation/                       # Method-level evaluation (outside src/, installed as the `evaluation` package): benchmarks × approaches × metrics on the stage façades
+│   ├── run_single_experiment.py      # Hydra entry point: one (approach, benchmark, seed) run → results.csv (per round) + episodes.csv
+│   ├── analyze_results.py            # Aggregate runs/multiruns → per-approach tables + per-event plots
+│   ├── episode.py                    # Interaction loop: oracle path → trigger → attribute → verbalize → ground → choose → learn → continue; learned costs persist across a task's goal sequence
+│   ├── rig.py                        # EvalRig: MpcRunConfig + fk/context/q0 (+ optional MDM load)
+│   ├── verbalize.py                  # Bind a task's verbalizer (abstraction level) to episode state
+│   ├── metrics.py / structs.py       # Per-round records; InteractionTask/GroundingResult/RoundContext/LearnOutcome
+│   ├── benchmarks/base.py            # InteractionBenchmark: personas × verbalizers × goal sequences
+│   ├── approaches/                   # SystemApproach (learning/steering knobs) + baselines: ParameterizedEditApproach (single-joint axis-offset edits, weak reference), BridgePotentialFieldApproach (BRIDGE-style landmark attract/repel potential-field edits, oracle-selected upper bound), BridgeInterpreterApproach (language-faithful: LLM maps utterance -> landmark/polarity/strength), KeypointApproach (LLM emits one 3D workspace keypoint for elbow/wrist); shared learn() = generate_cost_for_cluster + CombineCostGenerator
+│   └── conf/                         # Hydra configs (approach/, benchmark/) + mpc_smoke.yaml (CPU-only planner config)
 ├── src/uncertain_feedback/
 │   ├── consts.py                     # Project-wide paths (MDM_ROOT, weights)
 │   ├── planners/
@@ -433,9 +442,9 @@ When `llm_cost.enabled: true` in the YAML:
 | `cartesian.*`          | CartesianConfig | Presence enables the Cartesian goal space: `goals` (non-empty list of [x,y,z]), `threshold` |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
-| `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets). Like `persona_goals`, still parsed but not consumed after the experiment-runner removal; the repo-root `evaluation/` rewrite will use it. Legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
-| `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments. Parsed and available on `MpcRunConfig`, but no code applies it since the experiment runners were removed — the method-level experiments in repo-root `evaluation/` will consume it. Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
-| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings, consumed by the method-level experiments to be rewritten in repo-root `evaluation/`: `verbalizer` (`vague` \| `everyday` [default] \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20) |
+| `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets). Consumed (with `persona_goals`) by the repo-root `evaluation/` benchmarks: `InteractionBenchmark(use_persona_goals=true)` appends them to a persona's goal sequence. Legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
+| `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments. Consumed by the repo-root `evaluation/` benchmarks (`InteractionBenchmark(use_persona_goals=true)` resolves each persona's cartesian + transfer goals into its task's goal sequence); nothing in `src/` applies it. Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
+| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings. `chooser` (`intent_aligned` [default] \| `progress` \| `random`) selects the candidate-choice model in `simulated_users/chooser.py` — intent-aligned picks the comfortable candidate best aligned with the private `CorrectionIntent`; acceptability = mean playback violation ≤ trigger threshold. The repo-root `evaluation/` episode loop consumes `magnitudes`, `nominal_steps`, and `time_of_day`; `verbalizer`/`seed`/`max_rounds` are superseded there by the benchmark's task fields (verbalizer grid, hydra seed, per-benchmark round cap) and remain unconsumed: `verbalizer` (`vague` \| `everyday` [default] \| `motion_directive` \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20), `time_of_day` (session clock in hours `[0, 24)` seen by time-conditioned personas via `MpcCostContext.time_of_day`; default unset = untimed) |
 
 ---
 

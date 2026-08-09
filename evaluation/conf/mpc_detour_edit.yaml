@@ -1,0 +1,60 @@
+# mpc_detour.yaml with the MDM pose file replaced by its decoded arm axis-angles,
+# for approaches that skip the motion-generator load.
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.01
+arm:
+  - [-0.281804, 0.003735, -0.441243]
+  - [0.983574, -0.50581, -0.538337]
+  - [0.015375, -0.384195, 0.324092]
+feedback:
+  max_playback_delta: 0.05
+  trajectory_fraction: 1
+  frames: 50
+  text_time: 10
+  uq:
+    diffusion_samples: 500
+    n_clusters: 3
+    auto_cluster: 1
+    scale: 1.0
+    steering:
+      mode: "off"
+      resample_steps: [15, 25, 35, 45]
+      temperature: 0.5
+      guide_from: 10
+      guidance_weight: 1.0e5
+
+corrections:
+  trigger_threshold: 0.02
+
+cartesian:
+  goals:
+    - [-0.15, -0.05, 0.30]
+  threshold: 0.05
+
+preference_learning: false
+preference_alpha: 0
+
+simulated_user:
+  time_of_day: 9.0
+
+persona_goals:
+  cross_body_pain:
+    cartesian:
+      - [-0.15, -0.05, 0.30]
+    transfer: []
+  brachial_plexus_mechanosensitivity:
+    cartesian:
+      - [0.48, 0.10, 0.10]
+    transfer:
+      - [0.45, 0.15, 0.15]
+
+llm_cost:
+  enabled: true
+  model: gpt-5.6-luna
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true
+  max_turns: 3
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"

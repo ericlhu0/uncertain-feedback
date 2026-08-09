@@ -1,0 +1,7 @@
+_target_: evaluation.benchmarks.base.InteractionBenchmark
+name: smoke
+personas: [elbow_contracture]
+verbalizers: [joint_resolved]
+goals: [[-0.18, 0.40, 0.34]]
+max_goals: 1
+max_rounds: 2

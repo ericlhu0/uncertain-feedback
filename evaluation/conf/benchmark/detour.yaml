@@ -1,0 +1,11 @@
+# Grounding showcase: the feedback's literal direction crosses the persona's
+# pain region, so the correct correction is a detour (path shape / coupled
+# posture), not an endpoint shift. Pair with mpc_config=evaluation/conf/
+# mpc_detour.yaml (system arms) or mpc_detour_edit.yaml (baselines).
+_target_: evaluation.benchmarks.base.InteractionBenchmark
+name: detour
+personas: [cross_body_pain, brachial_plexus_mechanosensitivity]
+verbalizers: [everyday, motion_directive]
+use_persona_goals: true
+max_goals: 1
+max_rounds: 3

@@ -1,0 +1,16 @@
+# Exp B/C: goal sequences per persona (use with an mpc_config defining
+# persona_goals, e.g. mdm_llm_transfer.yaml); learning persists across goals.
+_target_: evaluation.benchmarks.base.InteractionBenchmark
+name: lifelong
+personas:
+  [
+    adhesive_capsulitis,
+    stroke_flexor_synergy,
+    painful_arc,
+    cross_body_pain,
+    elbow_contracture,
+  ]
+verbalizers: [everyday]
+use_persona_goals: true
+max_goals: 4
+max_rounds: 3

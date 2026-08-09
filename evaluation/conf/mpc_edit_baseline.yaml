@@ -1,8 +1,13 @@
+# mdm_llm.yaml with the MDM pose file replaced by its decoded arm axis-angles,
+# for approaches that skip the motion-generator load (edit_baseline).
 steps: 300
 horizon: 10
 n_mpc_samples: 200
 max_angle_delta: 0.01
-pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
+arm:
+  - [-0.281804, 0.003735, -0.441243]
+  - [0.983574, -0.50581, -0.538337]
+  - [0.015375, -0.384195, 0.324092]
 feedback:
   max_playback_delta: 0.05
   trajectory_fraction: 1
@@ -13,13 +18,12 @@ feedback:
     n_clusters: 3
     auto_cluster: 1
     scale: 1.0
-    # Steer diffusion sampling toward the simulated user's hidden bounds.
     steering:
-      mode: "off"           # off | resample | cg
+      mode: "off"
       resample_steps: [15, 25, 35, 45]
       temperature: 0.5
-      guide_from: 10        # cg only
-      guidance_weight: 1.0e5  # cg only
+      guide_from: 10
+      guidance_weight: 1.0e5
 
 corrections:
   trigger_threshold: 0.02
@@ -32,13 +36,9 @@ cartesian:
 preference_learning: false
 preference_alpha: 0
 
-# Session clock (hours) for time-conditioned personas (morning_shoulder_stiffness).
 simulated_user:
   time_of_day: 9.0
 
-# Curated per-persona goals (from mdm_llm_transfer.yaml): geometry that makes
-# the nominal plan provoke each persona's restriction. Consumed only by the
-# evaluation/ benchmarks (use_persona_goals: true); inert everywhere in src/.
 persona_goals:
   adhesive_capsulitis:
     cartesian:

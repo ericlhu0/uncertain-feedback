@@ -1,0 +1,4 @@
+_target_: evaluation.approaches.system.SystemApproach
+name: full
+learning: lifelong
+steering_mode: resample

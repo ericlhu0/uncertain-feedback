@@ -1,0 +1,19 @@
+# Exp A: feedback across abstraction levels (vague -> everyday -> motion-directive -> joint-resolved).
+# Personas are limited to those with curated persona_goals (goal geometry that
+# makes the nominal plan provoke the restriction); the config's default goal
+# triggers almost no feedback for the others.
+_target_: evaluation.benchmarks.base.InteractionBenchmark
+name: abstraction_sweep
+personas:
+  [
+    adhesive_capsulitis,
+    stroke_flexor_synergy,
+    painful_arc,
+    cross_body_pain,
+    triceps_long_head_contracture,
+    elbow_contracture,
+  ]
+verbalizers: [vague, everyday, motion_directive, joint_resolved]
+use_persona_goals: true
+max_goals: 1
+max_rounds: 3

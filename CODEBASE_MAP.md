@@ -1,7 +1,7 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-07-30
-**Branch:** full-agent
+**Last updated:** 2026-08-05
+**Branch:** mdm-steering
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
 
@@ -57,7 +57,6 @@ uncertain-feedback/
 │   │       │   └── mdm.py            # MdmFeedback + FeedbackConfig (rate-limited MDM playback, stall-skip when constrained)
 │   │       └── configs/              # Example YAML config files
 │   │           ├── mdm.yaml
-│   │           ├── kimodo.yaml  # motion_generator: kimodo backend
 │   │           ├── mdm_learn.yaml
 │   │           ├── mdm_llm.yaml
 │   │           ├── mdm_llm_turns.yaml  # backend: turns (multi-turn scored selection)
@@ -100,13 +99,10 @@ uncertain-feedback/
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator
 │   │   ├── base.py                   # MotionGenerator ABC (shared backend interface)
-│   │   ├── kimodo/                   # kimodo (NVIDIA) backend, isolated conda env
-│   │   │   ├── kimodo_api.py         # KimodoMotionGenerator (subprocess bridge)
-│   │   │   ├── _kimodo_inference_worker.py  # standalone worker (runs in kimodo env)
-│   │   │   ├── generate_motion.py    # Standalone kimodo text-to-motion + video CLI
-│   │   │   └── start_pose.npy        # SMPL body_pose (21,3) default start pose
+│   │   ├── steering.py               # Diffusion steering: SteeringConfig/Spec/Event, build_steering_spec (shared persona→spec guard chain), particle resampler, classifier-guidance cond_fn, conflict diagnostic (torch-free — imported at config-parse time)
 │   │   └── mdm/
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
+│   │       ├── torch_features.py     # Differentiable arm features + hidden-bound cost read off x̂0 (the steering signal; imports torch at module scope, so consumers import it lazily)
 │   │       ├── hml_smpl_conversion.py  # HML263 ↔ SMPL pose conversions
 │   │       ├── mdm_parser_util.py    # CLI arg parser helpers for MDM scripts
 │   │       ├── sample_leftarm.py     # Standalone left-arm generation script
@@ -153,6 +149,7 @@ uncertain-feedback/
 │   │   └── viz.py                    # render_hidden_bounds: shaded forbidden regions + trajectories
 │   ├── data_collection/
 │   │   ├── build_mdm_dataset.py      # Build HumanML3D dataset from video/labels
+│   │   ├── build_speed_dataset.py    # Speed-variant dataset from cached positions (fast/normal/slow + above-shoulder-slow retiming, speed captions)
 │   │   ├── extract_all_frames.py     # Video → frames
 │   │   ├── labeler.py                # Browser-based text labeling UI (Flask)
 │   │   ├── mhr_pose_estimator.py     # MHR human pose estimation wrapper
@@ -202,7 +199,7 @@ no sampling) before the goal phase resumes.
 |------|-----------|-----------------|----------------|--------------|
 | goal space | `GoalSpace` (`goal_spaces/base.py`) | `CartesianGoalSpace` — spine3-relative wrist goals, rotation-free | `cartesian:` | no goal phase (hold after feedback) |
 | action space | `ActionSpace` (`action_spaces/base.py`) | `HumanArmActions` — Gaussian deltas composed on SO(3), clavicle zeroed (a robot holding the forearm cannot actuate the shoulder girdle); `RobotJointActions` — robot joint deltas capped at the execution inf-norm cap, projected back through the rigid `MeasuredGrasp` (`project_forearm_frames`) so every cost still scores the human arm, projection residual hard-gated (`max_grasp_residual` over the leading `grasp_residual_frames`) and soft-penalized | `robot_actions:` | human-arm sampling |
-| feedback method | `FeedbackMethod` (`feedback/base.py`) | `MdmFeedback` — validated MDM trajectory played back one rate-limited frame per step (`max_playback_delta` per joint), with an optional UQ layer (`UqSelector`, `uncertainty/uq_selector.py`): draw N diffusion samples, cluster, pick interactively or headlessly (`auto_cluster` / `cluster_selector`), scale, enqueue the chosen mean | `feedback:` (nested `uq:`) | no correction phase |
+| feedback method | `FeedbackMethod` (`feedback/base.py`) | `MdmFeedback` — validated MDM trajectory played back one rate-limited frame per step (`max_playback_delta` per joint), with an optional UQ layer (`UqSelector`, `uncertainty/uq_selector.py`): draw N diffusion samples, cluster, pick interactively or headlessly (`auto_cluster` / `cluster_selector`), scale, enqueue the chosen mean. The UQ layer can also **steer** sampling toward the user's cost model before clustering (`feedback.uq.steering`, §14) | `feedback:` (nested `uq:`) | no correction phase |
 | constraints | `FeasibilityConstraint` (`constraints/base.py`) | `RobotIkConstraint` — masks rollouts whose leading frames continuation IK (`track_robot_ik_batch`, never execution's enumerating fallback) cannot place within `max_residual`; also screens feedback playback at push time (drop unreachable frames), step time (hold), and via the closest-approach stall-skip (`playback_stall_steps`) | `constraints:` (named entries, `CONSTRAINT_BUILDERS` registry) | unconstrained |
 
 Composition rules (enforced in the loader and `ArmMPC.__init__`):
@@ -347,6 +344,14 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 
 - `JointLimitCost` — linear (L1) penalty on rollout joint rotations that leave a per-slot axis-angle box. Not a YAML key: `build_run()` builds it from the active persona's `joint_limits` (`SimulatedUser.limit_cost()`) and appends it to the composite, so the planner refuses to *generate* motions outside the same anatomical box the persona uses to *score* them. Linear (not squared) so the gradient stays firm at the boundary.
 
+### Steering costs (`motion_generators/mdm/torch_features.py`)
+
+A third, narrower cost surface, used **only inside diffusion sampling** (§14) — never to score or select a trajectory. `build_user_bound_cost(user, hml_mean, hml_std)` compiles a persona's `HiddenBound`/`CoupledBound` terms into a differentiable `x̂0 → (N,)` torch cost with `HiddenCostTerm`'s shape (time-averaged square of the summed per-frame violation, weight omitted: resampling is scale-free and cg folds the scale into λ). Caveats, all deliberate:
+
+- **World-frame features.** Flexion and elevation are read straight off the RIC joint positions in the HML263 block, so no IK runs in the loop (the numpy IK path costs ~8.5 s per scoring event). Elbow flexion matches `arm_feature_series` exactly; shoulder elevation is measured from world-down instead of torso-down, so the two agree only for an unleaned torso — which is what `test_torch_position_features_match_arm_feature_series` pins (upright fixture, `spine3_aa = 0`). Demo runs use `frozen_body=False`, so the body *can* lean and the steering signal then reads slightly stricter than the oracle.
+- **Not every term is representable.** Only `elbow_flexion` and `shoulder_elevation` bounds are supported; `JointBoxLimit` is structurally excluded (it needs axis-angles). `build_user_bound_cost` prints the terms it skips and returns `None` when nothing is left.
+- **Time-averaged, so mildly hackable** toward violating late frames only. Acceptable here because the cost never decides anything: oracle evaluation and cluster scoring keep going through the exact IK path.
+
 ### Cost structure
 
 - `_range_rollout_cost()` — shared helper: penalizes out-of-range feature values across predicted rollout, plus a progress penalty when already violating and moving farther out
@@ -405,7 +410,7 @@ When `llm_cost.enabled: true` in the YAML:
 
 | Key                    | Type     | Purpose                                               |
 |------------------------|----------|-------------------------------------------------------|
-| `motion_generator`     | str      | Text-to-motion backend: `mdm` (default) or `kimodo`  |
+| `motion_generator`     | str      | Text-to-motion backend: `mdm` (default, only backend) |
 | `env`                  | str      | Execution environment realizing each MPC step: `kinematic` (default), `sim_robot_visual` (no-physics PyBullet scene with a Panda IK'd to a forearm grasp point), `sim_mannequin` (physics proxy: Panda drags the passive limb-manipulation mannequin arm; achieved q measured back from link positions), or `real` (real world: human arm measured from OptiTrack rigid bodies, real Gen3 commanded over ZMQ). Passed to the planner constructor (`build_run`, demo runner) after `set_pose_context`; every planner's `step` returns the env-achieved q. Envs render via `visualize()`/`save_video()` (`run.py --env-video`). |
 | `env_params`           | mapping  | Keyword args forwarded to the env constructor by `make_env` (empty default). `sim_mannequin` accepts `robot` (`panda` default, or `kinova_gen3` — Gen3 7-DOF + Robotiq 2F-85 URDF loaded from `~/kortex_description`), `robot_max_joint_delta` (per-step robot joint travel cap, rad), `robot_base_offset` (robot base position relative to spine3, pybullet frame), `robot_joint_limit_padding` (rad; shrinks robot joint limits so commands clear the real controller's soft limits), and — kinova_gen3 only — `real_mirror_host`/`real_mirror_confirm_start` (mirror the sim robot's achieved joint trajectory onto the real Gen3 via an emprise-gen3-controller ZMQ server, planning against the controller's enforced joint-limit table; see `envs/real_mirror.py`). `real` accepts `mocap_host` (OptiTrack PC address), `mocap_rigid_bodies` (Motive streaming ids for `robot_base`/`collar`/`collar_right`/`shoulder`/`elbow`/`wrist`; the right-collar body — read at calibration only — makes the registration yaw measurable: the left→right collar axis is the torso's facing, so its measured direction solves the yaw with no arm assumption, and the robot is loaded at that solved yaw), `mocap_hold_timeout` (s, default 0.5 — dropout hold before raising `MocapStaleError`), `recording` (path to a `RealRecording` .npz — replays both sensed channels instead of the live streams; set this *or* `mocap_host`, not both; `real_mirror_host` then only says whether a robot is in the loop at all, not what it talks to), plus `robot`, `robot_max_joint_delta`, `robot_joint_limit_padding`, `real_mirror_host` (null = mocap-only dry run, no command reaches the arm), `real_mirror_confirm_start` (one prompt before tracking starts — the real env moves nothing at startup, since the grasp must already be taken and is measured from the real ee pose), `control_mode` (default `position_joint`; `compliant_joint` tracks targets with the emprise controller's joint-space impedance so the arm yields to the person — gains are server-side), `live_view`/`live_view_fps` (PyBullet GUI window with the measured person as an SMPL mesh next to the robot's meshes; needs a display, mesh refresh rate-limited because each refresh replaces the whole mesh), and `preview_plan` (default true; draw each planned step in the live view as it is solved and wait for operator approval before the first command — needs `live_view`). |
 | `steps`                | int      | Total MPC steps to run                               |
@@ -419,7 +424,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `arm`                  | 3×3 list? | Initial left-arm `[shoulder, elbow, wrist]` axis-angle override on top of `pose` (same semantics as `--arm`, which wins when both are given) |
 | `feedback.*`           | FeedbackConfig | Presence enables the MDM feedback method. `max_playback_delta` (max per-joint rotation, radians, per step while following the MDM trajectory, default 0.05 — rate limit easing the initial jump into the trajectory and any large frame-to-frame jump), `trajectory_fraction` (fraction of MDM frames to enqueue, default 1.0), `frames` (exact MDM frames to generate; null = generator default), `text_time` (step at which the scripted correction triggers), and a nested optional `uq:` (below). |
 | `feedback.uq.*`        | UqConfig | Presence enables the UQ layer: `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose [default] \| agglo_path_pca \| agglo_t2m; Demo Runner dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
-| `num_denoising_steps`  | int?     | Kimodo DDIM steps (kimodo backend only; None = backend default 100) |
+| `feedback.uq.steering.*` | SteeringConfig | Cost-steered diffusion sampling (§14). `mode` (`off` [default] \| `resample` \| `cg`), `resample_steps` (denoising-loop indices at which to score and resample, default `[15, 25, 35, 45]`), `temperature` (softmax temperature over z-scored costs, default 0.5 — scale-free, transfers across costs), `guide_from` (cg only: first guided loop index, default 10), `guidance_weight` (cg only: λ on the cost gradient, default 1e5; useful band 1e4–1e5, needs per-cost calibration). Validated in `SteeringConfig.__post_init__`; checked-in configs ship `mode: "off"`. Honored by both frontends; the demo runner's Steering dropdown overrides `mode` per generation. |
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
@@ -452,6 +457,12 @@ Step 2: Label video segments with text
 Step 3: Build MDM dataset
     └── build_mdm_dataset.py → HumanML3D dataset dir
         Uses: smpl_to_hml263.py, mhr_to_hml263_pipeline.py
+
+Step 3b (optional): Build speed-variant dataset from cached positions
+    └── build_speed_dataset.py → HumanML3D dataset dir
+        Retimes each mdm_cache segment to fast/normal/slow (51/96/180 frames)
+        plus a conditional variant (3× slower while wrist above shoulder),
+        captioned with matching speed language for speed-conditioned fine-tuning
 
 Step 4: Fine-tune MDM
     └── motion-diffusion-model/train/train_mdm.py
@@ -513,7 +524,6 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | HML263 feature vector   | `(263,)`   | MDM input/output                              |
 | SMPL body_pose          | `(21, 3)`  | SMPL model; intermediate conversion format   |
 | XYZ joint positions     | `(22, 3)`  | FK output, visualization, clustering features|
-| Global joint rotations  | `(22, 3, 3)` | Derived in Kimodo worker for frame-0 constraint |
 | Arm chain positions     | `(5, 3)`   | FK arm output (spine3 through wrist)          |
 | Spine3 anchor           | `(3,)`×2   | Position + axis-angle; fixed reference frame  |
 | Cartesian wrist goal    | `(3,)`     | Spine3-relative target for Cartesian MPC      |
@@ -543,11 +553,6 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
   - HumanML3D dataset expected at `.../dataset/HumanML3D/`
   - Pretrained weights at `.../save/humanml_enc_512_50steps/model000750000.pt`
   - SMPL neutral model at `.../body_models/smpl/SMPL_NEUTRAL.pkl`
-- **kimodo** (NVIDIA, `github.com/nv-tlabs/kimodo`) — second text-to-motion backend.
-  Installed in an **isolated conda env** (`KIMODO_CONDA_ENV`, default `kimodo`) because it
-  pins `pydantic>=2` / `transformers==5.1.0`, conflicting with the main env. Invoked via
-  `conda run` subprocess (`kimodo/_kimodo_inference_worker.py`), mirroring the SAM/MHR
-  worker pattern. Needs gated HF access to `meta-llama/Meta-Llama-3-8B-Instruct`.
 - **OpenAI** — used for LLM cost generation (`llm/openai_model.py`)
 - **emprise-gen3-controller** — private lab repo driving the real Kinova Gen3 (`envs/real_mirror.py`); not a project dependency — rig hosts install it with `uv pip install -e ../../emprise-gen3-controller` after `uv sync`
 - **sklearn** — KMeans + AgglomerativeClustering in `clustering/base.py`, PCA in `clustering/path_pca_clusterer.py`
@@ -711,7 +716,6 @@ via `SmplLeftArmFK`, implemented once on the base).
 | Backend  | Class                   | Pose repr            | Generation                                  |
 |----------|-------------------------|----------------------|---------------------------------------------|
 | `mdm`    | `MdmMotionGenerator`    | HML263 `(263,)`      | in-process diffusion (MDM submodule)        |
-| `kimodo` | `KimodoMotionGenerator` | SMPL body_pose `(21,3)` | subprocess to isolated conda env (worker) |
 
 `MdmMotionGenerator` builds its inference args from the checkpoint's `args.json` overlaid with
 `mdm/mdm_configs/mdm_config.yaml` (the YAML wins). The YAML pins `use_ema: false`: fine-tune
@@ -719,13 +723,45 @@ checkpoints save the training flag `use_ema: true`, but their EMA (`model_avg`, 
 weights stay ≈95% base model after 500 steps, so loading them silently reverts generation to
 base-MDM behavior. Inference must always load the raw `model` weights.
 
-The kimodo backend reuses `hml_smpl_conversion`'s SMPL-side helpers
-(`smpl_body_pose_to_arm_aa/_collar_aa/_positions/_spine3_aa`) since kimodo's SMPL-X
-`get_amass_parameters()` `pose_body (T,63)` maps directly to SMPL `body_pose (T,21,3)`.
-For start poses, `KimodoMotionGenerator` converts SMPL `body_pose (21,3)` through the
-same FK used by the visualizer and sends Kimodo visualizer-FK joint positions; the worker retargets them onto Kimodo's
-skeleton and builds a frame-0 `FullBodyConstraintSet` from the resulting positions and
-global rotations.
-
 **Adding a new backend:** subclass `MotionGenerator`, implement the 5 abstract methods, and
 register a builder in `MOTION_GENERATOR_BUILDERS`.
+
+### Cost-steered sampling (`motion_generators/steering.py`)
+
+Both `generate_*` methods take a keyword-only `steering: SteeringSpec | None`. MDM implements
+it; a backend that does not support steering raises `NotImplementedError` for a non-`None`
+spec (as it may for `frozen_body`). A `SteeringSpec` bundles a `cost` (normalized `x̂0 (N,263,1,T)` → `(N,)`; built
+by `MdmMotionGenerator.build_user_steering_cost(user)` from the persona's bounds, §6), a
+`SteeringConfig`, and a `seed`. Nothing steers unless the config says so — `mode: "off"` is
+the default everywhere. `build_steering_spec(gen, user, config, seed)` (same module) is the
+shared guard chain both frontends compile a spec through: `mode: "off"` → `None`; non-MDM
+backend or a persona without supported bounds → printed skip + `None` (unsteered sampling).
+The demo runner calls it per generation from `Session._steering_spec` with the browser's
+Steering-dropdown mode substituted into the YAML config; `run.py` calls it per correction
+round in `handle_correction` and threads the spec through
+`ArmMPC.query_mdm_with_uncertainty(steering=...)` → `UqSelector.query`.
+
+`MdmMotionGenerator._sample_hml` writes the denoising loop out instead of calling
+`p_sample_loop`, so steering can see each step's `x̂0`. Unsteered it is byte-equivalent to
+`p_sample_loop` (verified against a seed-locked fixture). Two modes:
+
+| Mode | Mechanism | Cost | Notes |
+|------|-----------|------|-------|
+| `resample` | At each `resample_steps` index, score every chain's `x̂0` and systematically resample the population with weights `softmax(-z(cost)/temperature)`; only the latent is reindexed (every per-sample `model_kwargs` entry is an identical broadcast) | ~0 s at N=500 | Default. Works with any cost, differentiable or not; can't push samples off-manifold, only reweight the model's own mass |
+| `cg` | Classifier guidance: `p_sample_with_grad` from `guide_from` on, with `cond_fn = -guidance_weight · ∇ₓ cost(x̂0)` | ~2× sampling time | For the prompt/cost-conflict regime resampling cannot fix. Needs per-cost λ calibration. `p_sample_loop(cond_fn_with_grad=True)` is broken in the vendored code, so the manual loop is the only working route |
+
+The resampler's numpy RNG is keyed off `(seed, step_idx)`, deliberately off the torch stream,
+so a steered and an unsteered run at the same seed start from identical noise.
+
+Each scoring step appends a `SteeringEvent` (`step`, `cost_mean`, `frac_violating`, `ess`,
+`unique_ancestors` — `None` in cg mode) to `gen.last_steering_events`; the demo runner logs
+them per event, and the sampler itself prints the conflict warning (so CLI runs see it too).
+On the first event, `conflict_warning` fires when essentially every sample violates the
+cost *and* the effective sample size has collapsed: that means the prompt and the cost
+conflict, so resampling harder only destroys diversity. It is a diagnostic only — nothing
+auto-escalates; switching to `mode: cg` is the operator's call.
+
+Validated defaults (do not re-derive): `resample_steps=(15,25,35,45)`, `temperature=0.5`,
+`guide_from=10`, `guidance_weight=1e5`. `resample_steps`/`guide_from` live in loop-index space
+over `diffusion.num_timesteps` (50 for the current checkpoint); indices past the end never
+fire. Experiment scripts and results behind these numbers are in `steering_experiments/`.

@@ -36,7 +36,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import yaml
@@ -62,6 +62,16 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_body_pose_to_positions,
     smpl_body_pose_to_spine3_aa,
 )
+from uncertain_feedback.motion_generators.steering import (
+    SteeringEvent,
+    SteeringSpec,
+    conflict_warning,
+    make_cond_fn,
+    resample_indices,
+)
+
+if TYPE_CHECKING:
+    from uncertain_feedback.simulated_users.base import SimulatedUser
 
 _MDM_SUBDIR = MDM_ROOT / "motion-diffusion-model"
 
@@ -107,6 +117,9 @@ class MdmMotionGenerator(
         lock_seed:  Reset the seed before every generation so repeated calls
                     with identical inputs produce identical samples.
     """
+
+    # Class-level so it is readable on instances built without __init__.
+    _last_steering_events: tuple[SteeringEvent, ...] = ()
 
     def __init__(
         self,
@@ -365,62 +378,50 @@ class MdmMotionGenerator(
             fk=self._fk,
         )
 
-    def generate_left_arm_trajectory(  # pylint: disable=too-many-locals
+    @property
+    def last_steering_events(self) -> tuple[SteeringEvent, ...]:
+        """Per-step steering diagnostics recorded by the most recent generation."""
+        return self._last_steering_events
+
+    def build_user_steering_cost(
+        self, user: SimulatedUser
+    ) -> Callable[[Any], Any] | None:
+        """Compile a persona's hidden bounds into a steering cost over ``x̂0``.
+
+        Returns ``None`` when none of the persona's bounds can be scored from
+        positions alone (see ``torch_features.supported_bounds``).
+        """
+        self._ensure_loaded()
+        assert self._hml_mean is not None
+        assert self._hml_std is not None
+        # pylint: disable=import-outside-toplevel
+        import torch
+
+        from uncertain_feedback.motion_generators.mdm.torch_features import (
+            build_user_bound_cost,
+        )
+
+        device = self._dist_util.dev()
+        # float32 to match x̂0: float64 stats would upcast the autograd graph.
+        mean = torch.tensor(self._hml_mean, dtype=torch.float32, device=device)
+        std = torch.tensor(self._hml_std, dtype=torch.float32, device=device)
+        return build_user_bound_cost(user, mean, std)
+
+    def _sample_hml(  # pylint: disable=too-many-locals,too-many-statements
         self,
         text: str,
-        motion_length_seconds: float = 6.0,
-        start_pose: np.ndarray | None = None,
-        save_path: str | Path | None = None,
-        num_samples: int = 1,
-        num_frames: int | None = None,
-        frozen_body: bool = False,
-        spine3_aa: np.ndarray | None = None,
-    ) -> np.ndarray:
-        """Generate a left arm motion trajectory from a text description.
+        start_pose: np.ndarray | None,
+        num_samples: int,
+        n_frames: int,
+        frozen_body: bool,
+        steering: SteeringSpec | None,
+    ) -> Any:
+        """Draw ``num_samples`` normalized HML263 samples for ``text``.
 
-        All body joints except the left arm (left_shoulder, left_elbow,
-        left_wrist) are inpainted to ``start_pose`` throughout the motion.
-        The first ``N_PREFIX_FRAMES`` frames are locked to the arm configuration encoded in
-        ``start_pose``.  To start from the MPC's current arm state, pass a
-        ``start_pose`` built with :meth:`build_pose_from_arm_aa`.
-
-        Args:
-            text:                  Natural-language description of the desired
-                                   motion (e.g. ``"a person waves their left
-                                   arm"``).
-            motion_length_seconds: Length of the generated motion in seconds.
-                                   Capped at 9.8 s (HumanML3D maximum).
-            start_pose:            ``(263,)`` HML263 feature vector used as
-                                   the inpainting base for all joints
-                                   throughout the motion.  Pass the output of
-                                   :meth:`load_pose` or
-                                   :meth:`build_pose_from_arm_aa`.
-            save_path:             If provided, save a full-body visualization
-                                   of the generated motion to this path as an
-                                   MP4 (e.g. ``"motion.mp4"``).  Uses the same
-                                   ``plot_3d_motion`` pipeline as
-                                   ``sample_leftarm.py``.  Requires ``ffmpeg``
-                                   and ``moviepy``.  Defaults to ``None``
-                                   (no video saved).  When ``num_samples > 1``,
-                                   only the first sample is visualized.
-            num_samples:           Number of independent diffusion samples to
-                                   draw in a single forward pass.  Defaults to
-                                   ``1`` (backward-compatible).
-            num_frames:            Exact number of MDM frames to generate.  If
-                                   ``None``, derived from
-                                   ``motion_length_seconds`` at 20 FPS.
-            frozen_body:           If ``True``, inpaint/freeze all non-left-arm
-                                   body features for the full motion.  If
-                                   ``False``, only the first ``N_PREFIX_FRAMES`` frames are
-                                   locked to ``start_pose``.
-            spine3_aa:             Optional fixed MPC spine3 world axis-angle.
-                                   When provided, the returned goals are
-                                   projected into the fixed MPC base instead
-                                   of using MDM's body frame.
-
-        Returns:
-            ``(n_frames, 3, 3)`` axis-angle trajectory when ``num_samples==1``.
-            ``(num_samples, n_frames, 3, 3)`` when ``num_samples > 1``.
+        Returns ``(num_samples, 263, 1, n_frames)``.  The denoising loop is
+        written out here rather than delegated to ``p_sample_loop`` so steering
+        can inspect and act on every step's ``x̂0``; with ``steering=None`` it is
+        equivalent to ``p_sample_loop``.
         """
         self._ensure_loaded()
         self._reset_seed_if_locked()
@@ -428,19 +429,18 @@ class MdmMotionGenerator(
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         assert self._hml_mean is not None
         assert self._hml_std is not None
+        assert self._not_l_arm_mask is not None
         self._align_fk_collar_to_pose(start_pose)
 
         # pylint: disable=import-outside-toplevel,import-error
         import torch
         from data_loaders.tensors import collate
+        from tqdm.auto import tqdm
 
         dist_util = self._dist_util
         model = self._model
         diffusion = self._diffusion
-        data = self._data
         args = self._args
-
-        n_frames = _resolve_num_frames(motion_length_seconds, num_frames)
 
         # --- Build model_kwargs via collate (mirrors sample_leftarm.py) ------
         collate_args = [
@@ -496,21 +496,158 @@ class MdmMotionGenerator(
         print(f"Generating motion for: '{text}' ({n_frames} frames)…")
         _sync_cuda_if_needed(torch)
         diffusion_t0 = time.perf_counter()
-        sample = diffusion.p_sample_loop(
-            model,
-            (num_samples, model.njoints, model.nfeats, n_frames),
-            clip_denoised=False,
-            model_kwargs=model_kwargs,
-            skip_timesteps=0,
-            init_image=None,
-            progress=True,
-            dump_steps=None,
-            noise=None,
-            const_noise=False,
+
+        mode = "off" if steering is None else steering.config.mode
+        cond_fn: Callable[..., Any] | None = None
+        resample_steps: tuple[int, ...] = ()
+        guide_from = 0
+        if steering is not None:
+            resample_steps = steering.config.resample_steps
+            if mode == "cg":
+                cond_fn = make_cond_fn(steering.cost, steering.config.guidance_weight)
+                guide_from = steering.config.guide_from
+
+        # Encoding the text once — as p_sample_loop does — is both faster and
+        # necessary: under no_grad the cached embedding stays a leaf tensor, so
+        # ClassifierFreeSampleModel's deepcopy still works in cg mode.
+        if "text" in model_kwargs["y"]:
+            with torch.no_grad():
+                model_kwargs["y"]["text_embed"] = model.encode_text(
+                    model_kwargs["y"]["text"]
+                )
+
+        img = torch.randn(
+            num_samples, model.njoints, model.nfeats, n_frames, device=dist_util.dev()
         )
+        events: list[SteeringEvent] = []
+        for step_idx, i in enumerate(tqdm(list(range(diffusion.num_timesteps))[::-1])):
+            t = torch.tensor([i] * num_samples, device=dist_util.dev())
+            if cond_fn is not None and step_idx >= guide_from:
+                out = diffusion.p_sample_with_grad(
+                    model,
+                    img,
+                    t,
+                    clip_denoised=False,
+                    cond_fn=cond_fn,
+                    model_kwargs=model_kwargs,
+                )
+            else:
+                with torch.no_grad():
+                    out = diffusion.p_sample(
+                        model,
+                        img,
+                        t,
+                        clip_denoised=False,
+                        model_kwargs=model_kwargs,
+                    )
+            img = out["sample"]
+            if step_idx in resample_steps:
+                assert steering is not None
+                with torch.no_grad():
+                    costs = steering.cost(out["pred_xstart"]).cpu().numpy()
+                # Off the torch RNG stream on purpose, so a steered run and an
+                # unsteered one at the same seed share their initial noise.
+                indices, ess = resample_indices(
+                    costs,
+                    steering.config.temperature,
+                    np.random.default_rng((steering.seed, step_idx)),
+                )
+                unique_ancestors = None
+                if mode == "resample":
+                    unique_ancestors = int(np.unique(indices).size)
+                    # Only the latent is reindexed: every per-sample entry of
+                    # model_kwargs is an identical broadcast of the same pose.
+                    img = img[
+                        torch.as_tensor(
+                            np.ascontiguousarray(indices), device=dist_util.dev()
+                        )
+                    ]
+                events.append(
+                    SteeringEvent(
+                        step=step_idx,
+                        cost_mean=float(costs.mean()),
+                        frac_violating=float((costs > 0).mean()),
+                        ess=ess,
+                        unique_ancestors=unique_ancestors,
+                    )
+                )
+                if len(events) == 1:
+                    warning = conflict_warning(events[0], num_samples)
+                    if warning is not None:
+                        print(warning)
+
+        self._last_steering_events = tuple(events)
         _sync_cuda_if_needed(torch)
         print(f"[timing] diffusion sampling: {time.perf_counter() - diffusion_t0:.3f}s")
-        # sample: (1, 263, 1, n_frames) — normalized HumanML3D
+        return img.detach()
+
+    def generate_left_arm_trajectory(  # pylint: disable=too-many-locals
+        self,
+        text: str,
+        motion_length_seconds: float = 6.0,
+        start_pose: np.ndarray | None = None,
+        save_path: str | Path | None = None,
+        num_samples: int = 1,
+        num_frames: int | None = None,
+        frozen_body: bool = False,
+        spine3_aa: np.ndarray | None = None,
+        *,
+        steering: SteeringSpec | None = None,
+    ) -> np.ndarray:
+        """Generate a left arm motion trajectory from a text description.
+
+        All body joints except the left arm (left_shoulder, left_elbow,
+        left_wrist) are inpainted to ``start_pose`` throughout the motion.
+        The first ``N_PREFIX_FRAMES`` frames are locked to the arm configuration encoded in
+        ``start_pose``.  To start from the MPC's current arm state, pass a
+        ``start_pose`` built with :meth:`build_pose_from_arm_aa`.
+
+        Args:
+            text:                  Natural-language description of the desired
+                                   motion (e.g. ``"a person waves their left
+                                   arm"``).
+            motion_length_seconds: Length of the generated motion in seconds.
+                                   Capped at 9.8 s (HumanML3D maximum).
+            start_pose:            ``(263,)`` HML263 feature vector used as
+                                   the inpainting base for all joints
+                                   throughout the motion.  Pass the output of
+                                   :meth:`load_pose` or
+                                   :meth:`build_pose_from_arm_aa`.
+            save_path:             If provided, save a full-body visualization
+                                   of the generated motion to this path as an
+                                   MP4 (e.g. ``"motion.mp4"``).  Uses the same
+                                   ``plot_3d_motion`` pipeline as
+                                   ``sample_leftarm.py``.  Requires ``ffmpeg``
+                                   and ``moviepy``.  Defaults to ``None``
+                                   (no video saved).  When ``num_samples > 1``,
+                                   only the first sample is visualized.
+            num_samples:           Number of independent diffusion samples to
+                                   draw in a single forward pass.  Defaults to
+                                   ``1`` (backward-compatible).
+            num_frames:            Exact number of MDM frames to generate.  If
+                                   ``None``, derived from
+                                   ``motion_length_seconds`` at 20 FPS.
+            frozen_body:           If ``True``, inpaint/freeze all non-left-arm
+                                   body features for the full motion.  If
+                                   ``False``, only the first ``N_PREFIX_FRAMES`` frames are
+                                   locked to ``start_pose``.
+            spine3_aa:             Optional fixed MPC spine3 world axis-angle.
+                                   When provided, the returned goals are
+                                   projected into the fixed MPC base instead
+                                   of using MDM's body frame.
+            steering:              Optional cost-steering spec biasing the
+                                   diffusion samples toward a user cost model.
+
+        Returns:
+            ``(n_frames, 3, 3)`` axis-angle trajectory when ``num_samples==1``.
+            ``(num_samples, n_frames, 3, 3)`` when ``num_samples > 1``.
+        """
+        n_frames = _resolve_num_frames(motion_length_seconds, num_frames)
+        sample = self._sample_hml(
+            text, start_pose, num_samples, n_frames, frozen_body, steering
+        )
+        model = self._model
+        data = self._data
 
         # --- Optionally save a full-body visualization MP4 -------------------
         if save_path is not None:
@@ -606,6 +743,8 @@ class MdmMotionGenerator(
         num_samples: int = 1,
         num_frames: int | None = None,
         frozen_body: bool = False,
+        *,
+        steering: SteeringSpec | None = None,
     ) -> np.ndarray:
         """Generate MDM samples and return SMPL XYZ positions without IK.
 
@@ -617,86 +756,14 @@ class MdmMotionGenerator(
         Returns:
             ``(num_samples, n_frames, 22, 3)`` global SMPL joint positions.
         """
-        self._ensure_loaded()
-        self._reset_seed_if_locked()
-        if num_samples < 1:
-            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
-        assert self._not_l_arm_mask is not None
-        self._align_fk_collar_to_pose(start_pose)
-
-        # pylint: disable=import-outside-toplevel,import-error
-        import torch
-        from data_loaders.tensors import collate
-
-        dist_util = self._dist_util
-        model = self._model
-        diffusion = self._diffusion
-        data = self._data
-        args = self._args
-
         n_frames = _resolve_num_frames(motion_length_seconds, num_frames)
-
-        collate_args = [
-            {"inp": torch.zeros(n_frames), "tokens": None, "lengths": n_frames}
-        ]
-        collate_args = [{**arg, "text": text} for arg in collate_args]  # type: ignore[dict-item]
-        _, model_kwargs = collate(collate_args)
-
-        for key in ("mask", "lengths"):
-            if key in model_kwargs["y"] and hasattr(model_kwargs["y"][key], "to"):
-                t = model_kwargs["y"][key].to(dist_util.dev())
-                if num_samples > 1 and t.shape[0] == 1:
-                    t = t.repeat(num_samples, *([1] * (t.dim() - 1)))
-                model_kwargs["y"][key] = t
-
-        start_frame = torch.tensor(
-            start_pose, dtype=torch.float32, device=dist_util.dev()
-        ).unsqueeze(-1)
-        input_motions = (
-            start_frame.unsqueeze(0).unsqueeze(-1).repeat(num_samples, 1, 1, n_frames)
+        sample = self._sample_hml(
+            text, start_pose, num_samples, n_frames, frozen_body, steering
         )
-        model_kwargs["y"]["inpainted_motion"] = input_motions
-
-        if frozen_body:
-            mask_np = self._not_l_arm_mask
-        else:
-            mask_np = np.zeros_like(self._not_l_arm_mask, dtype=bool)
-        mask_tensor = torch.tensor(
-            mask_np, dtype=torch.bool, device=input_motions.device
-        )
-        model_kwargs["y"]["inpainting_mask"] = (
-            mask_tensor.unsqueeze(0)
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-            .repeat(num_samples, 1, 1, n_frames)
-        )
-        model_kwargs["y"]["inpainting_mask"][..., :N_PREFIX_FRAMES] = True
-
-        model_kwargs["y"]["scale"] = (
-            torch.ones(num_samples, device=dist_util.dev()) * args.guidance_param
-        )
-
-        print(f"Generating motion for: '{text}' ({n_frames} frames)…")
-        _sync_cuda_if_needed(torch)
-        diffusion_t0 = time.perf_counter()
-        sample = diffusion.p_sample_loop(
-            model,
-            (num_samples, model.njoints, model.nfeats, n_frames),
-            clip_denoised=False,
-            model_kwargs=model_kwargs,
-            skip_timesteps=0,
-            init_image=None,
-            progress=True,
-            dump_steps=None,
-            noise=None,
-            const_noise=False,
-        )
-        _sync_cuda_if_needed(torch)
-        print(f"[timing] diffusion sampling: {time.perf_counter() - diffusion_t0:.3f}s")
 
         convert_t0 = time.perf_counter()
         hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
-        positions = hml263_batch_to_smpl_positions(hml_vecs, data, model)
+        positions = hml263_batch_to_smpl_positions(hml_vecs, self._data, self._model)
         print(
             "[timing] HML-to-position conversion total: "
             f"{time.perf_counter() - convert_t0:.3f}s"

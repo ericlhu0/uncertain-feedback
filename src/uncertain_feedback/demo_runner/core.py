@@ -175,7 +175,6 @@ class DemoRig:
         self.gen = make_motion_generator(
             self.cfg.motion_generator,
             None,
-            self.cfg.num_denoising_steps,
             seed=self.cfg.seed,
             lock_seed=self.cfg.motion_generator == "mdm",
         )
@@ -472,6 +471,7 @@ class DemoRig:
                 "n_clusters": self.cfg.feedback.uq.n_clusters,
                 "clusterer": self.cfg.feedback.uq.clusterer,
                 "scale": self.cfg.feedback.uq.scale,
+                "steering_mode": self.cfg.feedback.uq.steering.mode,
             },
             "cost_backend": self.cfg.llm_cost.backend,
             "default_persona": self.cfg.user,

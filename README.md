@@ -127,6 +127,14 @@ with a `_v<N>` version tag in the filename; bumping `_CACHE_VERSION` in `build_m
 (done whenever the pose-estimation/conversion changes) invalidates old entries automatically.
 Cache files without a version tag predate the 2026-06-29 chirality fix and are mirrored; delete them.
 
+3b. (Optional) Build a speed-variant dataset instead — retimes each cached segment into
+fast / normal / slow variants plus a conditional variant that slows while the wrist is
+above the shoulder, with matching speed-language captions. Reads the `mdm_cache`
+positions directly, so steps 1–3 must have run (and cached) at least once:
+```
+uv run python src/uncertain_feedback/data_collection/build_speed_dataset.py --output_dir ./speed_mdm_dataset/
+```
+
 4. Fine-tune motion-diffusion-model
 First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` (or whatever was created with the trajectory editor web ui) to `.../HumanML3D`
 
@@ -208,56 +216,6 @@ uv run python src/uncertain_feedback/motion_generators/mdm/sample_leftarm.py \
 All paths are relative to wherever you invoke the script. Output videos are saved under `save/my_finetuned_v1/edit_*/` inside `motion-diffusion-model/`. (1s = 20 frames)
 
 
-## Kimodo backend setup
-
-[Kimodo](https://github.com/nv-tlabs/kimodo) (NVIDIA) is an optional second
-text-to-motion backend. It pins `pydantic>=2` and `transformers==5.1.0`, which conflict
-with the main environment, so it lives in its own conda env and is called via a subprocess
-worker (`motion_generators/kimodo/_kimodo_inference_worker.py`).
-
-**1. Hugging Face / Llama-3 access** (kimodo's text encoder uses gated
-`meta-llama/Meta-Llama-3-8B-Instruct`):
-- Accept the license at https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct
-- Create a read token at https://huggingface.co/settings/tokens
-- `hf auth login` (or write the token to `~/.cache/huggingface/token`)
-
-**2. Create the isolated env and install kimodo** (env name must match
-`KIMODO_CONDA_ENV`, default `kimodo`):
-```bash
-conda create -n kimodo python=3.10 -y
-conda install -n kimodo -y -c conda-forge cmake cxx-compiler   # kimodo C++ extension
-# Install a torch build matching your GPU (cu128 for Blackwell sm_120):
-conda run -n kimodo pip install torch --index-url https://download.pytorch.org/whl/cu128
-conda run -n kimodo pip install "git+https://github.com/nv-tlabs/kimodo.git"
-```
-Model weights download automatically on first use. Set `TEXT_ENCODER_DEVICE=cpu` to cut
-VRAM from ~17 GB to <3 GB.
-
-**3. Run** any MDM-backed planner with `motion_generator: kimodo` in its YAML, e.g.:
-```bash
-uv run python src/uncertain_feedback/planners/run.py \
-  --mpc-config src/uncertain_feedback/planners/mpc/configs/kimodo.yaml
-```
-The kimodo start pose is a SMPL `body_pose (21,3)` `.npy` (`motion_generators/kimodo/start_pose.npy`). The wrapper converts it through the same FK used by the visualizer; the worker retargets that pose onto Kimodo's skeleton and applies the resulting positions and global rotations as the frame-0 Kimodo constraint. `--frozen-body` is not supported with `motion_generator: kimodo`.
-
-**Generation speed.** Kimodo's text encoder is an 8B LLM2Vec model. With no encoder
-server reachable on `127.0.0.1:9550` it loads locally, and `TEXT_ENCODER_DEVICE=cpu`
-(auto-set when VRAM < 18 GB) runs it on CPU — slow per prompt. The worker encodes the
-(shared) prompt once per call regardless of `feedback.uq.diffusion_samples`, so generation time is
-dominated by the one-time ~85 s model load plus diffusion, not the sample count. To speed
-diffusion, lower `num_denoising_steps` (top-level YAML key, kimodo only; default 100,
-try 30-50 for a quality/speed trade).
-
-To generate only a kimodo motion and render it to video, without MPC:
-```bash
-TEXT_ENCODER_DEVICE=cpu uv run python src/uncertain_feedback/motion_generators/kimodo/generate_motion.py \
-  --text "raise my left arm" \
-  --num-frames 100 \
-  --output-npz kimodo_motion.npz \
-  --output-video kimodo_motion.mp4 \
-  --start-pose src/uncertain_feedback/motion_generators/kimodo/start_pose_kimodo.npy
-```
-
 ## Running a Single MPC Run
 
 `run.py` performs one end-to-end run: plan with sampling MPC, inject the first
@@ -319,7 +277,7 @@ presence of top-level YAML sections, one per module slot:
 | Section | Module | Absent means |
 |---|---|---|
 | `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
-| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`) | no correction phase |
+| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`) | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
 
@@ -336,12 +294,12 @@ sequence.
 ### Motion-generation backend (`motion_generator`)
 
 The text-to-motion backend is selected by the optional YAML key `motion_generator`:
-- `mdm` (default): the in-process Motion Diffusion Model (see Getting Started).
-- `kimodo`: NVIDIA's [kimodo](https://github.com/nv-tlabs/kimodo) SMPL-X model, run in an
-  isolated conda env via a subprocess worker (see [Kimodo backend setup](#kimodo-backend-setup)).
+- `mdm` (default, currently the only backend): the in-process Motion Diffusion
+  Model (see Getting Started).
 
-Both backends expose the same interface, so any config with a `feedback:`
-section works with either by setting `motion_generator:` in its config.
+Backends expose the shared `MotionGenerator` interface, so any config with a
+`feedback:` section works with any backend registered in
+`MOTION_GENERATOR_BUILDERS`.
 
 ### Execution environment (`env`)
 
@@ -1083,6 +1041,12 @@ feedback:
     clusterer: agglo_end_pose  # kmeans_end_pose | agglo_end_pose | agglo_path_pca | agglo_t2m
     auto_cluster: null
     scale: 1.0  # default motion-magnitude scale for the chosen cluster
+    steering:
+      mode: "off"           # off | resample | cg
+      resample_steps: [15, 25, 35, 45]
+      temperature: 0.5
+      guide_from: 10          # cg only
+      guidance_weight: 1.0e5  # cg only
 
 cartesian:
   goals:
@@ -1106,6 +1070,42 @@ the MPC planner keeps its injected clusterer):
   cd src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model
   bash prepare/download_t2m_evaluators.sh  # needs gdown
   ```
+
+#### Steering diffusion sampling toward the user's cost (`feedback.uq.steering`)
+
+`mode: "off"` (the default, and what every checked-in config ships) samples MDM
+exactly as before. The other two modes bias sampling toward the configured
+simulated user's hidden bounds, so the candidates that reach clustering already
+respect the user's constraints. The cost is compiled from the persona's
+`elbow_flexion` / `shoulder_elevation` bounds and read off each denoising step's
+`x̂0` prediction; `JointBoxLimit` and bounds on other features are skipped (named
+in a log line). Steering is implemented by the MDM backend; with any other
+backend the run logs a skip and samples unsteered, as it does when the persona
+has no supported bounds (e.g. `user: unrestricted`, the default).
+
+The key applies to both frontends: `run.py` steers every UQ correction round
+with the YAML mode, and the demo runner's stage-2 **Steering** dropdown starts
+at the YAML mode and can override it per generation (the other knobs stay
+YAML-only).
+
+- **`resample`** (recommended default): at each `resample_steps` index, score
+  every chain and resample the population with weights
+  `softmax(-z(cost)/temperature)`. Cost-agnostic (the cost need not be
+  differentiable), effectively free at N=500, and it can only reweight motions
+  MDM was already willing to produce — so samples stay on-manifold. In the
+  triceps stress scenario this took oracle violations from 28% of samples to 0%
+  with cluster diversity preserved (endpoint spread slightly *up*).
+- **`cg`** (classifier guidance): from `guide_from` on, nudge the reverse
+  diffusion mean by `-guidance_weight · ∇ₓ cost(x̂0)`. Roughly doubles sampling
+  time (≈5 s → ≈9.5 s at N=500 × 50 frames) and `guidance_weight` needs
+  per-cost calibration — the useful band is 1e4–1e5 — but it handles the case
+  `resample` cannot: a prompt that genuinely contradicts the cost.
+
+Each scoring step is logged (`cost`, fraction violating, ESS, surviving
+ancestors). When the first event shows ~every sample violating *and* an ESS
+collapse, the log carries an explicit conflict warning: the prompt and the cost
+disagree, resampling harder will only collapse diversity, and the options are
+`mode: cg` or rewording the correction. Nothing escalates automatically.
 
 In the interactive picker, each cluster panel has a **magnitude** slider
 (range 0.0–2.0) that scales that trajectory's motion up or down while
@@ -1384,8 +1384,8 @@ Then open `http://127.0.0.1:6781`. The config supplies the pose, MPC settings,
 UQ defaults, `feedback.frames`, per-persona goal presets, and the `llm_cost` backend
 used by the cost-generation stage. With the default config, cost generation
 starts on `llm (single-pass)`; the backend dropdown can still select `turns` or
-`agent`. When `motion_generator: mdm`, the top-level `seed` is reset before each
-MDM generation request, so identical demo inputs reproduce the same samples.
+`agent`. The top-level `seed` is reset before each MDM generation request, so
+identical demo inputs reproduce the same samples.
 
 **Demo vs dev mode.** The header button toggles between them and the choice
 persists in `localStorage` (demo is the default). Both modes use the same
@@ -1496,7 +1496,11 @@ Stages (each stage's controls unlock once the previous one ran):
    violates) and clusters them (*Re-cluster* reuses cached samples at the
    currently displayed refinement level). The *Clusterer* dropdown selects the
    clustering method (see `feedback.uq.clusterer` above; initial value from the config)
-   and applies on the next Generate/Re-cluster/Refine. Each cluster is
+   and applies on the next Generate/Re-cluster/Refine. The *Steering* dropdown
+   (off / resample / cg) steers the next *Generate* toward the persona's hidden
+   bounds (see `feedback.uq.steering` above; initial value from the config's
+   mode, other steering knobs stay YAML-only); scoring events and any
+   prompt/cost conflict warning appear in the log panel. Each cluster is
    represented by its medoid — an actual MDM sample — rather than the
    elementwise mean. Every
    cluster option is automatically integrated into the full corrected

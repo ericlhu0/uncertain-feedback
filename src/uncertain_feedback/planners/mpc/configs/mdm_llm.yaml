@@ -13,6 +13,13 @@ feedback:
     n_clusters: 3
     auto_cluster: 1
     scale: 1.0
+    # Steer diffusion sampling toward the simulated user's hidden bounds.
+    steering:
+      mode: "off"           # off | resample | cg
+      resample_steps: [15, 25, 35, 45]
+      temperature: 0.5
+      guide_from: 10        # cg only
+      guidance_weight: 1.0e5  # cg only
 
 corrections:
   trigger_threshold: 0.02

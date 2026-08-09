@@ -16,7 +16,7 @@ extension-pkg-allow-list = pybullet
 # them to satisfy a counter would obscure the math rather than clarify it.
 #
 # The import placement and resolution checks are disabled because the vendored
-# MDM / SAM-3D-Body / Kimodo submodules are only importable after a runtime
+# MDM / SAM-3D-Body submodules are only importable after a runtime
 # sys.path injection, so their imports must stay below that call and cannot
 # resolve at lint time.
 #

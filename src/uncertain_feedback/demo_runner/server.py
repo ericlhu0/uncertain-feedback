@@ -258,6 +258,7 @@ def create_app(static_dir: Path) -> Flask:
                 int(data["n_clusters"]),
                 float(data["scale"]),
                 str(data["clusterer"]),
+                str(data["steering_mode"]),
             )
 
         return _run_heavy(do)

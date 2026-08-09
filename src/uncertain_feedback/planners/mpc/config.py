@@ -67,13 +67,18 @@ class CorrectionConfig:
 
 @dataclass(frozen=True)
 class SimulatedUserConfig:
-    """Automated simulated-user episode settings (verbalizer + re-trigger loop)."""
+    """Automated simulated-user episode settings (verbalizer + re-trigger loop).
+
+    ``time_of_day`` is the session clock in hours ``[0, 24)`` seen by
+    time-conditioned personas; ``None`` runs an untimed session.
+    """
 
     verbalizer: str = "everyday"
     seed: int = 0
     max_rounds: int = 3
     magnitudes: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5)
     nominal_steps: int = 20
+    time_of_day: float | None = None
 
 
 @dataclass(frozen=True)
@@ -464,6 +469,14 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     )
     if not isinstance(magnitudes_value, list) or not magnitudes_value:
         raise ValueError("simulated_user.magnitudes must be a non-empty list.")
+    time_of_day_value = simulated_user_data.get("time_of_day")
+    time_of_day = (
+        None
+        if time_of_day_value is None
+        else _float(time_of_day_value, "simulated_user.time_of_day")
+    )
+    if time_of_day is not None and not 0.0 <= time_of_day < 24.0:
+        raise ValueError("simulated_user.time_of_day must be in [0, 24).")
     simulated_user = SimulatedUserConfig(
         verbalizer=str(
             simulated_user_data.get("verbalizer", default_sim_user.verbalizer)
@@ -484,6 +497,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             simulated_user_data.get("nominal_steps", default_sim_user.nominal_steps),
             "simulated_user.nominal_steps",
         ),
+        time_of_day=time_of_day,
     )
 
     return MpcRunConfig(

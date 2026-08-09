@@ -573,9 +573,19 @@ instruction to their `feedback_text` (`resolve_feedback_text` in
 The hidden bounds are the evaluation ground truth for method-level evaluation
 (never shown to the cost generator).
 
+- Bounds reference the five anatomical joint features plus scoring-side
+  extensions computed by `simulated_users.base.feature_series`: per-feature
+  velocities (`<feature>_velocity`, rad/s via `np.gradient` at the repo-wide
+  20 fps `MOTION_FPS`) and the session clock (`time_of_day`, hours, present
+  only when `MpcCostContext.time_of_day` is set). `SIM_FEATURE_NAMES` is the
+  full allowed set; the extensions exist only on the scoring side (the cost
+  generator still sees position features only). New personas:
+  `morning_shoulder_stiffness` (time-gated elevation cap before 11:00) and
+  `spastic_elbow_flexors` (velocity-dependent catch: tolerable elbow extension
+  speed shrinks as the elbow approaches full extension).
 - `HiddenBound` — one restriction over a shared joint feature (radians):
   `upper_bound` / `lower_bound` / `avoid_band` (painful range), optionally gated
-  by a `FeatureCondition` on another feature.
+  by a `FeatureCondition` on another feature (including `time_of_day`).
 - `CoupledBound` — **pose-dependent limit**: the threshold on one feature moves
   linearly with another (`threshold = intercept + slope * cond_value`), e.g.
   stroke flexor synergy (required elbow bend grows with shoulder elevation).

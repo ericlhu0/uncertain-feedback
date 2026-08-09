@@ -490,6 +490,7 @@ def build_run(
         spine3_aa=np.asarray(
             spine3_aa if spine3_aa is not None else np.zeros(3), dtype=np.float64
         ),
+        time_of_day=cfg.simulated_user.time_of_day,
     )
     user = get_persona(cfg.user)
     extra_costs = build_extra_costs(cfg.costs, cost_context)

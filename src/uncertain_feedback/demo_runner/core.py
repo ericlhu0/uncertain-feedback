@@ -50,6 +50,7 @@ from uncertain_feedback.simulated_users.base import (
     JOINT_SLOTS,
     Bound,
     CoupledBound,
+    FeatureCondition,
     HiddenBound,
     SimulatedUser,
 )
@@ -86,13 +87,20 @@ def bound_to_json(bound: Bound) -> dict[str, Any]:
             "intercept": bound.intercept,
             "slope": bound.slope,
         }
-    return {
+    data: dict[str, Any] = {
         "kind": "hidden",
         "feature": bound.feature,
         "bound_type": bound.bound_type,
         "low": bound.low,
         "high": bound.high,
     }
+    if bound.condition is not None:
+        data["condition"] = {
+            "feature": bound.condition.feature,
+            "low": bound.condition.low,
+            "high": bound.condition.high,
+        }
+    return data
 
 
 def bound_from_json(data: dict[str, Any]) -> Bound:
@@ -105,11 +113,21 @@ def bound_from_json(data: dict[str, Any]) -> Bound:
             intercept=float(data["intercept"]),
             slope=float(data["slope"]),
         )
+    condition = data.get("condition")
     return HiddenBound(
         feature=data["feature"],
         bound_type=data["bound_type"],
         low=None if data.get("low") is None else float(data["low"]),
         high=None if data.get("high") is None else float(data["high"]),
+        condition=(
+            None
+            if condition is None
+            else FeatureCondition(
+                feature=condition["feature"],
+                low=float(condition["low"]),
+                high=float(condition["high"]),
+            )
+        ),
     )
 
 
@@ -193,7 +211,10 @@ class DemoRig:
         self.default_q = self.fk.arm_aa_to_q(self.default_arm_aa, self.spine3_aa)
         self.meshes = SmplMeshCache(self.body_pos)
         self.context = MpcCostContext(
-            fk=self.fk, spine3_pos=self.spine3_pos, spine3_aa=self.spine3_aa
+            fk=self.fk,
+            spine3_pos=self.spine3_pos,
+            spine3_aa=self.spine3_aa,
+            time_of_day=self.cfg.simulated_user.time_of_day,
         )
 
         self.session: "Session | None" = None

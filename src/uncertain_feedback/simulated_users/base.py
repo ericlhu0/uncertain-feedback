@@ -8,9 +8,11 @@ and scores any trajectory by how much the hidden restrictions are violated
 (:func:`violation_metrics`). The hidden cost is never shown to the cost
 generator — it is the ground truth the generated cost is evaluated against.
 
-Restrictions are expressed over the same five anatomical joint features the cost
+Restrictions are expressed over the five anatomical joint features the cost
 generator uses (see ``GeneratedCostContext``), so a hidden bound and a generated
-bound are directly comparable.
+bound are directly comparable. Simulated-user bounds may additionally reference
+each feature's velocity (``<feature>_velocity``, rad/s) and the session clock
+(``time_of_day``, hours), which exist only on the scoring side.
 """
 
 from __future__ import annotations
@@ -32,12 +34,35 @@ from uncertain_feedback.planners.mpc.costs.base import (
 
 BOUND_TYPES = ("upper_bound", "lower_bound", "avoid_band")
 
+MOTION_FPS = 20.0
+VELOCITY_FEATURE_NAMES = tuple(f"{name}_velocity" for name in FEATURE_NAMES)
+TIME_OF_DAY_FEATURE = "time_of_day"
+SIM_FEATURE_NAMES = (*FEATURE_NAMES, *VELOCITY_FEATURE_NAMES, TIME_OF_DAY_FEATURE)
+
 
 def feature_series(
     context: MpcCostContext, trajectory: np.ndarray
 ) -> dict[str, np.ndarray]:
-    """Return the canonical anatomical features for q or axis-angle states."""
-    return arm_feature_series(trajectory, context)
+    """Return anatomical features plus velocities and the session clock.
+
+    Velocities are central finite differences along the trajectory's time
+    axis in rad/s at the repo-wide 20 fps frame convention (zero for
+    single-frame inputs). ``time_of_day`` (hours) is a constant series,
+    present only when the context carries a session clock.
+    """
+    features = dict(arm_feature_series(trajectory, context))
+    for name in FEATURE_NAMES:
+        values = features[name]
+        if values.ndim == 0 or values.shape[-1] < 2:
+            velocity = np.zeros_like(values)
+        else:
+            velocity = np.gradient(values, axis=-1) * MOTION_FPS
+        features[f"{name}_velocity"] = velocity
+    if context.time_of_day is not None:
+        features[TIME_OF_DAY_FEATURE] = np.full_like(
+            features[FEATURE_NAMES[0]], context.time_of_day
+        )
+    return features
 
 
 @dataclass(frozen=True)
@@ -65,8 +90,13 @@ class HiddenBound:
     condition: FeatureCondition | None = None
 
     def __post_init__(self) -> None:
-        if self.feature not in FEATURE_NAMES:
+        if self.feature not in SIM_FEATURE_NAMES:
             raise ValueError(f"Unknown feature {self.feature!r}.")
+        if (
+            self.condition is not None
+            and self.condition.feature not in SIM_FEATURE_NAMES
+        ):
+            raise ValueError(f"Unknown condition feature {self.condition.feature!r}.")
         if self.bound_type not in BOUND_TYPES:
             raise ValueError(f"Unknown bound_type {self.bound_type!r}.")
         if self.bound_type in ("upper_bound", "avoid_band") and self.high is None:
@@ -111,9 +141,9 @@ class CoupledBound:
     slope: float
 
     def __post_init__(self) -> None:
-        if self.feature not in FEATURE_NAMES:
+        if self.feature not in SIM_FEATURE_NAMES:
             raise ValueError(f"Unknown feature {self.feature!r}.")
-        if self.cond_feature not in FEATURE_NAMES:
+        if self.cond_feature not in SIM_FEATURE_NAMES:
             raise ValueError(f"Unknown cond_feature {self.cond_feature!r}.")
         if self.bound_type not in ("upper_bound", "lower_bound"):
             raise ValueError(

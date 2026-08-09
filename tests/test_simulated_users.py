@@ -179,3 +179,60 @@ def test_limit_cost_penalizes_out_of_box_rollouts() -> None:
 
     assert cost(inside)[0] == 0.0
     assert np.isclose(cost(outside)[0], 0.3)
+
+
+def test_intent_aligned_chooser_picks_comfortable_aligned_candidate() -> None:
+    from uncertain_feedback.simulated_users.attribution import CorrectionIntent
+    from uncertain_feedback.simulated_users.chooser import choose_correction
+    from uncertain_feedback.simulated_users.personas import ADHESIVE_CAPSULITIS
+
+    fk = SmplLeftArmFK()
+    context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    intent = CorrectionIntent(
+        join_index=0,
+        feature_deltas={
+            "elbow_flexion": -0.4,
+            "shoulder_flexion_extension": 0.0,
+            "shoulder_abduction_adduction": 0.0,
+            "shoulder_elevation": 0.0,
+        },
+        wrist_offset=np.zeros(3),
+        elbow_offset=np.zeros(3),
+    )
+    frames = 6
+    ramp = np.linspace(0.0, 1.0, frames)
+    aligned = np.zeros((frames, 7))
+    aligned[:, 6] = 0.5 * ramp  # bends the elbow hinge
+    orthogonal = np.zeros((frames, 7))
+    orthogonal[:, 4] = 0.2 * ramp  # small upper-arm rotation, no elbow bend
+    painful = np.zeros((frames, 7))
+    painful[:, 6] = 0.5 * ramp
+    painful[:, 3] = 2.6 * ramp  # exceeds the anatomical joint box
+    candidates = {0: aligned, 1: orthogonal, 2: painful}
+    oracle = np.zeros((4, 7))
+
+    choice = choose_correction(
+        ADHESIVE_CAPSULITIS,
+        context,
+        candidates,
+        oracle,
+        mode="intent_aligned",
+        intent=intent,
+    )
+    assert choice.label == 0
+    assert choice.acceptable[2] is False
+    assert choice.alignment[0] > choice.alignment[1]
+
+    rng = np.random.default_rng(0)
+    for _ in range(5):
+        random_choice = choose_correction(
+            ADHESIVE_CAPSULITIS,
+            context,
+            candidates,
+            oracle,
+            mode="random",
+            rng=rng,
+        )
+        assert random_choice.label in (0, 1)

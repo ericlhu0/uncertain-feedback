@@ -79,6 +79,8 @@ class SimulatedUserConfig:
     magnitudes: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5)
     nominal_steps: int = 20
     time_of_day: float | None = None
+    # Candidate-selection model: intent_aligned | progress | random.
+    chooser: str = "intent_aligned"
 
 
 @dataclass(frozen=True)
@@ -477,6 +479,11 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     )
     if time_of_day is not None and not 0.0 <= time_of_day < 24.0:
         raise ValueError("simulated_user.time_of_day must be in [0, 24).")
+    chooser_value = str(simulated_user_data.get("chooser", default_sim_user.chooser))
+    if chooser_value not in ("intent_aligned", "progress", "random"):
+        raise ValueError(
+            "simulated_user.chooser must be intent_aligned, progress, or random."
+        )
     simulated_user = SimulatedUserConfig(
         verbalizer=str(
             simulated_user_data.get("verbalizer", default_sim_user.verbalizer)
@@ -498,6 +505,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             "simulated_user.nominal_steps",
         ),
         time_of_day=time_of_day,
+        chooser=chooser_value,
     )
 
     return MpcRunConfig(

@@ -2,11 +2,12 @@
 
 Each verbalizer phrases the same level-invariant :class:`CorrectionIntent` at
 a different specificity — ``vague`` (a fixed complaint), ``everyday`` (a
-sampled body-part phrase), and ``joint_resolved`` (the divergent joint
-features named directly). All return ``None`` exactly when
-:func:`has_feedback_content` is false, so episode termination never depends on
-the level. Intent deltas/offsets are nominal − oracle; phrases point the
-opposite way (offset up → move down).
+sampled body-part phrase), ``motion_directive`` (a deterministic imperative
+over the dominant referent in egocentric direction words), and
+``joint_resolved`` (the divergent joint features named directly). All return
+``None`` exactly when :func:`has_feedback_content` is false, so episode
+termination never depends on the level. Intent deltas/offsets are
+nominal − oracle; phrases point the opposite way (offset up → move down).
 """
 
 from __future__ import annotations
@@ -50,6 +51,13 @@ _AXIS_DIRECTION_WORDS = (
     ("back", "forward"),
 )
 
+# Egocentric variant for the motion-directive level.
+_MOTION_DIRECTIVE_WORDS = (
+    ("closer to my body", "out to the side"),
+    ("down", "up"),
+    ("back", "forward"),
+)
+
 
 @dataclass(frozen=True)
 class Utterance:
@@ -71,7 +79,10 @@ def _joint_resolved_phrases(intent: CorrectionIntent) -> list[tuple[str, float]]
     ]
 
 
-def _direction_words(offset: np.ndarray) -> str:
+def _direction_words(
+    offset: np.ndarray,
+    lexicon: tuple[tuple[str, str], ...] = _AXIS_DIRECTION_WORDS,
+) -> str:
     """Corrective direction words from the offset's dominant axis components."""
     components = np.asarray(offset, dtype=np.float64)
     order = np.argsort(-np.abs(components))
@@ -80,13 +91,17 @@ def _direction_words(offset: np.ndarray) -> str:
     for axis in order[:2]:
         if abs(components[axis]) < dominant / 2.0:
             break
-        negative, positive = _AXIS_DIRECTION_WORDS[axis]
+        negative, positive = lexicon[axis]
         words.append(negative if components[axis] > 0 else positive)
     return " and ".join(words)
 
 
-def _offset_phrase(referent: str, offset: np.ndarray) -> str:
-    phrase = f"move my {referent} {_direction_words(offset)}"
+def _offset_phrase(
+    referent: str,
+    offset: np.ndarray,
+    lexicon: tuple[tuple[str, str], ...] = _AXIS_DIRECTION_WORDS,
+) -> str:
+    phrase = f"move my {referent} {_direction_words(offset, lexicon)}"
     norm = float(np.linalg.norm(offset))
     if norm < _MAGNITUDE_SMALL:
         return f"{phrase} a bit"
@@ -140,11 +155,29 @@ def verbalize_everyday(
     return Utterance(text, form)
 
 
+def verbalize_motion_directive(intent: CorrectionIntent) -> Utterance | None:
+    """A deterministic imperative over the dominant referent's offset.
+
+    The referent (elbow or arm) with the larger Cartesian contrast is named
+    with egocentric direction words, always yielding a directive whenever the
+    intent has feedback content.
+    """
+    if not has_feedback_content(intent):
+        return None
+    referent, offset = max(
+        (("elbow", intent.elbow_offset), ("arm", intent.wrist_offset)),
+        key=lambda candidate: float(np.linalg.norm(candidate[1])),
+    )
+    text = _offset_phrase(f"left {referent}", offset, _MOTION_DIRECTIVE_WORDS)
+    return Utterance(text, "motion_directive")
+
+
 # Name → callable for config-driven selection. "everyday" is bound to an rng
 # and "visual" (a class, registered by visual.py) is constructed at episode
 # setup, so values are loosely typed.
 VERBALIZERS: dict[str, Callable[..., object]] = {
     "vague": verbalize_vague,
     "everyday": verbalize_everyday,
+    "motion_directive": verbalize_motion_directive,
     "joint_resolved": verbalize_joint_resolved,
 }

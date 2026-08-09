@@ -142,7 +142,7 @@ uncertain-feedback/
 │   ├── simulated_users/
 │   │   ├── base.py                   # SimulatedUser, HiddenBound/CoupledBound, violations, cluster choice, oracle cost term
 │   │   ├── attribution.py            # attribute_correction: nominal-vs-oracle-window contrast → CorrectionIntent
-│   │   ├── verbalizers.py            # vague/everyday/joint_resolved verbalizers + VERBALIZERS registry
+│   │   ├── verbalizers.py            # vague/everyday/motion_directive/joint_resolved verbalizers + VERBALIZERS registry
 │   │   ├── visual.py                 # VisualVerbalizer: VLM speaks from rendered pose images, disk-cached
 │   │   ├── chooser.py                # choose_correction: oracle-path lexicographic cluster+magnitude chooser; oracle_cluster_scores
 │   │   ├── personas.py               # Clinically motivated personas (PERSONAS registry)
@@ -627,7 +627,9 @@ The hidden bounds are the evaluation ground truth for method-level evaluation
   false: `verbalize_vague` (fixed complaint), `verbalize_joint_resolved` (top
   two above-dead-band features through an 8-entry phrase table),
   `verbalize_everyday` (seeded categorical over arm/elbow/joint-resolved
-  phrases, weight ∝ contrast magnitude × form prior), and `VisualVerbalizer`
+  phrases, weight ∝ contrast magnitude × form prior),
+  `verbalize_motion_directive` (deterministic imperative naming the dominant
+  referent — elbow or arm — with egocentric direction words), and `VisualVerbalizer`
   (VLM sees rendered trigger + oracle-window-end poses, responses disk-cached
   per episode/round). `VERBALIZERS` registry maps config names to callables.
   Intent deltas are nominal − oracle, so phrases point the opposite way.

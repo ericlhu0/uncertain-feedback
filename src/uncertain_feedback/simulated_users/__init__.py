@@ -38,6 +38,7 @@ from uncertain_feedback.simulated_users.verbalizers import (
     Utterance,
     verbalize_everyday,
     verbalize_joint_resolved,
+    verbalize_motion_directive,
     verbalize_vague,
 )
 from uncertain_feedback.simulated_users.viz import render_hidden_bounds
@@ -52,6 +53,7 @@ __all__ = [
     "Utterance",
     "verbalize_everyday",
     "verbalize_joint_resolved",
+    "verbalize_motion_directive",
     "verbalize_vague",
     "BOUND_TYPES",
     "FEATURE_NAMES",

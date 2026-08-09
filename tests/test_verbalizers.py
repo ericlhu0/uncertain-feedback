@@ -11,6 +11,7 @@ from uncertain_feedback.simulated_users import (
     CorrectionIntent,
     verbalize_everyday,
     verbalize_joint_resolved,
+    verbalize_motion_directive,
     verbalize_vague,
 )
 from uncertain_feedback.simulated_users.verbalizers import VAGUE_PHRASE
@@ -37,6 +38,7 @@ def test_all_verbalizers_return_none_below_dead_band() -> None:
     assert verbalize_vague(quiet) is None
     assert verbalize_joint_resolved(quiet) is None
     assert verbalize_everyday(quiet, rng) is None
+    assert verbalize_motion_directive(quiet) is None
 
 
 def test_vague_is_fixed_phrase() -> None:
@@ -82,6 +84,42 @@ def test_everyday_dead_band_gates_referents() -> None:
         assert utterance is not None
         assert utterance.form == "joint_resolved"
         assert utterance.text == "keep my arm lower"
+
+
+def test_motion_directive_offset_up_means_move_down() -> None:
+    # Offsets are nominal - oracle, so an upward wrist offset commands "down".
+    utterance = verbalize_motion_directive(
+        _intent({"shoulder_elevation": 0.3}, wrist=(0.0, 0.3, 0.0))
+    )
+    assert utterance is not None
+    assert utterance.text == "move my left arm down a lot"
+    assert utterance.form == "motion_directive"
+
+
+def test_motion_directive_picks_dominant_referent() -> None:
+    utterance = verbalize_motion_directive(
+        _intent(
+            {"elbow_flexion": 0.3}, wrist=(0.0, 0.0, 0.06), elbow=(0.16, 0.0, 0.0)
+        )
+    )
+    assert utterance is not None
+    assert utterance.text == "move my left elbow closer to my body"
+
+
+def test_motion_directive_composes_comparable_axes() -> None:
+    utterance = verbalize_motion_directive(
+        _intent({"shoulder_elevation": 0.3}, wrist=(0.2, -0.15, 0.0))
+    )
+    assert utterance is not None
+    assert utterance.text == "move my left arm closer to my body and up a lot"
+
+
+def test_motion_directive_small_offset_says_a_bit() -> None:
+    utterance = verbalize_motion_directive(
+        _intent({"shoulder_elevation": 0.2}, wrist=(0.0, 0.04, 0.0))
+    )
+    assert utterance is not None
+    assert utterance.text == "move my left arm down a bit"
 
 
 def test_everyday_offset_up_means_move_down() -> None:

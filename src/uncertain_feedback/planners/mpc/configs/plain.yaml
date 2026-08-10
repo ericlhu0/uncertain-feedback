@@ -2,7 +2,6 @@ steps: 100
 horizon: 10
 n_mpc_samples: 512
 max_angle_delta: 0.0025
-pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose.pt"
 
 cartesian:
   goals:

@@ -19,6 +19,7 @@ from typing import Any
 
 import yaml
 
+from uncertain_feedback.consts import MDM_START_POSE_PATH
 from uncertain_feedback.motion_generators.steering import SteeringConfig
 from uncertain_feedback.planners.mpc.action_spaces import RobotActionsConfig
 from uncertain_feedback.planners.mpc.constraints import CONSTRAINT_BUILDERS
@@ -129,6 +130,9 @@ class MpcRunConfig:
     horizon: int
     n_mpc_samples: int
     max_angle_delta: float
+    # Whole-body HML263 start pose; defaults to consts.MDM_START_POSE_PATH when
+    # the YAML omits `pose:`.  Set `pose: null` for configs that supply the arm
+    # directly via `arm:` and need no HML pose at all.
     pose: Path | None
     # Optional (3, 3) [shoulder, elbow, wrist] axis-angle override for the
     # initial left-arm pose (same semantics as the --arm CLI flag, which wins).
@@ -513,7 +517,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         horizon=_positive_int(data.get("horizon"), "horizon"),
         n_mpc_samples=_positive_int(data.get("n_mpc_samples"), "n_mpc_samples"),
         max_angle_delta=_float(data.get("max_angle_delta"), "max_angle_delta"),
-        pose=_optional_path(data.get("pose"), "pose"),
+        pose=_optional_path(data.get("pose", str(MDM_START_POSE_PATH)), "pose"),
         arm=arm,
         cartesian=cartesian,
         feedback=feedback,

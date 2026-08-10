@@ -3,7 +3,6 @@ steps: 300
 horizon: 10
 n_mpc_samples: 200
 max_angle_delta: 0.01
-pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 feedback:
   max_playback_delta: 0.05
   trajectory_fraction: 1

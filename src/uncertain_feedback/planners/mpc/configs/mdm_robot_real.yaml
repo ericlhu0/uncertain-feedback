@@ -36,7 +36,6 @@ feedback:
     n_clusters: 3
     scale: 1.0
 steps: 3000
-pose: "src/uncertain_feedback/motion_generators/mdm/demo_pose_v3.pt"
 
 corrections:
   trigger_threshold: 0.02

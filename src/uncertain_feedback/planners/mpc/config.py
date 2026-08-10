@@ -265,7 +265,7 @@ def _str_list(value: Any, name: str) -> list[str]:
 def _parse_steering(data: dict[str, Any]) -> SteeringConfig:
     steps = data.get("resample_steps")
     return SteeringConfig(
-        mode=str(data.get("mode", "off")),
+        mode=str(data.get("mode", SteeringConfig.mode)),
         resample_steps=(
             SteeringConfig.resample_steps
             if steps is None

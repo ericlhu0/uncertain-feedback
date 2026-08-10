@@ -314,19 +314,19 @@ def test_steering_config_rejects_invalid_settings(kwargs) -> None:
         SteeringConfig(**kwargs)
 
 
-def test_uq_config_steering_defaults_to_off(tmp_path) -> None:
+def test_uq_config_steering_defaults_to_cg(tmp_path) -> None:
     cfg = load_mpc_config(_write_uq_config(tmp_path, ""))
 
     assert cfg.feedback is not None and cfg.feedback.uq is not None
     assert cfg.feedback.uq.steering == SteeringConfig()
-    assert cfg.feedback.uq.steering.mode == "off"
+    assert cfg.feedback.uq.steering.mode == "cg"
 
 
 def test_uq_config_parses_an_explicit_steering_block(tmp_path) -> None:
     path = _write_uq_config(
         tmp_path,
         """    steering:
-      mode: cg
+      mode: resample
       resample_steps: [10, 20]
       temperature: 0.25
       guide_from: 5
@@ -338,7 +338,7 @@ def test_uq_config_parses_an_explicit_steering_block(tmp_path) -> None:
 
     assert cfg.feedback is not None and cfg.feedback.uq is not None
     assert cfg.feedback.uq.steering == SteeringConfig(
-        mode="cg",
+        mode="resample",
         resample_steps=(10, 20),
         temperature=0.25,
         guide_from=5,

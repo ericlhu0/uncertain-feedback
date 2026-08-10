@@ -808,7 +808,7 @@ class Session:
         n_clusters: int,
         scale: float,
         clusterer: str = "agglo_end_pose",
-        steering_mode: str = "off",
+        steering_mode: str = "cg",
     ) -> dict[str, Any]:
         """Sample MDM corrections for ``prompt``, cluster them, and scale each cluster mean."""
         traj = self.trajectory

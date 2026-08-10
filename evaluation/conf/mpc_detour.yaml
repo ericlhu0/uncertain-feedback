@@ -16,7 +16,7 @@ feedback:
     auto_cluster: 1
     scale: 1.0
     steering:
-      mode: "off"
+      mode: "cg"
       resample_steps: [15, 25, 35, 45]
       temperature: 0.5
       guide_from: 10

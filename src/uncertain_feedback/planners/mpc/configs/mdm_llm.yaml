@@ -14,9 +14,9 @@ feedback:
     scale: 1.0
     # Steer diffusion sampling toward the simulated user's hidden bounds.
     steering:
-      mode: "off"           # off | resample | cg
+      mode: "cg"            # cg (default) | resample | off
       resample_steps: [15, 25, 35, 45]
-      temperature: 0.5
+      temperature: 0.5      # resample only
       guide_from: 10        # cg only
       guidance_weight: 1.0e5  # cg only
 

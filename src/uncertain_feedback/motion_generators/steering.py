@@ -2,19 +2,21 @@
 
 Two mechanisms, selected by :attr:`SteeringConfig.mode`:
 
-``resample``
-    At chosen denoising steps, score every chain's ``x̂0`` prediction with the
-    cost and systematically resample the population with weights
-    ``softmax(-z(cost) / temperature)``. Cost-agnostic (the cost need not be
-    differentiable), scale-free in the temperature knob, and free at production
-    batch sizes. This is the default steering method.
-
 ``cg``
     Classifier guidance: nudge the reverse-diffusion mean by
-    ``-guidance_weight · ∇ₓ cost(x̂0(x))``. Handles the regime where the prompt
-    and the cost genuinely conflict — resampling can only reweight the mass the
-    model already puts on satisfying motions — at the price of a per-cost
-    ``guidance_weight`` calibration (~1e4–1e5) and roughly 2x sampling time.
+    ``-guidance_weight · ∇ₓ cost(x̂0(x))``. This is the default steering
+    method: it also covers the regime where the prompt and the cost genuinely
+    conflict, at the price of a per-cost ``guidance_weight`` calibration
+    (~1e4–1e5), a cost that must be differentiable w.r.t. ``x̂0``, and roughly
+    2x sampling time.
+
+``resample``
+    Alternative: at chosen denoising steps, score every chain's ``x̂0``
+    prediction with the cost and systematically resample the population with
+    weights ``softmax(-z(cost) / temperature)``. Cost-agnostic (the cost need
+    not be differentiable), scale-free in the temperature knob, and free at
+    production batch sizes, but it can only reweight the mass the model already
+    puts on satisfying motions.
 
 This module is imported while parsing YAML configs, so it must stay torch-free
 at module scope: ``torch.Tensor`` appears only in string annotations under
@@ -35,7 +37,7 @@ if TYPE_CHECKING:
     from uncertain_feedback.motion_generators.base import MotionGenerator
     from uncertain_feedback.simulated_users.base import SimulatedUser
 
-STEERING_MODES = ("off", "resample", "cg")
+STEERING_MODES = ("off", "cg", "resample")
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,7 @@ class SteeringConfig:
     the sampler's step count simply never fire.
     """
 
-    mode: str = "off"
+    mode: str = "cg"
     resample_steps: tuple[int, ...] = (15, 25, 35, 45)
     temperature: float = 0.5
     guide_from: int = 10
@@ -160,17 +162,18 @@ def make_cond_fn(
 
 
 def conflict_warning(event: SteeringEvent, n_samples: int) -> str | None:
-    """Flag a prompt/cost conflict resampling cannot fix, or ``None`` if healthy.
+    """Flag a prompt/cost conflict, or ``None`` if the population is healthy.
 
     Every chain violating the cost *and* the weights collapsing onto a handful
     of ancestors means the model puts almost no mass on motions that satisfy the
-    cost: resampling harder only destroys diversity.
+    cost, so reweighting the population cannot help.
     """
     if event.frac_violating >= 0.99 and event.ess < 0.05 * n_samples:
         return (
             f"steering conflict at step {event.step}: {event.frac_violating:.0%} of "
             f"samples violate the user cost and ESS collapsed to {event.ess:.1f}/"
-            f"{n_samples}. The prompt and the cost likely conflict — resampling "
-            "cannot fix this; try steering mode 'cg' or renegotiating the prompt."
+            f"{n_samples}. The prompt and the cost likely conflict: the model puts "
+            "almost no mass on satisfying motions, so mode 'resample' cannot fix "
+            "it — only guidance ('cg', the default) or a reworded prompt can."
         )
     return None

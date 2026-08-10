@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Any
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -104,7 +105,7 @@ from uncertain_feedback.motion_generators.mdm.sample_leftarm import (  # noqa: E
 # ---------------------------------------------------------------------------
 
 
-def _generate_leftarm(gen_args):
+def _generate_leftarm_impl(gen_args):
     """Drop-in replacement for ``sample.generate.main`` used during training.
 
     Dispatches to ``_run_one`` (defined below) according to ``_BODY_MODE``:
@@ -143,7 +144,10 @@ def _generate_leftarm(gen_args):
     data = load_dataset(args, max_frames, n_frames)
 
     model, diffusion = create_model_and_diffusion(args, data)
-    load_saved_model(model, args.model_path, use_avg=args.use_ema)
+    # Never the EMA copy: with avg_model_beta 0.9999 it is still ~61% base model
+    # after 5000 steps, so EMA samples would show no fine-tuning progress. This
+    # also matches inference, which overlays use_ema: false (mdm_config.yaml).
+    load_saved_model(model, args.model_path, use_avg=False)
     if args.guidance_param != 1:
         model = ClassifierFreeSampleModel(model)
     model.to(dist_util.dev())
@@ -321,6 +325,35 @@ def _generate_leftarm(gen_args):
     return _run_one(fix_body=False, out_path=args.output_dir)  # "free"
 
 
+def _generate_leftarm(gen_args):
+    """Generate samples without perturbing the training RNG.
+
+    The generation path calls ``fixseed(args.seed)``, which would reset the
+    global RNGs every save interval and make training replay the same data
+    permutation and noise tape between checkpoints. Snapshotting and restoring
+    the RNG state keeps the training RNG stream unperturbed by generation.
+    """
+    import random
+
+    import numpy as np
+    import torch
+
+    states = (
+        random.getstate(),
+        np.random.get_state(),
+        torch.get_rng_state(),
+        torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    )
+    try:
+        return _generate_leftarm_impl(gen_args)
+    finally:
+        random.setstate(states[0])
+        np.random.set_state(states[1])
+        torch.set_rng_state(states[2])
+        if states[3] is not None:
+            torch.cuda.set_rng_state_all(states[3])
+
+
 # ---------------------------------------------------------------------------
 # Monkey-patch and launch training
 # ---------------------------------------------------------------------------
@@ -328,6 +361,29 @@ def _generate_leftarm(gen_args):
 import train.training_loop as _training_loop  # noqa: E402  # pylint: disable=wrong-import-order
 
 _training_loop.generate = _generate_leftarm
+
+# Resuming loads opt<step>.pt when it exists next to the resume checkpoint, and
+# the restored param groups carry the ORIGINAL run's lr (1e-4 for the stock
+# humanml_enc_512_50steps opt state), silently overriding --lr. Every fine-tune
+# resumed from that checkpoint before 2026-08-09 — including customv3_fixed —
+# therefore trained at 1e-4 regardless of its args.json.
+_orig_load_optimizer_state = _training_loop.TrainLoop._load_optimizer_state
+
+
+def _load_optimizer_state_keep_lr(self: Any) -> None:
+    try:
+        _orig_load_optimizer_state(self)
+    except ValueError as exc:
+        # New conditioning heads (e.g. --speed_cond) change the parameter count,
+        # so the checkpoint's Adam state no longer matches; start it fresh.
+        print(f"[train_leftarm] optimizer state not loaded ({exc}); starting fresh")
+        return
+    for group in self.opt.param_groups:
+        group["lr"] = self.lr
+    print(f"[train_leftarm] optimizer state loaded; lr reset to {self.lr:g}")
+
+
+_training_loop.TrainLoop._load_optimizer_state = _load_optimizer_state_keep_lr
 
 
 def _auto_increment_save_dir() -> None:

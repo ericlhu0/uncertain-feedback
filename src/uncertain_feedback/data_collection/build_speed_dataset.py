@@ -57,6 +57,17 @@ _CLIP_FRAMES = 51
 _COND_SLOW_FACTOR = 3.0
 _COND_MIN_REGION = 0.15
 
+# Frames each variant is resampled to before the fixed-length crop. "fast" is
+# pinned at _CLIP_FRAMES (the whole source path in one clip) so it is already the
+# speed ceiling; contrast is bought entirely on the slow side.
+_RETIME_STYLES: dict[str, dict[str, int]] = {
+    "default": {"fast": _FAST_FRAMES, "normal": _NORMAL_FRAMES, "slow": _SLOW_FRAMES},
+    # 10.8x fast/slow contrast (vs 3.8x default), with "normal" at the geometric
+    # mean so the three tiers are evenly spaced in log speed. Still no hold
+    # padding: the slowest clip moves 9.4e-5 m/frame at its slowest frame.
+    "stark": {"fast": _CLIP_FRAMES, "normal": 161, "slow": 510},
+}
+
 _SPEED_WORDS = ("slow", "gently", "quick", "fast", "rapid", "swift", "relax")
 
 _TEMPLATE_STYLES: dict[str, dict[str, list[str]]] = {
@@ -81,6 +92,32 @@ _TEMPLATE_STYLES: dict[str, dict[str, list[str]]] = {
             "{c} at a snail's pace",
             "{c}, creeping like a sloth",
         ],
+    },
+    # Plain, non-figurative speed phrases a user could plausibly speak, chosen
+    # for CLIP separation: "gradually, little by little" vs "rapidly, in one
+    # motion" (set cosine 0.9514, against 0.9844 for adverbs and 0.9275 for
+    # vivid). At 22 CLIP tokens these sit exactly at MDM's 20-content-token
+    # limit — lengthening any template silently drops the speed phrase.
+    "plain": {
+        "fast": [
+            "{c}, rapidly, in one motion",
+            "{c}, rapid, all in one motion",
+            "{c}, rapidly, all at once",
+        ],
+        "normal": ["{c}"],
+        "slow": [
+            "{c}, gradually, little by little",
+            "{c}, gradual, little by little",
+            "{c}, gradually, bit by bit",
+        ],
+    },
+    # No speed language at all: for runs where speed must come from an explicit
+    # conditioning channel rather than the caption (avoids collinearity).
+    "none": {
+        "fast": ["{c}"],
+        "normal": ["{c}"],
+        "slow": ["{c}"],
+        "cond": ["{c}"],
     },
 }
 _COND_TEMPLATES: list[str] = [
@@ -160,9 +197,11 @@ def _base_captions(captions: list[str]) -> list[str]:
 
 
 def _variant_captions(variant: str, captions: list[str], style: str) -> list[str]:
-    templates = (
-        _COND_TEMPLATES if variant == "cond" else _TEMPLATE_STYLES[style][variant]
+    style_templates = _TEMPLATE_STYLES[style]
+    templates = style_templates.get(
+        variant, _COND_TEMPLATES if variant == "cond" else None
     )
+    assert templates is not None
     return [
         templates[i % len(templates)].format(c=c[0].lower() + c[1:])
         for i, c in enumerate(captions[:3])
@@ -175,7 +214,9 @@ def build(
     output_dir: Path,
     hml_stats_dir: Path,
     caption_style: str = "adverb",
+    retime_style: str = "default",
 ) -> None:
+    retime = _RETIME_STYLES[retime_style]
     (output_dir / "new_joint_vecs").mkdir(parents=True, exist_ok=True)
     (output_dir / "texts").mkdir(parents=True, exist_ok=True)
     hml_mean, hml_std = load_hml_stats(hml_stats_dir)
@@ -215,11 +256,13 @@ def build(
                 split = "train"
 
             variants: dict[str, np.ndarray] = {
-                "fast": _fit_clip(resample_positions(positions, _FAST_FRAMES)),
-                "normal": _fit_clip(resample_positions(positions, _NORMAL_FRAMES)),
-                "slow": _fit_clip(resample_positions(positions, _SLOW_FRAMES)),
+                name: _fit_clip(resample_positions(positions, n))
+                for name, n in retime.items()
             }
-            cond = retime_conditional(positions)
+            # retime_conditional is anchored on _NORMAL_FRAMES; under "stark"
+            # the slow region stretches past the point where _fit_clip can find
+            # a balanced above/below-shoulder window, so cond is dropped there.
+            cond = retime_conditional(positions) if retime_style == "default" else None
             if cond is not None:
                 variants["cond"] = _fit_clip(cond)
                 n_cond += 1
@@ -265,6 +308,9 @@ def main() -> None:
         "--caption_style", choices=sorted(_TEMPLATE_STYLES), default="adverb"
     )
     parser.add_argument(
+        "--retime_style", choices=sorted(_RETIME_STYLES), default="default"
+    )
+    parser.add_argument(
         "--hml_stats_dir",
         default=str(
             _here.parent
@@ -282,6 +328,7 @@ def main() -> None:
         Path(args.output_dir).expanduser().resolve(),
         Path(args.hml_stats_dir).expanduser().resolve(),
         caption_style=args.caption_style,
+        retime_style=args.retime_style,
     )
 
 

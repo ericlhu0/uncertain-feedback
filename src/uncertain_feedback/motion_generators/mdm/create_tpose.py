@@ -2,6 +2,14 @@
 
 Run this script to create the file, then move it to your MDM_ROOT
 directory.
+
+**Old-convention (pre-2026-07-07).** This assembles the 263 vector by hand with
+repo SMPL T-pose local positions and 6D identity rotations.  Under the official
+`process_file` encoding the 6D block is relative to the t2m reference skeleton
+(arms down), so identity is *not* a T-pose, RIC-Y is absolute height rather than
+root-relative, and the output is raw (unnormalized).  Prefer
+``make_initial_pose.py`` on an officially-encoded clip.  See ``CODEBASE_MAP.md``
+§9 "Dataset encoding provenance".
 """
 
 import numpy as np

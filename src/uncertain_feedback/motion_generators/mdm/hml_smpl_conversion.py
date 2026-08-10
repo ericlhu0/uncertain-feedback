@@ -5,7 +5,10 @@ HML263 files/model outputs follow the **official** HumanML3D encoding
 the t2m reference skeleton (arms hanging down), NOT this repo's SMPL T-pose
 (arms out).  All decoding therefore goes through the RIC positions —
 convention-free — followed by minimum-rotation IK into repo body_pose; the 6D
-block is never read directly.
+block is never read directly.  Exception: ``dataset/custom1`` and the
+checkpoints fine-tuned on it (including ``save/customv3_fixed``, the default
+until 2026-08-09) predate the 2026-07-07 switch to ``process_file`` — see
+:func:`smpl_arm_aa_to_hml263_frame`.
 
 HML → SMPL  (MDM output decoding):
 
@@ -27,9 +30,15 @@ HML → SMPL  (MDM output decoding):
 
 SMPL → HML  (inpainting / input conditioning):
 
+    ``smpl_arm_aa_seq_to_hml263_frames``
+        Patch a *sequence* of left-arm axis-angles into K normalized HML263
+        frames encoded as one clip, so the velocity channels describe the
+        actual arm motion across the prefix.
+
     ``smpl_arm_aa_to_hml263_frame``
-        Patch left-arm axis-angles back into a normalized HML263 frame.  Used
-        to condition the MDM inpainting start frame on the current MPC state.
+        Single-frame case (``K = 1``) of the above: a static pinned frame whose
+        velocity channels are ~0.  Used to condition the MDM inpainting start
+        frame on the current MPC state.
 
 FK utility:
 
@@ -99,6 +108,92 @@ ARM_BODY_POSE_INDICES: list[int] = [15, 17, 19]
 # ---------------------------------------------------------------------------
 
 
+def smpl_arm_aa_seq_to_hml263_frames(
+    base_norm: np.ndarray,
+    arm_aa_seq: np.ndarray,
+    hml_mean: np.ndarray,
+    hml_std: np.ndarray,
+    fk: SmplLeftArmFK,
+) -> np.ndarray:
+    """Patch a sequence of left-arm axis-angles into K normalized HML263 frames.
+
+    Same pipeline as :func:`smpl_arm_aa_to_hml263_frame` but for a whole
+    inpainting prefix: the base frame is decoded and IK'd **once**, each of the
+    ``K`` arm configurations is patched into that body_pose and FK'd, and the
+    resulting ``(K, 22, 3)`` position clip is encoded with a **single**
+    ``positions_to_hml263`` call.
+
+    The single call is the load-bearing detail.  ``process_file`` computes
+    velocities, root features and foot contacts by finite-differencing *within*
+    the clip it is given, so encoding the K frames together yields a prefix
+    whose velocity channels (``[0:3]``, ``[193:259]``) describe the actual arm
+    motion.  Encoding each frame separately and stacking would instead give K
+    frames that each say "not moving".
+
+    Root and body joints are static across the prefix — they come from the base
+    frame — so only the arm chain carries velocity.  The final returned frame is
+    the one duplicated to satisfy ``process_file``'s ``N → N-1`` drop, so its
+    own velocity channels are 0; it is the frame the generated motion continues
+    from.
+
+    Note that for ``K > 1`` that final frame is **not** bit-identical to
+    ``smpl_arm_aa_to_hml263_frame`` applied to the same last arm config.
+    ``process_file`` derives the canonical heading from hips + shoulders and
+    Gaussian-smooths it along the clip (``sigma = 20`` frames), so a prefix with
+    ``K << 20`` gets one clip-averaged heading for all K frames while the
+    single-frame pin gets that pose's own heading — and that heading depends on
+    the arm configuration.  The two therefore differ by a pure yaw about the
+    root: 0.13 rad (0.08 m at the wrist) for a 0.5 rad shoulder sweep.  Root
+    position and the body pose itself are unchanged.  The shared heading is what
+    keeps the encoded velocities pure arm motion rather than spurious body yaw,
+    so comparisons against the single-frame pin belong on decoded positions
+    after yaw alignment, not on raw channels.
+
+    Args:
+        base_norm:   ``(263,)`` normalized HML263 frame to use as the base.
+        arm_aa_seq:  ``(K, 3, 3)`` left-arm axis-angles per prefix frame,
+                     oldest → newest, for
+                     ``[left_shoulder, left_elbow, left_wrist]``.
+        hml_mean:    ``(263,)`` HML263 normalization mean.
+        hml_std:     ``(263,)`` HML263 normalization std.
+        fk:          :class:`~uncertain_feedback.planners.mpc.kinematics.SmplLeftArmFK`
+                     instance used to access T-pose bone lengths.
+
+    Returns:
+        ``(K, 263)`` patched and re-normalized HML263 frames.
+    """
+    # pylint: disable=import-outside-toplevel
+    import torch
+
+    from uncertain_feedback.data_collection.smpl_to_hml263 import (
+        positions_to_hml263,
+    )
+
+    recover_from_ric = _import_recover_from_ric()
+
+    arm_aa_seq = np.asarray(arm_aa_seq, dtype=np.float64)
+    raw = base_norm * hml_std + hml_mean  # (263,)
+    base_positions = (
+        recover_from_ric(torch.tensor(raw, dtype=torch.float32).unsqueeze(0), 22)[0]
+        .numpy()
+        .astype(np.float64)
+    )  # (22, 3)
+
+    body_pose = positions_to_smpl_body_pose(base_positions, fk.tpose_all_joints)
+    patched_positions = []
+    for arm_aa in arm_aa_seq:
+        body_pose[ARM_BODY_POSE_INDICES] = arm_aa
+        patched_positions.append(
+            smpl_body_pose_to_positions(
+                body_pose, fk.tpose_all_joints, root_pos=base_positions[0]
+            )
+        )
+
+    # process_file drops the last frame, so duplicate the newest one.
+    frames = np.stack(patched_positions + patched_positions[-1:])  # (K + 1, 22, 3)
+    return positions_to_hml263(frames, hml_mean, hml_std).astype(np.float64)
+
+
 def smpl_arm_aa_to_hml263_frame(
     base_norm: np.ndarray,
     arm_aa: np.ndarray,
@@ -111,12 +206,31 @@ def smpl_arm_aa_to_hml263_frame(
     Decodes the base frame to global positions (``recover_from_ric``), swaps
     the controlled arm slots into the repo body_pose obtained by
     minimum-rotation IK, runs full-body FK, and re-encodes the patched frame
-    with the official HumanML3D ``process_file`` — so the conditioning frame
-    follows exactly the encoding the model was fine-tuned on.
+    with the official HumanML3D ``process_file``.
 
     This is used to condition MDM's inpainting start frame on the current MPC
     arm state so that the generated motion starts from the actual arm
-    configuration rather than the fixed sitting pose.
+    configuration rather than the fixed sitting pose.  It is the ``K = 1`` case
+    of :func:`smpl_arm_aa_seq_to_hml263_frames`.
+
+    **Encoding match (2026-08-09).** The re-encode makes the output
+    official-convention regardless of what ``base_norm`` was encoded with, so
+    the frame is only on the *model's* training manifold if that model was
+    fine-tuned on official-encoding data.  **The current default checkpoint
+    satisfies this**: ``custom_seatedcanon_lr1e7_10k/model000759250.pt``
+    (``consts.py``) was fine-tuned on ``dataset/custom1_seatedcanon``, where
+    patching a frame's own arm angles back in moves its rot6d arm slots by only
+    0.0002 normalized RMS (0.0006 max).  The previous default
+    ``save/customv3_fixed`` was fine-tuned on ``dataset/custom1``, which
+    predates the 2026-07-07 ``process_file`` switch: the same measurement gives
+    1.98 RMS (4.34 max), i.e. that checkpoint could not read the arm rotations
+    it was conditioned on.  See ``CODEBASE_MAP.md`` §9 "Dataset encoding
+    provenance".
+
+    The output encodes a duplicated static pose, so its velocity blocks
+    (``[0:3]``, ``[193:259]``) are ~0, its foot contacts read "in contact", and
+    floor grounding is recomputed on the single pose (a constant RIC-Y shift
+    relative to a frame grounded on its full clip).
 
     Args:
         base_norm:  ``(263,)`` normalized HML263 frame to use as the base
@@ -131,32 +245,10 @@ def smpl_arm_aa_to_hml263_frame(
     Returns:
         ``(263,)`` patched and re-normalized HML263 frame.
     """
-    # pylint: disable=import-outside-toplevel
-    import torch
-
-    from uncertain_feedback.data_collection.smpl_to_hml263 import (
-        positions_to_hml263,
-    )
-
-    recover_from_ric = _import_recover_from_ric()
-
     arm_aa = np.asarray(arm_aa, dtype=np.float64)
-    raw = base_norm * hml_std + hml_mean  # (263,)
-    base_positions = (
-        recover_from_ric(torch.tensor(raw, dtype=torch.float32).unsqueeze(0), 22)[0]
-        .numpy()
-        .astype(np.float64)
-    )  # (22, 3)
-
-    body_pose = positions_to_smpl_body_pose(base_positions, fk.tpose_all_joints)
-    body_pose[ARM_BODY_POSE_INDICES] = arm_aa
-    patched_positions = smpl_body_pose_to_positions(
-        body_pose, fk.tpose_all_joints, root_pos=base_positions[0]
-    )
-
-    # process_file drops the last frame, so encode the static frame twice.
-    frames = np.repeat(patched_positions[None], 2, axis=0)
-    return positions_to_hml263(frames, hml_mean, hml_std)[0].astype(np.float64)
+    return smpl_arm_aa_seq_to_hml263_frames(
+        base_norm, arm_aa[None], hml_mean, hml_std, fk
+    )[0]
 
 
 # ---------------------------------------------------------------------------

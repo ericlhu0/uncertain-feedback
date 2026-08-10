@@ -20,6 +20,7 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     ARM_BODY_POSE_INDICES,
     COLLAR_BODY_POSE_INDEX,
     positions_to_smpl_body_pose,
+    smpl_arm_aa_seq_to_hml263_frames,
     smpl_arm_aa_to_hml263_frame,
     smpl_body_pose_to_arm_aa,
     smpl_body_pose_to_collar_aa,
@@ -242,6 +243,84 @@ class TestSmplBodyPoseToArmAa:
             smpl_body_pose_to_arm_aa(collar_bp),
             smpl_body_pose_to_arm_aa(wrist_bp),
         )
+
+
+def _tpose_base_frame(
+    fk: SmplLeftArmFK,
+) -> np.ndarray:  # pylint: disable=redefined-outer-name
+    """Encode the T-pose as a (263,) HML263 frame under identity normalization."""
+    # pylint: disable=import-outside-toplevel
+    from uncertain_feedback.data_collection.smpl_to_hml263 import positions_to_hml263
+
+    frames = np.repeat(fk.tpose_all_joints[None], 2, axis=0)
+    return positions_to_hml263(frames, np.zeros(263), np.ones(263))[0].astype(
+        np.float64
+    )
+
+
+# Local joint velocities live in [193:259]; joint j occupies 193 + 3j.
+_LEFT_WRIST_VEL_SLICE = slice(193 + 20 * 3, 193 + 20 * 3 + 3)
+
+
+@pytest.mark.skipif(
+    not _SMPL_PKL.exists(),
+    reason="SMPL_NEUTRAL.pkl not available",
+)
+class TestSmplArmAaSeqToHml263Frames:
+    """The multi-frame prefix encoder."""
+
+    _ARM_AA = np.array(
+        [[0.0, -0.8, 0.3], [0.0, 0.5, 0.0], [0.1, 0.0, 0.2]], dtype=np.float64
+    )
+
+    @staticmethod
+    def _sweep(k: int) -> np.ndarray:
+        """(k, 3, 3) arm sequence sweeping the shoulder open over k frames."""
+        seq = np.repeat(TestSmplArmAaSeqToHml263Frames._ARM_AA[None], k, axis=0)
+        seq[:, 0, 1] = np.linspace(-0.8, -0.3, k)
+        return seq
+
+    def test_k1_matches_single_frame_helper(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
+        mean, std = np.zeros(263), np.ones(263)
+        base = _tpose_base_frame(fk)
+        seq_out = smpl_arm_aa_seq_to_hml263_frames(
+            base, self._ARM_AA[None], mean, std, fk
+        )
+        single = smpl_arm_aa_to_hml263_frame(base, self._ARM_AA, mean, std, fk)
+        assert seq_out.shape == (1, 263)
+        np.testing.assert_array_equal(seq_out[0], single)
+
+    def test_static_sequence_matches_single_frame(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
+        """A repeated arm config gives K copies of the static pinned frame."""
+        mean, std = np.zeros(263), np.ones(263)
+        base = _tpose_base_frame(fk)
+        seq_out = smpl_arm_aa_seq_to_hml263_frames(
+            base, np.repeat(self._ARM_AA[None], 4, axis=0), mean, std, fk
+        )
+        single = smpl_arm_aa_to_hml263_frame(base, self._ARM_AA, mean, std, fk)
+        assert seq_out.shape == (4, 263)
+        for frame in seq_out:
+            np.testing.assert_allclose(frame, single, atol=1e-5)
+
+    def test_moving_sequence_has_nonzero_arm_velocity(
+        self, fk: SmplLeftArmFK  # pylint: disable=redefined-outer-name
+    ) -> None:
+        """The whole point: a moving prefix encodes real velocity features."""
+        mean, std = np.zeros(263), np.ones(263)
+        base = _tpose_base_frame(fk)
+        seq_out = smpl_arm_aa_seq_to_hml263_frames(base, self._sweep(4), mean, std, fk)
+
+        wrist_vel = np.abs(seq_out[:, _LEFT_WRIST_VEL_SLICE]).max(axis=1)
+        assert (wrist_vel[:-1] > 1e-3).all()
+        # Last frame is the duplicated one process_file differences against.
+        assert wrist_vel[-1] < 1e-6
+
+        static = smpl_arm_aa_to_hml263_frame(base, self._ARM_AA, mean, std, fk)
+        assert np.abs(static[_LEFT_WRIST_VEL_SLICE]).max() < 1e-6
 
 
 @pytest.mark.skipif(

@@ -1,8 +1,13 @@
 """Convert world-space 22-joint positions to 263-dim HumanML3D (HML263) features.
 
 Feature construction is delegated to the **official** HumanML3D ``process_file``
-from the MDM submodule, so our data is encoded with exactly the pipeline the
-pretrained MDM checkpoint was trained on:
+from the MDM submodule (since 2026-07-07), so our data is encoded with exactly
+the pipeline the *pretrained* ``humanml_enc_512_50steps`` checkpoint was trained
+on.  Datasets built before that date — ``dataset/custom1``, and hence the
+``save/customv3_fixed`` fine-tune (the default until 2026-08-09) — use the old
+homegrown encoding instead; ``dataset/custom1_seatedcanon`` is the
+``process_file`` re-encoding of the same clips, and the training data of the
+current default checkpoint:
 
 - ``uniform_skeleton`` retargeting onto the standard t2m skeleton
 - floor grounding, root-XZ origin, initial facing to Z+

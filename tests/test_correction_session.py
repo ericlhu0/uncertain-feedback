@@ -235,13 +235,18 @@ corrections:
     class FakeGenerator:
         """Motion generator stand-in returning a canned correction."""
 
+        prefix_frames = 4
+
         @staticmethod
-        def build_pose_from_arm_aa(_initial_pose, arm_aa):
-            return np.asarray(arm_aa)
+        def build_prefix_from_arm_history(_initial_pose, arm_aa_seq):
+            return np.asarray(arm_aa_seq)
 
         @staticmethod
         def generate_left_arm_trajectory(_text, *, start_pose, **_kwargs):
-            return np.stack([start_pose, start_pose])
+            # Mirrors the real contract: the prefix conditions generation and
+            # the returned motion starts at its last frame.
+            current = np.asarray(start_pose)[-1]
+            return np.stack([current, current])
 
     setup = RunSetup(
         mpc=planner,
@@ -325,13 +330,18 @@ corrections:
     class FakeGenerator:
         """Motion generator stand-in returning a canned correction."""
 
+        prefix_frames = 4
+
         @staticmethod
-        def build_pose_from_arm_aa(_initial_pose, arm_aa):
-            return np.asarray(arm_aa)
+        def build_prefix_from_arm_history(_initial_pose, arm_aa_seq):
+            return np.asarray(arm_aa_seq)
 
         @staticmethod
         def generate_left_arm_trajectory(_text, *, start_pose, **_kwargs):
-            return np.stack([start_pose, start_pose])
+            # Mirrors the real contract: the prefix conditions generation and
+            # the returned motion starts at its last frame.
+            current = np.asarray(start_pose)[-1]
+            return np.stack([current, current])
 
     context = MpcCostContext(
         fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)

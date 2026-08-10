@@ -69,6 +69,11 @@ class MotionGenerator(ABC):
         Returns ``(arm_aa (3,3), body_positions (22,3), spine3_aa (3,), collar_aa (3,))``.
         """
 
+    @property
+    @abstractmethod
+    def prefix_frames(self) -> int:
+        """Number of leading frames pinned as generation-time conditioning."""
+
     @abstractmethod
     def build_pose_from_arm_aa(
         self,
@@ -76,6 +81,19 @@ class MotionGenerator(ABC):
         arm_aa: np.ndarray,
     ) -> np.ndarray:
         """Return a copy of ``base_pose`` with the arm joints set to ``arm_aa``."""
+
+    @abstractmethod
+    def build_prefix_from_arm_history(
+        self,
+        base_pose: np.ndarray,
+        arm_aa_seq: np.ndarray,
+    ) -> np.ndarray:
+        """Return a ``(prefix_frames, 263)``-style prefix from an arm history.
+
+        ``arm_aa_seq`` is ``(prefix_frames, 3, 3)``, oldest → newest, ending at
+        the current configuration.  The result is passed as ``start_pose`` to
+        condition generation on the recent trajectory instead of a single pose.
+        """
 
     @abstractmethod
     def generate_left_arm_trajectory(
@@ -90,8 +108,18 @@ class MotionGenerator(ABC):
         spine3_aa: np.ndarray | None = None,
         *,
         steering: SteeringSpec | None = None,
+        speed: float | None = None,
     ) -> np.ndarray:
         """Generate a left-arm axis-angle trajectory from text.
+
+        The ``prefix_frames`` frames pinned to ``start_pose`` are
+        generation-time conditioning only: they are additive to the requested
+        length and never part of the returned motion, apart from the last one,
+        which is frame 0 of the output — the configuration the arm is in now.
+        ``num_frames`` is therefore the returned length.
+
+        ``speed`` requests a mean left-arm speed in metres per frame; backends
+        without an explicit speed channel ignore it.
 
         Returns ``(n_frames, 3, 3)`` when ``num_samples == 1``, otherwise
         ``(num_samples, n_frames, 3, 3)``.
@@ -108,8 +136,14 @@ class MotionGenerator(ABC):
         frozen_body: bool = False,
         *,
         steering: SteeringSpec | None = None,
+        speed: float | None = None,
     ) -> np.ndarray:
-        """Generate samples and return ``(num_samples, n_frames, 22, 3)`` SMPL positions."""
+        """Generate samples and return ``(num_samples, n_frames, 22, 3)`` SMPL positions.
+
+        Same prefix contract as :meth:`generate_left_arm_trajectory`: the pinned
+        prefix conditions generation and is stripped from the result, whose
+        frame 0 is the current configuration.
+        """
 
     # ------------------------------------------------------------------
     # Shared, backend-agnostic conversion
@@ -124,11 +158,16 @@ class MotionGenerator(ABC):
         same collar or the extracted trajectory lands in a different frame
         (identity collar) than the one the MPC tracks.  Backends call this at
         the top of their ``generate_*`` methods.
+
+        Accepts a ``(263,)`` pose or a ``(K, 263)`` prefix; for a prefix the
+        collar is taken from the **last** frame, which is the one the generated
+        motion continues from.
         """
         if start_pose is not None:
-            self._fk.collar_aa = np.asarray(
-                self.decode_pose(start_pose)[3], dtype=np.float64
-            )
+            pose = np.asarray(start_pose)
+            if pose.ndim == 2:
+                pose = pose[-1]
+            self._fk.collar_aa = np.asarray(self.decode_pose(pose)[3], dtype=np.float64)
 
     def smpl_positions_to_left_arm_trajectory(
         self,

@@ -254,7 +254,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         dest="mdm_frames",
-        help="Exact number of MDM frames to generate (1-196). Default is 120.",
+        help=(
+            "Exact number of MDM frames to return (1-189: the pinned prefix is "
+            "sampled on top, within MDM's 196-frame limit). Default is 120."
+        ),
     )
     p.add_argument(
         "--frozen-body",
@@ -832,8 +835,17 @@ def run_repeated_correction_session(
         if old_suffix is not None:
             np.save(round_dir / "interrupted_reference.npy", old_suffix)
 
-        current_pose = gen.build_pose_from_arm_aa(
-            setup.initial_pose, q_to_arm_aa(q, setup.fk.elbow_hinge_axis)
+        # Condition the correction on the arm's recent trajectory: the pinned
+        # prefix ends at the current configuration and is stripped from the
+        # generated motion by the generator.  q_history already ends at q
+        # (the loop appends each state before the pre-step trigger fires).
+        recent_q = (q_history or [q])[-gen.prefix_frames :]
+        recent_q = [recent_q[0]] * (gen.prefix_frames - len(recent_q)) + recent_q
+        current_pose = gen.build_prefix_from_arm_history(
+            setup.initial_pose,
+            q_to_arm_aa(
+                np.asarray(recent_q, dtype=np.float64), setup.fk.elbow_hinge_axis
+            ),
         )
         mdm_frames = (
             args.mdm_frames if args.mdm_frames is not None else feedback_cfg.frames

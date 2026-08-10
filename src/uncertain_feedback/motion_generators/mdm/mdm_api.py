@@ -56,6 +56,7 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     hml263_batch_to_smpl_body_pose,
     hml263_batch_to_smpl_positions,
     hml263_to_smpl_body_pose,
+    smpl_arm_aa_seq_to_hml263_frames,
     smpl_arm_aa_to_hml263_frame,
     smpl_body_pose_to_arm_aa,
     smpl_body_pose_to_collar_aa,
@@ -77,7 +78,76 @@ _MDM_SUBDIR = MDM_ROOT / "motion-diffusion-model"
 
 _MAX_FRAMES = 196  # HumanML3D hard limit
 _FPS = 20  # HumanML3D frame rate
-N_PREFIX_FRAMES = 1  # leading frames pinned to the start pose during inpainting
+# Leading frames pinned to the start pose during inpainting.  Measured: 8 cuts
+# the frame-0 seam teleport roughly in half and a static prefix is as good as a
+# real arm history — see CODEBASE_MAP.md, "How many frames to pin".  It also
+# sets train_leftarm.py's --n_prefix default and the steering-cost slice in
+# torch_features.py, which both read this constant.  The prefix is
+# generation-time conditioning only: it is additive to the requested frame
+# count and stripped from the returned motion apart from its last frame.
+N_PREFIX_FRAMES = 8
+
+
+def build_inpainting_tensors(  # pylint: disable=too-many-arguments
+    torch_module: Any,
+    prefix: Any,
+    n_prefix: int,
+    n_frames: int,
+    num_samples: int,
+    body_mask: np.ndarray,
+) -> tuple[Any, Any]:
+    """Build the ``inpainted_motion`` / ``inpainting_mask`` pair for sampling.
+
+    Frames past the prefix hold its **last** frame, so ``body_mask`` freezes the
+    non-arm channels against the configuration the generated motion continues
+    from.  The first ``n_prefix`` frames are locked on every channel.
+
+    Args:
+        torch_module: The ``torch`` module (imported lazily by callers).
+        prefix:       ``(K, 263)`` float32 tensor of pinned frames.
+        n_prefix:     Number of leading frames to lock.
+        n_frames:     Total frames in the generated motion.
+        num_samples:  Diffusion batch size.
+        body_mask:    ``(263,)`` bool — channels frozen for the whole clip.
+
+    Returns:
+        ``(inpainted_motion, inpainting_mask)``, each
+        ``(num_samples, 263, 1, n_frames)``.
+    """
+    frames = prefix[-1].unsqueeze(-1).repeat(1, n_frames)  # (263, n_frames)
+    frames[:, : prefix.shape[0]] = prefix.T
+    input_motions = frames.unsqueeze(1).unsqueeze(0).repeat(num_samples, 1, 1, 1)
+
+    mask = torch_module.tensor(
+        body_mask, dtype=torch_module.bool, device=prefix.device
+    )  # (263,)
+    mask = (
+        mask.unsqueeze(0)
+        .unsqueeze(-1)
+        .unsqueeze(-1)
+        .repeat(num_samples, 1, 1, n_frames)
+    )
+    mask[..., :n_prefix] = True
+    return input_motions, mask
+
+
+def build_prefix_tensor(torch_module: Any, start_pose: np.ndarray, device: Any) -> Any:
+    """Return the ``(N_PREFIX_FRAMES, 263)`` pinned prefix for ``start_pose``.
+
+    A ``(263,)`` pose is expanded into a static prefix — measured to be as good
+    as a real history.  A 2-D prefix must already hold exactly
+    ``N_PREFIX_FRAMES`` frames: the steering cost in ``torch_features.py``
+    drops that many frames, so a shorter or longer prefix would mis-score.
+    """
+    pose = np.asarray(start_pose)
+    if pose.ndim == 1:
+        pose = np.repeat(pose[np.newaxis, :], N_PREFIX_FRAMES, axis=0)
+    if pose.shape[0] != N_PREFIX_FRAMES:
+        raise ValueError(
+            f"start_pose prefix must have {N_PREFIX_FRAMES} frames, "
+            f"got {pose.shape[0]}"
+        )
+    return torch_module.tensor(pose, dtype=torch_module.float32, device=device)
 
 
 def _sync_cuda_if_needed(torch_module: Any) -> None:
@@ -99,6 +169,26 @@ def _resolve_num_frames(
     if resolved > _MAX_FRAMES:
         raise ValueError(f"num_frames must be <= {_MAX_FRAMES}, got {resolved}")
     return resolved
+
+
+def _resolve_total_frames(
+    motion_length_seconds: float,
+    num_frames: int | None,
+) -> int:
+    """Frames to sample so the requested count survives prefix stripping.
+
+    The pinned prefix is additive: a request for ``n`` frames samples
+    ``n + N_PREFIX_FRAMES - 1`` so that ``n`` frames remain once the prefix is
+    dropped (its last frame is kept as the output's frame 0).
+    """
+    resolved = _resolve_num_frames(motion_length_seconds, num_frames)
+    n_total = resolved + N_PREFIX_FRAMES - 1
+    if n_total > _MAX_FRAMES:
+        raise ValueError(
+            f"num_frames plus the {N_PREFIX_FRAMES - 1} extra pinned frames must "
+            f"be <= {_MAX_FRAMES}, got {resolved} + {N_PREFIX_FRAMES - 1} = {n_total}"
+        )
+    return n_total
 
 
 class MdmMotionGenerator(
@@ -379,6 +469,46 @@ class MdmMotionGenerator(
         )
 
     @property
+    def prefix_frames(self) -> int:
+        """Number of leading frames pinned as generation-time conditioning."""
+        return N_PREFIX_FRAMES
+
+    def build_prefix_from_arm_history(
+        self,
+        base_pose: np.ndarray,
+        arm_aa_seq: np.ndarray,
+    ) -> np.ndarray:
+        """Patch a sequence of arm configurations into a ``(K, 263)`` prefix.
+
+        The multi-frame counterpart of :meth:`build_pose_from_arm_aa`: pass the
+        MPC's recent arm history (oldest → newest, ending at the current
+        configuration) and the resulting prefix carries real velocity features
+        rather than the ~0 of a single pinned frame.  Feed the result to
+        :meth:`generate_left_arm_trajectory` as ``start_pose``, which requires
+        ``K == prefix_frames``.
+
+        Args:
+            base_pose:  ``(263,)`` HML263 feature vector (e.g. sitting pose
+                        from :meth:`load_pose`).
+            arm_aa_seq: ``(K, 3, 3)`` axis-angles for
+                        ``[left_shoulder, left_elbow, left_wrist]`` per frame,
+                        oldest → newest.
+
+        Returns:
+            ``(K, 263)`` HML263 prefix frames.
+        """
+        self._ensure_loaded()
+        assert self._hml_mean is not None
+        assert self._hml_std is not None
+        return smpl_arm_aa_seq_to_hml263_frames(
+            base_norm=np.asarray(base_pose, dtype=np.float64),
+            arm_aa_seq=np.asarray(arm_aa_seq, dtype=np.float64),
+            hml_mean=self._hml_mean,
+            hml_std=self._hml_std,
+            fk=self._fk,
+        )
+
+    @property
     def last_steering_events(self) -> tuple[SteeringEvent, ...]:
         """Per-step steering diagnostics recorded by the most recent generation."""
         return self._last_steering_events
@@ -415,6 +545,7 @@ class MdmMotionGenerator(
         n_frames: int,
         frozen_body: bool,
         steering: SteeringSpec | None,
+        speed: float | None = None,
     ) -> Any:
         """Draw ``num_samples`` normalized HML263 samples for ``text``.
 
@@ -430,6 +561,7 @@ class MdmMotionGenerator(
         assert self._hml_mean is not None
         assert self._hml_std is not None
         assert self._not_l_arm_mask is not None
+        assert start_pose is not None, "sampling requires a start pose to pin"
         self._align_fk_collar_to_pose(start_pose)
 
         # pylint: disable=import-outside-toplevel,import-error
@@ -458,39 +590,38 @@ class MdmMotionGenerator(
                 model_kwargs["y"][key] = t
 
         # --- Inpainting: start pose + optional frozen body --------------------
-        start_frame = torch.tensor(
-            start_pose, dtype=torch.float32, device=dist_util.dev()
-        ).unsqueeze(
-            -1
-        )  # (263, 1)
-
-        # input_motions: (num_samples, 263, 1, n_frames)
-        input_motions = (
-            start_frame.unsqueeze(0).unsqueeze(-1).repeat(num_samples, 1, 1, n_frames)
+        # start_pose is a (263,) pose, expanded into a static prefix, or an
+        # (N_PREFIX_FRAMES, 263) prefix from build_prefix_from_arm_history.
+        prefix = build_prefix_tensor(torch, start_pose, dist_util.dev())
+        body_mask = (
+            self._not_l_arm_mask
+            if frozen_body
+            else np.zeros_like(self._not_l_arm_mask, dtype=bool)
+        )
+        input_motions, inpainting_mask = build_inpainting_tensors(
+            torch, prefix, N_PREFIX_FRAMES, n_frames, num_samples, body_mask
         )
         model_kwargs["y"]["inpainted_motion"] = input_motions
-
-        if frozen_body:
-            mask_np = self._not_l_arm_mask
-        else:
-            mask_np = np.zeros_like(self._not_l_arm_mask, dtype=bool)
-        mask_tensor = torch.tensor(
-            mask_np, dtype=torch.bool, device=input_motions.device
-        )
-        # Expand: (263,) → (num_samples, 263, 1, n_frames)
-        model_kwargs["y"]["inpainting_mask"] = (
-            mask_tensor.unsqueeze(0)
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-            .repeat(num_samples, 1, 1, n_frames)
-        )
-        # Lock the prefix frames to the start frame.
-        model_kwargs["y"]["inpainting_mask"][..., :N_PREFIX_FRAMES] = True
+        model_kwargs["y"]["inpainting_mask"] = inpainting_mask
 
         # --- Classifier-free guidance scale ----------------------------------
         model_kwargs["y"]["scale"] = (
             torch.ones(num_samples, device=dist_util.dev()) * args.guidance_param
         )
+
+        # --- Optional scalar speed channel (--speed_cond checkpoints only) ----
+        if getattr(model, "speed_cond", False):
+            # pylint: disable=import-outside-toplevel,import-error
+            from model.mdm import (  # type: ignore[import-not-found]
+                SPEED_NEUTRAL,
+                SPEED_SCALE,
+            )
+
+            model_kwargs["y"]["speed"] = torch.full(
+                (num_samples, 1),
+                (SPEED_NEUTRAL if speed is None else speed) / SPEED_SCALE,
+                device=dist_util.dev(),
+            )
 
         # --- Run diffusion sampling ------------------------------------------
         print(f"Generating motion for: '{text}' ({n_frames} frames)…")
@@ -593,14 +724,26 @@ class MdmMotionGenerator(
         spine3_aa: np.ndarray | None = None,
         *,
         steering: SteeringSpec | None = None,
+        speed: float | None = None,
     ) -> np.ndarray:
         """Generate a left arm motion trajectory from a text description.
 
         All body joints except the left arm (left_shoulder, left_elbow,
         left_wrist) are inpainted to ``start_pose`` throughout the motion.
-        The first ``N_PREFIX_FRAMES`` frames are locked to the arm configuration encoded in
-        ``start_pose``.  To start from the MPC's current arm state, pass a
-        ``start_pose`` built with :meth:`build_pose_from_arm_aa`.
+        The first ``N_PREFIX_FRAMES`` frames are locked to the arm
+        configuration(s) encoded in ``start_pose``.  To start from the MPC's
+        current arm state, pass a ``(263,)`` ``start_pose`` built with
+        :meth:`build_pose_from_arm_aa` — it is expanded into a static prefix —
+        or an ``(N_PREFIX_FRAMES, 263)`` prefix from
+        :meth:`build_prefix_from_arm_history` to condition on the arm's recent
+        history instead.
+
+        The prefix is **generation-time conditioning only**: it is additive to
+        the requested length and stripped from the result, so the returned
+        trajectory has exactly the requested number of frames and its frame 0
+        is the last pinned frame — the configuration the arm is in right now.
+        The ``save_path`` video is a diagnostic and still shows the full clip
+        including the prefix.
 
         Args:
             text:                  Natural-language description of the desired
@@ -610,9 +753,11 @@ class MdmMotionGenerator(
                                    Capped at 9.8 s (HumanML3D maximum).
             start_pose:            ``(263,)`` HML263 feature vector used as
                                    the inpainting base for all joints
-                                   throughout the motion.  Pass the output of
-                                   :meth:`load_pose` or
-                                   :meth:`build_pose_from_arm_aa`.
+                                   throughout the motion, or an
+                                   ``(N_PREFIX_FRAMES, 263)`` prefix.  Pass the
+                                   output of :meth:`load_pose`,
+                                   :meth:`build_pose_from_arm_aa` or
+                                   :meth:`build_prefix_from_arm_history`.
             save_path:             If provided, save a full-body visualization
                                    of the generated motion to this path as an
                                    MP4 (e.g. ``"motion.mp4"``).  Uses the same
@@ -624,7 +769,7 @@ class MdmMotionGenerator(
             num_samples:           Number of independent diffusion samples to
                                    draw in a single forward pass.  Defaults to
                                    ``1`` (backward-compatible).
-            num_frames:            Exact number of MDM frames to generate.  If
+            num_frames:            Exact number of MDM frames to return.  If
                                    ``None``, derived from
                                    ``motion_length_seconds`` at 20 FPS.
             frozen_body:           If ``True``, inpaint/freeze all non-left-arm
@@ -637,14 +782,18 @@ class MdmMotionGenerator(
                                    of using MDM's body frame.
             steering:              Optional cost-steering spec biasing the
                                    diffusion samples toward a user cost model.
+            speed:                 Requested mean left-arm speed in metres per
+                                   MDM frame (20 FPS).  Only used by
+                                   ``--speed_cond`` checkpoints; ``None`` means
+                                   the dataset-neutral value.
 
         Returns:
             ``(n_frames, 3, 3)`` axis-angle trajectory when ``num_samples==1``.
             ``(num_samples, n_frames, 3, 3)`` when ``num_samples > 1``.
         """
-        n_frames = _resolve_num_frames(motion_length_seconds, num_frames)
+        n_total = _resolve_total_frames(motion_length_seconds, num_frames)
         sample = self._sample_hml(
-            text, start_pose, num_samples, n_frames, frozen_body, steering
+            text, start_pose, num_samples, n_total, frozen_body, steering, speed
         )
         model = self._model
         data = self._data
@@ -676,8 +825,8 @@ class MdmMotionGenerator(
                 get_rotations_back=False,
             )
             motion = (
-                vis[0].cpu().numpy().transpose(2, 0, 1)[:n_frames]
-            )  # (n_frames, 22, 3)
+                vis[0].cpu().numpy().transpose(2, 0, 1)[:n_total]
+            )  # (n_total, 22, 3)
             clip = plot_3d_motion(
                 str(save_path),
                 paramUtil.t2m_kinematic_chain,
@@ -686,12 +835,15 @@ class MdmMotionGenerator(
                 dataset="humanml",
                 fps=_FPS,
             )
-            clip.set_duration(float(n_frames) / _FPS).write_videofile(
+            clip.set_duration(float(n_total) / _FPS).write_videofile(
                 str(save_path), fps=_FPS, codec="libx264", audio=False, logger=None
             )
             print(f"Saved motion video to {save_path}")
 
         # --- Convert normalized HML → SMPL body_pose/XYZ → arm axis-angles ---
+        # The prefix is dropped only after decoding: HML263 root features are
+        # frame-to-frame velocities that recover_from_ric integrates from frame
+        # 0, so slicing raw frames would move every decoded frame.
         use_fixed_base = spine3_aa is not None
         if use_fixed_base:
             hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
@@ -705,35 +857,36 @@ class MdmMotionGenerator(
                 "[timing] HML-to-fixed-base arm conversion total: "
                 f"{time.perf_counter() - convert_t0:.3f}s"
             )
+            arm_aa = arm_aa[:, N_PREFIX_FRAMES - 1 :]
             return arm_aa[0] if num_samples == 1 else arm_aa
 
         if num_samples == 1:
             # Single-sample fast path: no ThreadPoolExecutor overhead.
-            hml_vec = sample[0, :, 0, :].T  # (n_frames, 263)
+            hml_vec = sample[0, :, 0, :].T  # (n_total, 263)
             convert_t0 = time.perf_counter()
             body_pose = hml263_to_smpl_body_pose(
                 hml_vec, data, self._fk.tpose_all_joints
-            )  # (n_frames, 21, 3)
+            )  # (n_total, 21, 3)
             print(
                 "[timing] HML-to-arm conversion: "
                 f"{time.perf_counter() - convert_t0:.3f}s"
             )
-            return smpl_body_pose_to_arm_aa(body_pose)  # (n_frames, 3, 3)
+            arm_aa = smpl_body_pose_to_arm_aa(body_pose)
+            return arm_aa[N_PREFIX_FRAMES - 1 :]  # (n_frames, 3, 3)
 
         # Batch path: recover positions for all samples at once, then IK.
-        # sample: (num_samples, 263, 1, n_frames) → (num_samples, n_frames, 263)
+        # sample: (num_samples, 263, 1, n_total) → (num_samples, n_total, 263)
         hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
         convert_t0 = time.perf_counter()
         body_pose_batch = hml263_batch_to_smpl_body_pose(
             hml_vecs, data, self._fk.tpose_all_joints
-        )  # (num_samples, n_frames, 21, 3)
+        )  # (num_samples, n_total, 21, 3)
         print(
             "[timing] HML-to-arm conversion total: "
             f"{time.perf_counter() - convert_t0:.3f}s"
         )
-        return smpl_body_pose_to_arm_aa(
-            body_pose_batch
-        )  # (num_samples, n_frames, 3, 3)
+        arm_aa = smpl_body_pose_to_arm_aa(body_pose_batch)
+        return arm_aa[:, N_PREFIX_FRAMES - 1 :]  # (num_samples, n_frames, 3, 3)
 
     def generate_left_arm_position_samples(  # pylint: disable=too-many-locals
         self,
@@ -745,6 +898,7 @@ class MdmMotionGenerator(
         frozen_body: bool = False,
         *,
         steering: SteeringSpec | None = None,
+        speed: float | None = None,
     ) -> np.ndarray:
         """Generate MDM samples and return SMPL XYZ positions without IK.
 
@@ -753,12 +907,20 @@ class MdmMotionGenerator(
         then stops after HML recovery / ``rot2xyz`` instead of converting every
         frame to local arm axis-angles.
 
+        As in :meth:`generate_left_arm_trajectory`, the ``N_PREFIX_FRAMES``
+        pinned frames are conditioning only: they are additive to
+        ``num_frames`` and stripped after decoding, so frame 0 of the result is
+        the last pinned frame (the current configuration).  ``start_pose`` is a
+        ``(263,)`` pose — expanded into a static prefix — or an
+        ``(N_PREFIX_FRAMES, 263)`` prefix.
+
         Returns:
-            ``(num_samples, n_frames, 22, 3)`` global SMPL joint positions.
+            ``(num_samples, n_frames, 22, 3)`` global SMPL joint positions,
+            where ``n_frames`` is the requested count.
         """
-        n_frames = _resolve_num_frames(motion_length_seconds, num_frames)
+        n_total = _resolve_total_frames(motion_length_seconds, num_frames)
         sample = self._sample_hml(
-            text, start_pose, num_samples, n_frames, frozen_body, steering
+            text, start_pose, num_samples, n_total, frozen_body, steering, speed
         )
 
         convert_t0 = time.perf_counter()
@@ -768,4 +930,4 @@ class MdmMotionGenerator(
             "[timing] HML-to-position conversion total: "
             f"{time.perf_counter() - convert_t0:.3f}s"
         )
-        return positions
+        return positions[:, N_PREFIX_FRAMES - 1 :]

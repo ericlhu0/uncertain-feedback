@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-08-05
+**Last updated:** 2026-08-10
 **Branch:** mdm-steering
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -116,6 +116,7 @@ uncertain-feedback/
 │   │       ├── mdm_parser_util.py    # CLI arg parser helpers for MDM scripts
 │   │       ├── sample_leftarm.py     # Standalone left-arm generation script
 │   │       ├── train_leftarm.py      # Fine-tuning script for left arm
+│   │       ├── finetune_standing.sh  # Swap dataset/HumanML3D -> dataset/<name>, fine-tune with the customv3_fixed recipe, restore on exit
 │   │       ├── create_tpose.py       # T-pose demo pose generator
 │   │       ├── make_initial_pose.py  # Build an HML pose from a body config
 │   │       ├── visualize_sitting_pose.py
@@ -158,7 +159,7 @@ uncertain-feedback/
 │   │   └── viz.py                    # render_hidden_bounds: shaded forbidden regions + trajectories
 │   ├── data_collection/
 │   │   ├── build_mdm_dataset.py      # Build HumanML3D dataset from video/labels
-│   │   ├── build_speed_dataset.py    # Speed-variant dataset from cached positions (fast/normal/slow + above-shoulder-slow retiming, speed captions)
+│   │   ├── build_speed_dataset.py    # Speed-variant dataset from cached positions (fast/normal/slow + above-shoulder-slow retiming; `--caption_style adverb|vivid|none`, `none` = speed-free captions for scalar-channel runs)
 │   │   ├── extract_all_frames.py     # Video → frames
 │   │   ├── labeler.py                # Browser-based text labeling UI (Flask)
 │   │   ├── mhr_pose_estimator.py     # MHR human pose estimation wrapper
@@ -429,11 +430,11 @@ When `llm_cost.enabled: true` in the YAML:
 | `max_angle_delta`      | float    | Sampling std dev (radians)                           |
 | `robot_actions.*`      | RobotActionsConfig | Presence switches the action space to robot joint deltas. `max_joint_delta` (per-step inf-norm cap on sampled robot joint deltas, rad, default 0.005 — the same cap `execute_robot` enforces; the env's `robot_max_joint_delta` remains the hardware backstop), `joint_delta_std` (sampling-noise std around the warm-started previous plan, rad; default null = a third of the cap — keep it well below the cap or the uniform rescale drowns the warm-started mean in noise), `infeasibility_weight` (weight on the squared grasp-transmission residual from `project_forearm_frames`, default 1.0), `max_grasp_residual` / `grasp_residual_frames` (hard gate: rollouts whose first `grasp_residual_frames` frames [default 3] exceed `max_grasp_residual` per frame [default 0.02; m + rad] are discarded before the argmin; fallback: least-violating sample if none pass). Mutually exclusive with `constraints:`. |
 | `constraints.*`        | mapping  | Named feasibility constraints (registry: `CONSTRAINT_BUILDERS`). `robot_ik:` takes `max_residual` (maximum gripper pose error, metres + radians, default 0.001, over the leading `grasp_residual_frames` [default 3]; the real env evaluates it with the same analytical IK and padded joint-limit box as execution; also the threshold for the feedback push and per-step playback screens), and `playback_stall_steps` (consecutive playback steps without closest-approach progress before the cursor skips the frame, default 40). Requires `env: real` or `sim_mannequin`. |
-| `pose`                 | path?    | HML pose `.pt` file for initial body state           |
+| `pose`                 | path?    | HML pose `.pt` file for initial body state. **Defaults to `consts.MDM_START_POSE_PATH`** when omitted — no config sets it any more; set it only to deviate, or `null` for configs that supply `arm:` and need no HML pose. Must match the checkpoint's training body (see "Checkpoint training bodies") |
 | `arm`                  | 3×3 list? | Initial left-arm `[shoulder, elbow, wrist]` axis-angle override on top of `pose` (same semantics as `--arm`, which wins when both are given) |
-| `feedback.*`           | FeedbackConfig | Presence enables the MDM feedback method. `max_playback_delta` (max per-joint rotation, radians, per step while following the MDM trajectory, default 0.05 — rate limit easing the initial jump into the trajectory and any large frame-to-frame jump), `trajectory_fraction` (fraction of MDM frames to enqueue, default 1.0), `frames` (exact MDM frames to generate; null = generator default), `text_time` (step at which the scripted correction triggers), and a nested optional `uq:` (below). |
+| `feedback.*`           | FeedbackConfig | Presence enables the MDM feedback method. `max_playback_delta` (max per-joint rotation, radians, per step while following the MDM trajectory, default 0.05 — rate limit easing the initial jump into the trajectory and any large frame-to-frame jump), `trajectory_fraction` (fraction of MDM frames to enqueue, default 1.0), `frames` (exact MDM frames the generator *returns*; the pinned prefix is sampled on top of it, so the cap is `196 - (N_PREFIX_FRAMES - 1)`; null = generator default), `text_time` (step at which the scripted correction triggers), and a nested optional `uq:` (below). |
 | `feedback.uq.*`        | UqConfig | Presence enables the UQ layer: `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose [default] \| agglo_path_pca \| agglo_t2m; Demo Runner dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
-| `feedback.uq.steering.*` | SteeringConfig | Cost-steered diffusion sampling (§14). `mode` (`off` [default] \| `resample` \| `cg`), `resample_steps` (denoising-loop indices at which to score and resample, default `[15, 25, 35, 45]`), `temperature` (softmax temperature over z-scored costs, default 0.5 — scale-free, transfers across costs), `guide_from` (cg only: first guided loop index, default 10), `guidance_weight` (cg only: λ on the cost gradient, default 1e5; useful band 1e4–1e5, needs per-cost calibration). Validated in `SteeringConfig.__post_init__`; checked-in configs ship `mode: "off"`. Honored by both frontends; the demo runner's Steering dropdown overrides `mode` per generation. |
+| `feedback.uq.steering.*` | SteeringConfig | Cost-steered diffusion sampling (§14). `mode` (`cg` [default] \| `resample` \| `off`), `resample_steps` (denoising-loop indices at which to score and resample, default `[15, 25, 35, 45]`), `temperature` (resample only: softmax temperature over z-scored costs, default 0.5 — scale-free, transfers across costs), `guide_from` (cg only: first guided loop index, default 10), `guidance_weight` (cg only: λ on the cost gradient, default 1e5; useful band 1e4–1e5, needs per-cost calibration). Validated in `SteeringConfig.__post_init__`; checked-in configs ship `mode: "cg"`. Honored by both frontends; the demo runner's Steering dropdown overrides `mode` per generation. |
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
@@ -472,6 +473,23 @@ Step 3b (optional): Build speed-variant dataset from cached positions
         Retimes each mdm_cache segment to fast/normal/slow (51/96/180 frames)
         plus a conditional variant (3× slower while wrist above shoulder),
         captioned with matching speed language for speed-conditioned fine-tuning
+
+Step 3c (optional): Graft the left-arm motion onto a standing body
+    └── graft_standing_dataset.py → dataset/custom1_standing/
+        Splices each custom1 clip's left collar/shoulder/elbow/wrist rotations
+        into one static standing body_pose sampled from the base checkpoint and
+        re-encodes with process_file (49 frames/clip); texts, splits and stats
+        are copied from custom1 unchanged, so a fine-tune from the base
+        checkpoint no longer learns the seated posture
+
+Step 3d (optional): Official-encoding re-encode of custom1 (and skeleton-only
+                    control for step 3c)
+    └── canonicalize_seated_dataset.py → dataset/custom1_seatedcanon/
+        Re-encodes the unchanged seated custom1 motions through the same
+        process_file pipeline, isolating the canonical-skeleton retarget from
+        the seated→standing posture change.  This is the drop-in
+        official-encoding replacement for custom1 (see the dataset provenance
+        note below)
 
 Step 4: Fine-tune MDM
     └── motion-diffusion-model/train/train_mdm.py
@@ -520,11 +538,190 @@ Videos → _mhr_inference_worker.py (detectron2 + SAM → SMPL .npz)
 > encoder re-faces the body to Z+ from hips+shoulders, so re-encoding a frame
 > whose arm moved shifts the canonical heading slightly.
 
+> **Multi-frame prefixes (2026-08-09):** `smpl_arm_aa_seq_to_hml263_frames`
+> encodes a `(K, 3, 3)` arm history as `(K, 263)` in a **single**
+> `positions_to_hml263` call, so the velocity blocks (`[0:3]`, `[193:259]`)
+> carry the real arm motion instead of the ~0 a stack of independently encoded
+> static frames would give. `smpl_arm_aa_to_hml263_frame` is the `K = 1` case
+> and delegates to it. `process_file` Gaussian-smooths the hips+shoulders
+> heading along the clip (`sigma = 20` frames), so a `K << 20` prefix gets one
+> clip-averaged heading while the single-frame pin gets its own pose's heading;
+> since that heading is arm-dependent, the last prefix frame sits a pure yaw
+> away from the static pin (0.13 rad / 0.08 m at the wrist for a 0.5 rad
+> shoulder sweep) with root position and body pose unchanged. The shared
+> heading is what keeps the prefix's encoded velocities pure arm motion rather
+> than spurious body yaw. Compare against the single-frame pin on decoded
+> positions after yaw alignment, not on raw channels.
+
+> **How many frames to pin — measured (2026-08-09).** `N_PREFIX_FRAMES` is the
+> single biggest lever on the frame-0 seam teleport. Sweep: demo pose, 4
+> prompts, 2 arm anchors along the nominal rollout, 16 seed-locked samples,
+> steering off, seam = left-wrist jump at frame `K-1 → K`.
+>
+> | K | `lr1e7_10k@9250` | `lowlr_v1@1250` |
+> |---|---|---|
+> | 1 | 0.2333 | 0.2749 |
+> | 3 | 0.1261 | 0.2633 |
+> | 5 | 0.1062 | 0.2080 |
+> | 8 | **0.0998** | **0.1937** |
+> | 12 | 0.1052 | 0.1961 |
+>
+> Seed-paired against the `K = 1` control on `@9250`: median −0.133 m at
+> `K = 8`, 95% of samples improve. Saturates at `K = 8`; past it wrist rise
+> decays (0.352 → 0.292 at `K = 12`) as pinned frames eat the 50-frame clip.
+> Laterality (mean) is unharmed, 0.93–0.98.
+>
+> **Prefix content is irrelevant — length is the mechanism.** Prefix spacing is
+> invariant (`K = 5`: 0.1062 / 0.1074 / 0.1088 for 0.01 / 0.05 / 0.10 rad
+> between frames) and a *fully static* prefix of K identical frames ties the
+> real history (`K = 8`: 0.0978 vs 0.0998; paired −0.140, 96% improve). One
+> pinned frame is too weak to bind the sampler; a `(K, 263)` static prefix
+> builds **bit-identical** sampler tensors to a `(263,)` pin with
+> `N_PREFIX_FRAMES = K`, so no `prefix_stride` knob is warranted.
+>
+> **Implemented contract (2026-08-09).** `N_PREFIX_FRAMES = 8`, and the prefix
+> is *generation-time conditioning only*:
+>
+> - **Additive frames.** A request for `n` frames samples `n + K - 1`
+>   (`_resolve_total_frames`, which raises past the 196-frame limit), so
+>   `feedback.frames` still means *returned* frames.
+> - **Generator-side stripping.** Both `generate_left_arm_trajectory` and
+>   `generate_left_arm_position_samples` return frames `[K-1:]` of the decoded
+>   motion, so frame 0 is the last pinned frame — the configuration the arm is
+>   in now — and no consumer (playback cutoff, `set_mdm_goal`, UQ clustering)
+>   ever sees the prefix. Strip **after** `recover_from_ric`: raw HML263 root
+>   features are frame-to-frame velocities integrated from frame 0. The
+>   `save_path` MP4 still shows the full clip, prefix included.
+> - **History prefix on the planner path.** `run.py::handle_correction` builds
+>   the prefix from the last `K` planner states via
+>   `build_prefix_from_arm_history` (left-padded when the history is shorter).
+>   Measured as a tie with static; it is used because conditioning on the recent
+>   trajectory is the more defensible framing. `demo_runner/session.py` still
+>   passes a `(263,)` pose, which `build_prefix_tensor` expands to a static
+>   prefix.
+> - **One prefix length everywhere.** `build_prefix_tensor` rejects a 2-D
+>   `start_pose` whose length is not `N_PREFIX_FRAMES`, because the steering
+>   cost slice `torch_features.py` `ric[:, N_PREFIX_FRAMES:]` reads the same
+>   constant. `train_leftarm.py` uses it as the `--n_prefix` default, so raising
+>   it also changes what future fine-tunes pin (preview samples only).
+>
+> End-to-end on `customv3_fixed/model000750500.pt` (the default at the time;
+> superseded 2026-08-09, so these figures predate the checkpoint switch)
+> (`mpc_detour.yaml`, "raise my left arm", 500-sample UQ): the correction's
+> frame 0→1 wrist jump is 0.057 m — 3× a normal frame step, against 0.74 m
+> (184×) for the same prompt/anchor/seed at `K = 1`. Frame 0 lands 0.042 m from
+> the executed configuration, which is the HML263 re-encode round-trip (3.9 cm),
+> not a hand-off gap.
+
+> **Dataset encoding provenance (2026-08-09):** two HML263 encodings exist on
+> disk and they are not interchangeable.
+>
+> | Dataset | Encoding | Notes |
+> |---|---|---|
+> | `dataset/custom1` | **old** homegrown (built 2026-06-29) | 44 clips, `(50, 263)`; non-rigid bones (collar→shoulder ≈ 0.081 m, varying), old rotation conventions, constant foot contacts. Training data of `save/customv3_fixed/model000750500.pt`, the default checkpoint until 2026-08-09 |
+> | `dataset/custom1_seatedcanon` | **official** `process_file` | Same 44 clips/captions/splits, `(49, 263)`; the drop-in official-encoding training set, and training data of the **current default** `save/custom_seatedcanon_lr1e7_10k/model000759250.pt` (`consts.py`). Re-encode fidelity: spine3-relative wrist deviation mean 3.9 cm / max 7.4 cm (canonical-skeleton retarget); pelvis stays seated (0.597 m → 0.656 m) |
+> | `dataset/custom1_standing` | **official** `process_file` | Same arm motions grafted onto a standing body — changes posture *and* skeleton |
+>
+> Query-time pinned frames (`smpl_arm_aa_to_hml263_frame`) are **always**
+> official-encoding — it re-encodes through `process_file`, so its output is
+> official-convention no matter what the base frame was. Patching a training
+> frame's own left-arm angles back in therefore measures the training/query
+> encoding gap directly (44 clips, frame 0, normalized space):
+>
+> | rot6d `[67:193]` | `custom1` | `custom1_seatedcanon` |
+> |---|---|---|
+> | block L2 | 16.25 (worst 18.50) | 0.196 (worst 0.637) |
+> | RMS / max | 1.45 / 4.90 | 0.018 / 0.086 |
+> | arm slots only (16/18/20) RMS / max | 1.98 / 4.34 | 0.0002 / 0.0006 |
+>
+> The former default `customv3_fixed` therefore could not read the arm
+> rotations it was conditioned on; only checkpoints fine-tuned on
+> official-encoding data (`custom1_seatedcanon` / `custom1_standing`) receive
+> pinned frames on-manifold. **Resolved for the deployed path on 2026-08-09**:
+> the default is now `custom_seatedcanon_lr1e7_10k/model000759250.pt`, trained
+> on `custom1_seatedcanon`. **Use `custom1_seatedcanon`, not `custom1`, for any
+> new fine-tune.** (The `[0:3]` / `[193:259]` velocity blocks and `[259:263]`
+> contacts always differ — the encoder duplicates a static pose — and RIC-Y
+> picks up a constant floor-grounding offset; those are by construction.)
+
+> **Checkpoint training bodies (2026-08-10).** Each fine-tune saw exactly one
+> rest-of-body pose, and **`args.json` does not record which** — it says
+> `dataset: humanml` for every run, because the fine-tune runner symlinks the
+> chosen dataset into `dataset/HumanML3D` and restores it on exit. `--start_pose`
+> / `--n_prefix` / `--body_mode` are consumed before MDM's parser and are not
+> saved either. This table is therefore the only durable record; **update it
+> when you train anything.** Bodies measured at frame 0 of every clip:
+>
+> | checkpoint(s) | training set | body | pelvis y | knee flex | spread |
+> |---|---|---|---|---|---|
+> | `humanml_enc_512_50steps/model000750000.pt` | upstream HumanML3D (not on disk here) | all poses, no fixed body | — | — | — |
+> | `customv2`, `customv3_fixed` | `dataset/custom1` (old encoding) | seated | +0.597 | 95° ± 6 | 0.022 m |
+> | `custom_seatedcanon_lowlr_v1`, `_truelr1e5`, **`_lr1e7_10k`** | `dataset/custom1_seatedcanon` | seated | +0.656 | 95° ± 6 | 0.043 m |
+> | `custom_standing_v1` | `dataset/custom1_standing` | standing | +0.933 | 9° ± 0 | 0.014 m |
+> | `speed_v1` … `speed_v8_*` | speed datasets (built into the `dataset/HumanML3D` slot) | HumanML3D bodies | — | — | — |
+| `speed_v9_scalar` | speed dataset, `--caption_style none` + `--speed_cond` scalar channel | HumanML3D bodies | — | — | — |
+>
+> **Query poses must match the checkpoint's training body.** Distance from the
+> deployed `custom1_seatedcanon` body, pelvis-relative, mean over non-arm joints
+> — compare against that set's own 0.043 m internal spread:
+>
+> | start pose | distance | knee flex | wrist seam (`lr1e7@9250`, K=8) |
+> |---|---|---|---|
+> | `demo_pose_v3.pt` | 0.032 m | 92° | 0.0795 |
+> | `demo_pose.pt` | 0.035 m | 99° | 0.0875 |
+> | **`mdm_sit_pose.pt`** (`consts.MDM_START_POSE_PATH`) | 0.162 m | 91° | 0.0548 |
+> | `standing_template.pt` | 0.193 m | 9° | 0.0450 |
+> | `stock_stand.pt` | 0.237 m | 42° | 0.0371 |
+>
+> Counter-intuitively the seam is *inversely* related to training-body
+> proximity, and instruction-following does **not** degrade off-manifold:
+> between-prompt divergence rises (0.213 for `mdm_sit_pose` vs 0.182 for
+> `demo_pose_v3`) and the elbow response to "keep my elbow bent" is +28–32°
+> versus "move my arm up" for every pose including standing ones. Laterality
+> spans 0.77–0.92 across poses, but at 64 samples/cell that is within ~2 standard
+> errors — do not read it as a ranking without a larger run.
+
+> **`dataset/HumanML3D` is a swap slot, not HumanML3D (2026-08-10).**
+> `opt.data_root` is hardcoded to `./dataset/HumanML3D`, so `finetune_standing.sh`
+> symlinks the real training set into that path. It currently holds the **vivid
+> speed dataset** (127 clips, captions like "move my left arm back, sprint"), so
+> a fine-tune launched without swapping would silently train on that. Check the
+> contents before training and before reading anything as "the base dataset".
+
+> **From-source rebuild (2026-08-09):** the capture sources that produced
+> `custom1` are still on disk — `data_collection/data/frames/{IMG_3503,IMG_3537}`
+> (+ `labels.json`, verified caption-for-caption identical to `custom1/texts`,
+> so the segment ranges and captions have not drifted), the SAM-3D-Body
+> checkpoint, and 40 of 44 `(N, 22, 3)` position caches in
+> `data/mdm_cache/*_v2.npy`. Rebuilding
+> through the current pipeline yields `(50, 263)` clips directly from capture
+> positions instead of `custom1_seatedcanon`'s decode→re-encode round-trip
+> (`(49, 263)`, one extra `process_file` frame drop). Four IMG_3503 segments
+> (f624-637, f794-814, f818-831, f932-945) have no `_v2` cache — the frames are
+> present but the 2026-07-07 pipeline run skipped them, so they need a GPU
+> pose-estimation retry; their untagged `.npy` caches are pre-2026-07-07
+> *features*, not positions, and must not be reused. **Id caveat:**
+> `build_dataset` numbers ids over *successes only*, so all 44 succeeding gives
+> ids `000001–000044` and custom1's exact 36/4/4 split, while those 4 failing
+> again gives 40 clips with every id from `000012` on shifted down by one and a
+> different 32/4/4 split — i.e. no longer id-comparable to `custom1` or
+> `custom1_seatedcanon`. Command (repo root; `--hml_stats_dir` must be overridden
+> because the default `dataset/HumanML3D` is the fine-tune symlink target):
+> ```
+> uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py \
+>     --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/custom1_official \
+>     --hml_stats_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/custom1
+> ```
+> (`custom1` used no `--fix_body` and no `--n_augment`, and the default
+> `--val_fraction 0.1 --test_fraction 0.1 --seed 42` reproduce its 36/4/4 split.)
+
 ---
 
 ## 10. Pose Representations
 
-See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
+See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. HML263 exists in
+two mutually incompatible encodings on disk — see §9 "Dataset encoding
+provenance". Key formats:
 
 | Format                  | Shape      | Where used                                    |
 |-------------------------|------------|-----------------------------------------------|
@@ -553,6 +750,7 @@ See `.claude/POSE_REPRESENTATION_AUDIT.md` for full reference. Key formats:
 | `uv run python src/.../trajectory_editor/server.py`   | Synthetic trajectory editor          |
 | `uv run python src/.../data_collection/build_mdm_dataset.py` | Build HumanML3D dataset        |
 | `uv run python -m train.train_mdm` (in MDM subdir)    | Fine-tune MDM model                  |
+| `bash src/.../mdm/finetune_standing.sh [dataset] [save_name] [lr] [extra args...]` | Fine-tune on `dataset/<dataset>` with the `customv3_fixed` recipe (lr defaults to `3e-5`; trailing args pass through to `train_leftarm.py`, e.g. `--gen_during_training --start_pose demo_pose.pt`). `opt.data_root` is hardcoded to `./dataset/HumanML3D` in `data_loaders/humanml/utils/get_opt.py` and `--data_dir` is never read, so the runner symlinks the dataset into place, sets the `t2m_{split}.npy` caches aside, and restores both via an `EXIT` trap |
 
 ---
 
@@ -730,9 +928,13 @@ in `motion_generators/__init__.py` (mirrors the `COST_BUILDERS` pattern). Caller
 hold a `MotionGenerator` and call its methods; the per-backend "pose" array is treated as
 opaque.
 
-**Interface** (abstract unless noted): `load_pose`, `decode_pose`, `build_pose_from_arm_aa`, `generate_left_arm_trajectory`, `generate_left_arm_position_samples`,
+**Interface** (abstract unless noted): `load_pose`, `decode_pose`, `prefix_frames`,
+`build_pose_from_arm_aa`, `build_prefix_from_arm_history`, `generate_left_arm_trajectory`,
+`generate_left_arm_position_samples`,
 and the shared concrete `smpl_positions_to_left_arm_trajectory` (SMPL XYZ → arm axis-angles
-via `SmplLeftArmFK`, implemented once on the base).
+via `SmplLeftArmFK`, implemented once on the base). The `prefix_frames` frames pinned to
+`start_pose` are conditioning only — additive to the requested length and stripped from
+the result, whose frame 0 is the current configuration (see §"How many frames to pin").
 
 | Backend  | Class                   | Pose repr            | Generation                                  |
 |----------|-------------------------|----------------------|---------------------------------------------|
@@ -747,14 +949,27 @@ base-MDM behavior. Inference must always load the raw `model` weights.
 **Adding a new backend:** subclass `MotionGenerator`, implement the 5 abstract methods, and
 register a builder in `MOTION_GENERATOR_BUILDERS`.
 
+### Scalar speed channel (experimental, `--speed_cond`)
+
+Both `generate_*` methods also take a keyword-only `speed: float | None` — a requested mean
+left-arm speed in metres per MDM frame. It only reaches the model for checkpoints trained
+with MDM's `--speed_cond` flag (`speed_v9_scalar`), which adds a zero-initialized
+`nn.Linear(1, latent_dim)` (`embed_speed`) whose output is added to the timestep embedding
+and is CFG-tied, so guidance amplifies it. `model/mdm.py` holds the shared normalization
+constants (`SPEED_SCALE`, `SPEED_NEUTRAL`); `train/training_loop.py:speed_cond_modifier`
+derives the per-clip label from the HML263 left-arm local-velocity channels. `speed=None`
+resolves to `SPEED_NEUTRAL`, so existing checkpoints and callers are unaffected. **Measured
+outcome: the channel does not produce usable speed control** (fast/slow wrist-speed ratio
+1.22 at n_prefix=1, 0.95 at n_prefix=8, versus caption-based `speed_v7_vivid`'s 2.83/1.45).
+
 ### Cost-steered sampling (`motion_generators/steering.py`)
 
 Both `generate_*` methods take a keyword-only `steering: SteeringSpec | None`. MDM implements
 it; a backend that does not support steering raises `NotImplementedError` for a non-`None`
 spec (as it may for `frozen_body`). A `SteeringSpec` bundles a `cost` (normalized `x̂0 (N,263,1,T)` → `(N,)`; built
 by `MdmMotionGenerator.build_user_steering_cost(user)` from the persona's bounds, §6), a
-`SteeringConfig`, and a `seed`. Nothing steers unless the config says so — `mode: "off"` is
-the default everywhere. `build_steering_spec(gen, user, config, seed)` (same module) is the
+`SteeringConfig`, and a `seed`. `mode: "cg"` is the default everywhere; `mode: "off"` opts a
+config out of steering entirely. `build_steering_spec(gen, user, config, seed)` (same module) is the
 shared guard chain both frontends compile a spec through: `mode: "off"` → `None`; non-MDM
 backend or a persona without supported bounds → printed skip + `None` (unsteered sampling).
 The demo runner calls it per generation from `Session._steering_spec` with the browser's
@@ -768,8 +983,8 @@ round in `handle_correction` and threads the spec through
 
 | Mode | Mechanism | Cost | Notes |
 |------|-----------|------|-------|
-| `resample` | At each `resample_steps` index, score every chain's `x̂0` and systematically resample the population with weights `softmax(-z(cost)/temperature)`; only the latent is reindexed (every per-sample `model_kwargs` entry is an identical broadcast) | ~0 s at N=500 | Default. Works with any cost, differentiable or not; can't push samples off-manifold, only reweight the model's own mass |
-| `cg` | Classifier guidance: `p_sample_with_grad` from `guide_from` on, with `cond_fn = -guidance_weight · ∇ₓ cost(x̂0)` | ~2× sampling time | For the prompt/cost-conflict regime resampling cannot fix. Needs per-cost λ calibration. `p_sample_loop(cond_fn_with_grad=True)` is broken in the vendored code, so the manual loop is the only working route |
+| `cg` | Classifier guidance: `p_sample_with_grad` from `guide_from` on, with `cond_fn = -guidance_weight · ∇ₓ cost(x̂0)` | ~2× sampling time | Default. Requires a differentiable cost and per-cost λ calibration; also covers the prompt/cost-conflict regime resampling cannot. `p_sample_loop(cond_fn_with_grad=True)` is broken in the vendored code, so the manual loop is the only working route |
+| `resample` | At each `resample_steps` index, score every chain's `x̂0` and systematically resample the population with weights `softmax(-z(cost)/temperature)`; only the latent is reindexed (every per-sample `model_kwargs` entry is an identical broadcast) | ~0 s at N=500 | Alternative. Works with any cost, differentiable or not; can't push samples off-manifold, only reweight the model's own mass |
 
 The resampler's numpy RNG is keyed off `(seed, step_idx)`, deliberately off the torch stream,
 so a steered and an unsteered run at the same seed start from identical noise.
@@ -779,8 +994,8 @@ Each scoring step appends a `SteeringEvent` (`step`, `cost_mean`, `frac_violatin
 them per event, and the sampler itself prints the conflict warning (so CLI runs see it too).
 On the first event, `conflict_warning` fires when essentially every sample violates the
 cost *and* the effective sample size has collapsed: that means the prompt and the cost
-conflict, so resampling harder only destroys diversity. It is a diagnostic only — nothing
-auto-escalates; switching to `mode: cg` is the operator's call.
+conflict, so reweighting the population (`mode: resample`) cannot help. It is a diagnostic
+only — nothing switches mode automatically.
 
 Validated defaults (do not re-derive): `resample_steps=(15,25,35,45)`, `temperature=0.5`,
 `guide_from=10`, `guidance_weight=1e5`. `resample_steps`/`guide_from` live in loop-index space

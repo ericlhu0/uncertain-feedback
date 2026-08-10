@@ -122,10 +122,16 @@ uv run python src/uncertain_feedback/data_collection/labeler.py
 ```
 uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py --output_dir ./my_mdm_dataset/
 ```
+Pass `--hml_stats_dir .../dataset/custom1` unless you are sure of what `dataset/HumanML3D`
+currently points at — the default is that path, and `finetune_standing.sh` symlinks it to
+whichever dataset is training. Every `custom1*` dataset carries the same stock `Mean.npy`/`Std.npy`.
+
 Pose-estimation results are cached as `(N, 22, 3)` position arrays in `<frames_dir>/../mdm_cache/`
 with a `_v<N>` version tag in the filename; bumping `_CACHE_VERSION` in `build_mdm_dataset.py`
 (done whenever the pose-estimation/conversion changes) invalidates old entries automatically.
-Cache files without a version tag predate the 2026-06-29 chirality fix and are mirrored; delete them.
+Untagged cache files predate the 2026-07-07 encoding switch and hold `(N, 263)` *features*
+rather than positions — they are never read and can be deleted. Anything under
+`data/mdm_cache.mirrored_bak_*` predates the 2026-06-29 chirality fix and is mirrored.
 
 3b. (Optional) Build a speed-variant dataset instead — retimes each cached segment into
 fast / normal / slow variants plus a conditional variant that slows while the wrist is
@@ -134,6 +140,10 @@ positions directly, so steps 1–3 must have run (and cached) at least once:
 ```
 uv run python src/uncertain_feedback/data_collection/build_speed_dataset.py --output_dir ./speed_mdm_dataset/
 ```
+`--caption_style` picks the speed language: `adverb` (default), `vivid`, or `none`. `none`
+gives every variant the same speed-free caption, for runs where speed must come from MDM's
+experimental `--speed_cond` scalar channel (`MdmMotionGenerator.generate_*(speed=...)`,
+metres per frame) instead of the text.
 
 4. Fine-tune motion-diffusion-model
 First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` (or whatever was created with the trajectory editor web ui) to `.../HumanML3D`
@@ -169,7 +179,7 @@ To generate sanity-check samples from a fixed starting pose, use `train_leftarm.
 uv run python src/uncertain_feedback/motion_generators/mdm/train_leftarm.py \
     --save_dir ./save/customv3 \
     --start_pose demo_pose.pt \
-    --n_prefix 1 \
+    --n_prefix 8 \
     --body_mode both \
     --dataset humanml \
     --resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt \
@@ -201,6 +211,64 @@ Key hyperparameter guidance:
   generations revert to base-MDM whole-body motions. Inference always loads the raw `model` weights:
   `mdm_configs/mdm_config.yaml` sets `use_ema: false`, overriding the training flag saved in the
   checkpoint's `args.json`. Do not remove that override.
+
+**Building the standing dataset.** Every clip in `dataset/custom1` has a seated body, so
+fine-tuning on it teaches the checkpoint to snap standing bodies into sitting.
+`graft_standing_dataset.py` rebuilds the same 44 clips on one static standing body sampled
+from the base checkpoint, writing `dataset/custom1_standing` (49 frames per clip; `texts/`,
+the splits and the stock `Mean.npy`/`Std.npy` are copied from `custom1` unchanged):
+```
+uv run python src/uncertain_feedback/motion_generators/mdm/graft_standing_dataset.py \
+    --verify-dir /tmp/graft_verify
+```
+`--verify-dir` is optional; when given it writes a skeleton contact sheet plus
+seated-vs-grafted comparison strips there. The script always prints the round-trip
+deviations (left-arm joint positions, root height, foot contacts).
+
+**Official-encoding dataset (use this one).** `custom1` was built 2026-06-29 with the old
+homegrown HML263 encoding, so `custom1_standing` changes both the posture *and* the skeleton
+(`uniform_skeleton` retargets onto the canonical t2m bone lengths).
+`canonicalize_seated_dataset.py` writes `dataset/custom1_seatedcanon`: the same seated
+motions, unchanged, pushed through the current `process_file` encoding so only the skeleton
+differs. It doubles as the drop-in **official-encoding** training set — query-time pinned
+frames are always official-encoding, so a checkpoint fine-tuned on `custom1_seatedcanon`
+reads the arm rotations it is conditioned on (rot6d round-trip 0.018 normalized RMS) while
+one fine-tuned on `custom1` does not (1.45 RMS). See `CODEBASE_MAP.md` §9 "Dataset encoding
+provenance".
+```
+uv run python src/uncertain_feedback/motion_generators/mdm/canonicalize_seated_dataset.py \
+    --verify-dir /tmp/graft_verify
+```
+It prints the spine3-relative left-wrist deviation and the pelvis heights before/after, and
+with `--verify-dir` writes `04_seatedcanon_*.png` original-vs-re-encoded skeleton strips.
+
+**Automated swap-and-train runner.** `finetune_standing.sh` does the whole dance above
+(dataset swap, cache handling, training, restore) for one dataset with the `customv3_fixed`
+recipe — batch 8, lr 3e-5, 5000 steps, save_interval 250, `--mask_frames --use_ema`, seed 10,
+resumed from `humanml_enc_512_50steps/model000750000.pt`:
+```
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    [dataset_name] [save_name] [lr] [extra train_leftarm.py args...]
+```
+Defaults are `custom1_standing`, `custom_standing_v1` and lr `3e-5`; anything after the 3rd
+argument is forwarded verbatim to `train_leftarm.py`. To save a sample video at every
+checkpoint (one `model*.pt.samples/samples_00_to_02.mp4` per save interval, generated from the
+deployed query pose so the samples reflect inference conditions):
+```
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    custom1_seatedcanon custom_seatedcanon_lowlr_v1 1e-5 \
+    --gen_during_training --gen_num_samples 3 --gen_num_repetitions 2 \
+    --start_pose demo_pose.pt --body_mode freeze
+```
+Generation adds ~15 s per checkpoint (50 diffusion steps) and reads the *test* split of the
+swapped dataset for its prompts; it loads the raw (non-EMA) weights, matching inference. It
+symlinks
+`dataset/HumanML3D -> dataset/<dataset_name>`, sets the `t2m_{train,val,test}.npy` caches aside,
+and restores everything via an `EXIT` trap (discarding any cache written during the swap so the
+next run cannot inherit it). Preflight refuses to run if the dataset is missing, if its
+`Mean.npy`/`Std.npy` differ from the live `HumanML3D` stats, if the backup name is taken, or if
+`--save_dir` already exists (`train_leftarm.py` would otherwise silently train into `<name>_2`).
+Expect ~10–15 min: ~7 min compute plus ~6 GB of checkpoint I/O.
 
 5. Run motion generation with the new model
 
@@ -262,7 +330,9 @@ uv run python src/uncertain_feedback/planners/run.py --mpc-config path/to/mpc.ya
 ```
 
 Controller settings live in the required YAML file passed with `--mpc-config`.
-The initial whole-body HML pose can be set with `pose:` in the YAML, and the
+The initial whole-body HML pose defaults to `consts.MDM_START_POSE_PATH`
+(`mdm_sit_pose.pt`) for every config; override it per-config with `pose:` in
+the YAML only to deviate from that shared default, and the
 initial left arm can be overridden with an inline 3×3 `arm:` list of
 `[shoulder, elbow, wrist]` axis-angles. Runtime inputs still stay on the
 command line: `--model-path`, `--arm`, `--text`, `--save`, `--live`,
@@ -1052,9 +1122,9 @@ feedback:
     auto_cluster: null
     scale: 1.0  # default motion-magnitude scale for the chosen cluster
     steering:
-      mode: "off"           # off | resample | cg
+      mode: "cg"            # cg (default) | resample | off
       resample_steps: [15, 25, 35, 45]
-      temperature: 0.5
+      temperature: 0.5        # resample only
       guide_from: 10          # cg only
       guidance_weight: 1.0e5  # cg only
 
@@ -1083,10 +1153,10 @@ the MPC planner keeps its injected clusterer):
 
 #### Steering diffusion sampling toward the user's cost (`feedback.uq.steering`)
 
-`mode: "off"` (the default, and what every checked-in config ships) samples MDM
-exactly as before. The other two modes bias sampling toward the configured
-simulated user's hidden bounds, so the candidates that reach clustering already
-respect the user's constraints. The cost is compiled from the persona's
+`mode: "cg"` (the default, and what every checked-in config ships) biases
+sampling toward the configured simulated user's hidden bounds, so the candidates
+that reach clustering already respect the user's constraints; `mode: "off"`
+samples MDM unsteered. The cost is compiled from the persona's
 `elbow_flexion` / `shoulder_elevation` bounds and read off each denoising step's
 `x̂0` prediction; `JointBoxLimit` and bounds on other features are skipped (named
 in a log line). Steering is implemented by the MDM backend; with any other
@@ -1098,24 +1168,27 @@ with the YAML mode, and the demo runner's stage-2 **Steering** dropdown starts
 at the YAML mode and can override it per generation (the other knobs stay
 YAML-only).
 
-- **`resample`** (recommended default): at each `resample_steps` index, score
-  every chain and resample the population with weights
+- **`cg`** (classifier guidance, the default): from `guide_from` on, nudge the
+  reverse diffusion mean by `-guidance_weight · ∇ₓ cost(x̂0)`. Roughly doubles
+  sampling time (≈5 s → ≈9.5 s at N=500 × 50 frames), needs a differentiable
+  cost, and `guidance_weight` needs per-cost calibration — the useful band is
+  1e4–1e5 — but it also handles the case `resample` cannot: a prompt that
+  genuinely contradicts the cost.
+- **`resample`** (alternative): at each `resample_steps` index, score every
+  chain and resample the population with weights
   `softmax(-z(cost)/temperature)`. Cost-agnostic (the cost need not be
   differentiable), effectively free at N=500, and it can only reweight motions
   MDM was already willing to produce — so samples stay on-manifold. In the
   triceps stress scenario this took oracle violations from 28% of samples to 0%
   with cluster diversity preserved (endpoint spread slightly *up*).
-- **`cg`** (classifier guidance): from `guide_from` on, nudge the reverse
-  diffusion mean by `-guidance_weight · ∇ₓ cost(x̂0)`. Roughly doubles sampling
-  time (≈5 s → ≈9.5 s at N=500 × 50 frames) and `guidance_weight` needs
-  per-cost calibration — the useful band is 1e4–1e5 — but it handles the case
-  `resample` cannot: a prompt that genuinely contradicts the cost.
 
 Each scoring step is logged (`cost`, fraction violating, ESS, surviving
-ancestors). When the first event shows ~every sample violating *and* an ESS
-collapse, the log carries an explicit conflict warning: the prompt and the cost
-disagree, resampling harder will only collapse diversity, and the options are
-`mode: cg` or rewording the correction. Nothing escalates automatically.
+ancestors in `resample`). When the first event shows ~every sample violating
+*and* an ESS collapse, the log carries an explicit conflict warning: the prompt
+and the cost disagree, so mere reweighting (`mode: resample`) cannot help — the
+remaining levers are guidance (`mode: cg`, the default) and rewording the
+correction. The warning is a diagnostic only; nothing switches mode
+automatically.
 
 In the interactive picker, each cluster panel has a **magnitude** slider
 (range 0.0–2.0) that scales that trajectory's motion up or down while
@@ -1531,7 +1604,7 @@ Stages (each stage's controls unlock once the previous one ran):
    currently displayed refinement level). The *Clusterer* dropdown selects the
    clustering method (see `feedback.uq.clusterer` above; initial value from the config)
    and applies on the next Generate/Re-cluster/Refine. The *Steering* dropdown
-   (off / resample / cg) steers the next *Generate* toward the persona's hidden
+   (cg / resample / off) steers the next *Generate* toward the persona's hidden
    bounds (see `feedback.uq.steering` above; initial value from the config's
    mode, other steering knobs stay YAML-only); scoring events and any
    prompt/cost conflict warning appear in the log panel. Each cluster is

@@ -234,6 +234,7 @@ class ArmMPC:
                 max_playback_delta=feedback.max_playback_delta,
                 trajectory_fraction=feedback.trajectory_fraction,
                 stall_steps=stall_steps,
+                anchor_correction=feedback.anchor_correction,
             )
             if feedback is not None
             else None
@@ -532,6 +533,10 @@ class ArmMPC:
         )
         self._last_uq_result = result
         chosen_mean = result.chosen_mean  # (n_frames, 3, 3)
+        if feedback.anchor_correction and current_q is not None:
+            chosen_mean = self._fk.anchor_arm_trajectory(
+                chosen_mean, current_q, self._spine3_aa
+            )
 
         n_frames = chosen_mean.shape[0]
         cutoff = max(1, round(n_frames * feedback.trajectory_fraction))

@@ -46,7 +46,7 @@ uncertain-feedback/
 │   │   └── mpc/
 │   │       ├── __init__.py           # Public exports
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
-│   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants
+│   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants; `anchor_arm_trajectory` re-anchors a generated correction onto the current q (drops the pinned frame 0, shifts the rest in q space) to kill the frame-0 seam
 │   │       ├── arm_features.py        # Canonical q conversion + shared anatomical arm features
 │   │       ├── costs/                # Planner cost package (public surface: mpc.costs)
 │   │       │   ├── __init__.py       # Re-exports the planner-side cost API
@@ -301,6 +301,18 @@ ArmVisualizer.update_step()                          [utils/plot.py]
 ---
 
 ## 5. Kinematics (`kinematics.py`)
+
+`anchor_arm_trajectory(arm_aa, current_q, spine3_aa)`: a generator's frame 0 is the
+last pinned prefix frame and frame 1 the first free one, so a model pulled toward its
+training-prior start teleports between them (0.114 m measured on correction_demo1 vs a
+~0.005 m step). This drops frame 0 and shifts the rest to start at `current_q`, keeping
+every per-frame displacement. Gated by `feedback.anchor_correction` (default true);
+call sites are `Mpc.query_mdm_with_uncertainty`, `run.py`'s single-sample branch, and
+`demo_runner/session.py::_activate_cluster_level` (which anchors every cluster mean, so the
+browser previews, oracle scores, Magnitude slider and pushed correction all inherit it — the
+demo runner assembles and pushes its own correction and does NOT go through the Mpc helper).
+Also decouples `feedback.uq.scale` from the seam — `scale_trajectory` anchors at frame 0,
+so on a raw sample the Magnitude slider scales the teleport too.
 
 - **`SmplLeftArmFK`** — loads SMPL neutral PKL once; stores T-pose bone offsets for the arm chain. `scale_arm_lengths(clavicle, upper_arm, forearm)` rescales the arm bones to measured segment lengths (directions and hinge axis unchanged, idempotent) — `RealEnv._register` calls it with the calibration frame's marker distances, so real runs plan on the person's proportions
 - Joint chain: `spine3 (9) → left_collar (13) → left_shoulder (16) → left_elbow (18) → left_wrist (20)`

@@ -104,9 +104,11 @@ def test_cluster_activation_canonicalizes_mdm_axis_angles_before_history_concat(
 
     session._activate_cluster_level()
 
-    assert trajectory.cluster_means[0].shape == (2, 7)
-    assert trajectory.cluster_corrections[0].shape == (2, 7)
-    assert trajectory.cluster_fulls[0].shape == (4, 7)
+    # anchor_correction drops the generator's pinned frame 0, so only one free
+    # frame of a 2-frame sample reaches the history concat.
+    assert trajectory.cluster_means[0].shape == (1, 7)
+    assert trajectory.cluster_corrections[0].shape == (1, 7)
+    assert trajectory.cluster_fulls[0].shape == (3, 7)
 
 
 def make_session(monkeypatch, tmp_path) -> tuple[Session, SimulatedUser]:

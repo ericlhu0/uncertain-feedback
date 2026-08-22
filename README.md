@@ -577,7 +577,7 @@ presence of top-level YAML sections, one per module slot:
 | Section | Module | Absent means |
 |---|---|---|
 | `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
-| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`) | no correction phase |
+| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`) | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
 
@@ -1555,6 +1555,31 @@ control shoulder, elbow, and wrist. This input is converted once to the internal
 into shoulder rotation plus a scalar elbow-flexion angle while preserving arm
 joint positions.
 
+
+
+### `feedback.anchor_correction` — the frame-0 seam
+
+A generator returns the pinned prefix's last frame as frame 0 and its first *free*
+frame as frame 1, so any pull the model has toward its training prior's start pose
+lands as a one-frame teleport between them — measured at 0.114 m on the deployed
+`correction_demo1` checkpoint, against a ~0.005 m normal step. `anchor_correction`
+(default **true**) drops frame 0 and shifts the rest so the correction begins at the
+arm's current configuration (`SmplLeftArmFK.anchor_arm_trajectory`, applied in
+planner `q` space so the elbow hinge stays parameterised). Per-frame displacements —
+the demonstrated shape — are untouched; the seam cannot exist, since frame 0 *is*
+the current configuration. The trajectory is one frame shorter. Set it false to
+track the raw sample, which is what you want when measuring how big the seam is.
+
+This also cleans up `feedback.uq.scale`: `scale_trajectory` anchors at frame 0 and
+scales every offset from it, so with the raw sample the Magnitude slider scales the
+teleport along with the motion (`scale: 0.5` halves the seam as a side effect).
+Anchored, it scales only real motion.
+
+Applied in all three correction paths: `Mpc.query_mdm_with_uncertainty` (the planner's UQ
+route), `run.py`'s single-sample route, and the demo runner, which builds and pushes its own
+corrections — `demo_runner/session.py::_activate_cluster_level` anchors each cluster mean, so
+the browser's feature plots, the oracle cluster scores, the Magnitude slider and the tracked
+trajectory all see the anchored version.
 
 ## Cost-generation backends
 

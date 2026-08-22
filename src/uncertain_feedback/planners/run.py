@@ -866,6 +866,8 @@ def run_repeated_correction_session(
                 frozen_body=args.frozen_body,
                 spine3_aa=setup.spine3_aa,
             )
+            if feedback_cfg.anchor_correction:
+                traj = setup.fk.anchor_arm_trajectory(traj, q, setup.spine3_aa)
             cutoff = max(1, round(len(traj) * mpc.trajectory_fraction))
             arm_aa_traj = np.asarray(traj[:cutoff], dtype=np.float64)
             llm_traj = setup.fk.arm_aa_to_q_batch(arm_aa_traj, setup.spine3_aa)
@@ -899,6 +901,23 @@ def run_repeated_correction_session(
                 np.asarray(traj[:cutoff], dtype=np.float64), setup.spine3_aa
             )
         np.save(round_dir / "correction.npy", llm_traj)
+        uq_result = mpc.last_uq_result
+        if uq_result is not None:
+            # Anchored the way the chosen mean already is, so the candidates a
+            # rendering overlays all leave the arm's actual pose instead of each
+            # teleporting off it from its own raw frame 0.
+            np.savez(
+                round_dir / "cluster_means.npz",
+                chosen_label=uq_result.chosen_label,
+                **{
+                    f"cluster_{label:02d}": (
+                        setup.fk.anchor_arm_trajectory(mean, q, setup.spine3_aa)
+                        if feedback_cfg.anchor_correction
+                        else mean
+                    )
+                    for label, mean in uq_result.cluster_means.items()
+                },
+            )
 
         if cfg.preference_learning:
             learned = _apply_preference_update(

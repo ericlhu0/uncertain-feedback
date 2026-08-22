@@ -54,7 +54,10 @@ from uncertain_feedback.planners.mpc.costs import (
     generated_cost_feature_dependencies,
     replace_generated_costs,
 )
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.mpc.kinematics import (
+    anchor_q_trajectory,
+    q_to_arm_aa,
+)
 from uncertain_feedback.planners.mpc.rollout import (
     assemble_full_correction_traj,
     goal_reach,
@@ -922,6 +925,14 @@ class Session:
             )
             for label in sorted(int(v) for v in np.unique(level.labels))
         }
+        if _feedback_cfg(rig).anchor_correction:
+            # Re-anchor onto the live configuration before anything downstream
+            # sees these means: previews, oracle scores, the Magnitude slider and
+            # the trajectory that finally gets pushed all inherit the fix.
+            traj.cluster_means = {
+                label: anchor_q_trajectory(mean, traj.q)
+                for label, mean in traj.cluster_means.items()
+            }
         traj.chosen_label = level.selected_label
         traj.scaled_correction = None
         traj.scale = scale

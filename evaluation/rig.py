@@ -39,7 +39,10 @@ def build_rig(config_path: Path, *, seed: int, load_generator: bool) -> EvalRig:
 
     ``load_generator=False`` skips the heavyweight motion-generator load for
     approaches that ground feedback without it; the start pose then comes from
-    the config's ``arm:`` axis-angles instead of the MDM pose file.
+    the config's ``arm:`` axis-angles instead of the MDM pose file. With the
+    generator loaded, ``arm:`` still overrides the pose file's arm (the
+    precedence :mod:`uncertain_feedback.planners.run` uses), so a run can pick a
+    start arm configuration while keeping the pose's torso and body geometry.
     """
     cfg = replace(load_mpc_config(config_path), seed=seed)
     if load_generator:
@@ -57,6 +60,8 @@ def build_rig(config_path: Path, *, seed: int, load_generator: bool) -> EvalRig:
         spine3_aa = np.asarray(spine3_aa_raw, dtype=np.float64)
         fk = SmplLeftArmFK()
         fk.collar_aa = np.asarray(collar_aa, dtype=np.float64)
+        if cfg.arm is not None:
+            arm_aa = cfg.arm
         q0 = fk.arm_aa_to_q(np.asarray(arm_aa, dtype=np.float64), spine3_aa)
     else:
         if cfg.arm is None:

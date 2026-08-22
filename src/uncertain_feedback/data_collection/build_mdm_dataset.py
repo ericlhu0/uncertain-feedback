@@ -175,6 +175,48 @@ def _copy_frame_segment(
 # ---------------------------------------------------------------------------
 
 
+def write_splits(
+    output_dir: Path,
+    ids: list[str],
+    val_fraction: float,
+    test_fraction: float,
+    seed: int = 42,
+) -> None:
+    """Shuffle *ids* into ``train.txt`` / ``val.txt`` / ``test.txt``.
+
+    MDM asserts ``len(dataset) > 1``, so val and test are topped up from train
+    whenever the requested fractions leave them with fewer than 2 IDs.
+    """
+    rng = random.Random(seed)
+    shuffled = list(ids)
+    rng.shuffle(shuffled)
+
+    n_val = max(1, round(len(shuffled) * val_fraction)) if val_fraction > 0 else 0
+    n_test = max(1, round(len(shuffled) * test_fraction)) if test_fraction > 0 else 0
+    # Ensure train set is never empty
+    n_val = min(n_val, len(shuffled) - 1)
+    n_test = min(n_test, len(shuffled) - n_val - 1)
+
+    val_ids = shuffled[:n_val]
+    test_ids = shuffled[n_val : n_val + n_test]
+    train_ids = shuffled[n_val + n_test :]
+
+    if len(val_ids) < 2:
+        val_ids = (val_ids + train_ids * 2)[:2]
+    if len(test_ids) < 2:
+        test_ids = (test_ids + train_ids * 2)[:2]
+
+    for split_name, split_ids in [
+        ("train", train_ids),
+        ("val", val_ids),
+        ("test", test_ids),
+    ]:
+        (output_dir / f"{split_name}.txt").write_text(
+            "\n".join(split_ids) + "\n", encoding="utf-8"
+        )
+        print(f"  {split_name}: {len(split_ids)} motion(s)")
+
+
 def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
     frames_dir: Path,
     labels: dict[str, list[dict[str, Any]]],
@@ -344,32 +386,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
     if not successful_ids:
         raise RuntimeError("No segments were processed successfully.")
 
-    # --- splits ---
-    rng = random.Random(seed)
-    shuffled = list(successful_ids)
-    rng.shuffle(shuffled)
-
-    n_val = max(1, round(len(shuffled) * val_fraction)) if val_fraction > 0 else 0
-    n_test = max(1, round(len(shuffled) * test_fraction)) if test_fraction > 0 else 0
-    # Ensure train set is never empty
-    n_val = min(n_val, len(shuffled) - 1)
-    n_test = min(n_test, len(shuffled) - n_val - 1)
-
-    val_ids = shuffled[:n_val]
-    test_ids = shuffled[n_val : n_val + n_test]
-    train_ids = shuffled[n_val + n_test :]
-
-    # MDM asserts len(dataset) > 1, so every split needs at least 2 IDs.
-    if len(val_ids) < 2:
-        val_ids = (val_ids + train_ids * 2)[:2]
-    if len(test_ids) < 2:
-        test_ids = (test_ids + train_ids * 2)[:2]
-
-    for split_name, ids in [("train", train_ids), ("val", val_ids), ("test", test_ids)]:
-        (output_dir / f"{split_name}.txt").write_text(
-            "\n".join(ids) + "\n", encoding="utf-8"
-        )
-        print(f"  {split_name}: {len(ids)} motion(s)")
+    write_splits(output_dir, successful_ids, val_fraction, test_fraction, seed)
 
     print(f"\nDataset written to {output_dir}")
 

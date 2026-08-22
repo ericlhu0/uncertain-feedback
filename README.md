@@ -1757,7 +1757,9 @@ Apply feedback. Its configuration section is collapsible and closes
 automatically when a trajectory starts, while Start/Exit and the live
 trajectory status remain visible. Starting or continuing a trajectory stops at Trajectory
 decision, where the operator either enters a correction or ignores the comfort
-violation and continues. Entering a correction unlocks Language correction.
+violation and continues. A correction does not have to wait for that stop:
+*Correct from frame N* beside the scrubber takes one at any frame, comfortable
+or not (see stage 1). Entering a correction unlocks Language correction.
 Selecting a cluster keeps that stage open for inspection and enables its
 bottom *Next* button; pressing *Next* advances to Cost generation. Generating a
 cost enables the Cost stage's bottom *Next* button; pressing it advances to
@@ -1842,7 +1844,25 @@ Stages (each stage's controls unlock once the previous one ran):
    until the goal is reached or `steps` is exhausted; no cluster is selected
    automatically. *Ignore comfort violation + continue* dismisses only the
    current discomfort event without adding feedback; the trajectory can pause
-   again after it returns to comfort and crosses a bound later. The accumulated
+   again after it returns to comfort and crosses a bound later.
+
+   **Corrections at any frame.** The discomfort trigger is not the only way in.
+   *Correct from frame N*, beside the frame scrubber, pauses for a correction at
+   the frame the scrubber is on (`POST /api/live_trajectory/request_correction`
+   with `{"step": <frame>}`, or `{"step": null}` for wherever the rollout stands)
+   and opens Language correction, whether or not the simulated user is anywhere
+   near a bound; the pause is reported with reason `operator`. Pressed while
+   frames are still streaming, it stops the stepping at the current frame
+   instead of racing it (the scrubber follows the newest frame during a live
+   rollout, so scrub *after* stopping, not during). Scrubbing back to an
+   **already executed frame** first makes the correction retroactive: the frames after it are discarded, the
+   planner is rebuilt at that pose, and the correction stage conditions on the
+   history up to it — so *Apply feedback + continue trajectory* re-rolls the
+   rest of the trajectory from that frame under the new cost instead of from the
+   end. `executed_trajectory.npy` is rewritten to the truncated path. Committed
+   rounds are **not** rewound: rewinding undoes execution, not what the session
+   has learned. *Ignore comfort violation + continue* also resumes from an
+   operator pause without adding feedback, so a rewind can be abandoned. The accumulated
    executed trajectory is saved under
    `demo_runner_artifacts/<timestamp>_session_<persona>/<timestamp>_trajectory/`.
    The live planner (its MPC stepping state) is held in server memory and is lost

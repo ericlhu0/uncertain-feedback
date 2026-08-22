@@ -599,6 +599,13 @@ class Session:
 
     # --- trajectory lifetime ----------------------------------------------
 
+    def _active_costs(self) -> CompositeTrajectoryCost:
+        """The persona's costs plus everything this session has learned so far."""
+        base_terms = self.rig._extra_costs(self.user)
+        if self.unified_cost is not None:
+            return replace_generated_costs(base_terms, self.unified_cost)
+        return CompositeTrajectoryCost([*base_terms.terms(), *self._round_costs])
+
     def start_trajectory(
         self,
         arm_aa: list[list[float]],
@@ -612,11 +619,7 @@ class Session:
         goal_arr = np.asarray(goal, dtype=np.float64)
         artifact_dir = self.dir / f"{time.strftime('%Y%m%d_%H%M%S')}_trajectory"
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        base_terms = rig._extra_costs(self.user)
-        if self.unified_cost is not None:
-            extra = replace_generated_costs(base_terms, self.unified_cost)
-        else:
-            extra = CompositeTrajectoryCost([*base_terms.terms(), *self._round_costs])
+        extra = self._active_costs()
         self._release_pinned_meshes()
         self.trajectory = Trajectory(
             mpc=rig._manual_planner(start_q, goal_arr, extra),
@@ -657,6 +660,63 @@ class Session:
         if traj.stopped():
             return self._record("trajectory", payload)
         return payload
+
+    def request_correction(self, step: int | None = None) -> dict[str, Any]:
+        """Pause for a correction at ``step``, whatever the persona is feeling.
+
+        The discomfort trigger is not consulted, so the operator can correct a
+        frame the simulated user is perfectly comfortable in. ``step`` defaults
+        to the frame the rollout is on; an earlier one rewinds to it, which is
+        what makes a correction retroactive: applying it re-rolls the rest of the
+        trajectory from that frame instead of from the end.
+        """
+        traj = self.trajectory
+        rig = self.rig
+        if traj is None or traj.base_traj is None:
+            raise ValueError("Start a trajectory first.")
+        target = traj.step if step is None else int(step)
+        if not 0 <= target <= traj.step:
+            raise ValueError(
+                f"Frame {target} is outside the executed trajectory (0-{traj.step})."
+            )
+        if target < traj.step:
+            self._rewind_to(target)
+        traj.paused = True
+        traj.complete = False
+        traj.reached_goal = False
+        traj.trigger.note_operator_pause()
+        traj.trigger_step = traj.step
+        traj.trigger_reason = "operator"
+        traj.trigger_violation = float(
+            compute_violations(
+                self.user, rig.context, _arm_aa(rig, traj.q[np.newaxis])
+            )[0]
+        )
+        traj.q_feedback = traj.q.copy()
+        traj.q_history = [q.copy() for q in traj.executed]
+        traj.clear_pending_feedback()
+        _log(f"correction requested at frame {traj.step}")
+        return self._record("trajectory", self._trajectory_payload())
+
+    def _rewind_to(self, step: int) -> None:
+        """Drop every frame executed after ``step`` and re-plan from that frame.
+
+        The planner is rebuilt rather than reset: its warm start, queued MDM
+        playback, and goal-space progress all belong to the discarded frames.
+        Committed rounds stay installed -- rewinding undoes execution, not what
+        the session has learned.
+        """
+        traj = self.trajectory
+        assert traj is not None and traj.goal is not None
+        traj.executed = [q.copy() for q in traj.executed[: step + 1]]
+        traj.q = traj.executed[-1].copy()
+        traj.step = step
+        traj.error = None
+        traj.logged_frames = min(traj.logged_frames, len(traj.executed))
+        traj.base_traj = np.asarray(traj.executed, dtype=np.float64)
+        np.save(traj.artifact_dir / "executed_trajectory.npy", traj.base_traj)
+        traj.mpc = self.rig._manual_planner(traj.q, traj.goal, self._active_costs())
+        _log(f"rewound the trajectory to frame {step}")
 
     def exit_trajectory(self) -> dict[str, Any]:
         """Discard the active trajectory; rounds, costs, and corpus stay."""
@@ -1350,13 +1410,13 @@ class Session:
         return self._trajectory_payload(current_mesh_only=current_mesh_only)
 
     def ignore_comfort_violation(self) -> dict[str, Any]:
-        """Resume without feedback after ignoring the current discomfort event."""
+        """Resume without feedback from a discomfort event or an operator pause."""
         traj = self.trajectory
         if traj is None or not traj.paused:
             raise ValueError("The multi-turn trajectory is not paused for feedback.")
-        if traj.trigger_reason != "discomfort":
-            raise ValueError("The current feedback trigger is not a comfort violation.")
-        _log(f"ignored comfort violation at frame {traj.step}")
+        if traj.trigger_reason not in ("discomfort", "operator"):
+            raise ValueError("This feedback trigger cannot be resumed without input.")
+        _log(f"resumed without feedback from frame {traj.step}")
         traj.paused = False
         traj.clear_pending_feedback()
         traj.advance(self)

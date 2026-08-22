@@ -343,6 +343,106 @@ def test_ignore_comfort_violation_resumes_until_a_new_violation(
     assert payload["rounds"] == []
 
 
+def test_correction_can_be_requested_while_the_user_is_comfortable(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        demo_session,
+        "compute_violations",
+        lambda selected, context, q: np.array([0.0]),
+    )
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False)
+    session.advance_trajectory(max_steps=2)
+
+    payload = session.request_correction()
+
+    assert payload["status"] == "paused"
+    assert payload["trigger"] == {"step": 2, "reason": "operator", "violation": 0.0}
+    assert payload["trajectory"]["n_frames"] == 3
+    trajectory = session.trajectory
+    assert trajectory is not None
+    np.testing.assert_array_equal(trajectory.q_feedback, trajectory.executed[-1])
+    assert len(trajectory.q_history) == 3
+
+
+def test_retroactive_correction_rewinds_the_rollout_and_replans(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        demo_session,
+        "compute_violations",
+        lambda selected, context, q: np.array([0.0]),
+    )
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    trajectory = session.trajectory
+    assert trajectory is not None and trajectory.complete
+    planner = trajectory.mpc
+
+    payload = session.request_correction(2)
+
+    assert payload["status"] == "paused"
+    assert payload["trigger"] == {"step": 2, "reason": "operator", "violation": 0.0}
+    assert payload["trajectory"]["n_frames"] == 3
+    assert trajectory.step == 2
+    assert not trajectory.complete
+    np.testing.assert_allclose(trajectory.q, trajectory.executed[0] + 2.0)
+    assert trajectory.mpc is not planner
+    saved = np.load(trajectory.artifact_dir / "executed_trajectory.npy")
+    assert saved.shape == (3, 7)
+
+
+def test_retroactive_correction_re_rolls_the_rest_of_the_trajectory(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        demo_session,
+        "compute_violations",
+        lambda selected, context, q: np.array([0.0]),
+    )
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    trajectory = session.trajectory
+    assert trajectory is not None
+    session.request_correction(2)
+    replanned = trajectory.mpc
+    correction = np.stack([np.full((3, 3), 0.5), np.ones((3, 3))])
+    trajectory.scaled_correction = correction
+    trajectory._last_cost = FakeCost()  # type: ignore[assignment]
+
+    def fake_commit(self):
+        self._round_costs.append(self.trajectory._last_cost)
+        self.round_records.append({"index": 0})
+        return {"rounds": self.round_records, "unified": None}
+
+    session.commit_round = MethodType(fake_commit, session)  # type: ignore[method-assign]
+
+    payload = session.apply_round_and_continue()
+
+    np.testing.assert_array_equal(replanned.pushed, correction)  # type: ignore[attr-defined]
+    assert payload["status"] == "complete"
+    assert payload["trajectory"]["n_frames"] == 7
+    assert [entry["n_frames"] for entry in session.corpus.entries()] == [7, 4]
+
+
+def test_operator_pause_can_be_resumed_without_feedback(monkeypatch, tmp_path) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        demo_session,
+        "compute_violations",
+        lambda selected, context, q: np.array([0.0]),
+    )
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False)
+    session.advance_trajectory(max_steps=2)
+    session.request_correction()
+
+    payload = session.ignore_comfort_violation()
+
+    assert payload["status"] == "complete"
+    assert payload["trajectory"]["n_frames"] == 7
+
+
 def test_commit_round_persists_all_recursive_cluster_labels(tmp_path) -> None:
     session = Session.__new__(Session)
     session.persona_name = "restricted"

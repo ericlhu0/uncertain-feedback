@@ -431,6 +431,16 @@ def create_app(static_dir: Path) -> Flask:
             lambda: _require_session().advance_trajectory(current_mesh_only=True)
         )
 
+    @app.route("/api/live_trajectory/request_correction", methods=["POST"])
+    def request_correction_live_trajectory() -> Any:
+        data = request.get_json(force=True)
+
+        def do() -> dict[str, Any]:
+            session, _ = _require_trajectory()
+            return session.request_correction(data.get("step"))
+
+        return _run_heavy(do)
+
     @app.route("/api/live_trajectory/apply_round", methods=["POST"])
     def apply_round_live_trajectory() -> Any:
         return _run_heavy(

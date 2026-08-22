@@ -41,6 +41,11 @@ class FeedbackConfig:
                             keeps the generator default). Run-level.
         text_time:          Step at which the run pauses for a correction
                             prompt. Run-level.
+        anchor_correction:  Re-anchor the generated correction onto the arm's
+                            current configuration before tracking it, dropping
+                            the pinned frame (see
+                            ``SmplLeftArmFK.anchor_arm_trajectory``). Removes the
+                            frame-0 seam; set false to track the raw sample.
         uq:                 Optional UQ layer: sample several diffusion
                             outputs, cluster, and pick, instead of following a
                             single sample.
@@ -50,6 +55,7 @@ class FeedbackConfig:
     trajectory_fraction: float = 1.0
     frames: int | None = None
     text_time: int = 0
+    anchor_correction: bool = True
     uq: UqConfig | None = None
 
 
@@ -63,11 +69,14 @@ class MdmFeedback(FeedbackMethod):
         stall_steps: Steps without closest-approach progress before the
             current frame is skipped; ``None`` disables the stall-skip (no
             feasibility constraint active).
+        anchor_correction: Re-anchor a generated correction onto the current
+            configuration before enqueuing it.
     """
 
     max_playback_delta: float = 0.05
     trajectory_fraction: float = 1.0
     stall_steps: int | None = None
+    anchor_correction: bool = True
 
     mdm_goal: np.ndarray | None = None
     preview_q: np.ndarray | None = None

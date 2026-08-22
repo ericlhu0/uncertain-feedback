@@ -342,6 +342,18 @@ def anatomical_elbow_wrist_slots(
     return elbow_local.as_rotvec(), wrist_local.as_rotvec()
 
 
+def anchor_q_trajectory(q_traj: np.ndarray, current_q: np.ndarray) -> np.ndarray:
+    """Shift a generated correction so it starts at ``current_q``.
+
+    Drops frame 0 — the pinned prefix frame a generator echoes back — and
+    translates the rest by the offset between the first *free* frame and the
+    live configuration. Per-frame displacements are untouched, so the
+    demonstrated shape survives exactly while the frame-0 seam cannot exist.
+    """
+    q = np.asarray(q_traj, dtype=np.float64)[1:]
+    return q - q[0] + np.asarray(current_q, dtype=np.float64)
+
+
 class SmplLeftArmFK:
     """Forward kinematics for the SMPL left arm.
 
@@ -691,6 +703,27 @@ class SmplLeftArmFK:
         flat = arm_aa.reshape((-1, _N_JOINTS, 3))
         out = np.stack([self.arm_aa_to_q(frame, spine3_aa) for frame in flat], axis=0)
         return out.reshape((*leading, Q_DIM))
+
+    def anchor_arm_trajectory(
+        self,
+        arm_aa: np.ndarray,
+        current_q: np.ndarray,
+        spine3_aa: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Re-anchor a generated correction onto the arm's current configuration.
+
+        A generator's frame 0 is the last *pinned* prefix frame and frame 1 is the
+        first frame it was free to choose, so whatever pull the model has toward
+        its training prior's start shows up as a one-frame teleport between the
+        two. Dropping frame 0 and shifting the rest to begin at ``current_q``
+        keeps every per-frame displacement — the demonstrated shape — and removes
+        that seam by construction.
+
+        The shift is applied in planner ``q`` space, where an additive offset
+        respects the elbow-hinge parameterisation that raw axis-angles do not.
+        """
+        q = self.arm_aa_to_q_batch(np.asarray(arm_aa, dtype=np.float64), spine3_aa)
+        return q_to_arm_aa(anchor_q_trajectory(q, current_q), self.elbow_hinge_axis)
 
     # ------------------------------------------------------------------
     # FK — full body

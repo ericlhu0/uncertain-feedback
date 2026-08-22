@@ -32,6 +32,8 @@ const meshLoads = new Map();
 let liveBaseMeshIds = [];
 let baseTrigger = null;
 let multiTurnActive = false;
+let rollingLive = false;
+let correctionRequestPending = false;
 
 // Both modes share the guided workflow. Demo mode hides setup and hidden-cost
 // machinery; dev mode reveals it inside the same stages. Replay steps through a
@@ -654,7 +656,8 @@ function setScenarioLocked(locked) {
 function setDecisionControls(data) {
   const paused = data.status === "paused";
   $("enter-correction").disabled = !paused;
-  const ignoreDisabled = !paused || data.trigger?.reason !== "discomfort";
+  const ignoreDisabled = !paused
+    || !["discomfort", "operator"].includes(data.trigger?.reason);
   $("ignore-violation").disabled = ignoreDisabled;
 }
 
@@ -803,8 +806,9 @@ function clearTrajectoryUi() {
   showMdmStart = false;
   setScenarioLocked(false);
   $("exit-trajectory").disabled = true;
-  for (const id of ["ignore-violation", "enter-correction", "generate", "recluster",
-    "correction-next", "generate-cost", "cost-next", "commit-round", "apply-round"]) {
+  for (const id of ["ignore-violation", "enter-correction", "correct-here", "generate",
+    "recluster", "correction-next", "generate-cost", "cost-next", "commit-round",
+    "apply-round"]) {
     $(id).disabled = true;
   }
   $("trajectory-session").className = "trajectory-session";
@@ -948,17 +952,31 @@ function renderLiveTrajectoryFrame(data) {
 }
 
 async function rollLiveTrajectory(data) {
-  renderLiveTrajectoryFrame(data);
-  while (data.status === "running") {
-    const frameStarted = performance.now();
-    setStatus(`rolling out MPC · frame ${data.step}/${data.step_limit}`, "busy");
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    data = await api("/api/live_trajectory/step", {});
+  rollingLive = true;
+  try {
     renderLiveTrajectoryFrame(data);
-    const remaining = LIVE_FRAME_INTERVAL_MS - (performance.now() - frameStarted);
-    if (remaining > 0) {
-      await new Promise((resolve) => setTimeout(resolve, remaining));
+    while (data.status === "running") {
+      const frameStarted = performance.now();
+      setStatus(`rolling out MPC · frame ${data.step}/${data.step_limit}`, "busy");
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      data = await api("/api/live_trajectory/step", {});
+      renderLiveTrajectoryFrame(data);
+      // A correction asked for mid-rollout stops the stepping here rather than
+      // racing the in-flight step request for the server's trajectory lock.
+      if (correctionRequestPending) break;
+      const remaining = LIVE_FRAME_INTERVAL_MS - (performance.now() - frameStarted);
+      if (remaining > 0) {
+        await new Promise((resolve) => setTimeout(resolve, remaining));
+      }
     }
+  } finally {
+    rollingLive = false;
+  }
+  if (correctionRequestPending) {
+    correctionRequestPending = false;
+    if (data.status === "running") return await pauseForCorrection(null);
+    if (data.status === "paused") setWorkflowStage(2);
+    refreshCorrectionButton();
   }
   setStatus(data.status === "paused" ? "paused for input" : "ready");
   return data;
@@ -1032,8 +1050,9 @@ async function exitManualTrajectory() {
   showMdmStart = false;
   setScenarioLocked(false);
   $("exit-trajectory").disabled = true;
-  for (const id of ["ignore-violation", "enter-correction", "generate", "recluster",
-    "correction-next", "generate-cost", "cost-next", "commit-round", "apply-round"]) {
+  for (const id of ["ignore-violation", "enter-correction", "correct-here", "generate",
+    "recluster", "correction-next", "generate-cost", "cost-next", "commit-round",
+    "apply-round"]) {
     $(id).disabled = true;
   }
   $("trajectory-session").className = "trajectory-session";
@@ -1093,6 +1112,81 @@ async function ignoreComfortViolation() {
   $("apply-round").disabled = true;
   setWorkflowStage(1);
   refreshLegend(); refreshTimeline(); renderAll();
+}
+
+// The scrubber spans every visible trajectory (the oracle rollout outlives the
+// executed one), so a correction target is clamped to a frame that really ran.
+function correctionTargetFrame() {
+  const base = session?.trajectory?.trajectory;
+  if (!base || !multiTurnActive) return null;
+  return Math.min(frame, base.n_frames - 1);
+}
+
+function refreshCorrectionButton() {
+  const target = correctionTargetFrame();
+  const button = $("correct-here");
+  button.textContent = `Correct from frame ${target === null ? 0 : target}`;
+  button.disabled = target === null || replayActive || correctionRequestPending;
+}
+
+async function requestCorrectionHere() {
+  if (rollingLive) {
+    correctionRequestPending = true;
+    refreshCorrectionButton();
+    setStatus("stopping the rollout to take a correction …", "busy");
+    return;
+  }
+  await pauseForCorrection(correctionTargetFrame());
+}
+
+// Pauses the trajectory for a correction the persona never asked for. `step` of
+// null takes the frame the rollout stands on; an earlier frame rewinds the
+// rollout to it, so applying the correction re-rolls everything after it.
+async function pauseForCorrection(step) {
+  const data = await api("/api/live_trajectory/request_correction", { step },
+    step === null
+      ? "pausing for a correction"
+      : `taking a correction at frame ${step}`);
+  session.trajectory = data;
+  syncSessionContext(data);
+  liveBaseMeshIds = [];
+  setTraj("base", data.trajectory);
+  baseTrigger = data.trigger ? data.trigger.step : null;
+  clearTraj("correction", "full", "generated", "generated_start");
+  clusters = [];
+  selectedCluster = null;
+  undesirableClusters = new Set();
+  selectedClusterSegments = null;
+  resetClusterNavigation();
+  generatedBounds = [];
+  costField = null;
+  pendingCost = null;
+  renderClusterList();
+  renderActiveCosts();
+  $("cost-output").innerHTML = "";
+  clearCostThoughtLog();
+  $("correction-metrics").textContent = "";
+  $("base-metrics").textContent = fmtMetrics(data.metrics, data.goal_reach) +
+    `\nexecuted ${data.step}/${data.step_limit} steps` +
+    (data.error ? `\nerror: ${data.error}` : "");
+  renderTrajectorySession(data);
+  setScenarioLocked(true);
+  $("run-base").disabled = true;
+  $("exit-trajectory").disabled = false;
+  setDecisionControls(data);
+  $("generate").disabled = data.status !== "paused";
+  $("recluster").disabled = true;
+  $("generate-cost").disabled = true;
+  $("commit-round").disabled = true;
+  $("apply-round").disabled = true;
+  // Park the scrubber on the pause frame: after a rewind that is the last frame
+  // that survived, and the body views should show the pose being corrected.
+  $("frame-slider").value = Math.max(0, data.trajectory.n_frames - 1);
+  refreshLegend();
+  refreshTimeline();
+  renderAll();
+  setWorkflowStage(2);
+  return data;
 }
 
 function applyClusterPayload(data) {
@@ -1684,6 +1778,7 @@ function refreshTimeline() {
   if (+slider.value > +slider.max) slider.value = slider.max;
   frame = +slider.value;
   $("frame-label").textContent = `frame ${frame} / ${slider.max}`;
+  refreshCorrectionButton();
 }
 
 function tick(ts) {
@@ -2979,9 +3074,9 @@ function resetReplayState() {
 // beat was paused), but there is no live session behind them.
 function disableLiveControls() {
   for (const id of ["run-base", "exit-trajectory", "ignore-violation",
-    "enter-correction", "generate", "recluster", "cluster-refine", "cluster-back",
-    "correction-next", "generate-cost", "cost-next", "commit-round", "apply-round",
-    "combine-rounds", "reset-rounds"]) {
+    "enter-correction", "correct-here", "generate", "recluster", "cluster-refine",
+    "cluster-back", "correction-next", "generate-cost", "cost-next", "commit-round",
+    "apply-round", "combine-rounds", "reset-rounds"]) {
     $(id).disabled = true;
   }
 }
@@ -3048,6 +3143,7 @@ async function main() {
   $("exit-trajectory").onclick = exitManualTrajectory;
   $("ignore-violation").onclick = ignoreComfortViolation;
   $("enter-correction").onclick = enterCorrection;
+  $("correct-here").onclick = requestCorrectionHere;
   $("generate").onclick = generate;
   $("recluster").onclick = recluster;
   $("cluster-refine").onclick = refineCluster;
@@ -3091,6 +3187,7 @@ async function main() {
   $("frame-slider").oninput = () => {
     frame = +$("frame-slider").value;
     $("frame-label").textContent = `frame ${frame} / ${$("frame-slider").max}`;
+    refreshCorrectionButton();
     renderAll();
   };
   $("play").onclick = () => {

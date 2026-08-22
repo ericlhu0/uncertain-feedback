@@ -23,12 +23,20 @@ MDM_ROOT = PROJECT_ROOT / "motion_generators" / "mdm"
 # Fine-tuned on dataset/custom1_seatedcanon at lr 1e-7 for 9250 steps, so query
 # poses (official process_file encoding) are on-manifold.  Checkpoints are
 # gitignored — this file must exist on every host that runs the pipeline.
+# MDM_MODEL_WEIGHTS_PATH = (
+#     MDM_ROOT
+#     / "motion-diffusion-model"
+#     / "save"
+#     / "custom_seatedcanon_lr1e7_10k"
+#     / "model000759250.pt"
+# )
+
 MDM_MODEL_WEIGHTS_PATH = (
     MDM_ROOT
     / "motion-diffusion-model"
     / "save"
-    / "custom_seatedcanon_lr1e7_10k"
-    / "model000759250.pt"
+    / "correction_demo1_lr1e5_5k"
+    / "model000752000.pt"
 )
 
 # Default whole-body HML263 start pose, used by every MPC config that does not

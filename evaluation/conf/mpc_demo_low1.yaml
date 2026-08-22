@@ -1,0 +1,72 @@
+# Correction-clip scenario: the mpc_demo_base1 goal reached from a LOW start arm.
+#
+# Same body, goal and MPC settings as mpc_demo_base1.yaml; only `arm:` differs.
+# The arm begins resting low — wrist ~0.29 m below spine3, elbow bent 0.6 rad —
+# instead of already held out near shoulder height, so the reach the clips branch
+# off is a full lift rather than a short lateral adjustment.
+#
+# Derived from base1's start by inverting the anatomical features
+# (`arm_q_from_features`): elbow flexion 1.57 -> 0.60 rad, shoulder
+# flexion/abduction scaled to 0.30. Every joint stays inside
+# DEFAULT_ARM_JOINT_LIMITS.
+#
+# Why this is the default for evaluation/generate_correction_clips.py: the longer
+# reach (165 frames at the clip pipeline's max_angle_delta 0.00125, vs base1's
+# shorter one) widens the usable trigger window to (12, 100) and evens out which
+# anatomical feature the sampled bound lands on — base1's short reach skewed hard
+# toward two features.
+#
+# Kept separate from mpc_demo_base1.yaml on purpose: that file is the shared
+# demo/comparison scenario, and outputs/comparison_demo + outputs/base1 were all
+# generated against its start pose.
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.01
+
+# base1's "base1" pose, lowered (see header)
+arm:
+  - [-0.242408, 0.113504, -0.444638]
+  - [0.674113, -0.590372, -0.770453]
+  - [0.014318, -0.357798, 0.301825]
+
+feedback:
+  max_playback_delta: 0.05
+  trajectory_fraction: 1
+  frames: 50
+  text_time: 10
+  uq:
+    diffusion_samples: 500
+    n_clusters: 4
+    auto_cluster: 1
+    scale: 1.0
+    steering:
+      mode: "cg"
+      resample_steps: [15, 25, 35, 45]
+      temperature: 0.5
+      guide_from: 10
+      guidance_weight: 1.0e5
+
+corrections:
+  trigger_threshold: 0.02
+
+# demo_runner goal "hits limit 1"
+cartesian:
+  goals:
+    - [0.25, 0.3, 0.18]
+  threshold: 0.05
+
+preference_learning: false
+preference_alpha: 0
+
+simulated_user:
+  time_of_day: 9.0
+
+llm_cost:
+  enabled: true
+  model: gpt-5.6-luna
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true
+  max_turns: 3
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"

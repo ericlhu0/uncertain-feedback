@@ -145,6 +145,236 @@ gives every variant the same speed-free caption, for runs where speed must come 
 experimental `--speed_cond` scalar channel (`MdmMotionGenerator.generate_*(speed=...)`,
 metres per frame) instead of the text.
 
+3c. (Optional) Build a **correction-clip** dataset around one base trajectory — for a
+checkpoint that is multimodal about a single scenario rather than a broad motion corpus.
+Stage (a) rolls one naive MPC trajectory to a Cartesian goal, then for each run samples a
+hidden comfort bound *anchored on that rollout* (so violation is guaranteed), replans from
+the induced trigger step under the oracle cost, and writes an 8-frame naive history prefix
+spliced onto a slice of the corrected continuation:
+```
+uv run python evaluation/generate_correction_clips.py --out_dir outputs/correction_clips --n_runs 0
+```
+`--n_runs 0` writes only the base artifacts — the naive rollout, the body geometry and an
+empty manifest — and the labeling UI then plans each correction on demand as you press Next
+(one oracle rollout, 2–13 s, prefetched while you type). Pass `--n_runs 32` instead to batch
+them up front; both paths produce identical runs, since each is seeded on `(seed, index)`
+rather than on a streaming generator.
+
+Stage (a) **refuses to write into a directory that already holds a clip set** — it rewrites
+`manifest.json` wholesale, so doing so would blank that set's captions and orphan the
+labeling sessions underneath it. Pass a new `--out_dir` instead.
+
+Only this step needs the GPU/MDM env — it loads the generator once for the start-pose
+geometry and caches it to `geometry.npz`. Knobs:
+`--seed`, `--trigger_window LOW HIGH` (accepted range for the naive rollout's first
+violation), `--margin_range LOW HIGH` (radians the bound sits past the naive feature
+value), `--correction_frames LOW HIGH` (corrected frames kept per clip, before the
+prefix), and `--max_angle_delta`.
+
+The default scenario is `evaluation/conf/mpc_demo_low1.yaml`: the `mpc_demo_base1` body and
+goal, but the arm **starts resting low** (wrist ~0.29 m below spine3, elbow bent 0.6 rad)
+rather than already held near shoulder height, so the reach the clips branch off is a full
+lift. It is a separate file because `mpc_demo_base1.yaml` is the shared demo/comparison
+scenario that `outputs/comparison_demo` and `outputs/base1` were generated against. The low
+start is also simply better for this purpose: the longer reach evens out which anatomical
+feature the sampled bound lands on — base1's short reach skewed hard toward two features.
+Pass `--config evaluation/conf/mpc_demo_base1.yaml` for the old start (and scale
+`--trigger_window` down to suit its shorter reach).
+
+`--max_angle_delta` (default `0.00125`) overrides the config's action-sampling spread and
+is **the one knob for how big and how fast a clip's motion is**. It is a std dev, not a
+per-step cap, so it sets distance travelled per frame; because a clip is a fixed frame
+budget, halving it halves both the speed and the ground covered. Measured on the low1 start:
+
+| `--max_angle_delta` | reach | wrist path per clip | speed | clip frames |
+|---|---|---|---|---|
+| 0.01 (config's own) | 28 fr | — | — | too short to clip |
+| 0.0025 | 85 fr (4.2 s) | 0.351 m | 0.0079 m/fr | 50–64 |
+| **0.00125** (default) | 165 fr (8.2 s) | **0.186 m** | **0.0042 m/fr** | 50–64 |
+
+Clip length and padding are unaffected, so lowering it buys smaller, gentler corrections
+outright; the cost is generation time (~4–13 s per run instead of ~3–7 s, hidden by the
+prefetch). `--margin_range` looks like a size knob but is **not** — it sets how far past the
+naive value the bound sits, i.e. which way and how insistently the correction deviates, not
+how far the arm travels in the window. Halving it moved wrist path by under a centimetre
+while making corrections less distinct from the naive path, so it is left wide.
+
+`--trigger_window` counts naive frames, so it must scale with `--max_angle_delta`:
+`(12, 100)` suits the 165-frame reach, `(6, 50)` the 85-frame one. Pushing its top end near
+the end of the reach starts producing continuations too short to fill the window, which get
+padded by holding the last frame (recorded as `pad_frames`).
+
+Clips are paced more slowly than the `0.01` demo the finetuned checkpoint is queried in;
+MDM output is tracked as a *path* (playback advances on proximity, not on a clock), so the
+pacing costs nothing downstream, but the pinned prefix a clip carries is slower than the one
+inference pins.
+
+Then hand-label. The browser UI serves every clip next to the bound that produced it and
+writes typed captions straight back into the manifest (saves on blur), so nothing needs
+editing by hand:
+```
+uv run python evaluation/label_correction_clips.py
+# then: ssh -L 6768:localhost:6768 user@host  →  http://localhost:6768
+```
+**Every launch labels into its own session directory.** `--clips_dir` defaults to
+`outputs/correction_clips`, so labeling normally needs no flags at all. The UI forks
+`outputs/correction_clips/session_<timestamp>/` off the clip set — the base artifacts copied
+in, an empty manifest, and the timestamp as the session's seed — and writes its runs and
+captions there, so it never touches the set it came from or an earlier session. Runs are
+seeded on `(seed, index)`, so the fresh seed is what keeps two sessions off the same sampled
+bounds. A session directory is self-contained: stage (b) reads it exactly like a clip set,
+and several of them combine into one dataset. Pass `--resume` with a session directory to
+carry on captioning that one instead of starting another:
+```
+uv run python evaluation/label_correction_clips.py \
+    --clips_dir outputs/correction_clips/session_20260817_2321 --resume
+```
+
+The UI shows **one run at a time**: three orthogonal projections (Front XY / Side ZY / Top
+XZ), a scrubber, a caption box, and Prev / Next. Next saves the caption and advances,
+planning that run if it does not exist yet; the run after it is prefetched in the background
+while you type, so Next normally lands instantly (~0.1 s) instead of waiting on the rollout.
+Generation is serialized, so a click that races the prefetch waits for the same result
+rather than duplicating the work, and saving a caption never blocks on a rollout.
+
+Playback covers the **whole** story in three colour-coded phases:
+
+| colour | phase | frames |
+|---|---|---|
+| gray | naive approach | frame 0 → trigger |
+| **blue** | **the training clip — this is what you caption** | `correction_frames` after the clip anchor (pale head = pinned prefix) |
+| orange | rest of the oracle rollout, context only | everything after the trigger outside the clip |
+
+So the branch is visible in context rather than starting 8 frames before it, and — since
+clips end mid-reach by design — you can see where the correction was still heading instead
+of guessing. The whole wrist path is drawn at all times, faint ahead of the playhead and
+solid behind it, and a faint ghost of the trigger pose stays on screen so the departure
+point is always in view.
+
+**The clip window is draggable.** The sampled cut anchors at the trigger, but the
+interesting motion is often further along the rollout, so the blue bar under the scrubber
+can be grabbed by either end to resize or in the middle to slide anywhere along the motion.
+Colours and the frame counter update live while dragging; on release the clip is re-cut on
+disk and `window_violation` is recomputed from that run's own recorded bound. **No replan is
+needed** — the naive rollout and oracle continuation are already saved, so a clip is just a
+different cut of them, which is why dragging is instant while generating a new run is not.
+The bar's pale head is the `n_prefix` pinned prefix (conditioning, not the described
+motion); the solid blue is what your caption covers.
+
+Anchoring later means the pinned prefix is recent *corrected* history rather than naive
+history. That is still a valid clip: inference pins whatever the arm just did, so a prefix
+taken from mid-correction matches the query distribution just as well.
+
+The clip is clamped to `MIN_WINDOW`–`MAX_WINDOW` (42–180 corrected frames, so 50–188 with
+the prefix) — above the t2m loader's minimum and below MDM's 196-frame cap. Dragging to the
+very end holds the anchor back rather than padding, so a dragged clip is always real frames
+(`pad_frames` 0).
+
+Stage (a) writes **no video** — rendering was 3.5 MB of a 3.9 MB 32-clip set, against 436 KB
+without it. The viewer reads only `manifest.json`, `naive.npy`, `geometry.npz` and the
+per-run `clip.npy` / `continuation.npy`, reconstructing each preview through `motion_frames` at ~9–40 KB of JSON per
+run, so it needs neither the MDM environment nor a GPU — including for the corrections it
+plans on demand, since `clip_source_from_dir` rebuilds the rollout context from those same
+files (`geometry.npz` carries the generator-decoded body for exactly this reason). A
+bootstrapped set is 32 KB and each run adds ~20–32 KB (clip, features, and the full
+continuation the preview's context phase needs). Runs whose continuation never reached
+the goal are marked in the header; blank runs are skipped by stage (b).
+
+Editing `outputs/correction_clips/manifest.json` directly works too. Each run records the sampled
+`feature`/`bound_type`/`bound_value`, `trigger_step`, `clip_anchor` (where the cut sits —
+equal to `trigger_step` until you drag it), `window_violation` (how much of the described
+window still violates the bound) and `continuation_reach`. Skip a run by leaving
+its caption empty.
+
+`continuation_reach` describes the **whole** continuation, not the clip: a clip keeps only
+`correction_frames` of it — a median 46% on the 32-clip demo set — so 30 of 32 clips end
+mid-reach (median clip-final wrist distance 0.11 m against a 0.05 threshold) even though
+their continuations reached. That is the intended shape, not a defect: at inference MDM
+emits a `feedback.frames`-length correction that the MPC tracks and then finishes the reach
+under its own cost, so a clip should teach a steering nudge, not a completed reach. On the
+demo goal,
+every `elbow_flexion upper_bound` run fails to reach — capping elbow flexion puts the goal
+out of geometric range, so the MPC burns its full step budget — yet those clips carry as
+much arm motion as the reaching ones and are still good training content. Judge a clip by
+its video and `window_violation`; treat `continuation_reach: false` as a prompt to look,
+not as a rejection.
+
+Stage (b) encodes every captioned clip into HumanML3D format. `--clips_dir` takes **several
+directories**, which is how separate labeling sessions become one training set — ids are
+handed out across the whole run, so nothing collides:
+```
+uv run python src/uncertain_feedback/data_collection/build_correction_dataset.py \
+    --clips_dir outputs/correction_clips outputs/correction_clips/session_* \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_demo1 \
+    --transplants 4
+```
+`--transplants N` adds N augmented copies of every captioned clip, each replaying that
+clip's joint-space correction from a **randomly drawn** frame of the naive rollout: the
+prefix becomes the arm's real history at that frame, and the described window is the same
+deltas applied from there. This is what puts a behaviour labeled high up the reach in front
+of the model with the arm low, which matters because the prefix is inpainted at inference —
+the caption is the only other handle the model has. Draws are rejected and redrawn if they
+leave the anatomical joint box or inflate the bounded feature's excursion past 3x (the
+features are `arccos`/`arcsin` of rotated axes, so the same joint delta lands differently
+from a different base pose). Measured on 31 captioned clips at `--transplants 4`: 0
+rejections, and clips whose prefix sits in the top height band (+0.15 to +0.35 m) go from 2
+to 57. The correction's *shape* transfers exactly; the absolute feature values it was
+generated under do not, so caption a behaviour ("raise my arm a bit"), never a limit.
+Transplants of one clip can land in different splits, which is one more reason not to read
+anything into val loss at this dataset size.
+
+Clips are encoded with `smpl_arm_aa_seq_to_hml263_frames` — the *same* function inference
+uses to build its pinned prefix — so training clips and query-time prefixes share a body
+and an encoding by construction. `--hml_stats_dir` defaults to `dataset/custom1_seatedcanon`,
+**not** `dataset/HumanML3D` (that path is the fine-tune swap slot and holds whichever
+dataset trained last).
+
+Fine-tune on it from the **stock** checkpoint. `finetune_standing.sh` already resumes from
+`./save/humanml_enc_512_50steps/model000750000.pt`, so pass no `--resume_checkpoint`
+(MDM's argparse is last-flag-wins, so passing one would override it). Note the runner
+hardcodes `--num_steps 5000`; a longer run needs an explicit override in the trailing args:
+```
+# ran 2026-08-18: matches the deployed lr/steps recipe — MODE COLLAPSED, see below
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_demo1 correction_demo1_lr1e7_10k 1e-7 \
+    --num_steps 10000 --gen_during_training --start_pose mdm_sit_pose.pt --n_prefix 8
+
+# ran 2026-08-18: the usable checkpoint
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_demo1 correction_demo1_lr1e5_5k 1e-5 \
+    --gen_during_training --start_pose mdm_sit_pose.pt --n_prefix 8
+```
+
+**Pick the recipe by diversity, not by loss** (val splits contain transplants of training
+clips, so val loss is meaningless here). Measured on left-wrist trajectories across the 6
+`--gen_during_training` samples at every saved checkpoint:
+
+| recipe | wrist path / frame | cross-sample spread | verdict |
+|---|---|---|---|
+| training clips (target) | 0.0039 m | — | — |
+| `lr 1e-5 / 5k` | 0.0045 m | 0.205 m, no trend over the run | usable |
+| `lr 1e-7 / 10k` | 0.0021 m | 0.316 → 0.023 m, monotone | collapsed — all samples identical |
+
+10k steps x batch 8 over 123 examples is ~650 epochs on a set where every clip carries the
+same caption, so even lr 1e-7 accumulates into drift toward the dataset mean. The
+deployed-checkpoint recipe does **not** transfer to this dataset.
+
+After training, flip `use_ema` to false in `save/<run>/args.json` if you will sample from
+`sample_leftarm.py` (`mdm_api` is safe either way — `mdm_configs/mdm_config.yaml` overlays
+it). Then point `consts.MDM_MODEL_WEIGHTS_PATH` at the checkpoint.
+
+**Try it in the demo runner, on the scenario the clips were trained on.** Launch the demo
+runner (see *Demo runner web tool*) and in the Scenario panel pick start pose
+**`low1 (clip training start)`** and goal **`hits limit 1`** — that pair is exactly
+`evaluation/conf/mpc_demo_low1.yaml`'s `arm:` and `cartesian.goals[0]` `[0.25, 0.3, 0.18]`,
+verified against `outputs/correction_clips/naive.npy` frame 0. Type the correction
+**`raise my arm a bit`** verbatim: every clip in the set carries that one caption, so it is
+the only prompt the checkpoint knows. Two expected mismatches: the demo runs at
+`max_angle_delta 0.01` while the clips were generated at `0.00125`, so the pinned prefix is
+paced ~8x faster than any the model trained on; and the checkpoint's training body sits
+0.060 m from `mdm_sit_pose.pt` (vs 0.190 m for `custom1_seatedcanon`, so this part is
+*better* matched than the deployed checkpoint).
+
 4. Fine-tune motion-diffusion-model
 First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` (or whatever was created with the trajectory editor web ui) to `.../HumanML3D`
 
@@ -347,7 +577,7 @@ presence of top-level YAML sections, one per module slot:
 | Section | Module | Absent means |
 |---|---|---|
 | `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
-| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`) | no correction phase |
+| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`) | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
 
@@ -1326,6 +1556,31 @@ into shoulder rotation plus a scalar elbow-flexion angle while preserving arm
 joint positions.
 
 
+
+### `feedback.anchor_correction` — the frame-0 seam
+
+A generator returns the pinned prefix's last frame as frame 0 and its first *free*
+frame as frame 1, so any pull the model has toward its training prior's start pose
+lands as a one-frame teleport between them — measured at 0.114 m on the deployed
+`correction_demo1` checkpoint, against a ~0.005 m normal step. `anchor_correction`
+(default **true**) drops frame 0 and shifts the rest so the correction begins at the
+arm's current configuration (`SmplLeftArmFK.anchor_arm_trajectory`, applied in
+planner `q` space so the elbow hinge stays parameterised). Per-frame displacements —
+the demonstrated shape — are untouched; the seam cannot exist, since frame 0 *is*
+the current configuration. The trajectory is one frame shorter. Set it false to
+track the raw sample, which is what you want when measuring how big the seam is.
+
+This also cleans up `feedback.uq.scale`: `scale_trajectory` anchors at frame 0 and
+scales every offset from it, so with the raw sample the Magnitude slider scales the
+teleport along with the motion (`scale: 0.5` halves the seam as a side effect).
+Anchored, it scales only real motion.
+
+Applied in all three correction paths: `Mpc.query_mdm_with_uncertainty` (the planner's UQ
+route), `run.py`'s single-sample route, and the demo runner, which builds and pushes its own
+corrections — `demo_runner/session.py::_activate_cluster_level` anchors each cluster mean, so
+the browser's feature plots, the oracle cluster scores, the Magnitude slider and the tracked
+trajectory all see the anchored version.
+
 ## Cost-generation backends
 
 `llm_cost.backend` selects how the cost is generated:
@@ -1502,7 +1757,9 @@ Apply feedback. Its configuration section is collapsible and closes
 automatically when a trajectory starts, while Start/Exit and the live
 trajectory status remain visible. Starting or continuing a trajectory stops at Trajectory
 decision, where the operator either enters a correction or ignores the comfort
-violation and continues. Entering a correction unlocks Language correction.
+violation and continues. A correction does not have to wait for that stop:
+*Correct from frame N* beside the scrubber takes one at any frame, comfortable
+or not (see stage 1). Entering a correction unlocks Language correction.
 Selecting a cluster keeps that stage open for inspection and enables its
 bottom *Next* button; pressing *Next* advances to Cost generation. Generating a
 cost enables the Cost stage's bottom *Next* button; pressing it advances to
@@ -1587,7 +1844,25 @@ Stages (each stage's controls unlock once the previous one ran):
    until the goal is reached or `steps` is exhausted; no cluster is selected
    automatically. *Ignore comfort violation + continue* dismisses only the
    current discomfort event without adding feedback; the trajectory can pause
-   again after it returns to comfort and crosses a bound later. The accumulated
+   again after it returns to comfort and crosses a bound later.
+
+   **Corrections at any frame.** The discomfort trigger is not the only way in.
+   *Correct from frame N*, beside the frame scrubber, pauses for a correction at
+   the frame the scrubber is on (`POST /api/live_trajectory/request_correction`
+   with `{"step": <frame>}`, or `{"step": null}` for wherever the rollout stands)
+   and opens Language correction, whether or not the simulated user is anywhere
+   near a bound; the pause is reported with reason `operator`. Pressed while
+   frames are still streaming, it stops the stepping at the current frame
+   instead of racing it (the scrubber follows the newest frame during a live
+   rollout, so scrub *after* stopping, not during). Scrubbing back to an
+   **already executed frame** first makes the correction retroactive: the frames after it are discarded, the
+   planner is rebuilt at that pose, and the correction stage conditions on the
+   history up to it — so *Apply feedback + continue trajectory* re-rolls the
+   rest of the trajectory from that frame under the new cost instead of from the
+   end. `executed_trajectory.npy` is rewritten to the truncated path. Committed
+   rounds are **not** rewound: rewinding undoes execution, not what the session
+   has learned. *Ignore comfort violation + continue* also resumes from an
+   operator pause without adding feedback, so a rewind can be abandoned. The accumulated
    executed trajectory is saved under
    `demo_runner_artifacts/<timestamp>_session_<persona>/<timestamp>_trajectory/`.
    The live planner (its MPC stepping state) is held in server memory and is lost

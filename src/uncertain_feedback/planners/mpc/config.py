@@ -318,6 +318,9 @@ def _parse_feedback(data: dict[str, Any]) -> FeedbackConfig:
             else _positive_int(data["frames"], "feedback.frames")
         ),
         text_time=int(data.get("text_time", 0)),
+        anchor_correction=_bool(
+            data.get("anchor_correction", True), "feedback.anchor_correction"
+        ),
         uq=(_parse_uq(_mapping(data["uq"], "feedback.uq")) if "uq" in data else None),
     )
 

@@ -32,13 +32,22 @@ class CorrectionTrigger:
     discomfort_armed: bool = True
     operator_requested: Callable[[], bool] | None = None
 
+    def note_operator_pause(self) -> None:
+        """Record an operator pause taken outside :meth:`evaluate`.
+
+        The demo runner pauses out of band (the browser asks for a correction at
+        a frame it has already executed), so the flags a live ``operator``
+        trigger would have set have to be set the same way here.
+        """
+        self.first_correction_triggered = True
+        self.discomfort_armed = False
+
     def evaluate(self, step: int, violation: float | None) -> TriggerReason | None:
         """Decide whether this step should pause for feedback, and why."""
         if self.operator_requested is not None and self.operator_requested():
             # A live person asking outranks both the scripted step and the
             # discomfort edge, and needs no re-arming: they can ask again at will.
-            self.first_correction_triggered = True
-            self.discomfort_armed = False
+            self.note_operator_pause()
             return "operator"
         uncomfortable = (
             self.automatic and violation is not None and violation > self.threshold

@@ -1,0 +1,4 @@
+# Ablation: costs are authored from the utterance + nominal plan only; the
+# selected correction motion never reaches the cost generator.
+_target_: evaluation.approaches.cost_gen.immediate.ImmediateCostGen
+source: nominal

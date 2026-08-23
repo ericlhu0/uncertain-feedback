@@ -8,10 +8,15 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.planners.mpc.kinematics import (
+    ELBOW_CHAIN_IDX,
     Q_CLAVICLE,
     Q_DIM,
+    Q_ELBOW,
     Q_SHOULDER,
+    SHOULDER_CHAIN_IDX,
+    WRIST_CHAIN_IDX,
     SmplLeftArmFK,
+    _shortest_arc_rotvecs,
     q_to_arm_aa,
 )
 
@@ -22,10 +27,6 @@ FEATURE_NAMES = (
     "shoulder_elevation",
     "shoulder_internal_external_rotation",
 )
-
-_SHOULDER_POS_IDX = 2
-_ELBOW_POS_IDX = 3
-_WRIST_POS_IDX = 4
 
 
 class ArmFeatureContext(Protocol):
@@ -88,8 +89,8 @@ def arm_feature_series(
     if flat.shape[0] == 0:
         return {name: np.empty(leading, dtype=np.float64) for name in FEATURE_NAMES}
 
-    upper_axis = _tpose_bone_axis(context.fk, _SHOULDER_POS_IDX, _ELBOW_POS_IDX)
-    forearm_axis = _tpose_bone_axis(context.fk, _ELBOW_POS_IDX, _WRIST_POS_IDX)
+    upper_axis = _tpose_bone_axis(context.fk, SHOULDER_CHAIN_IDX, ELBOW_CHAIN_IDX)
+    forearm_axis = _tpose_bone_axis(context.fk, ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX)
     arm_aa = q_to_arm_aa(flat, context.fk.elbow_hinge_axis)
 
     forearm = Rotation.from_rotvec(arm_aa[:, 2]).apply(forearm_axis)
@@ -116,6 +117,51 @@ def arm_feature_series(
     return {name: value.reshape(leading) for name, value in zip(FEATURE_NAMES, values)}
 
 
+def arm_q_from_features(
+    features: np.ndarray,
+    clavicle: np.ndarray,
+    context: ArmFeatureContext,
+) -> np.ndarray:
+    """Invert :func:`arm_feature_series`: ``(T, 5)`` features -> ``(T, 7)`` states.
+
+    ``features`` holds radians in :data:`FEATURE_NAMES` order; ``clavicle`` is the
+    ``(3,)`` clavicle rotation held fixed on every frame (the planner never
+    actuates it). Flexion, abduction and elevation over-determine the two-DOF
+    upper-arm direction, so an inconsistent triple — what an LLM writing
+    anatomical trajectories produces — is resolved by taking the lateral and depth
+    components from abduction/flexion, only the sign of the vertical component
+    from elevation, and normalizing.
+    """
+    features = np.asarray(features, dtype=np.float64)
+    if features.ndim != 2 or features.shape[1] != len(FEATURE_NAMES):
+        raise ValueError(
+            f"features must have shape (T, {len(FEATURE_NAMES)}), got {features.shape}"
+        )
+    clavicle = np.asarray(clavicle, dtype=np.float64)
+    upper_axis = _tpose_bone_axis(context.fk, SHOULDER_CHAIN_IDX, ELBOW_CHAIN_IDX)
+
+    elbow_flexion = features[:, 0]
+    flexion, abduction, elevation, rotation = (features[:, i] for i in range(1, 5))
+    lateral, depth = np.sin(abduction), np.sin(flexion)
+    vertical = -np.sign(np.cos(elevation)) * np.sqrt(
+        np.maximum(0.0, 1.0 - lateral**2 - depth**2)
+    )
+    upper_arm = np.stack([lateral, vertical, depth], axis=-1)
+    upper_arm /= np.maximum(np.linalg.norm(upper_arm, axis=-1, keepdims=True), 1e-12)
+
+    parent = Rotation.from_rotvec(context.fk.collar_aa) * Rotation.from_rotvec(clavicle)
+    swing = Rotation.from_rotvec(
+        _shortest_arc_rotvecs(upper_axis, parent.inv().apply(upper_arm))
+    )
+    twist = Rotation.from_rotvec(rotation[:, np.newaxis] * upper_axis)
+
+    q = np.empty((features.shape[0], Q_DIM), dtype=np.float64)
+    q[:, Q_CLAVICLE] = clavicle
+    q[:, Q_SHOULDER] = (swing * twist).as_rotvec()
+    q[:, Q_ELBOW] = _elbow_scalar_from_flexion(elbow_flexion, context.fk)
+    return q
+
+
 def elbow_heights(
     trajectory: np.ndarray,
     context: ArmFeatureContext,
@@ -125,7 +171,7 @@ def elbow_heights(
     leading = arm_aa.shape[:-2]
     flat = arm_aa.reshape((-1, 3, 3))
     positions = context.fk.fk_batch(flat, context.spine3_pos, context.spine3_aa)
-    return (positions[:, _ELBOW_POS_IDX, 1] - context.spine3_pos[1]).reshape(leading)
+    return (positions[:, ELBOW_CHAIN_IDX, 1] - context.spine3_pos[1]).reshape(leading)
 
 
 def shoulder_abduction_angles(
@@ -166,6 +212,27 @@ def _tpose_bone_axis(fk: SmplLeftArmFK, start_idx: int, end_idx: int) -> np.ndar
     if norm <= 1e-12:
         return np.array([1.0, 0.0, 0.0], dtype=np.float64)
     return axis / norm
+
+
+def _elbow_scalar_from_flexion(flexion: np.ndarray, fk: SmplLeftArmFK) -> np.ndarray:
+    """Invert the elbow-flexion feature on its monotone branch.
+
+    The hinge axis is the T-pose flexion-plane normal, so rotating the forearm
+    about it keeps the forearm in that plane: the feature is exactly the T-pose
+    bend plus the scalar elbow angle, folded through ``arccos``. Only the fold's
+    orientation depends on the skeleton, so it is probed rather than restated
+    here. Flexion under the T-pose bend inverts to a hyperextended elbow.
+    """
+    upper_axis = _tpose_bone_axis(fk, SHOULDER_CHAIN_IDX, ELBOW_CHAIN_IDX)
+    forearm_axis = _tpose_bone_axis(fk, ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX)
+
+    def measure(angle: float) -> float:
+        forearm = Rotation.from_rotvec(angle * fk.elbow_hinge_axis).apply(forearm_axis)
+        return float(np.arccos(np.clip(forearm @ upper_axis, -1.0, 1.0)))
+
+    rest = measure(0.0)
+    sign = 1.0 if measure(0.1) > rest else -1.0
+    return sign * (np.asarray(flexion, dtype=np.float64) - rest)
 
 
 def _twist_angles_about_axis(rotvecs: np.ndarray, axis: np.ndarray) -> np.ndarray:

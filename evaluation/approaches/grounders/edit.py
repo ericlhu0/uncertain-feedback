@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from evaluation.approaches.base import Approach, ClusterSelector
+from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.structs import GroundingResult
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
@@ -13,7 +13,7 @@ _SHOULDER_ROW = 0
 _ELBOW_ROW = 1
 
 
-class ParameterizedEditApproach(Approach):
+class ParameterizedEditGrounder(Grounder):
     """Candidates are fixed parametric edits of the nominal continuation.
 
     Stands in for prior systems that modify trajectories through predefined
@@ -23,15 +23,8 @@ class ParameterizedEditApproach(Approach):
     by construction.
     """
 
-    requires_generator = False
-
-    def __init__(
-        self,
-        name: str = "edit_baseline",
-        learning: str = "immediate",
-        edit_delta: float = 0.4,
-    ) -> None:
-        super().__init__(name=name, learning=learning)
+    def __init__(self, edit_delta: float = 0.4) -> None:
+        super().__init__()
         self._edit_delta = edit_delta
 
     def ground(
@@ -40,8 +33,9 @@ class ParameterizedEditApproach(Approach):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
+        goal: np.ndarray,
     ) -> GroundingResult:
-        del text, q_feedback
+        del text, q_feedback, goal
         nominal_aa = q_to_arm_aa(nominal_plan, self.rig.fk.elbow_hinge_axis)
         ramp = np.linspace(0.0, 1.0, nominal_aa.shape[0])
         candidates: dict[int, np.ndarray] = {0: nominal_aa}

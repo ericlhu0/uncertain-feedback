@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-08-21
+**Last updated:** 2026-08-22
 **Branch:** mdm-steering
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -27,16 +27,21 @@ uncertain-feedback/
 ├── evaluation/                       # Method-level evaluation (outside src/, installed as the `evaluation` package): benchmarks × approaches × metrics on the stage façades
 │   ├── run_single_experiment.py      # Hydra entry point: one (approach, benchmark, seed) run → results.csv (per round) + episodes.csv
 │   ├── analyze_results.py            # Aggregate runs/multiruns → per-approach tables + per-event plots
+│   ├── run_comparison.py             # Entry point: one scenario, several approaches, utterance supplied as --feedback text → comparison.mp4 + comparison.csv
+│   ├── comparison.py                 # run_arms / comparison_table / render_comparison: shared-rig multi-approach episodes + the tiled side-by-side video
 │   ├── generate_correction_clips.py  # Entry point: one base trajectory → N oracle-corrected, hand-labelable clips (stage (a) of the correction-clip finetune pipeline)
 │   ├── label_correction_clips.py     # Flask captioning UI for a clip set (default port 6768): forks a `session_<timestamp>/` per launch via `new_session_dir` (`--resume` labels into --clips_dir itself); per card, three canvas projections (Front XY / Side ZY / Top XZ) animating the whole naive→correction motion via `motion_frames`, the sampled bound, a **draggable clip window** (POST /clip re-cuts via `ClipSource.cut`, no replan), and a caption box saved into the session's manifest.json on blur. Reads manifest/naive.npy/geometry.npz/clip.npy/continuation.npy only — no video, no MDM env, no GPU
 │   ├── correction_clips.py           # CorrectionClipConfig / sample_violating_bound / assemble_clip / ClipSource (one run at a time, seeded on (seed,index)) / clip_source_from_dir (rebuild the rollout context from disk, no MDM — what the labeling UI generates with) / new_session_dir (fork a per-launch labeling session off a clip set: base artifacts copied in, empty manifest, timestamp as seed) / generate_correction_clips (refuses to overwrite an existing clip set): samples hidden bounds anchored on the naive rollout (violation guaranteed), replans from the induced trigger under the oracle cost, then cuts a clip out of the run's one continuous motion. `motion_frames` builds that motion (naive approach + whole oracle rollout), `assemble_clip(motion, anchor, window, n_prefix)` cuts at any anchor (`clip_bounds` clamps to MIN_WINDOW/MAX_WINDOW), `ClipSource.cut` rewrites clip.npy + features + derived manifest fields — the shared path for the sampled default and a UI drag — and `arm_positions` gives the browser previewer its arm-chain positions, so no video is ever written
 │   ├── episode.py                    # Interaction loop: oracle path → trigger → attribute → verbalize → ground → choose → learn → continue; learned costs persist across a task's goal sequence
-│   ├── rig.py                        # EvalRig: MpcRunConfig + fk/context/q0 (+ optional MDM load); `arm:` overrides the pose file's arm even with the generator loaded (same precedence as planners/run.py), so baselines (`use_generator_rig=true`) and system arms can share one rig and one nominal rollout
-│   ├── verbalize.py                  # Bind a task's verbalizer (abstraction level) to episode state
+│   ├── rig.py                        # EvalRig: MpcRunConfig + fk/context/q0 (+ optional MDM load); `arm:` overrides the pose file's arm even with the generator loaded (same precedence as planners/run.py), so baselines (`+approach.grounder.use_generator_rig=true`) and system arms can share one rig and one nominal rollout
+│   ├── verbalize.py                  # Bind a task's verbalizer (abstraction level) to episode state; `scripted` replays InteractionTask.feedback_text verbatim
 │   ├── metrics.py / structs.py       # Per-round records; InteractionTask/GroundingResult/RoundContext/LearnOutcome
 │   ├── benchmarks/base.py            # InteractionBenchmark: personas × verbalizers × goal sequences
-│   ├── approaches/                   # SystemApproach (learning/steering knobs) + baselines: ParameterizedEditApproach (single-joint axis-offset edits, weak reference), BridgePotentialFieldApproach (BRIDGE-style landmark attract/repel potential-field edits, oracle-selected upper bound), BridgeInterpreterApproach (language-faithful: LLM maps utterance -> landmark/polarity/strength), KeypointApproach (LLM emits one 3D workspace keypoint for elbow/wrist); shared learn() = generate_cost_for_cluster + CombineCostGenerator
-│   └── conf/                         # Hydra configs (approach/, benchmark/) + mpc_smoke.yaml (CPU-only planner config)
+│   ├── approaches/                   # Approach (base.py) = named composition of grounder × cost_gen × steering; each axis is a package with one file per method + a matching hydra config group. Validated at construction: cg steering requires the mdm grounder; the nominal grounder requires cost_gen source "nominal" (it selects no correction). Arm-chain indices come from kinematics.py (SHOULDER/ELBOW/WRIST_CHAIN_IDX); the prompt-facing LANDMARKS table lives in grounders/base.py
+│   │   ├── grounders/                # Grounder ABC (base.py: reset/ground, one selector call) + MdmGrounder (mdm.py: MDM sampling + clustering; carries the approach's steering module, planner-yaml steering mode ignored in evaluation), NominalGrounder (nominal.py: nominal plan as sole candidate — language goes straight to cost gen), LlmTrajectoryGrounder (llm_trajectory.py: one interpretation call -> 4 behaviourally distinct readings, LLM writes the motion itself, dense or sparse-waypoint, positions or anatomical-angle space, converted with no repair), ParameterizedEditGrounder (edit.py: single-joint axis-offset edits, weak reference), BridgePotentialFieldGrounder/BridgeInterpreterGrounder (bridge.py: landmark attract/repel potential fields, oracle-selected vs. LLM-interpreted), KeypointGrounder (keypoint.py: LLM emits one 3D workspace keypoint for elbow/wrist). (The former agent_cost approach — interpretations authored as throwaway MPC costs and rolled out — was removed; a multi-candidate revival would be a CostGen n_interpretations knob)
+│   │   ├── cost_gen/                 # CostGen ABC (base.py: shared per-round generation via generate_cost_for_cluster; source ∈ {chosen, nominal}, nominal = language-only prompt) + NoCostGen (none.py), ImmediateCostGen (immediate.py: stack every per-round cost), ConsolidateCostGen (consolidate.py: per-round costs replaced by one CombineCostGenerator cost, formerly "lifelong")
+│   │   └── steering/                 # Steering ABC (base.py: mode + spec(); consumed only by the mdm grounder) + NoSteering (none.py), ClassifierGuidanceSteering (classifier_guidance.py: build_steering_spec from persona hidden bounds; learned-cost steering = future subclass)
+│   └── conf/                         # Hydra configs: approach/ holds named compositions (defaults lists over the config groups approach/grounder/, approach/cost_gen/, approach/steering/; cost_only = none grounder + language-only cost gen), benchmark/ as before + mpc_smoke.yaml (CPU-only planner config); mpc_demo_base1.yaml is the shared demo/comparison scenario, mpc_demo_low1.yaml the same body/goal with the arm starting low (correction-clip default — longer reach, wider trigger window, evener feature coverage)
 ├── src/uncertain_feedback/
 │   ├── consts.py                     # Project-wide paths (MDM_ROOT, weights)
 │   ├── planners/
@@ -46,8 +51,8 @@ uncertain-feedback/
 │   │   └── mpc/
 │   │       ├── __init__.py           # Public exports
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
-│   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants; `anchor_arm_trajectory` re-anchors a generated correction onto the current q (drops the pinned frame 0, shifts the rest in q space) to kill the frame-0 seam
-│   │       ├── arm_features.py        # Canonical q conversion + shared anatomical arm features
+│   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants (SMPL_JOINT_NAMES_22 canonical joint-name table, SHOULDER/ELBOW/WRIST_CHAIN_IDX positions within the left-arm chain); `anchor_arm_trajectory` re-anchors a generated correction onto the current q (drops the pinned frame 0, shifts the rest in q space) to kill the frame-0 seam
+│   │       ├── arm_features.py        # Canonical q conversion + shared anatomical arm features (+ `arm_q_from_features` inverse)
 │   │       ├── costs/                # Planner cost package (public surface: mpc.costs)
 │   │       │   ├── __init__.py       # Re-exports the planner-side cost API
 │   │       │   ├── base.py           # Cost terms + registry + preference learning
@@ -1012,6 +1017,13 @@ The hidden bounds are the evaluation ground truth for method-level evaluation
 > plane-independent `shoulder_elevation`, remain available. Generated Python
 > source still receives decoded `(3,3)` states for compatibility, but named
 > feature helpers and all stored context/corpus trajectories are q-native.
+> `arm_q_from_features(features, clavicle, context)` is the inverse — `(T, 5)`
+> feature rows back to `(T, 7)` states, with the clavicle held fixed — so an LLM
+> (or anything else) can write a trajectory directly in anatomical space. The
+> three shoulder direction features over-determine a two-DOF direction, so an
+> inconsistent triple resolves to the nearest unit direction; elbow flexion is
+> folded through `arccos`, so it inverts only on the flexed branch
+> (`test_arm_q_from_features_inverts_arm_feature_series` pins both).
 
 > **Anatomical left-arm reparameterization (2026-07-14):**
 > The three left-arm reconstruction sites now route the elbow/wrist slots through

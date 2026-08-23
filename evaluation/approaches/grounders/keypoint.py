@@ -5,24 +5,30 @@ part (elbow or wrist) should move toward — the "language to workspace keypoint
 grounding style. The correction ramps the chosen joint from the nominal plan
 toward the keypoint and projects back to arm axis-angles by position IK. The
 simulated user only tunes playback magnitude of the one proposed motion; it
-never selects among alternatives. No persistent learning by default.
+never selects among alternatives.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from evaluation.approaches.base import Approach, ClusterSelector
-from evaluation.approaches.bridge_baseline import (
-    _ELBOW_CHAIN,
-    _LANDMARKS,
-    _WRIST_CHAIN,
+from evaluation.approaches.grounders.base import (
+    LANDMARKS,
+    ClusterSelector,
+    Grounder,
 )
+from evaluation.rig import EvalRig
 from evaluation.structs import GroundingResult, InteractionTask
 from uncertain_feedback.planners.mpc.costs import extract_json_object
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.mpc.kinematics import (
+    ELBOW_CHAIN_IDX,
+    WRIST_CHAIN_IDX,
+    q_to_arm_aa,
+)
+from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
 _KEYPOINT_SYSTEM_PROMPT = (
@@ -37,29 +43,32 @@ _KEYPOINT_SYSTEM_PROMPT = (
     '{"joint": "elbow"|"wrist", "keypoint": [x, y, z] | null, "reply": str}.'
 )
 
-_JOINT_CHAINS = {"elbow": _ELBOW_CHAIN, "wrist": _WRIST_CHAIN}
+_JOINT_CHAINS = {"elbow": ELBOW_CHAIN_IDX, "wrist": WRIST_CHAIN_IDX}
 
 
-class KeypointApproach(Approach):
+class KeypointGrounder(Grounder):
     """Candidates are single LLM-proposed keypoint edits of the nominal plan."""
-
-    requires_generator = False
 
     def __init__(
         self,
-        name: str = "llm_keypoint",
-        learning: str = "none",
         displacement_cap: float = 0.4,
         use_generator_rig: bool = False,
     ) -> None:
-        super().__init__(name=name, learning=learning)
+        super().__init__()
         self._displacement_cap = displacement_cap
         # Load the motion generator anyway (unused for grounding) so the rig
         # geometry (decoded pose spine3/body) matches the system arms exactly.
         if use_generator_rig:
             self.requires_generator = True
 
-    def _reset_grounding(self, task: InteractionTask) -> None:
+    def reset(
+        self,
+        rig: EvalRig,
+        user: SimulatedUser,
+        task: InteractionTask,
+        episode_dir: Path,
+    ) -> None:
+        super().reset(rig, user, task, episode_dir)
         self._history: list[str] = []
         self._llm: Any = None
 
@@ -109,8 +118,9 @@ class KeypointApproach(Approach):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
+        goal: np.ndarray,
     ) -> GroundingResult:
-        del q_feedback
+        del q_feedback, goal
         rig = self.rig
         nominal_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
         arm_pos = rig.fk.fk_batch(nominal_aa, rig.spine3_pos, rig.spine3_aa)
@@ -120,14 +130,14 @@ class KeypointApproach(Approach):
             return "[" + ", ".join(f"{v:.2f}" for v in point) + "]"
 
         scene_lines = [
-            f"arm now: elbow {fmt(arm_pos[0, _ELBOW_CHAIN])}, "
-            f"wrist {fmt(arm_pos[0, _WRIST_CHAIN])}",
-            f"planned end: elbow {fmt(arm_pos[-1, _ELBOW_CHAIN])}, "
-            f"wrist {fmt(arm_pos[-1, _WRIST_CHAIN])}",
+            f"arm now: elbow {fmt(arm_pos[0, ELBOW_CHAIN_IDX])}, "
+            f"wrist {fmt(arm_pos[0, WRIST_CHAIN_IDX])}",
+            f"planned end: elbow {fmt(arm_pos[-1, ELBOW_CHAIN_IDX])}, "
+            f"wrist {fmt(arm_pos[-1, WRIST_CHAIN_IDX])}",
         ]
         scene_lines += [
             f"landmark {name}: {fmt(np.asarray(body[i], dtype=np.float64))}"
-            for name, i in _LANDMARKS
+            for name, i in LANDMARKS
         ]
         edit = self._interpret(text, "\n".join(scene_lines))
 

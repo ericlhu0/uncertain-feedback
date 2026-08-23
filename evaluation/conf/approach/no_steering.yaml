@@ -1,4 +1,7 @@
-_target_: evaluation.approaches.system.SystemApproach
+defaults:
+  - grounder: mdm
+  - cost_gen: consolidate
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
 name: no_steering
-learning: lifelong
-steering_mode: "off"

@@ -30,19 +30,16 @@ from uncertain_feedback.planners.mpc.costs.base import (
     MpcCostContext,
     TrajectoryCost,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.kinematics import (
+    LEFT_ARM_CHAIN_NAMES,
+    SmplLeftArmFK,
+)
 
-# Canonical names first (used for summaries); short aliases follow.
-_JOINT_NAMES = {
-    "spine3": 0,
-    "left_collar": 1,
-    "left_shoulder": 2,
-    "left_elbow": 3,
-    "left_wrist": 4,
-    "collar": 1,
-    "shoulder": 2,
-    "elbow": 3,
-    "wrist": 4,
+# The FK chain names plus their "left_"-stripped short aliases.
+_JOINT_NAMES = {name: i for i, name in enumerate(LEFT_ARM_CHAIN_NAMES)} | {
+    name.removeprefix("left_"): i
+    for i, name in enumerate(LEFT_ARM_CHAIN_NAMES)
+    if name.startswith("left_")
 }
 
 _NAMED_FEATURE_METHODS = {

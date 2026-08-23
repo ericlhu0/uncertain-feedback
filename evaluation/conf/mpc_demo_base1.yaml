@@ -1,0 +1,61 @@
+# Demo-runner scenario as an evaluation planner config: the `base1` initial pose
+# and the `hits limit 1` goal from demo_runner_trajectory_configs.json.
+#
+# Unlike mpc_edit_baseline.yaml this keeps the MDM `pose:` default, so the
+# motion-generator arms and the baselines can share one rig: the pose supplies
+# the torso/body geometry and `arm:` overrides its arm (build_rig honours the
+# same precedence as planners/run.py). Baselines must therefore run with
+# `+approach.grounder.use_generator_rig=true` for the geometry to match the system.
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.01
+
+# demo_runner initial pose "base1"
+arm:
+  - [-0.2578684731175734, 0.11215073986226905, -0.44187915175365783]
+  - [0.6868865380518193, -0.18, -0.11006289820501858]
+  - [0.035651850950680734, -1.23, 0.7515284911778386]
+
+feedback:
+  max_playback_delta: 0.05
+  trajectory_fraction: 1
+  frames: 50
+  text_time: 10
+  uq:
+    diffusion_samples: 500
+    # 4 clusters so the system offers the same candidate count as the
+    # pure-agent baselines' 4 interpretations (best-of-4 on both sides).
+    n_clusters: 4
+    auto_cluster: 1
+    scale: 1.0
+    steering:
+      mode: "cg"
+      resample_steps: [15, 25, 35, 45]
+      temperature: 0.5
+      guide_from: 10
+      guidance_weight: 1.0e5
+
+corrections:
+  trigger_threshold: 0.02
+
+# demo_runner goal "hits limit 1"
+cartesian:
+  goals:
+    - [0.25, 0.3, 0.18]
+  threshold: 0.05
+
+preference_learning: false
+preference_alpha: 0
+
+simulated_user:
+  time_of_day: 9.0
+
+llm_cost:
+  enabled: true
+  model: gpt-5.6-luna
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true
+  max_turns: 3
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"

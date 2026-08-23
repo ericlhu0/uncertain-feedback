@@ -1,0 +1,11 @@
+# Grounder-free arm: language goes straight to LLM cost generation and the
+# correction is realized purely by replanning with the learned cost.
+defaults:
+  - grounder: none
+  - cost_gen: consolidate
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: cost_only
+cost_gen:
+  source: nominal

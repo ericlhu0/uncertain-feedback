@@ -10,13 +10,20 @@ import numpy as np
 
 @dataclass(frozen=True)
 class InteractionTask:
-    """One simulated interaction: a persona pursuing a sequence of goals."""
+    """One simulated interaction: a persona pursuing a sequence of goals.
+
+    ``feedback_text`` is the literal utterance the ``scripted`` verbalizer
+    replays every round, for comparing grounding methods on one chosen sentence
+    instead of a synthesized one; the persona's hidden intent still drives
+    candidate selection.
+    """
 
     persona: str
     verbalizer: str
     goals: tuple[tuple[float, float, float], ...]
     max_rounds: int
     seed: int
+    feedback_text: str | None = None
 
 
 @dataclass(frozen=True)

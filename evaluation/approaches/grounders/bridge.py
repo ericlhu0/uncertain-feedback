@@ -13,31 +13,29 @@ posture trajectories, so only the position scope is represented.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from evaluation.approaches.base import Approach, ClusterSelector
+from evaluation.approaches.grounders.base import (
+    LANDMARKS,
+    ClusterSelector,
+    Grounder,
+)
+from evaluation.rig import EvalRig
 from evaluation.structs import GroundingResult, InteractionTask
 from uncertain_feedback.planners.mpc.costs import extract_json_object
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.mpc.kinematics import (
+    ELBOW_CHAIN_IDX,
+    WRIST_CHAIN_IDX,
+    q_to_arm_aa,
+)
+from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
-_ELBOW_CHAIN = 3
-_WRIST_CHAIN = 4
 
-# SMPL-22 indices for landmarks a seated-care correction plausibly references.
-_LANDMARKS = (
-    ("pelvis", 0),
-    ("left_hip", 1),
-    ("chest", 9),
-    ("neck", 12),
-    ("head", 15),
-    ("right_shoulder", 17),
-)
-
-
-class BridgePotentialFieldApproach(Approach):
+class BridgePotentialFieldGrounder(Grounder):
     """Candidates are potential-field edits of the nominal continuation.
 
     One candidate per (landmark, polarity): the elbow and wrist waypoints are
@@ -46,18 +44,14 @@ class BridgePotentialFieldApproach(Approach):
     within ``rho0`` — then projected back to axis-angles by position IK.
     """
 
-    requires_generator = False
-
     def __init__(
         self,
-        name: str = "bridge_baseline",
-        learning: str = "immediate",
         attract_gain: float = 0.5,
         repel_gain: float = 0.05,
         rho0: float = 0.8,
         displacement_cap: float = 0.25,
     ) -> None:
-        super().__init__(name=name, learning=learning)
+        super().__init__()
         self._attract_gain = attract_gain
         self._repel_gain = repel_gain
         self._rho0 = rho0
@@ -85,8 +79,9 @@ class BridgePotentialFieldApproach(Approach):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
+        goal: np.ndarray,
     ) -> GroundingResult:
-        del text, q_feedback
+        del text, q_feedback, goal
         rig = self.rig
         nominal_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
         arm_pos = rig.fk.fk_batch(nominal_aa, rig.spine3_pos, rig.spine3_aa)
@@ -94,11 +89,11 @@ class BridgePotentialFieldApproach(Approach):
         ramp = np.linspace(0.0, 1.0, nominal_aa.shape[0])[:, None]
         candidates: dict[int, np.ndarray] = {0: nominal_aa}
         label = 1
-        for _, joint_index in _LANDMARKS:
+        for _, joint_index in LANDMARKS:
             landmark = np.asarray(body[joint_index], dtype=np.float64)
             for field in (self._attract, self._repel):
                 positions = arm_pos.copy()
-                for chain_index in (_ELBOW_CHAIN, _WRIST_CHAIN):
+                for chain_index in (ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX):
                     positions[:, chain_index] += ramp * field(
                         arm_pos[:, chain_index], landmark
                     )
@@ -132,10 +127,10 @@ _INTERPRETER_SYSTEM_PROMPT = (
 _STRENGTH_FACTORS = {"slight": 0.5, "default": 1.0, "strong": 1.5}
 
 
-class BridgeInterpreterApproach(BridgePotentialFieldApproach):
+class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
     """Language-faithful BRIDGE baseline: an LLM interprets the utterance.
 
-    Unlike :class:`BridgePotentialFieldApproach` (oracle selection over the
+    Unlike :class:`BridgePotentialFieldGrounder` (oracle selection over the
     full edit family), the utterance itself must be mapped to (landmark,
     polarity, strength) modifications, as in BRIDGE's LLM interpreter with
     trajectory + conversation-history context. The simulated user only tunes
@@ -143,7 +138,14 @@ class BridgeInterpreterApproach(BridgePotentialFieldApproach):
     BRIDGE's conversational refinement); it never sees the alternatives.
     """
 
-    def _reset_grounding(self, task: InteractionTask) -> None:
+    def reset(
+        self,
+        rig: EvalRig,
+        user: SimulatedUser,
+        task: InteractionTask,
+        episode_dir: Path,
+    ) -> None:
+        super().reset(rig, user, task, episode_dir)
         self._history: list[str] = []
         self._llm: Any = None
 
@@ -175,7 +177,7 @@ class BridgeInterpreterApproach(BridgePotentialFieldApproach):
                 return [
                     mod
                     for mod in data["modifications"]
-                    if mod.get("landmark") in dict(_LANDMARKS)
+                    if mod.get("landmark") in dict(LANDMARKS)
                     and mod.get("mode") in ("attract", "repel")
                 ]
         self._history.append(f"user: {text}")
@@ -187,15 +189,18 @@ class BridgeInterpreterApproach(BridgePotentialFieldApproach):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
+        goal: np.ndarray,
     ) -> GroundingResult:
-        del q_feedback
+        del q_feedback, goal
         rig = self.rig
         nominal_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
         arm_pos = rig.fk.fk_batch(nominal_aa, rig.spine3_pos, rig.spine3_aa)
         body = rig.body_pos if rig.body_pos is not None else rig.fk.tpose_all_joints
-        landmarks = {name: np.asarray(body[i], dtype=np.float64) for name, i in _LANDMARKS}
+        landmarks = {
+            name: np.asarray(body[i], dtype=np.float64) for name, i in LANDMARKS
+        }
 
-        wrist = arm_pos[:, _WRIST_CHAIN]
+        wrist = arm_pos[:, WRIST_CHAIN_IDX]
         stride = max(1, len(wrist) // 8)
         context_lines = []
         for frame in range(0, len(wrist), stride):
@@ -214,7 +219,7 @@ class BridgeInterpreterApproach(BridgePotentialFieldApproach):
                 landmark = landmarks[mod["landmark"]]
                 field = self._attract if mod["mode"] == "attract" else self._repel
                 factor = _STRENGTH_FACTORS.get(mod.get("strength", "default"), 1.0)
-                for chain_index in (_ELBOW_CHAIN, _WRIST_CHAIN):
+                for chain_index in (ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX):
                     positions[:, chain_index] += ramp * self._cap(
                         factor * field(arm_pos[:, chain_index], landmark)
                     )

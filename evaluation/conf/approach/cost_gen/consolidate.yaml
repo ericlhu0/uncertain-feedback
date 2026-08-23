@@ -1,0 +1,3 @@
+# Per-round costs are replaced by one combined cost (formerly "lifelong").
+_target_: evaluation.approaches.cost_gen.consolidate.ConsolidateCostGen
+source: chosen

@@ -1,7 +1,7 @@
-_target_: evaluation.approaches.bridge_baseline.BridgePotentialFieldApproach
+defaults:
+  - grounder: bridge
+  - cost_gen: immediate
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
 name: bridge_baseline
-learning: immediate
-attract_gain: 0.5
-repel_gain: 0.05
-rho0: 0.8
-displacement_cap: 0.25

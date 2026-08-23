@@ -181,7 +181,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 
             ground_t0 = time.perf_counter()
             grounding = approach.ground(
-                utterance.text, q_feedback, nominal_plan, _select
+                utterance.text, q_feedback, nominal_plan, _select, goal_arr
             )
             ground_seconds = time.perf_counter() - ground_t0
             choice = choices[-1]

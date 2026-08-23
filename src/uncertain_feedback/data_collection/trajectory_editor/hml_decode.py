@@ -21,32 +21,6 @@ from uncertain_feedback.planners.mpc.kinematics import (
 EDITABLE_JOINTS: list[int] = [3, 6, 9, 13, 14, 16, 17, 18, 19, 20, 21]
 FIXED_JOINTS: list[int] = [0, 1, 2, 4, 5, 7, 8, 10, 11, 12, 15]
 
-JOINT_NAMES: list[str] = [
-    "pelvis",
-    "l_hip",
-    "r_hip",
-    "spine1",
-    "l_knee",
-    "r_knee",
-    "spine2",
-    "l_ankle",
-    "r_ankle",
-    "spine3",
-    "l_foot",
-    "r_foot",
-    "neck",
-    "l_collar",
-    "r_collar",
-    "head",
-    "l_shoulder",
-    "r_shoulder",
-    "l_elbow",
-    "r_elbow",
-    "l_wrist",
-    "r_wrist",
-]
-
-
 def demo_pt_to_positions(pt_path: Path, hml_stats_dir: Path) -> np.ndarray:
     """Return (22, 3) float32 SMPL world positions from a normalized demo.pt.
 

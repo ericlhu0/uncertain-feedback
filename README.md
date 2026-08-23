@@ -577,7 +577,7 @@ presence of top-level YAML sections, one per module slot:
 | Section | Module | Absent means |
 |---|---|---|
 | `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
-| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`) | no correction phase |
+| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`). `clusterer` defaults to `agglo_end_pose` and is resolved by `run.py`, the demo runner, and the evaluation approaches alike — runs from before that wiring used `XyzPositionClusterer` (KMeans) regardless of the key | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
 
@@ -1701,7 +1701,7 @@ CPU-only smoke run (no MDM, no LLM):
 
 ```
 uv run python evaluation/run_single_experiment.py approach=edit_baseline \
-    approach.learning=none benchmark=smoke mpc_config=evaluation/conf/mpc_smoke.yaml
+    approach/cost_gen=none benchmark=smoke mpc_config=evaluation/conf/mpc_smoke.yaml
 ```
 
 Single experiment / sweep / aggregation:
@@ -1713,9 +1713,20 @@ uv run python evaluation/run_single_experiment.py -m seed=0,1,2 \
 uv run python evaluation/analyze_results.py multirun/ --out evaluation_analysis/
 ```
 
-Approaches: `full`, `no_steering`, `immediate_only`, `no_learning` (SystemApproach
-ablations over `learning` and `steering_mode`) and `edit_baseline` (predefined
-parameterized edits, no text-to-motion model). Benchmarks: `smoke`,
+An approach composes three modules via hydra config groups — a grounder
+(`approach/grounder=`: `mdm`, `none`, `edit`, `bridge`, `bridge_llm`,
+`keypoint`, `llm_*`), a cost-gen setting (`approach/cost_gen=`: `none`,
+`immediate`, `consolidate`, `language_only`), and a steering method
+(`approach/steering=`: `none` or `cg`, mdm-only). Named compositions: `full`,
+`no_steering`, `immediate_only`, `no_learning`, `language_only_learning`
+(mdm-grounder ablations), `cost_only` (no grounding — language goes straight
+to cost generation), `edit_baseline` (predefined parameterized edits, no
+text-to-motion model), `bridge_baseline` / `bridge_llm` / `llm_keypoint`
+(potential-field and LLM-interpreted predefined edits), and the pure-agent
+arms `agent_waypoint`, `agent_sparse_waypoints`, `agent_dense_positions`,
+`agent_dense_anatomical` (an LLM writes 4 candidate corrections as
+trajectories, no motion prior; all non-MDM grounders need
+`mpc_config=evaluation/conf/mpc_edit_baseline.yaml`). Benchmarks: `smoke`,
 `personas_core`, `abstraction_sweep` (verbalizer sweep), `lifelong` (per-persona
 goal sequences; pair with `mpc_config=...mdm_llm_transfer.yaml`). Outputs land in
 hydra's `outputs/`/`multirun/` dirs as `results.csv` (per feedback round) and

@@ -1,0 +1,6 @@
+# Pure-agent grounder: a sparse waypoint path, linearly interpolated (not tracked).
+_target_: evaluation.approaches.grounders.llm_trajectory.LlmTrajectoryGrounder
+n_interpretations: 4
+output_space: positions
+n_waypoints: 5
+n_frames: 16

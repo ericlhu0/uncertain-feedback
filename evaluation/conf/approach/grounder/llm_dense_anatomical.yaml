@@ -1,0 +1,6 @@
+# Pure-agent grounder: the LLM writes every frame as the five anatomical angles.
+_target_: evaluation.approaches.grounders.llm_trajectory.LlmTrajectoryGrounder
+n_interpretations: 4
+output_space: anatomical
+n_waypoints: 0
+n_frames: 16

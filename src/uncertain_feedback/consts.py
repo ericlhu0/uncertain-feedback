@@ -4,39 +4,18 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
 MDM_ROOT = PROJECT_ROOT / "motion_generators" / "mdm"
-# MDM_MODEL_WEIGHTS_PATH = (
-#     MDM_ROOT
-#     / "motion-diffusion-model"
-#     / "save"
-#     / "customv2"
-#     / "model000753000.pt"
-# )
-# Previous default, superseded 2026-08-09 (old homegrown encoding, seam 0.277 m):
-# MDM_MODEL_WEIGHTS_PATH = (
-#     MDM_ROOT
-#     / "motion-diffusion-model"
-#     / "save"
-#     / "customv3_fixed"
-#     / "model000750500.pt"
-# )
 
-# Fine-tuned on dataset/custom1_seatedcanon at lr 1e-7 for 9250 steps, so query
-# poses (official process_file encoding) are on-manifold.  Checkpoints are
-# gitignored — this file must exist on every host that runs the pipeline.
-# MDM_MODEL_WEIGHTS_PATH = (
-#     MDM_ROOT
-#     / "motion-diffusion-model"
-#     / "save"
-#     / "custom_seatedcanon_lr1e7_10k"
-#     / "model000759250.pt"
-# )
+# Host-shared storage for artifacts too big for git or home quota (MDM
+# checkpoints live under DATA_DIR / "mdm_save").  Must exist on every host that
+# runs the pipeline.
+DATA_DIR = Path("/share/bhattacharjee/eric_data")
 
 MDM_MODEL_WEIGHTS_PATH = (
-    MDM_ROOT
-    / "motion-diffusion-model"
-    / "save"
-    / "correction_demo1_lr1e5_5k"
-    / "model000752000.pt"
+    # fine tuned on only corrections off one trajectory and "raise my arm up a bit"
+    # DATA_DIR / "mdm_save" / "correction_demo1_lr1e5_5k" / "model000752000.pt" 
+    
+    # fine tuned on 100 auto-generated trajectories and corrections
+    DATA_DIR / "mdm_save" / "correction_auto100_lr1e5_5k" / "model000755051.pt"
 )
 
 # Default whole-body HML263 start pose, used by every MPC config that does not

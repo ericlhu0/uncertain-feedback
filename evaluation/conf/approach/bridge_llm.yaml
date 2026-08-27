@@ -1,8 +1,7 @@
-_target_: evaluation.approaches.bridge_baseline.BridgeInterpreterApproach
+defaults:
+  - grounder: bridge_llm
+  - cost_gen: none
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
 name: bridge_llm
-# Faithful BRIDGE has no persistent preference learning.
-learning: none
-attract_gain: 0.5
-repel_gain: 0.05
-rho0: 0.8
-displacement_cap: 0.25

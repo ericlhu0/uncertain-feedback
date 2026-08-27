@@ -41,7 +41,7 @@ _SRC_ROOT = Path(__file__).resolve().parents[3]
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
+from uncertain_feedback.data_collection.common.hml263 import (
     load_hml_stats,
     positions_to_hml263,
 )

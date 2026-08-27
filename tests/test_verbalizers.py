@@ -98,9 +98,7 @@ def test_motion_directive_offset_up_means_move_down() -> None:
 
 def test_motion_directive_picks_dominant_referent() -> None:
     utterance = verbalize_motion_directive(
-        _intent(
-            {"elbow_flexion": 0.3}, wrist=(0.0, 0.0, 0.06), elbow=(0.16, 0.0, 0.0)
-        )
+        _intent({"elbow_flexion": 0.3}, wrist=(0.0, 0.0, 0.06), elbow=(0.16, 0.0, 0.0))
     )
     assert utterance is not None
     assert utterance.text == "move my left elbow closer to my body"

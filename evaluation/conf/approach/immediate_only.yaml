@@ -1,4 +1,7 @@
-_target_: evaluation.approaches.system.SystemApproach
+defaults:
+  - grounder: mdm
+  - cost_gen: immediate
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
 name: immediate_only
-learning: immediate
-steering_mode: "off"

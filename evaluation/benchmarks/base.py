@@ -38,8 +38,10 @@ class InteractionBenchmark(Benchmark):
         use_persona_goals: bool = False,
         max_goals: int = 1,
         max_rounds: int = 3,
+        feedback_text: str | None = None,
     ) -> None:
         super().__init__(name)
+        self.feedback_text = feedback_text
         self.personas = list(personas) if personas is not None else None
         self.verbalizers = list(verbalizers)
         self.goals = (
@@ -85,6 +87,7 @@ class InteractionBenchmark(Benchmark):
                         goals=goal_seq,
                         max_rounds=self.max_rounds,
                         seed=seed,
+                        feedback_text=self.feedback_text,
                     )
                 )
         return tasks

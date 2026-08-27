@@ -3,6 +3,14 @@
 ## Getting Started
 Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model` and download the [required weights](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#mdm-is-now-40x-faster--04-secsample), [data](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#2-get-data) and [SMPL model](https://github.com/GuyTevet/motion-diffusion-model/blob/main/prepare/download_smpl_files.sh)
 
+On hosts with shared storage, `motion-diffusion-model/save` is a **symlink** to
+`consts.DATA_DIR / "mdm_save"` (`/share/bhattacharjee/eric_data/mdm_save` on
+`bhattacharjee-compute-02`) so every checkpoint — the stock
+`humanml_enc_512_50steps/` and all fine-tunes — lives on NFS rather than in the
+submodule. Every `./save/...` path below resolves through it unchanged; a
+fine-tune writes ~6 GB there, so check `df` before starting one, and never
+delete an existing run directory under it.
+
 ### Kinova Gen3 URDF
 
 `env: real` and `sim_mannequin` with `robot: kinova_gen3` load
@@ -89,16 +97,16 @@ conda run -n sam_3d_body hf download facebook/sam-3d-body-dinov3 \
   --local-dir src/uncertain_feedback/data_collection/sam-3d-body/checkpoints/sam-3d-body-dinov3
 ```
 
-Step 1 — inference (produces data/demo/smpl_out.npz)
+Step 1 — inference (produces pose_estimation/smpl_out.npz)
 ``` 
-uv run python src/uncertain_feedback/data_collection/_mhr_inference_worker.py \
---image_folder src/uncertain_feedback/data_collection/data/demo/images \
---output_path src/uncertain_feedback/data_collection/data/demo/smpl_out.npz
+uv run python src/uncertain_feedback/data_collection/pose_estimation/_inference_worker.py \
+--image_folder src/uncertain_feedback/data_collection/pose_estimation/images \
+--output_path src/uncertain_feedback/data_collection/pose_estimation/smpl_out.npz
 ```
 
-Step 2 — HML263 conversion + visualization (produces demo/comparison.png)
+Step 2 — HML263 conversion + visualization (produces pose_estimation/comparison.png)
 ```
-uv run python src/uncertain_feedback/data_collection/data/demo/run_demo.py
+uv run python src/uncertain_feedback/data_collection/pose_estimation/run_demo.py
 ```
 
 ## Label data and make dataset
@@ -108,83 +116,109 @@ uv run python -m uncertain_feedback.data_collection.trajectory_editor.server \
 --hml_stats_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D
 ```
 
-1. Turn videos into images
+Each method keeps its generated data under `src/uncertain_feedback/data_collection/data/`,
+in a subfolder named after the method's package (`data/dataset_video/`,
+`data/dataset_auto_correction/`). The whole tree is gitignored, and every entry point below
+defaults into it, so the commands normally need no path flags.
+
+1. Turn videos into images (default: `data/dataset_video/videos/` → `data/dataset_video/frames/`)
 ```
-uv run python src/uncertain_feedback/data_collection/extract_all_frames.py
+uv run python src/uncertain_feedback/data_collection/dataset_video/extract_all_frames.py
 ```
 
 2. Label segments with text descriptions in browser
 ```
-uv run python src/uncertain_feedback/data_collection/labeler.py
+uv run python src/uncertain_feedback/data_collection/dataset_video/labeler.py
 ```
                                                                                        
 3. Build MDM dataset
 ```
-uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py --output_dir ./my_mdm_dataset/
+uv run python src/uncertain_feedback/data_collection/dataset_video/build_dataset.py --output_dir ./my_mdm_dataset/
 ```
 Pass `--hml_stats_dir .../dataset/custom1` unless you are sure of what `dataset/HumanML3D`
 currently points at — the default is that path, and `finetune_standing.sh` symlinks it to
 whichever dataset is training. Every `custom1*` dataset carries the same stock `Mean.npy`/`Std.npy`.
 
 Pose-estimation results are cached as `(N, 22, 3)` position arrays in `<frames_dir>/../mdm_cache/`
-with a `_v<N>` version tag in the filename; bumping `_CACHE_VERSION` in `build_mdm_dataset.py`
+with a `_v<N>` version tag in the filename; bumping `_CACHE_VERSION` in `dataset_video/build_dataset.py`
 (done whenever the pose-estimation/conversion changes) invalidates old entries automatically.
 Untagged cache files predate the 2026-07-07 encoding switch and hold `(N, 263)` *features*
 rather than positions — they are never read and can be deleted. Anything under
-`data/mdm_cache.mirrored_bak_*` predates the 2026-06-29 chirality fix and is mirrored.
+`data/dataset_video/mdm_cache.mirrored_bak_*` predates the 2026-06-29 chirality fix and is
+mirrored.
 
 3b. (Optional) Build a speed-variant dataset instead — retimes each cached segment into
 fast / normal / slow variants plus a conditional variant that slows while the wrist is
 above the shoulder, with matching speed-language captions. Reads the `mdm_cache`
 positions directly, so steps 1–3 must have run (and cached) at least once:
 ```
-uv run python src/uncertain_feedback/data_collection/build_speed_dataset.py --output_dir ./speed_mdm_dataset/
+uv run python src/uncertain_feedback/data_collection/dataset_video/build_speed_dataset.py --output_dir ./speed_mdm_dataset/
 ```
 `--caption_style` picks the speed language: `adverb` (default), `vivid`, or `none`. `none`
 gives every variant the same speed-free caption, for runs where speed must come from MDM's
 experimental `--speed_cond` scalar channel (`MdmMotionGenerator.generate_*(speed=...)`,
 metres per frame) instead of the text.
 
-3c. (Optional) Build a **correction-clip** dataset around one base trajectory — for a
-checkpoint that is multimodal about a single scenario rather than a broad motion corpus.
-Stage (a) rolls one naive MPC trajectory to a Cartesian goal, then for each run samples a
-hidden comfort bound *anchored on that rollout* (so violation is guaranteed), replans from
-the induced trigger step under the oracle cost, and writes an 8-frame naive history prefix
-spliced onto a slice of the corrected continuation:
+3c. (Optional) Build a **correction-clip** dataset of oracle-corrected reaches — for a
+checkpoint that is multimodal about *how* an arm is moved rather than a broad motion corpus.
+Each run of stage (a) samples its own scenario: a start arm configuration and a Cartesian
+goal, both drawn from the anatomical feature box, with the naive MPC reach between them. It
+then samples a hidden comfort bound *anchored on that rollout* (so violation is guaranteed),
+replans from the induced trigger step under the oracle cost, and writes an 8-frame naive
+history prefix spliced onto a slice of the corrected continuation:
 ```
-uv run python evaluation/generate_correction_clips.py --out_dir outputs/correction_clips --n_runs 0
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/generate.py
 ```
-`--n_runs 0` writes only the base artifacts — the naive rollout, the body geometry and an
-empty manifest — and the labeling UI then plans each correction on demand as you press Next
-(one oracle rollout, 2–13 s, prefetched while you type). Pass `--n_runs 32` instead to batch
-them up front; both paths produce identical runs, since each is seeded on `(seed, index)`
-rather than on a streaming generator.
+The clip set lands in `data/dataset_auto_correction/clips/` unless `--out_dir` says
+otherwise — the same default the labeling UI reads, so neither step needs a path flag.
+The default `--n_runs 0` writes only the base artifacts — the body geometry, the base pose
+and an empty manifest — and the labeling UI then plans each correction on demand as you press
+Next (a naive rollout plus an oracle one, ~5–20 s, prefetched while you type). Pass
+`--n_runs 32` to batch them up front instead; both paths produce identical runs, since each is seeded on
+`(seed, index)` rather than on a streaming generator, and the draw order (scenario first,
+then bound) is part of that contract.
+
+The start arm and the goal are both drawn by `sample_arm_q` from `START_FEATURE_RANGES`
+(uniform per anatomical feature, redrawn until the pose is inside the shared joint box), and
+the goal is simply where a second such draw puts the wrist. A scenario is rejected and
+redrawn when the two wrists sit closer than `--min_goal_distance`, when the naive rollout
+never reaches the goal, or when the reach is too short for `--trigger_window` to contain a
+trigger. `arm_q_from_features` resolves the over-determined flexion/abduction/elevation
+triple rather than honouring all three, so the *realized* features differ from the drawn
+ones — the draw is for coverage, not for hitting a target pose. Measured over 500 draws:
+wrist 5–95% at −0.24 to +0.42 m vertically around spine3, 13% of starts above shoulder
+horizontal, no self-intersection (nearest torso joint 0.17 m) and no elbow hyperextension
+(the T-pose rest flexion is 0.13 rad, below the 0.5 floor).
 
 Stage (a) **refuses to write into a directory that already holds a clip set** — it rewrites
 `manifest.json` wholesale, so doing so would blank that set's captions and orphan the
 labeling sessions underneath it. Pass a new `--out_dir` instead.
 
-Only this step needs the GPU/MDM env — it loads the generator once for the start-pose
+Only this step needs the GPU/MDM env — it loads the generator once for the body
 geometry and caches it to `geometry.npz`. Knobs:
 `--seed`, `--trigger_window LOW HIGH` (accepted range for the naive rollout's first
 violation), `--margin_range LOW HIGH` (radians the bound sits past the naive feature
 value), `--correction_frames LOW HIGH` (corrected frames kept per clip, before the
-prefix), and `--max_angle_delta`.
+prefix), `--min_goal_distance` and `--max_angle_delta`.
 
-The default scenario is `evaluation/conf/mpc_demo_low1.yaml`: the `mpc_demo_base1` body and
-goal, but the arm **starts resting low** (wrist ~0.29 m below spine3, elbow bent 0.6 rad)
-rather than already held near shoulder height, so the reach the clips branch off is a full
-lift. It is a separate file because `mpc_demo_base1.yaml` is the shared demo/comparison
-scenario that `outputs/comparison_demo` and `outputs/base1` were generated against. The low
-start is also simply better for this purpose: the longer reach evens out which anatomical
-feature the sampled bound lands on — base1's short reach skewed hard toward two features.
-Pass `--config evaluation/conf/mpc_demo_base1.yaml` for the old start (and scale
-`--trigger_window` down to suit its shorter reach).
+The config still supplies everything except the reach: `evaluation/conf/mpc_demo_low1.yaml`
+gives the body `pose:`, the MPC settings, `cartesian.threshold`,
+`corrections.trigger_threshold` and `llm_cost.model` (the labeling UI's Draft caption
+button). Its `cartesian.goals` is **not** read any more, and of its `arm:` only the clavicle
+rotation survives — the one slot the planner never actuates, recorded in the manifest as
+`clavicle` and inherited by every sampled start.
+
+`--min_goal_distance` (default 0.25 m) is the floor on how far a sampled goal must sit from
+the sampled start wrist. It scales with `--max_angle_delta` the way `--trigger_window` does:
+0.25 m is roughly 60 naive frames at 0.00125, which keeps the `(12, 100)` window usable in
+every accepted scenario. Raising it buys longer reaches at the cost of more redraws (62% of
+raw draws clear 0.25 m).
 
 `--max_angle_delta` (default `0.00125`) overrides the config's action-sampling spread and
 is **the one knob for how big and how fast a clip's motion is**. It is a std dev, not a
 per-step cap, so it sets distance travelled per frame; because a clip is a fixed frame
-budget, halving it halves both the speed and the ground covered. Measured on the low1 start:
+budget, halving it halves both the speed and the ground covered. Measured on the old fixed
+low1 start, which is representative of a mid-length sampled reach:
 
 | `--max_angle_delta` | reach | wrist path per clip | speed | clip frames |
 |---|---|---|---|---|
@@ -200,9 +234,11 @@ how far the arm travels in the window. Halving it moved wrist path by under a ce
 while making corrections less distinct from the naive path, so it is left wide.
 
 `--trigger_window` counts naive frames, so it must scale with `--max_angle_delta`:
-`(12, 100)` suits the 165-frame reach, `(6, 50)` the 85-frame one. Pushing its top end near
-the end of the reach starts producing continuations too short to fill the window, which get
-padded by holding the last frame (recorded as `pad_frames`).
+`(12, 100)` suits the ~165-frame reaches, `(6, 50)` the ~85-frame ones. Reaches vary per run
+now (74–191 frames on a 4-run sample at the defaults), and a scenario whose reach is shorter
+than the window's low end is redrawn. Pushing its top end near the end of the reach starts
+producing continuations too short to fill the window, which get padded by holding the last
+frame (recorded as `pad_frames`).
 
 Clips are paced more slowly than the `0.01` demo the finetuned checkpoint is queried in;
 MDM output is tracked as a *path* (playback advances on proximity, not on a clock), so the
@@ -213,12 +249,15 @@ Then hand-label. The browser UI serves every clip next to the bound that produce
 writes typed captions straight back into the manifest (saves on blur), so nothing needs
 editing by hand:
 ```
-uv run python evaluation/label_correction_clips.py
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/label.py
 # then: ssh -L 6768:localhost:6768 user@host  →  http://localhost:6768
 ```
+Clip sets generated before scenarios became per-run can no longer be labeled or forked (they
+carry one set-level naive rollout and no `clavicle`); only stage (b) still reads both
+layouts. Label a fresh set instead.
 **Every launch labels into its own session directory.** `--clips_dir` defaults to
-`outputs/correction_clips`, so labeling normally needs no flags at all. The UI forks
-`outputs/correction_clips/session_<timestamp>/` off the clip set — the base artifacts copied
+`data/dataset_auto_correction/clips`, so labeling normally needs no flags at all. The UI
+forks `<clips_dir>/session_<timestamp>/` off the clip set — the base artifacts copied
 in, an empty manifest, and the timestamp as the session's seed — and writes its runs and
 captions there, so it never touches the set it came from or an earlier session. Runs are
 seeded on `(seed, index)`, so the fresh seed is what keeps two sessions off the same sampled
@@ -226,16 +265,81 @@ bounds. A session directory is self-contained: stage (b) reads it exactly like a
 and several of them combine into one dataset. Pass `--resume` with a session directory to
 carry on captioning that one instead of starting another:
 ```
-uv run python evaluation/label_correction_clips.py \
-    --clips_dir outputs/correction_clips/session_20260817_2321 --resume
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/label.py \
+    --clips_dir .../data/dataset_auto_correction/clips/session_20260817_2321 --resume
 ```
 
-The UI shows **one run at a time**: three orthogonal projections (Front XY / Side ZY / Top
-XZ), a scrubber, a caption box, and Prev / Next. Next saves the caption and advances,
-planning that run if it does not exist yet; the run after it is prefetched in the background
-while you type, so Next normally lands instantly (~0.1 s) instead of waiting on the rollout.
-Generation is serialized, so a click that races the prefetch waits for the same result
-rather than duplicating the work, and saving a caption never blocks on a rollout.
+The UI shows **one run at a time**: three orthogonal projections (Front XY from the front /
+Side ZY from the person's left / Top XZ from above — the last two are mirrored horizontally,
+without which the camera would sit on the person's *right* and below the floor and the moving
+left arm would read as the right one), a scrubber, the caption rows, and Prev / Next / Draft caption. Next saves the captions and
+advances, planning that run if it does not exist yet — a sampled scenario now costs a naive
+rollout *and* an oracle one, so on-demand generation is ~5–20 s — and the run after it is
+prefetched in the background while you type, so Next normally lands instantly (~0.1 s)
+instead of waiting on the rollouts. Generation is serialized, so a click that races the
+prefetch waits for the same result rather than duplicating the work, and saving a caption
+never blocks on a rollout. The goal marker is that run's own goal, so it moves as you page
+through runs.
+
+**A run takes several captions.** `+ caption` adds a row, `✕` drops one, and every row is
+saved (blanks discarded) into the run's `captions` list on blur, on Next and on remove.
+Stage (b) writes them as the *lines* of that clip's text file, which is how HumanML3D
+carries alternative wordings: the loader samples one line per epoch, so three phrasings of
+one correction train as one motion with three ways of asking for it — not as three copies
+of the motion. Use it for genuine paraphrases of the same behaviour; a row that describes a
+*different* behaviour is mislabeling the clip, since the loader may pick it for that motion.
+
+**Draft caption** hands the first sentence to a VLM instead of the blank box. The server
+renders the *currently selected* window (drag the bar first, then draft) as **one** image —
+three orthogonal panels each carrying the **posed SMPL body** (`SmplMeshCache`, the same mesh
+the demo runner draws) with the left arm in orange where the window starts, the arm alone in
+blue where it ends, and the paths the wrist and the elbow sweep between them, arrow-headed so
+the direction of travel is unambiguous — shows it to `llm_cost.model`, and appends the reply as
+a new caption row. One image with the motion drawn into it beats a before/after pair: both
+poses share axes, so the model compares them directly instead of across two separately
+scaled frames, and the traces say which route each joint took rather than leaving it to be
+inferred from the endpoints. The number beside the button is how many drafts one click asks for (1–5),
+and they come back from **one** completion, one line each (~8 s for four, serialized): the
+model sees the phrasings it has already written, so it can make them differ on purpose
+instead of drifting apart by sampling noise. The instruction appended for N > 1 asks it to
+vary the *expression* and the *level of abstraction* — some lines naming the body part and
+direction concretely, others asking loosely for the outcome or for how it should feel —
+which is the spread a caption set wants, since one motion is being described several ways.
+Numbering, bullets and surrounding quotes are stripped off each line. Nothing is written to
+the manifest until the captions save, so a draft is always edited or accepted by a human
+first. It needs `OPENAI_API_KEY` in the environment and `llm_cost.model` in the planner
+YAML; it is the only part of the tool that touches the network. Fitting the mesh to the clip
+set's body is a few seconds of optimization on the first draft of a session and is reused
+after that, so the first click runs ~11 s and the rest ~5 s. The image it sent stays in the
+run directory as `suggest.png`.
+
+**The prompt behind that button is editable** — open *Draft caption prompt* under the nav
+row. It starts as `DRAFT_PROMPT` in `captioning.py` — which describes that single image, unlike
+`simulated_users.visual.PROMPT`, whose wording is for the before/after pair the visual
+verbalizer renders at evaluation time — saves on blur into the session manifest as
+`caption_prompt`, and *restore default* puts the stock text back. It is per session, not per run, so a reopened session
+drafts with the wording you settled on, and a session forked off a set inherits it. Editing
+it here changes only the labeling drafts; the evaluation-time verbalizer still uses
+`PROMPT`. The N-lines-and-vary-them instruction (`DRAFT_N_INSTRUCTION` in `captioning.py`) is
+appended to whatever the panel holds whenever you ask for more than one draft, so an edited
+prompt keeps the multi-draft behaviour.
+
+**Or skip the browser entirely.** `autolabel.py` is the headless twin of that button: it
+walks a clip set's manifest and writes N drafts per run straight into the run's `captions`,
+through the same `captioning.py` render-and-ask path, so an auto-labeled set and a
+hand-labeled one are drawn the same way:
+```
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/autolabel.py \
+    --clips_dir .../data/dataset_auto_correction/clips_auto100 --n_captions 5
+```
+It labels **in place** in `--clips_dir` (point it at a session directory if the base set's
+captions matter), skips runs that already have captions, and rewrites the manifest after
+every run — so it is resumable, interruptible, and safe to re-run to top up a set. The
+prompt is that set's own saved `caption_prompt`, falling back to the stock `DRAFT_PROMPT`;
+`--prompt_from <clip set or session dir>` reuses the wording settled on elsewhere, and
+whichever is used is recorded as the labeled set's `caption_prompt`. Needs `OPENAI_API_KEY`
+and `llm_cost.model`; costs one VLM call per run (~4 s each, plus the one-off mesh fit) and
+leaves each run's `suggest.png` behind, which is what to look at when checking the captions.
 
 Playback covers the **whole** story in three colour-coded phases:
 
@@ -271,16 +375,18 @@ very end holds the anchor back rather than padding, so a dragged clip is always 
 (`pad_frames` 0).
 
 Stage (a) writes **no video** — rendering was 3.5 MB of a 3.9 MB 32-clip set, against 436 KB
-without it. The viewer reads only `manifest.json`, `naive.npy`, `geometry.npz` and the
-per-run `clip.npy` / `continuation.npy`, reconstructing each preview through `motion_frames` at ~9–40 KB of JSON per
+without it. The viewer reads only `manifest.json`, `geometry.npz` and the per-run
+`naive.npy` / `clip.npy` / `continuation.npy`, reconstructing each preview through
+`motion_frames` at ~9–40 KB of JSON per
 run, so it needs neither the MDM environment nor a GPU — including for the corrections it
-plans on demand, since `clip_source_from_dir` rebuilds the rollout context from those same
-files (`geometry.npz` carries the generator-decoded body for exactly this reason). A
-bootstrapped set is 32 KB and each run adds ~20–32 KB (clip, features, and the full
-continuation the preview's context phase needs). Runs whose continuation never reached
+plans on demand, since `clip_source_from_dir` rebuilds the rollout context from
+`geometry.npz` (the generator-decoded body) plus the manifest's `clavicle`. A
+bootstrapped set is 24 KB and each run adds ~25–40 KB (clip, features, and the full naive
+and continuation rollouts the preview's context phase needs). Runs whose continuation never reached
 the goal are marked in the header; blank runs are skipped by stage (b).
 
-Editing `outputs/correction_clips/manifest.json` directly works too. Each run records the sampled
+Editing the clip set's `manifest.json` directly works too. Each run records its
+sampled `goal` (spine3-relative) and `naive_file`, the sampled
 `feature`/`bound_type`/`bound_value`, `trigger_step`, `clip_anchor` (where the cut sits —
 equal to `trigger_step` until you drag it), `window_violation` (how much of the described
 window still violates the bound) and `continuation_reach`. Skip a run by leaving
@@ -291,25 +397,28 @@ its caption empty.
 mid-reach (median clip-final wrist distance 0.11 m against a 0.05 threshold) even though
 their continuations reached. That is the intended shape, not a defect: at inference MDM
 emits a `feedback.frames`-length correction that the MPC tracks and then finishes the reach
-under its own cost, so a clip should teach a steering nudge, not a completed reach. On the
-demo goal,
-every `elbow_flexion upper_bound` run fails to reach — capping elbow flexion puts the goal
-out of geometric range, so the MPC burns its full step budget — yet those clips carry as
-much arm motion as the reaching ones and are still good training content. Judge a clip by
-its video and `window_violation`; treat `continuation_reach: false` as a prompt to look,
-not as a rejection.
+under its own cost, so a clip should teach a steering nudge, not a completed reach. A bound
+can also put the goal out of geometric range outright — `elbow_flexion upper_bound` did that
+on every run of the old fixed demo goal — so the MPC burns its full step budget; those clips
+still carry as much arm motion as the reaching ones and are good training content. (The
+*naive* rollout always reaches: a scenario that misses is redrawn.) Judge a clip by its video
+and `window_violation`; treat `continuation_reach: false` as a prompt to look, not as a
+rejection.
 
-Stage (b) encodes every captioned clip into HumanML3D format. `--clips_dir` takes **several
-directories**, which is how separate labeling sessions become one training set — ids are
-handed out across the whole run, so nothing collides:
+Stage (b) encodes every captioned clip into HumanML3D format, one motion per clip with all
+of its captions as the lines of its text file. `--clips_dir` takes **several directories**,
+which is how separate labeling sessions become one training set — ids are handed out across
+the whole run, so nothing collides:
 ```
-uv run python src/uncertain_feedback/data_collection/build_correction_dataset.py \
-    --clips_dir outputs/correction_clips outputs/correction_clips/session_* \
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \
+    --clips_dir .../data/dataset_auto_correction/clips{,/session_*} \
     --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_demo1 \
     --transplants 4
 ```
 `--transplants N` adds N augmented copies of every captioned clip, each replaying that
-clip's joint-space correction from a **randomly drawn** frame of the naive rollout: the
+clip's joint-space correction from a **randomly drawn** frame of that run's own naive
+rollout (sets captioned under the old single-scenario layout fall back to their set-level
+`naive.npy`, so they stay buildable): the
 prefix becomes the arm's real history at that frame, and the described window is the same
 deltas applied from there. This is what puts a behaviour labeled high up the reach in front
 of the model with the arm low, which matters because the prefix is inpainted at inference —
@@ -343,21 +452,58 @@ bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
 bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
     correction_demo1 correction_demo1_lr1e5_5k 1e-5 \
     --gen_during_training --start_pose mdm_sit_pose.pt --n_prefix 8
+
+# ran 2026-08-27: same recipe on the auto-labeled 100-clip set — BEST SO FAR.
+# Diverse and genuinely text-steered: the first checkpoint whose "down" prompts
+# actually move the wrist down. 797 s wall, 21 checkpoints, 6.1 GB.
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto100 correction_auto100_lr1e5_5k 1e-5 \
+    --gen_during_training --start_pose mdm_sit_pose.pt --n_prefix 8
 ```
 
 **Pick the recipe by diversity, not by loss** (val splits contain transplants of training
 clips, so val loss is meaningless here). Measured on left-wrist trajectories across the 6
 `--gen_during_training` samples at every saved checkpoint:
 
-| recipe | wrist path / frame | cross-sample spread | verdict |
-|---|---|---|---|
-| training clips (target) | 0.0039 m | — | — |
-| `lr 1e-5 / 5k` | 0.0045 m | 0.205 m, no trend over the run | usable |
-| `lr 1e-7 / 10k` | 0.0021 m | 0.316 → 0.023 m, monotone | collapsed — all samples identical |
+| recipe | dataset | wrist path / frame | cross-sample spread | verdict |
+|---|---|---|---|---|
+| training clips (target) | `correction_demo1` | 0.0039 m | — | — |
+| `lr 1e-5 / 5k` | `correction_demo1` | 0.0045 m | 0.205 m, no trend over the run | usable |
+| `lr 1e-7 / 10k` | `correction_demo1` | 0.0021 m | 0.316 → 0.023 m, monotone | collapsed — all samples identical |
+| training clips (target) | `correction_auto100` | 0.0036 m | 0.287 m cross-clip | — |
+| **`lr 1e-5 / 5k`** | **`correction_auto100`** | **0.0045 m** | **0.318 m, no trend over the run** | **best — diverse *and* steered** |
 
 10k steps x batch 8 over 123 examples is ~650 epochs on a set where every clip carries the
 same caption, so even lr 1e-7 accumulates into drift toward the dataset mean. The
-deployed-checkpoint recipe does **not** transfer to this dataset.
+deployed-checkpoint recipe does **not** transfer to this dataset. The same lr 1e-5 / 5k
+recipe on `correction_auto100` is only ~80 epochs (500 motions), and it neither collapses
+nor drifts: spread rises from 0.22 to a 0.28–0.37 band by step 1000 and stays there.
+
+**Diversity is necessary but not sufficient — also check text steering.** `correction_demo1`
+carries one caption, so its checkpoints raise the arm for *every* prompt. Probe it through
+the production path (`MdmMotionGenerator.generate_left_arm_position_samples`, 8 samples per
+prompt, 48 frames) with four up/down prompt pairs, from two start poses: `mdm_sit_pose.pt`
+(left wrist 0.523 m, resting *below* the pelvis, so "down" has nowhere to go) and a
+mid-reach training frame with the wrist at 1.000 m. Mean left-wrist `dy` gap
+(up-prompt minus down-prompt; positive = correctly steered):
+
+| checkpoint | gap from sit pose | gap from mid pose | "down" prompts that actually descend (mid) |
+|---|---|---|---|
+| `correction_demo1_lr1e5_5k/model000755000.pt` | +0.061 m | +0.038 m | **0 / 4** — every prompt raises the arm |
+| `correction_auto100_lr1e5_5k/model000751500.pt` | +0.070 m | +0.090 m | — |
+| `correction_auto100_lr1e5_5k/model000753250.pt` | +0.175 m | +0.193 m | — |
+| `correction_auto100_lr1e5_5k/model000754250.pt` | +0.173 m | +0.175 m | — |
+| **`correction_auto100_lr1e5_5k/model000755051.pt`** | **+0.207 m** | **+0.218 m** | **4 / 4** |
+
+Every checkpoint from step ~3250 on sits in the same +0.12–0.22 band (8 samples per prompt is
+noisy between adjacent checkpoints — `model000755000.pt` scores +0.123/+0.178, 51 steps from
+the final one's +0.207/+0.218), and all of them beat `correction_demo1` by 3–5x. **Sign, not
+just magnitude, is what changed**: from the mid pose the final checkpoint gives "Lower my
+arm" −0.049 m, "Move my hand down" −0.094 m, "Bring my elbow down and in" −0.293 m and
+"Move my arm down and closer to my body" −0.156 m, where `correction_demo1` gives +0.112,
++0.144, +0.042 and +0.102. Within-prompt sample spread is unchanged (0.149 m vs 0.156 m), so
+the steering is not bought with diversity. From the *sit* pose the absolute `dy` stays
+positive even for "down" prompts — that is the start pose bottoming out, not the checkpoint.
 
 After training, flip `use_ema` to false in `save/<run>/args.json` if you will sample from
 `sample_leftarm.py` (`mdm_api` is safe either way — `mdm_configs/mdm_config.yaml` overlays
@@ -367,13 +513,18 @@ it). Then point `consts.MDM_MODEL_WEIGHTS_PATH` at the checkpoint.
 runner (see *Demo runner web tool*) and in the Scenario panel pick start pose
 **`low1 (clip training start)`** and goal **`hits limit 1`** — that pair is exactly
 `evaluation/conf/mpc_demo_low1.yaml`'s `arm:` and `cartesian.goals[0]` `[0.25, 0.3, 0.18]`,
-verified against `outputs/correction_clips/naive.npy` frame 0. Type the correction
+verified against `data/dataset_auto_correction/low1_20260817/naive.npy` frame 0. Type the correction
 **`raise my arm a bit`** verbatim: every clip in the set carries that one caption, so it is
 the only prompt the checkpoint knows. Two expected mismatches: the demo runs at
 `max_angle_delta 0.01` while the clips were generated at `0.00125`, so the pinned prefix is
 paced ~8x faster than any the model trained on; and the checkpoint's training body sits
 0.060 m from `mdm_sit_pose.pt` (vs 0.190 m for `custom1_seatedcanon`, so this part is
 *better* matched than the deployed checkpoint).
+
+That one-prompt restriction is specific to `correction_demo1`. `correction_auto100_lr1e5_5k`
+saw 464 distinct captions over 100 scenarios, so it takes arbitrary correction phrasings —
+including ones asking the arm *down*, which no `correction_demo1` checkpoint can honour. It
+shares the identical training body, so the body-match note above carries over unchanged.
 
 4. Fine-tune motion-diffusion-model
 First rename the original `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/HumanML3D` to something else, and rename your new generated `.../HumanML3Dnew` (or whatever was created with the trajectory editor web ui) to `.../HumanML3D`
@@ -577,7 +728,7 @@ presence of top-level YAML sections, one per module slot:
 | Section | Module | Absent means |
 |---|---|---|
 | `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
-| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`) | no correction phase |
+| `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`). `clusterer` defaults to `agglo_end_pose` and is resolved by `run.py`, the demo runner, and the evaluation approaches alike — runs from before that wiring used `XyzPositionClusterer` (KMeans) regardless of the key | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
 
@@ -1701,7 +1852,7 @@ CPU-only smoke run (no MDM, no LLM):
 
 ```
 uv run python evaluation/run_single_experiment.py approach=edit_baseline \
-    approach.learning=none benchmark=smoke mpc_config=evaluation/conf/mpc_smoke.yaml
+    approach/cost_gen=none benchmark=smoke mpc_config=evaluation/conf/mpc_smoke.yaml
 ```
 
 Single experiment / sweep / aggregation:
@@ -1713,9 +1864,20 @@ uv run python evaluation/run_single_experiment.py -m seed=0,1,2 \
 uv run python evaluation/analyze_results.py multirun/ --out evaluation_analysis/
 ```
 
-Approaches: `full`, `no_steering`, `immediate_only`, `no_learning` (SystemApproach
-ablations over `learning` and `steering_mode`) and `edit_baseline` (predefined
-parameterized edits, no text-to-motion model). Benchmarks: `smoke`,
+An approach composes three modules via hydra config groups — a grounder
+(`approach/grounder=`: `mdm`, `none`, `edit`, `bridge`, `bridge_llm`,
+`keypoint`, `llm_*`), a cost-gen setting (`approach/cost_gen=`: `none`,
+`immediate`, `consolidate`, `language_only`), and a steering method
+(`approach/steering=`: `none` or `cg`, mdm-only). Named compositions: `full`,
+`no_steering`, `immediate_only`, `no_learning`, `language_only_learning`
+(mdm-grounder ablations), `cost_only` (no grounding — language goes straight
+to cost generation), `edit_baseline` (predefined parameterized edits, no
+text-to-motion model), `bridge_baseline` / `bridge_llm` / `llm_keypoint`
+(potential-field and LLM-interpreted predefined edits), and the pure-agent
+arms `agent_waypoint`, `agent_sparse_waypoints`, `agent_dense_positions`,
+`agent_dense_anatomical` (an LLM writes 4 candidate corrections as
+trajectories, no motion prior; all non-MDM grounders need
+`mpc_config=evaluation/conf/mpc_edit_baseline.yaml`). Benchmarks: `smoke`,
 `personas_core`, `abstraction_sweep` (verbalizer sweep), `lifelong` (per-persona
 goal sequences; pair with `mpc_config=...mdm_llm_transfer.yaml`). Outputs land in
 hydra's `outputs/`/`multirun/` dirs as `results.csv` (per feedback round) and
@@ -1737,8 +1899,8 @@ root is CWD-relative):
 ```bash
 uv run python src/uncertain_feedback/demo_runner/server.py \
   [--mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml] \
-  [--personas-file demo_runner_personas.json] \
-  [--trajectory-configs-file demo_runner_trajectory_configs.json] \
+  [--personas-file demo_runner_artifacts/personas.json] \
+  [--trajectory-configs-file demo_runner_artifacts/trajectory_configs.json] \
   [--host 127.0.0.1] [--port 6781]
 ```
 
@@ -1823,8 +1985,8 @@ Stages (each stage's controls unlock once the previous one ran):
    where the selected persona has a joint box, with a live SMPL body preview), the
    spine3-relative Cartesian goal, and the simulated user. Initial poses and
    goals can each be named, saved, and selected independently; they persist in
-   `demo_runner_trajectory_configs.json` by default, and saving an existing
-   name updates it. *Start trajectory*
+   `demo_runner_artifacts/trajectory_configs.json` by default, and saving an
+   existing name updates it. *Start trajectory*
    starts one stateful `arm_mpc_cartesian` execution and animates it live: the
    browser requests one MPC step at a time (`POST /api/live_trajectory/start`,
    then `POST /api/live_trajectory/step`), follows the newest frame in the body

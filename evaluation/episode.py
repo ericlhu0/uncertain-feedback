@@ -11,12 +11,12 @@ import numpy as np
 
 from evaluation.approaches.base import Approach
 from evaluation.metrics import round_row
-from evaluation.rig import EvalRig, base_extra_costs, cfg_with_goal
 from evaluation.structs import InteractionTask, RoundContext
 from evaluation.verbalize import bind_verbalizer
 from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.rollout import goal_reach, rollout_to_goal
+from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs, cfg_with_goal
 from uncertain_feedback.simulated_users import (
     ChoiceResult,
     HiddenCostTerm,
@@ -36,7 +36,7 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
-    rig: EvalRig,
+    rig: PlanningRig,
     user: SimulatedUser,
     task: InteractionTask,
     approach: Approach,
@@ -181,7 +181,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 
             ground_t0 = time.perf_counter()
             grounding = approach.ground(
-                utterance.text, q_feedback, nominal_plan, _select
+                utterance.text, q_feedback, nominal_plan, _select, goal_arr
             )
             ground_seconds = time.perf_counter() - ground_t0
             choice = choices[-1]

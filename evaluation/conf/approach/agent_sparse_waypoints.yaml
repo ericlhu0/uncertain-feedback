@@ -1,0 +1,7 @@
+defaults:
+  - grounder: llm_sparse_waypoints
+  - cost_gen: none
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: agent_sparse_waypoints

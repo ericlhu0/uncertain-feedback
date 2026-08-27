@@ -15,7 +15,11 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from uncertain_feedback.planners.mpc import ArmMPC, CartesianConfig
-from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
+from uncertain_feedback.planners.mpc.arm_features import (
+    FEATURE_NAMES,
+    arm_feature_series,
+    arm_q_from_features,
+)
 from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_CLAVICLE,
@@ -174,6 +178,40 @@ def test_all_arm_features_match_for_q_and_decoded_boundary_states() -> None:
     assert q_features.keys() == boundary_features.keys()
     for name in q_features:
         np.testing.assert_allclose(q_features[name], boundary_features[name], atol=1e-9)
+
+
+def test_arm_q_from_features_inverts_arm_feature_series() -> None:
+    """The anatomical inverse pins the swing-twist order and the hinge orientation."""
+    fk = SmplLeftArmFK()
+    fk.collar_aa = np.array([0.1, -0.2, 0.05])
+    context = MpcCostContext(
+        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    )
+    rng = np.random.default_rng(8)
+    clavicle = rng.uniform(-0.3, 0.3, 3)
+    q = np.empty((200, Q_DIM))
+    q[:, Q_CLAVICLE] = clavicle
+    q[:, 3:6] = rng.uniform(-1.0, 1.0, size=(200, 3))
+    # Elbow flexion folds through arccos below the T-pose bend, so it inverts
+    # only on the flexed branch.
+    q[:, 6] = rng.uniform(0.0, 1.6, 200)
+    features = arm_feature_series(q, context)
+
+    recovered = arm_q_from_features(
+        np.stack([features[name] for name in FEATURE_NAMES], axis=-1), clavicle, context
+    )
+
+    for name, value in arm_feature_series(recovered, context).items():
+        np.testing.assert_allclose(value, features[name], atol=1e-9)
+    positions = [
+        fk.fk_batch(
+            q_to_arm_aa(states, fk.elbow_hinge_axis),
+            context.spine3_pos,
+            context.spine3_aa,
+        )
+        for states in (q, recovered)
+    ]
+    np.testing.assert_allclose(positions[1], positions[0], atol=1e-9)
 
 
 def test_torch_position_features_match_arm_feature_series() -> None:

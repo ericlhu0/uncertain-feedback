@@ -1,0 +1,7 @@
+# Pure-agent grounder: one waypoint per interpretation — the goal of the
+# correction; the episode loop's continuation resumes toward the original goal.
+_target_: evaluation.approaches.grounders.llm_trajectory.LlmTrajectoryGrounder
+n_interpretations: 4
+output_space: positions
+n_waypoints: 1
+n_frames: 16

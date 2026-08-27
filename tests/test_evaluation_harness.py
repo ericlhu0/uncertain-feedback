@@ -4,13 +4,17 @@ from pathlib import Path
 
 import numpy as np
 
-from evaluation.approaches.bridge_baseline import BridgePotentialFieldApproach
-from evaluation.approaches.edit_baseline import ParameterizedEditApproach
-from evaluation.approaches.keypoint_baseline import KeypointApproach
+from evaluation.approaches import (
+    Approach,
+    BridgePotentialFieldGrounder,
+    KeypointGrounder,
+    NoCostGen,
+    ParameterizedEditGrounder,
+)
 from evaluation.benchmarks.base import InteractionBenchmark
 from evaluation.episode import run_episode
-from evaluation.rig import build_rig
 from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.rig import build_rig
 from uncertain_feedback.simulated_users import get_persona
 
 _SMOKE_MPC = (
@@ -46,7 +50,11 @@ def test_bridge_baseline_episode_smoke(tmp_path: Path) -> None:
         max_rounds=1,
     )
     task = bench.generate_tasks(0, rig.cfg)[0]
-    approach = BridgePotentialFieldApproach(learning="none")
+    approach = Approach(
+        name="bridge_baseline",
+        grounder=BridgePotentialFieldGrounder(),
+        cost_gen=NoCostGen(),
+    )
     approach.reset(rig, user, task, tmp_path / "episode")
     result = run_episode(rig, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
@@ -65,10 +73,11 @@ def test_keypoint_baseline_episode_smoke(tmp_path: Path) -> None:
         max_rounds=1,
     )
     task = bench.generate_tasks(0, rig.cfg)[0]
-    approach = KeypointApproach(learning="none")
-    approach._interpret = (  # type: ignore[method-assign]
+    grounder = KeypointGrounder()
+    grounder._interpret = (  # type: ignore[method-assign]
         lambda text, scene: {"joint": "wrist", "keypoint": np.array([0.1, 0.3, 0.2])}
     )
+    approach = Approach(name="llm_keypoint", grounder=grounder, cost_gen=NoCostGen())
     approach.reset(rig, user, task, tmp_path / "episode")
     result = run_episode(rig, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
@@ -87,7 +96,11 @@ def test_edit_baseline_episode_smoke(tmp_path: Path) -> None:
         max_rounds=1,
     )
     task = bench.generate_tasks(0, rig.cfg)[0]
-    approach = ParameterizedEditApproach(learning="none")
+    approach = Approach(
+        name="edit_baseline",
+        grounder=ParameterizedEditGrounder(),
+        cost_gen=NoCostGen(),
+    )
     approach.reset(rig, user, task, tmp_path / "episode")
     result = run_episode(rig, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()

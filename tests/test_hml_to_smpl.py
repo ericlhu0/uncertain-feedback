@@ -250,7 +250,7 @@ def _tpose_base_frame(
 ) -> np.ndarray:  # pylint: disable=redefined-outer-name
     """Encode the T-pose as a (263,) HML263 frame under identity normalization."""
     # pylint: disable=import-outside-toplevel
-    from uncertain_feedback.data_collection.smpl_to_hml263 import positions_to_hml263
+    from uncertain_feedback.data_collection.common.hml263 import positions_to_hml263
 
     frames = np.repeat(fk.tpose_all_joints[None], 2, axis=0)
     return positions_to_hml263(frames, np.zeros(263), np.ones(263))[0].astype(
@@ -351,7 +351,7 @@ class TestSmplArmAaToHml263FrameRoundtrip:
         # pylint: disable=import-outside-toplevel
         import torch
 
-        from uncertain_feedback.data_collection.smpl_to_hml263 import (
+        from uncertain_feedback.data_collection.common.hml263 import (
             positions_to_hml263,
         )
         from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (

@@ -1,7 +1,7 @@
-_target_: evaluation.approaches.system.SystemApproach
+defaults:
+  - grounder: mdm
+  - cost_gen: language_only
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
 name: language_only_learning
-learning: immediate
-steering_mode: "off"
-# Ablation: costs are authored from the utterance + nominal plan only; the
-# selected correction motion never reaches the cost generator.
-learn_from: nominal

@@ -32,6 +32,32 @@ _SMPL_PKL_DEFAULT = (
 # SMPL skeleton topology (22 joints, 0-21; hands excluded)
 # ---------------------------------------------------------------------------
 
+# Joint name for each of the 22 joints, in skeleton order
+SMPL_JOINT_NAMES_22 = [
+    "pelvis",
+    "left_hip",
+    "right_hip",
+    "spine1",
+    "left_knee",
+    "right_knee",
+    "spine2",
+    "left_ankle",
+    "right_ankle",
+    "spine3",
+    "left_foot",
+    "right_foot",
+    "neck",
+    "left_collar",
+    "right_collar",
+    "head",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+]
+
 # Parent index for each of the 22 joints (-1 = root)
 SMPL_PARENTS_22 = [
     -1,
@@ -84,6 +110,11 @@ LEFT_ARM_CHAIN_NAMES = [
     "left_elbow",
     "left_wrist",
 ]
+
+# Positions of the joints within the chain above.
+SHOULDER_CHAIN_IDX = 2
+ELBOW_CHAIN_IDX = 3
+WRIST_CHAIN_IDX = 4
 
 # Number of axis-angle slots consumed by the arm FK.
 _N_JOINTS = 3

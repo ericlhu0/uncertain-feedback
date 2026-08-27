@@ -1,0 +1,3 @@
+# No grounding: the nominal plan is the only candidate; language is left to
+# cost generation.
+_target_: evaluation.approaches.grounders.nominal.NominalGrounder

@@ -32,6 +32,11 @@ def bind_verbalizer(
     cache_dir: Path,
 ) -> BoundVerbalizer:
     """Bind the task's verbalizer to its episode state (rng, VLM, oracle)."""
+    if task.verbalizer == "scripted":
+        if task.feedback_text is None:
+            raise ValueError("verbalizer: scripted needs the task's feedback_text.")
+        spoken = Utterance(text=task.feedback_text, form="scripted")
+        return lambda intent, q_trigger, event_index: spoken
     if task.verbalizer == "vague":
         return lambda intent, q_trigger, event_index: verbalize_vague(intent)
     if task.verbalizer == "joint_resolved":

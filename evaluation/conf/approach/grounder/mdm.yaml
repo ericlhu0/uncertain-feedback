@@ -1,0 +1,5 @@
+# The paper's grounding system: MDM sampling, clustering, optional steering.
+# null keeps the planner yaml's feedback.uq value.
+_target_: evaluation.approaches.grounders.mdm.MdmGrounder
+diffusion_samples: null
+n_clusters: null

@@ -53,7 +53,7 @@ if str(_MDM_SUBDIR) not in sys.path:
 import torch
 from data_loaders.humanml.scripts.motion_process import recover_from_ric
 
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
+from uncertain_feedback.data_collection.common.hml263 import (
     load_hml_stats,
     positions_to_hml263,
 )

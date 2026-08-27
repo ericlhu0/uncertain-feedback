@@ -1,5 +1,7 @@
-_target_: evaluation.approaches.keypoint_baseline.KeypointApproach
+defaults:
+  - grounder: keypoint
+  - cost_gen: immediate
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
 name: llm_keypoint
-# Same learning stage as the system arms: the arm isolates the grounding stage.
-learning: immediate
-displacement_cap: 0.4

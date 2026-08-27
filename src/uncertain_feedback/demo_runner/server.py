@@ -6,8 +6,8 @@ Usage::
 
     uv run python src/uncertain_feedback/demo_runner/server.py \\
         [--mpc-config <path to an mdm_llm_transfer.yaml>] \\
-        [--personas-file demo_runner_personas.json] \\
-        [--trajectory-configs-file demo_runner_trajectory_configs.json] \\
+        [--personas-file demo_runner_artifacts/personas.json] \\
+        [--trajectory-configs-file demo_runner_artifacts/trajectory_configs.json] \\
         [--host 127.0.0.1] [--port 6781]
 """
 
@@ -517,12 +517,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Demo-runner web server")
     parser.add_argument("--mpc-config", type=Path, default=_DEFAULT_CONFIG)
     parser.add_argument(
-        "--personas-file", type=Path, default=Path("demo_runner_personas.json")
+        "--personas-file", type=Path, default=_ARTIFACT_ROOT / "personas.json"
     )
     parser.add_argument(
         "--trajectory-configs-file",
         type=Path,
-        default=Path("demo_runner_trajectory_configs.json"),
+        default=_ARTIFACT_ROOT / "trajectory_configs.json",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6781)

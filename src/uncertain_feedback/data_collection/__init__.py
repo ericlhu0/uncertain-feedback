@@ -1,11 +1,16 @@
-"""Data collection pipeline: images → HML263 for MDM fine-tuning.
+"""Data generation for MDM fine-tuning, one subpackage per method.
 
-The pipeline converts a folder of images (treated as a video sequence) to
-263-dimensional HumanML3D feature vectors suitable for fine-tuning the MDM
-motion diffusion model.
+Every method ends in a HumanML3D dataset directory the MDM loader reads:
+:mod:`~uncertain_feedback.data_collection.dataset_video` (recorded video →
+frames → hand-captioned segments), :mod:`.dataset_auto_correction` (sampled MPC
+reaches → oracle corrections → hand captions) and :mod:`.trajectory_editor` (a
+hand-authoring UI that writes the dataset directly). :mod:`.common` holds the
+HML263 encoder and the dataset-writing helpers they share;
+:mod:`.pose_estimation` — re-exported here — is the images → HML263 stack the
+video pipeline calls.
 
-Stages
-------
+Pose-estimation stages
+----------------------
 1. **SAM 3D Body inference** — estimates MHR (Momentum Human Rig) pose from
    each image, running inside the ``sam-3d-body`` conda environment via
    subprocess.
@@ -32,17 +37,17 @@ Quick start::
     hml263 = MhrToHml263Pipeline(config).run(Path("./video_frames/"))
 """
 
-from uncertain_feedback.data_collection.mhr_pose_estimator import (
-    MhrEstimatorConfig,
-    MhrPoseEstimator,
+from uncertain_feedback.data_collection.common.hml263 import (
+    load_hml_stats,
+    positions_to_hml263,
 )
-from uncertain_feedback.data_collection.mhr_to_hml263_pipeline import (
+from uncertain_feedback.data_collection.pose_estimation.mhr_to_hml263_pipeline import (
     MhrToHml263Config,
     MhrToHml263Pipeline,
 )
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
-    load_hml_stats,
-    positions_to_hml263,
+from uncertain_feedback.data_collection.pose_estimation.pose_estimator import (
+    MhrEstimatorConfig,
+    MhrPoseEstimator,
 )
 
 __all__ = [

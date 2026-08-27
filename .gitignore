@@ -14,7 +14,6 @@ agent_handoffs/
 transfer_artifacts/
 paper/
 demo_runner_artifacts/
-demo_runner_trajectory_configs.json
 
 .DS_Store
 .python-version

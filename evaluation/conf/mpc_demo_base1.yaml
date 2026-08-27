@@ -1,5 +1,5 @@
 # Demo-runner scenario as an evaluation planner config: the `base1` initial pose
-# and the `hits limit 1` goal from demo_runner_trajectory_configs.json.
+# and the `hits limit 1` goal from demo_runner_artifacts/trajectory_configs.json.
 #
 # Unlike mpc_edit_baseline.yaml this keeps the MDM `pose:` default, so the
 # motion-generator arms and the baselines can share one rig: the pose supplies

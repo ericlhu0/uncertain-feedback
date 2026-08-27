@@ -1899,8 +1899,8 @@ root is CWD-relative):
 ```bash
 uv run python src/uncertain_feedback/demo_runner/server.py \
   [--mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml] \
-  [--personas-file demo_runner_personas.json] \
-  [--trajectory-configs-file demo_runner_trajectory_configs.json] \
+  [--personas-file demo_runner_artifacts/personas.json] \
+  [--trajectory-configs-file demo_runner_artifacts/trajectory_configs.json] \
   [--host 127.0.0.1] [--port 6781]
 ```
 
@@ -1985,8 +1985,8 @@ Stages (each stage's controls unlock once the previous one ran):
    where the selected persona has a joint box, with a live SMPL body preview), the
    spine3-relative Cartesian goal, and the simulated user. Initial poses and
    goals can each be named, saved, and selected independently; they persist in
-   `demo_runner_trajectory_configs.json` by default, and saving an existing
-   name updates it. *Start trajectory*
+   `demo_runner_artifacts/trajectory_configs.json` by default, and saving an
+   existing name updates it. *Start trajectory*
    starts one stateful `arm_mpc_cartesian` execution and animates it live: the
    browser requests one MPC step at a time (`POST /api/live_trajectory/start`,
    then `POST /api/live_trajectory/step`), follows the newest frame in the body

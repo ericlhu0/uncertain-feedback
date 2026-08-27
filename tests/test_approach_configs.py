@@ -23,12 +23,10 @@ from evaluation.approaches import (
 )
 from evaluation.benchmarks.base import InteractionBenchmark
 from evaluation.episode import run_episode
-from evaluation.rig import build_rig
+from uncertain_feedback.planners.rig import build_rig
 from uncertain_feedback.simulated_users import get_persona
 
-_APPROACH_DIR = (
-    Path(__file__).resolve().parents[1] / "evaluation" / "conf" / "approach"
-)
+_APPROACH_DIR = Path(__file__).resolve().parents[1] / "evaluation" / "conf" / "approach"
 _SMOKE_MPC = _APPROACH_DIR.parent / "mpc_smoke.yaml"
 _NAMES = sorted(path.stem for path in _APPROACH_DIR.glob("*.yaml"))
 

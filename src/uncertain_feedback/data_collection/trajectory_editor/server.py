@@ -10,7 +10,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -18,8 +17,11 @@ import spacy
 from flask import Flask, jsonify, request, send_from_directory
 from scipy.interpolate import CubicSpline
 
-from uncertain_feedback.data_collection.build_mdm_dataset import _write_text_file
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
+from uncertain_feedback.data_collection.common.dataset import (
+    copy_stats,
+    write_text_file,
+)
+from uncertain_feedback.data_collection.common.hml263 import (
     load_hml_stats,
     positions_to_hml263,
 )
@@ -231,7 +233,7 @@ def export_trajectory():
     np.save(vecs_dir / f"{base_motion_id}.npy", hml263)
 
     nlp = spacy.load("en_core_web_sm")
-    _write_text_file(texts_dir / f"{base_motion_id}.txt", [caption], nlp)
+    write_text_file(texts_dir / f"{base_motion_id}.txt", [caption], nlp)
 
     all_ids = [base_motion_id]
 
@@ -244,7 +246,7 @@ def export_trajectory():
             noise_norm = aug_rng.standard_normal(hml263.shape).astype(np.float32)
             hml263_aug += noise_norm * noise_std * std
             np.save(vecs_dir / f"{aug_id}.npy", hml263_aug)
-            _write_text_file(texts_dir / f"{aug_id}.txt", [caption], nlp)
+            write_text_file(texts_dir / f"{aug_id}.txt", [caption], nlp)
             all_ids.append(aug_id)
 
     # Update split files (append to train)
@@ -257,12 +259,7 @@ def export_trajectory():
         for mid in all_ids:
             f.write(f"{mid}\n")
 
-    # Copy Mean.npy and Std.npy if not already present
-    for stat_file in ["Mean.npy", "Std.npy"]:
-        dst = output_dir / stat_file
-        src = hml_stats_dir / stat_file
-        if not dst.exists() and src.exists():
-            shutil.copy2(src, dst)
+    copy_stats(hml_stats_dir, output_dir)
 
     return jsonify(
         {

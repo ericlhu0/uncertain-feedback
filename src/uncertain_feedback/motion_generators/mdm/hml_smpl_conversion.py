@@ -165,7 +165,7 @@ def smpl_arm_aa_seq_to_hml263_frames(
     # pylint: disable=import-outside-toplevel
     import torch
 
-    from uncertain_feedback.data_collection.smpl_to_hml263 import (
+    from uncertain_feedback.data_collection.common.hml263 import (
         positions_to_hml263,
     )
 

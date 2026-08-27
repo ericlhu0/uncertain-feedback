@@ -3,16 +3,16 @@
 Prerequisite: run the MHR inference worker to produce smpl_out.npz::
 
     uv run python \\
-        src/uncertain_feedback/data_collection/_mhr_inference_worker.py \\
-        --image_folder src/uncertain_feedback/data_collection/demo/images \\
-        --output_path src/uncertain_feedback/data_collection/demo/smpl_out.npz \\
+        src/uncertain_feedback/data_collection/pose_estimation/_inference_worker.py \\
+        --image_folder src/uncertain_feedback/data_collection/pose_estimation/images \\
+        --output_path src/uncertain_feedback/data_collection/pose_estimation/smpl_out.npz \\
         --sam_checkpoint_path \\
             src/uncertain_feedback/data_collection/sam-3d-body/checkpoints/\\
             sam-3d-body-dinov3/model.ckpt
 
 Then run this script (no special env needed)::
 
-    uv run python src/uncertain_feedback/data_collection/demo/run_demo.py
+    uv run python src/uncertain_feedback/data_collection/pose_estimation/run_demo.py
 """
 
 # pylint: disable=wrong-import-position
@@ -34,14 +34,14 @@ _SRC = Path(__file__).resolve().parents[4] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from uncertain_feedback.data_collection.show_conversion import (
+from uncertain_feedback.data_collection.common.hml263 import (
+    load_hml_stats,
+    positions_to_hml263,
+)
+from uncertain_feedback.data_collection.pose_estimation.show_conversion import (
     _BG,
     _FG,
     _hml263_to_local_positions,
-)
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
-    load_hml_stats,
-    positions_to_hml263,
 )
 from uncertain_feedback.utils.plot import ArmVisualizer
 
@@ -62,7 +62,7 @@ def main() -> None:
     if not _NPZ.exists():
         raise FileNotFoundError(
             f"{_NPZ} not found.\n"
-            "Run _mhr_inference_worker.py first to produce it (see docstring above)."
+            "Run _inference_worker.py first to produce it (see docstring above)."
         )
 
     print(f"Loading {_NPZ} …")

@@ -35,7 +35,7 @@ from evaluation.approaches.base import Approach
 from evaluation.approaches.cost_gen import COST_GEN_MODES
 from evaluation.benchmarks.base import InteractionBenchmark
 from evaluation.comparison import comparison_table, render_comparison, run_arms
-from evaluation.rig import build_rig
+from uncertain_feedback.planners.rig import build_rig
 from uncertain_feedback.simulated_users import get_persona
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent

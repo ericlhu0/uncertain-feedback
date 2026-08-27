@@ -1,12 +1,12 @@
 """Standalone worker: SAM 3D Body inference + MHR-70 → SMPL-22 direct mapping.
 
 Runs inside the sam-3d-body conda env.  Invoked by
-:class:`~uncertain_feedback.data_collection.mhr_pose_estimator.MhrPoseEstimator`
+:class:`~uncertain_feedback.data_collection.pose_estimation.pose_estimator.MhrPoseEstimator`
 via ``conda run``.
 
 Usage::
 
-    conda run -n sam_3d_body python _mhr_inference_worker.py \\
+    conda run -n sam_3d_body python _inference_worker.py \\
         --image_folder ./frames \\
         --output_path /tmp/smpl_out.npz \\
         --sam_checkpoint_path ./checkpoints/model.ckpt \\
@@ -40,7 +40,7 @@ import torch
 
 # Add sam-3d-body submodule to sys.path before importing its packages.
 # Pass --sam_repo_path at runtime to override the default submodule location.
-_SAM_REPO_DEFAULT = Path(__file__).parent / "sam-3d-body"
+_SAM_REPO_DEFAULT = Path(__file__).parent.parent / "sam-3d-body"
 if str(_SAM_REPO_DEFAULT) not in sys.path:
     sys.path.insert(0, str(_SAM_REPO_DEFAULT))
 
@@ -138,7 +138,7 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-statements
     parser.add_argument(
         "--sam_checkpoint_path",
         default=str(
-            Path(__file__).parent
+            Path(__file__).parent.parent
             / "sam-3d-body"
             / "checkpoints"
             / "sam-3d-body-dinov3"
@@ -147,12 +147,12 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-statements
     )
     parser.add_argument(
         "--sam_repo_path",
-        default=str(Path(__file__).parent / "sam-3d-body"),
+        default=str(Path(__file__).parent.parent / "sam-3d-body"),
     )
     parser.add_argument(
         "--mhr_path",
         default=str(
-            Path(__file__).parent
+            Path(__file__).parent.parent
             / "sam-3d-body"
             / "checkpoints"
             / "sam-3d-body-dinov3"

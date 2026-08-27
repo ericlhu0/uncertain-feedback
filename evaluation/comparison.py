@@ -20,9 +20,9 @@ import pandas as pd
 
 from evaluation.approaches.base import Approach
 from evaluation.episode import run_episode
-from evaluation.rig import EvalRig
 from evaluation.structs import InteractionTask
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.rig import PlanningRig
 from uncertain_feedback.simulated_users import SimulatedUser, first_violation_step
 from uncertain_feedback.utils.plot import ArmVisualizer
 
@@ -45,7 +45,7 @@ TABLE_COLUMNS = (
 
 
 def run_arms(
-    rig: EvalRig,
+    rig: PlanningRig,
     user: SimulatedUser,
     task: InteractionTask,
     approaches: Sequence[Approach],
@@ -70,7 +70,7 @@ def comparison_table(rows: pd.DataFrame, round_index: int = 0) -> pd.DataFrame:
 
 
 def _method_frames(
-    rig: EvalRig,
+    rig: PlanningRig,
     user: SimulatedUser,
     nominal: np.ndarray,
     trigger: int,
@@ -95,7 +95,7 @@ def _method_frames(
 
 
 def render_comparison(
-    rig: EvalRig,
+    rig: PlanningRig,
     user: SimulatedUser,
     goal: np.ndarray,
     out_dir: Path,

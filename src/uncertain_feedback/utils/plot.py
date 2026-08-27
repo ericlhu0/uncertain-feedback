@@ -64,6 +64,7 @@ import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from matplotlib.animation import FuncAnimation
 from matplotlib.axes import Axes
+from matplotlib.collections import PolyCollection
 from matplotlib.colors import Colormap
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3d projection
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -75,6 +76,7 @@ from uncertain_feedback.planners.mpc.kinematics import (
     SmplLeftArmFK,
     q_to_arm_aa,
 )
+from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 
 # pylint: enable=wrong-import-position
 
@@ -1270,6 +1272,166 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     label="original goal",
                 )
             )
+        axes[0].legend(handles=legend_handles, fontsize=7, loc="upper left")
+        fig.tight_layout()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+
+    def render_correction_summary(
+        self,
+        save_path: str | Path,
+        *,
+        arm_traj: np.ndarray,
+        spine3_pos: np.ndarray,
+        spine3_aa: np.ndarray,
+        mesh: SmplMeshCache,
+    ) -> None:
+        """Render one image of a correction: start and end pose, plus the two traces.
+
+        Three orthogonal panels, each carrying the posed SMPL surface where the
+        window starts (arm in orange, rest of the body grey), the left arm where it
+        ends (blue), and the paths the wrist and the elbow sweep between them,
+        arrow-headed at the end. Drawing the motion into a single image rather than
+        a before/after pair puts both poses on shared axes, so a reader compares
+        them directly and can see the route each joint took instead of inferring it
+        from two separately scaled frames; the surface rather than a stick figure,
+        so limb orientation is read off the body instead of guessed from four line
+        segments.
+
+        Args:
+            save_path:  Output image path (.png).
+            arm_traj:   ``(T, 3, 3)`` arm axis-angle over the described window.
+            spine3_pos: ``(3,)`` spine3 world position.
+            spine3_aa:  ``(3,)`` spine3 world axis-angle.
+            mesh:       Mesh generator already fitted to this body. Only the end
+                        pose's left arm is drawn over the start body, the way a
+                        goal ghost is: nothing else moves, and coincident surfaces
+                        would z-fight into speckle.
+        """
+        save_path = Path(save_path)
+        elbow_chain_idx, wrist_chain_idx = 3, 4
+        traj = np.asarray(arm_traj, dtype=np.float64)
+        chain = self.fk.fk_batch(traj, spine3_pos, spine3_aa)  # (T, 5, 3)
+
+        start_verts, end_verts = mesh.preview(chain[0]), mesh.preview(chain[-1])
+        arm_faces = mesh.left_arm_faces
+
+        all_pts = np.concatenate(
+            [start_verts, end_verts[arm_faces.ravel()], chain.reshape(-1, 3)]
+        )
+        mins, maxs = np.min(all_pts, axis=0), np.max(all_pts, axis=0)
+        center = (mins + maxs) / 2.0
+        radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
+        lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
+
+        # Each panel puts `hi` rightward and `vi` up, so the camera sits on
+        # hi x vi: +Z for Front, but -X for Side and -Y for Top, which would leave
+        # the left arm behind the body and the top view under the floor. Flipping
+        # the horizontal axis of those two swaps the handedness, so every panel
+        # looks from + of its remaining axis — the person's front, their left, and
+        # above — and the moving arm is the near one everywhere.
+        def _faces_viewer(view: _OrthoView) -> bool:
+            return (view.hi, view.vi, 3 - view.hi - view.vi) in (
+                (0, 1, 2),
+                (1, 2, 0),
+                (2, 0, 1),
+            )
+
+        # In _ORTHO_VIEWS order, once flipped.
+        viewpoints = ("from the front", "from the person's left", "from above")
+
+        layers = (
+            (start_verts, mesh.faces, (0.74, 0.74, 0.72), 1.0, 1),
+            (start_verts, arm_faces, (1.0, 0.498, 0.055), 1.0, 2),
+            (end_verts, arm_faces, (0.165, 0.471, 0.839), 0.72, 3),
+        )
+
+        traces = (
+            (chain[:, wrist_chain_idx], "#0f9b8e", "wrist path"),
+            (chain[:, elbow_chain_idx], "#7d3ac1", "elbow path"),
+        )
+
+        def _mesh_layer(
+            ax: Axes,
+            vertices: np.ndarray,
+            faces: np.ndarray,
+            rgb: tuple[float, float, float],
+            view: _OrthoView,
+            alpha: float,
+            zorder: int,
+        ) -> None:
+            """Draw one posed surface into a panel, shaded and sorted by depth."""
+            tri = vertices[faces]  # (F, 3, 3)
+            # The axis neither panel axis uses points at the viewer, so a larger
+            # value is nearer: sort ascending to paint back to front, and brighten
+            # with it so the surface reads as a body rather than a flat blob.
+            depth = tri[:, :, 3 - view.hi - view.vi].mean(axis=1)
+            order = np.argsort(depth)
+            shade = 0.62 + 0.38 * (depth[order] - depth.min()) / (
+                float(np.ptp(depth)) or 1.0
+            )
+            ax.add_collection(
+                PolyCollection(
+                    tri[order][:, :, (view.hi, view.vi)],
+                    facecolors=np.clip(np.array(rgb) * shade[:, None], 0.0, 1.0),
+                    edgecolors="none",
+                    alpha=alpha,
+                    zorder=zorder,
+                )
+            )
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        for ax, view, viewpoint in zip(axes, _ORTHO_VIEWS, viewpoints):
+            ax.set_aspect("equal")
+            ax.set_title(f"{view.title} — {viewpoint}", fontsize=9)
+            ax.set_xlabel(view.hl, fontsize=8)
+            ax.set_ylabel(view.vl, fontsize=8)
+            low, high = lims[view.hi]
+            ax.set_xlim(*((low, high) if _faces_viewer(view) else (high, low)))
+            ax.set_ylim(*lims[view.vi])
+            ax.tick_params(labelsize=7)
+
+            for vertices, faces, rgb, alpha, zorder in layers:
+                _mesh_layer(ax, vertices, faces, rgb, view, alpha, zorder)
+
+            for path, color, label in traces:
+                ax.plot(
+                    path[:, view.hi],
+                    path[:, view.vi],
+                    color=color,
+                    alpha=0.95,
+                    linewidth=1.8,
+                    zorder=4,
+                )
+                mid = path[len(path) // 2]
+                ax.annotate(
+                    label.split()[0],
+                    xy=(mid[view.hi], mid[view.vi]),
+                    xytext=(4, 4),
+                    textcoords="offset points",
+                    color=color,
+                    fontsize=7,
+                    zorder=6,
+                )
+                # Arrowhead on the last segment: without it the two poses read as an
+                # unordered pair and the caption could describe the motion backwards.
+                ax.annotate(
+                    "",
+                    xy=(path[-1, view.hi], path[-1, view.vi]),
+                    xytext=(path[-2, view.hi], path[-2, view.vi]),
+                    arrowprops={"arrowstyle": "-|>", "color": color, "lw": 1.8},
+                    zorder=5,
+                )
+
+        legend_handles = [
+            plt.Line2D([0], [0], color="tab:orange", linewidth=6, label="arm now"),
+            plt.Line2D([0], [0], color="#2a78d6", linewidth=6, label="arm at the end"),
+            *(
+                plt.Line2D([0], [0], color=color, linewidth=2, label=label)
+                for _, color, label in traces
+            ),
+        ]
         axes[0].legend(handles=legend_handles, fontsize=7, loc="upper left")
         fig.tight_layout()
         save_path.parent.mkdir(parents=True, exist_ok=True)

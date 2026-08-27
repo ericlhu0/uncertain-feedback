@@ -5,7 +5,6 @@ from __future__ import annotations
 import abc
 from pathlib import Path
 
-from evaluation.rig import EvalRig, cfg_with_goal
 from evaluation.structs import LearnOutcome, RoundContext
 from uncertain_feedback.cost_generation import (
     CostGenerationResult,
@@ -16,6 +15,7 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
 )
+from uncertain_feedback.planners.rig import PlanningRig, cfg_with_goal
 
 COST_GEN_SOURCES = ("chosen", "nominal")
 
@@ -32,14 +32,14 @@ class CostGen(abc.ABC):
         if source not in COST_GEN_SOURCES:
             raise ValueError(f"source must be one of {COST_GEN_SOURCES}.")
         self.source = source
-        self._rig: EvalRig | None = None
+        self._rig: PlanningRig | None = None
         self._base = CompositeTrajectoryCost()
         self._episode_dir = Path(".")
         self._generated: list[GeneratedPythonCost] = []
         self._cost_rounds: list[CostRound] = []
 
     def reset(
-        self, rig: EvalRig, base: CompositeTrajectoryCost, episode_dir: Path
+        self, rig: PlanningRig, base: CompositeTrajectoryCost, episode_dir: Path
     ) -> None:
         """Bind the episode and drop all learned state."""
         self._rig = rig

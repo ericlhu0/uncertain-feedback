@@ -1,7 +1,6 @@
-"""Example script: run the full pipeline and plot a few frames of the result."""
+"""Example script: run the full pipeline and visualize a few frames."""
 
 # pylint: disable=wrong-import-position
-
 from pathlib import Path
 
 import matplotlib
@@ -21,7 +20,7 @@ from uncertain_feedback.utils.plot import ArmVisualizer
 config = MhrToHml263Config(
     mhr_estimator_config=MhrEstimatorConfig(
         sam_checkpoint_path=str(
-            Path(__file__).parent
+            Path(__file__).parent.parent
             / "sam-3d-body"
             / "checkpoints"
             / "sam-3d-body-dinov3"
@@ -40,7 +39,7 @@ frames_to_plot = [0, len(positions) // 2, -1]
 fig = plt.figure(figsize=(5 * len(frames_to_plot), 5))
 for i, t in enumerate(frames_to_plot):
     ax = fig.add_subplot(1, len(frames_to_plot), i + 1, projection="3d")
-    ArmVisualizer.draw_smpl_skeleton(ax, positions[t], title=f"Frame {t}")  # type: ignore[no-untyped-call]
+    ArmVisualizer.draw_smpl_skeleton(ax, positions[t], title=f"Frame {t}")
 plt.tight_layout()
 plt.savefig("smpl_poses.png", dpi=150)
 print("Saved smpl_poses.png")

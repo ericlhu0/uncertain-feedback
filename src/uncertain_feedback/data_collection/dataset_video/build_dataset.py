@@ -5,7 +5,7 @@ training trajectory in the dataset.
 
 Usage::
 
-    uv run python src/uncertain_feedback/data_collection/build_mdm_dataset.py \\
+    uv run python src/uncertain_feedback/data_collection/dataset_video/build_dataset.py \\
         --frames_dir ./frames/ \\
         --labels_json ./frames/labels.json \\
         --output_dir ./my_mdm_dataset/ \\
@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 import shutil
 import tempfile
 from pathlib import Path
@@ -42,42 +41,31 @@ import numpy as np
 import spacy
 from spacy.language import Language
 
-from uncertain_feedback.data_collection.mhr_pose_estimator import MhrEstimatorConfig
-from uncertain_feedback.data_collection.mhr_to_hml263_pipeline import (
+from uncertain_feedback.consts import MDM_ROOT
+from uncertain_feedback.data_collection.common.dataset import (
+    arm_feature_mask,
+    copy_stats,
+    lock_body_to_frame0,
+    write_splits,
+    write_text_file,
+)
+from uncertain_feedback.data_collection.common.hml263 import (
+    load_hml_stats,
+    positions_to_hml263,
+)
+from uncertain_feedback.data_collection.common.paths import VIDEO_DATA_DIR
+from uncertain_feedback.data_collection.pose_estimation.mhr_to_hml263_pipeline import (
     MhrToHml263Config,
     MhrToHml263Pipeline,
     resample_positions,
 )
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
-    load_hml_stats,
-    positions_to_hml263,
+from uncertain_feedback.data_collection.pose_estimation.pose_estimator import (
+    MhrEstimatorConfig,
 )
 
 # Bump whenever the pose-estimation / camera-to-world conversion changes so
 # stale cache entries (e.g. pre-chirality-fix mirrored data) are never reused.
 _CACHE_VERSION = 2
-
-# ---------------------------------------------------------------------------
-# Text annotation helpers
-# ---------------------------------------------------------------------------
-
-
-def _pos_tag(nlp: Language, caption: str) -> str:
-    """Return space-separated ``word/POS`` tokens for *caption* using spaCy."""
-    doc = nlp(caption)
-    return " ".join(f"{token.text}/{token.pos_}" for token in doc)
-
-
-def _write_text_file(path: Path, captions: list[str], nlp: Language) -> None:
-    """Write one MDM-format text annotation file.
-
-    Each line has the format ``caption#tokens#0.0#0.0`` where ``tokens`` is a
-    space-separated sequence of ``word/POSTAG`` pairs and both timestamps are
-    ``0.0`` to indicate the label covers the full motion clip.
-    """
-    lines = [f"{cap}#{_pos_tag(nlp, cap)}#0.0#0.0" for cap in captions]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
 
 # ---------------------------------------------------------------------------
 # Motion resampling helper
@@ -107,36 +95,6 @@ def _clamp_positions_length(positions: np.ndarray) -> tuple[np.ndarray, bool]:
         return positions, False
     target = _MDM_MIN_FRAMES + 1 if n < _MDM_MIN_FRAMES + 1 else _MDM_MAX_FRAMES + 1
     return resample_positions(positions, target), True
-
-
-# ---------------------------------------------------------------------------
-# Body-locking helpers
-# ---------------------------------------------------------------------------
-
-# SMPL-22 left arm joint indices (0-indexed): left_shoulder=16, left_elbow=18, left_wrist=20
-_L_ARM_JOINTS = {16, 18, 20}
-
-
-def _arm_feature_mask() -> np.ndarray:
-    """Return a (263,) bool mask that is True for left-arm HML263 features."""
-    mask = np.zeros(263, dtype=bool)
-    for j in _L_ARM_JOINTS:
-        mask[4 + (j - 1) * 3 : 4 + (j - 1) * 3 + 3] = True  # positions
-        mask[67 + (j - 1) * 6 : 67 + (j - 1) * 6 + 6] = True  # rotations
-        mask[193 + j * 3 : 193 + j * 3 + 3] = True  # velocities
-    return mask
-
-
-def _lock_body_to_frame0(hml263: np.ndarray) -> np.ndarray:
-    """Copy frame-0 values of all non-arm features to every frame.
-
-    Makes the training data fully consistent with fixed-body inference: the
-    model only ever sees a static body with varying left-arm motion.
-    """
-    arm_mask = _arm_feature_mask()
-    result = hml263.copy()
-    result[:, ~arm_mask] = result[0:1, ~arm_mask]
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -173,48 +131,6 @@ def _copy_frame_segment(
 # ---------------------------------------------------------------------------
 # Dataset builder
 # ---------------------------------------------------------------------------
-
-
-def write_splits(
-    output_dir: Path,
-    ids: list[str],
-    val_fraction: float,
-    test_fraction: float,
-    seed: int = 42,
-) -> None:
-    """Shuffle *ids* into ``train.txt`` / ``val.txt`` / ``test.txt``.
-
-    MDM asserts ``len(dataset) > 1``, so val and test are topped up from train
-    whenever the requested fractions leave them with fewer than 2 IDs.
-    """
-    rng = random.Random(seed)
-    shuffled = list(ids)
-    rng.shuffle(shuffled)
-
-    n_val = max(1, round(len(shuffled) * val_fraction)) if val_fraction > 0 else 0
-    n_test = max(1, round(len(shuffled) * test_fraction)) if test_fraction > 0 else 0
-    # Ensure train set is never empty
-    n_val = min(n_val, len(shuffled) - 1)
-    n_test = min(n_test, len(shuffled) - n_val - 1)
-
-    val_ids = shuffled[:n_val]
-    test_ids = shuffled[n_val : n_val + n_test]
-    train_ids = shuffled[n_val + n_test :]
-
-    if len(val_ids) < 2:
-        val_ids = (val_ids + train_ids * 2)[:2]
-    if len(test_ids) < 2:
-        test_ids = (test_ids + train_ids * 2)[:2]
-
-    for split_name, split_ids in [
-        ("train", train_ids),
-        ("val", val_ids),
-        ("test", test_ids),
-    ]:
-        (output_dir / f"{split_name}.txt").write_text(
-            "\n".join(split_ids) + "\n", encoding="utf-8"
-        )
-        print(f"  {split_name}: {len(split_ids)} motion(s)")
 
 
 def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
@@ -270,7 +186,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
         cache_dir = frames_dir.parent / "mdm_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    arm_mask = _arm_feature_mask()
+    arm_mask = arm_feature_mask()
     hml_std = np.asarray(hml_std, dtype=np.float32)
     successful_ids: list[str] = []
     motion_id = 0
@@ -351,14 +267,14 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                     positions, hml_mean, hml_std, normalize=False
                 )  # (N-1, 263) raw HML263
                 if fix_body:
-                    hml263 = _lock_body_to_frame0(hml263)
+                    hml263 = lock_body_to_frame0(hml263)
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"  ✗ post-processing failed ({exc}) — skipping")
                 motion_id -= 1
                 continue
 
             np.save(output_dir / "new_joint_vecs" / f"{id_str}.npy", hml263)
-            _write_text_file(output_dir / "texts" / f"{id_str}.txt", captions, nlp)
+            write_text_file(output_dir / "texts" / f"{id_str}.txt", captions, nlp)
             resample_note = " (resampled)" if resampled else ""
             print(f"  ✓ frames={n_frames}, hml263={hml263.shape}{resample_note}")
             successful_ids.append(id_str)
@@ -376,7 +292,7 @@ def build_dataset(  # pylint: disable=too-many-locals,too-many-statements
                 ).astype(np.float32)
                 hml263_aug[:, arm_mask] += noise_norm * noise_std * hml_std[arm_mask]
                 np.save(output_dir / "new_joint_vecs" / f"{aug_id_str}.npy", hml263_aug)
-                _write_text_file(
+                write_text_file(
                     output_dir / "texts" / f"{aug_id_str}.txt", captions, nlp
                 )
                 successful_ids.append(aug_id_str)
@@ -401,36 +317,28 @@ def main() -> None:  # pylint: disable=too-many-locals
     parser = argparse.ArgumentParser(
         description="Build an MDM-compatible dataset from labeled motion frame sequences."
     )
-    _here = Path(__file__).parent
     parser.add_argument(
         "--frames_dir",
-        default=str(_here / "data" / "frames"),
-        help="Directory containing per-clip frame subdirectories (default: data_collection/frames/).",
+        default=str(VIDEO_DATA_DIR / "frames"),
+        help="Per-clip frame subdirectories (default: data/dataset_video/frames/).",
     )
     parser.add_argument(
         "--labels_json",
-        default=str(_here / "data" / "frames" / "labels.json"),
-        help="Path to labels.json produced by the labeler (default: data_collection/frames/labels.json).",
+        default=str(VIDEO_DATA_DIR / "frames" / "labels.json"),
+        help="labels.json from the labeler (default: data/dataset_video/frames/labels.json).",
     )
     parser.add_argument(
         "--output_dir", required=True, help="Directory to write the dataset into."
     )
     parser.add_argument(
         "--hml_stats_dir",
-        default=str(
-            Path(__file__).parent.parent
-            / "motion_generators"
-            / "mdm"
-            / "motion-diffusion-model"
-            / "dataset"
-            / "HumanML3D"
-        ),
+        default=str(MDM_ROOT / "motion-diffusion-model" / "dataset" / "HumanML3D"),
         help="Directory containing HumanML3D Mean.npy and Std.npy.",
     )
     parser.add_argument(
         "--sam_checkpoint_path",
         default=str(
-            Path(__file__).parent
+            Path(__file__).parent.parent
             / "sam-3d-body"
             / "checkpoints"
             / "sam-3d-body-dinov3"
@@ -441,7 +349,7 @@ def main() -> None:  # pylint: disable=too-many-locals
     parser.add_argument(
         "--mhr_path",
         default=str(
-            Path(__file__).parent
+            Path(__file__).parent.parent
             / "sam-3d-body"
             / "checkpoints"
             / "sam-3d-body-dinov3"
@@ -546,14 +454,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         cache_dir=cache_dir,
     )
 
-    # Copy normalization stats
-    for stat_file in ("Mean.npy", "Std.npy"):
-        src = hml_stats_dir / stat_file
-        if src.exists():
-            shutil.copy(src, output_dir / stat_file)
-            print(f"Copied {stat_file}")
-        else:
-            print(f"Warning: {src} not found — {stat_file} not copied")
+    copy_stats(hml_stats_dir, output_dir)
 
 
 if __name__ == "__main__":

@@ -2,20 +2,20 @@
 
 Orchestrates the full data-collection pipeline:
 
-1. :class:`~uncertain_feedback.data_collection.mhr_pose_estimator.MhrPoseEstimator`
+1. :class:`~uncertain_feedback.data_collection.pose_estimation.pose_estimator.MhrPoseEstimator`
    runs SAM 3D Body inference + MHR→SMPL conversion (inside the ``sam-3d-body``
    conda env via subprocess).
-2. :func:`~uncertain_feedback.data_collection.smpl_to_hml263.positions_to_hml263`
+2. :func:`~uncertain_feedback.data_collection.common.hml263.positions_to_hml263`
    converts world-space joint positions to the 263-dim HumanML3D feature vector
    via the official HumanML3D ``process_file``.
 
 Example::
 
     from pathlib import Path
-    from uncertain_feedback.data_collection.mhr_to_hml263_pipeline import (
+    from uncertain_feedback.data_collection.pose_estimation.mhr_to_hml263_pipeline import (
         MhrToHml263Config, MhrToHml263Pipeline,
     )
-    from uncertain_feedback.data_collection.mhr_pose_estimator import MhrEstimatorConfig
+    from uncertain_feedback.data_collection.pose_estimation.pose_estimator import MhrEstimatorConfig
 
     config = MhrToHml263Config(
         mhr_estimator_config=MhrEstimatorConfig(
@@ -67,13 +67,13 @@ def _resample_smpl_positions(
     return resample_positions(positions, n_out)
 
 
-from uncertain_feedback.data_collection.mhr_pose_estimator import (
-    MhrEstimatorConfig,
-    MhrPoseEstimator,
-)
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
+from uncertain_feedback.data_collection.common.hml263 import (
     load_hml_stats,
     positions_to_hml263,
+)
+from uncertain_feedback.data_collection.pose_estimation.pose_estimator import (
+    MhrEstimatorConfig,
+    MhrPoseEstimator,
 )
 
 

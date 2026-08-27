@@ -23,7 +23,6 @@ from evaluation.approaches.grounders.base import (
     ClusterSelector,
     Grounder,
 )
-from evaluation.rig import EvalRig
 from evaluation.structs import GroundingResult, InteractionTask
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
@@ -37,6 +36,7 @@ from uncertain_feedback.planners.mpc.kinematics import (
     WRIST_CHAIN_IDX,
     q_to_arm_aa,
 )
+from uncertain_feedback.planners.rig import PlanningRig
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
@@ -103,7 +103,7 @@ def anatomical_context_text(
     nominal_plan: np.ndarray,
     q_feedback: np.ndarray,
     goal: np.ndarray,
-    rig: EvalRig,
+    rig: PlanningRig,
     rows: int = 15,
 ) -> str:
     """The trajectory context this grounder interprets, in anatomical space.
@@ -216,7 +216,7 @@ class LlmTrajectoryGrounder(Grounder):
 
     def reset(
         self,
-        rig: EvalRig,
+        rig: PlanningRig,
         user: SimulatedUser,
         task: InteractionTask,
         episode_dir: Path,

@@ -2,7 +2,7 @@
 
 Run this once before launching the labeler::
 
-    uv run python src/uncertain_feedback/data_collection/extract_all_frames.py \\
+    uv run python src/uncertain_feedback/data_collection/dataset_video/extract_all_frames.py \\
         --videos_dir ./recordings/ \\
         --frames_dir ./frames/
 
@@ -19,7 +19,10 @@ import argparse
 import json
 from pathlib import Path
 
-from uncertain_feedback.data_collection.video_to_frames import extract_frames
+from uncertain_feedback.data_collection.common.paths import VIDEO_DATA_DIR
+from uncertain_feedback.data_collection.dataset_video.video_to_frames import (
+    extract_frames,
+)
 
 _VIDEO_EXTENSIONS = {".mov", ".mp4", ".avi", ".mkv", ".webm", ".m4v"}
 
@@ -66,16 +69,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Extract all frames from every video in a directory at native FPS."
     )
-    _here = Path(__file__).parent
     parser.add_argument(
         "--videos_dir",
-        default=str(_here / "data" / "videos"),
-        help="Directory containing source video files (default: data_collection/data/videos/).",
+        default=str(VIDEO_DATA_DIR / "videos"),
+        help="Source video files (default: data/dataset_video/videos/).",
     )
     parser.add_argument(
         "--frames_dir",
-        default=str(_here / "data" / "frames"),
-        help="Directory to write per-video frame folders into (default: data_collection/data/frames/).",
+        default=str(VIDEO_DATA_DIR / "frames"),
+        help="Where per-video frame folders go (default: data/dataset_video/frames/).",
     )
     args = parser.parse_args()
 

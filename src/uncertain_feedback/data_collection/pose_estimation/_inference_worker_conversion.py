@@ -2,16 +2,16 @@
 
 NOTE: This version requires ``pymomentum`` (Meta-internal) and the MHR repo to be
 installed in the conda env.  It is kept as a reference for when the full Conversion
-class is available.  For the pymomentum-free path, use ``_mhr_inference_worker.py``
+class is available.  For the pymomentum-free path, use ``_inference_worker.py``
 instead.
 
 Runs inside the sam-3d-body conda env.  Invoked by
-:class:`~uncertain_feedback.data_collection.mhr_pose_estimator.MhrPoseEstimator`
+:class:`~uncertain_feedback.data_collection.pose_estimation.pose_estimator.MhrPoseEstimator`
 via ``conda run``.
 
 Usage::
 
-    conda run -n sam-3d-body python _mhr_inference_worker_conversion.py \\
+    conda run -n sam-3d-body python _inference_worker_conversion.py \\
         --image_folder ./frames \\
         --output_path /tmp/smpl_out.npz \\
         --sam_checkpoint_path ./checkpoints/model.ckpt \\
@@ -49,11 +49,11 @@ import torch
 
 # Add sam-3d-body submodule and MHR repo to sys.path before importing their packages.
 # Pass --sam_repo_path / --mhr_repo_path at runtime to override the defaults.
-_SAM_REPO_DEFAULT = Path(__file__).parent / "sam-3d-body"
+_SAM_REPO_DEFAULT = Path(__file__).parent.parent / "sam-3d-body"
 if str(_SAM_REPO_DEFAULT) not in sys.path:
     sys.path.insert(0, str(_SAM_REPO_DEFAULT))
 
-_MHR_REPO_DEFAULT = Path(__file__).parent / "MHR"
+_MHR_REPO_DEFAULT = Path(__file__).parent.parent / "MHR"
 _MHR_CONVERSION_DEFAULT = _MHR_REPO_DEFAULT / "tools" / "mhr_smpl_conversion"
 for _p in (_MHR_CONVERSION_DEFAULT, _MHR_REPO_DEFAULT):
     if str(_p) not in sys.path:
@@ -101,15 +101,15 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-statements
     parser.add_argument("--smpl_model_path", required=True)
     parser.add_argument(
         "--mhr_repo_path",
-        default=str(Path(__file__).parent / "MHR"),
+        default=str(Path(__file__).parent.parent / "MHR"),
     )
     parser.add_argument(
         "--sam_repo_path",
-        default=str(Path(__file__).parent / "sam-3d-body"),
+        default=str(Path(__file__).parent.parent / "sam-3d-body"),
     )
     parser.add_argument(
         "--mhr_path",
-        default=str(Path(__file__).parent / "MHR" / "assets" / "mhr_model.pt"),
+        default=str(Path(__file__).parent.parent / "MHR" / "assets" / "mhr_model.pt"),
     )
     parser.add_argument("--bbox_thresh", type=float, default=0.8)
     parser.add_argument("--detector_name", default="vitdet")

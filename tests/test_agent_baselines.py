@@ -18,9 +18,9 @@ from evaluation.approaches.grounders.llm_trajectory import (
 )
 from evaluation.benchmarks.base import InteractionBenchmark
 from evaluation.episode import run_episode
-from evaluation.rig import EvalRig, build_rig
 from evaluation.structs import InteractionTask
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.rig import PlanningRig, build_rig
 from uncertain_feedback.simulated_users import get_persona
 
 _SMOKE_MPC = (
@@ -57,7 +57,7 @@ class _Selector:
         return min(candidates), 1.0
 
 
-def _smoke_task(rig: EvalRig) -> InteractionTask:
+def _smoke_task(rig: PlanningRig) -> InteractionTask:
     bench = InteractionBenchmark(
         name="smoke",
         personas=[_PERSONA],
@@ -69,7 +69,7 @@ def _smoke_task(rig: EvalRig) -> InteractionTask:
 
 
 def _bind(
-    grounder: LlmTrajectoryGrounder, rig: EvalRig, tmp_path: Path, *responses: str
+    grounder: LlmTrajectoryGrounder, rig: PlanningRig, tmp_path: Path, *responses: str
 ) -> _FakeModel:
     grounder.reset(rig, get_persona(_PERSONA), _smoke_task(rig), tmp_path)
     model = _FakeModel(*responses)
@@ -77,20 +77,20 @@ def _bind(
     return model
 
 
-def _nominal_plan(rig: EvalRig, n_frames: int = 21) -> np.ndarray:
+def _nominal_plan(rig: PlanningRig, n_frames: int = 21) -> np.ndarray:
     """A stand-in for the harness's nominal continuation from ``rig.q0``."""
     ramp = np.linspace(0.0, 1.0, n_frames)[:, None]
     delta = np.array([0.0, 0.0, 0.0, 0.1, 0.2, -0.1, 0.3])
     return np.asarray(rig.q0, dtype=np.float64)[None] + ramp * delta
 
 
-def _positions(rig: EvalRig, q: np.ndarray) -> np.ndarray:
+def _positions(rig: PlanningRig, q: np.ndarray) -> np.ndarray:
     return rig.fk.fk_batch(
         q_to_arm_aa(q, rig.fk.elbow_hinge_axis), rig.spine3_pos, rig.spine3_aa
     )
 
 
-def _position_rows(rig: EvalRig, q: np.ndarray) -> np.ndarray:
+def _position_rows(rig: PlanningRig, q: np.ndarray) -> np.ndarray:
     arm = _positions(rig, q)
     return np.concatenate([arm[:, _ELBOW], arm[:, _WRIST]], axis=1)
 
@@ -194,9 +194,7 @@ def test_agent_waypoint_episode_smoke(tmp_path: Path) -> None:
     """The episode loop runs end-to-end with a stubbed interpretation call."""
     rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
     grounder = LlmTrajectoryGrounder(n_waypoints=1, n_frames=8)
-    approach = Approach(
-        name="agent_waypoint", grounder=grounder, cost_gen=NoCostGen()
-    )
+    approach = Approach(name="agent_waypoint", grounder=grounder, cost_gen=NoCostGen())
     target = np.asarray(rig.q0, dtype=np.float64).copy()
     target[3:6] += 0.2
     rows = _position_rows(rig, target[None]).tolist()

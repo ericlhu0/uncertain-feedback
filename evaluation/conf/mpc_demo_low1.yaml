@@ -10,7 +10,7 @@
 # flexion/abduction scaled to 0.30. Every joint stays inside
 # DEFAULT_ARM_JOINT_LIMITS.
 #
-# Why this is the default for evaluation/generate_correction_clips.py: the longer
+# Why this is the default for dataset_auto_correction/generate.py: the longer
 # reach (165 frames at the clip pipeline's max_angle_delta 0.00125, vs base1's
 # shorter one) widens the usable trigger window to (12, 100) and evens out which
 # anatomical feature the sampled bound lands on — base1's short reach skewed hard

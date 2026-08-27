@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from uncertain_feedback.consts import MDM_ROOT
-from uncertain_feedback.data_collection.smpl_to_hml263 import positions_to_hml263
+from uncertain_feedback.data_collection.common.hml263 import positions_to_hml263
 from uncertain_feedback.uncertainty.clustering.base import (
     TrajectoryClusterer,
     agglomerative_labels,

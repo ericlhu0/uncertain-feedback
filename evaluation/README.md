@@ -78,8 +78,6 @@ built on the per-stage façades:
   attribute → verbalize → ground → simulated-user choice → learn → continue,
   re-triggering until resolution or the round cap. Learned costs persist
   across a task's goal sequence.
-- `rig.py` — loads the `MpcRunConfig` and derives the planning context;
-  skips the MDM load for approaches that do not need it.
 - `metrics.py` / `structs.py` — per-round records and shared dataclasses.
 - `run_single_experiment.py` — hydra entry point; writes `results.csv`
   (per-round) and `episodes.csv` (per-episode) plus per-round artifacts.
@@ -100,6 +98,11 @@ built on the per-stage façades:
   and `mpc_demo_base1.yaml` (the demo runner's `base1` initial pose and
   `hits limit 1` goal, keeping the MDM `pose:` so the system and the baselines
   can share one rig).
+
+The planning rig itself lives outside this package: `build_rig` /
+`PlanningRig` in `uncertain_feedback.planners.rig` load the `MpcRunConfig` and
+derive the planning context, skipping the MDM load for approaches that do not
+need it.
 
 **Comparing baselines against the system arms.** `build_rig` applies `arm:` over
 the pose file's arm when the generator is loaded (the precedence

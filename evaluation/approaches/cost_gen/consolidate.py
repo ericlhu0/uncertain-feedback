@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from evaluation.approaches.cost_gen.base import CostGen
-from evaluation.rig import EvalRig
 from evaluation.structs import LearnOutcome, RoundContext
 from uncertain_feedback.cost_generation import (
     CombineCostGenerator,
@@ -15,6 +14,7 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
 )
+from uncertain_feedback.planners.rig import PlanningRig
 
 
 class ConsolidateCostGen(CostGen):
@@ -25,7 +25,7 @@ class ConsolidateCostGen(CostGen):
         self._unified: GeneratedPythonCost | None = None
 
     def reset(
-        self, rig: EvalRig, base: CompositeTrajectoryCost, episode_dir: Path
+        self, rig: PlanningRig, base: CompositeTrajectoryCost, episode_dir: Path
     ) -> None:
         super().reset(rig, base, episode_dir)
         self._unified = None

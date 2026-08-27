@@ -9,7 +9,7 @@ Usage
 -----
 Step 1 – produce the positions npz with the inference worker::
 
-    uv run python _mhr_inference_worker.py \\
+    uv run python _inference_worker.py \\
         --image_folder ./frames \\
         --output_path /tmp/smpl_out.npz \\
         --sam_checkpoint_path \\
@@ -39,7 +39,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
+from uncertain_feedback.data_collection.common.hml263 import (
     load_hml_stats,
     positions_to_hml263,
 )
@@ -107,7 +107,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         "--npz_path",
         required=True,
         type=Path,
-        help="npz produced by _mhr_inference_worker.py",
+        help="npz produced by _inference_worker.py",
     )
     parser.add_argument(
         "--hml_stats_dir",

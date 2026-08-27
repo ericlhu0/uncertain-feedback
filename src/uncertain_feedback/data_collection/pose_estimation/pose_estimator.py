@@ -1,6 +1,6 @@
 """Subprocess bridge: invoke the MHR inference worker inside the sam-3d-body conda env.
 
-The worker script ``_mhr_inference_worker.py`` lives in the same package directory
+The worker script ``_inference_worker.py`` lives in the same package directory
 and runs as a standalone Python script inside the ``sam-3d-body`` conda environment,
 which has SAM 3D Body installed.  No MHR repo or SMPL model is required — joint
 positions are obtained by mapping ``pred_keypoints_3d`` (MHR-70) directly to
@@ -8,7 +8,7 @@ approximate SMPL-22 positions.
 
 Example::
 
-    from uncertain_feedback.data_collection.mhr_pose_estimator import (
+    from uncertain_feedback.data_collection.pose_estimation.pose_estimator import (
         MhrEstimatorConfig, MhrPoseEstimator,
     )
 
@@ -49,7 +49,7 @@ class MhrEstimatorConfig:  # pylint: disable=too-few-public-methods
     """
 
     sam_repo_path: Path = field(
-        default_factory=lambda: Path(__file__).parent / "sam-3d-body"
+        default_factory=lambda: Path(__file__).parent.parent / "sam-3d-body"
     )
     conda_env: str = "sam_3d_body"
     sam_checkpoint_path: str = ""
@@ -72,7 +72,7 @@ class MhrPoseEstimator:  # pylint: disable=too-few-public-methods
 
     def __init__(self, config: MhrEstimatorConfig) -> None:
         self._config = config
-        self._worker_path = Path(__file__).parent / "_mhr_inference_worker.py"
+        self._worker_path = Path(__file__).parent / "_inference_worker.py"
         if not self._worker_path.exists():
             raise FileNotFoundError(f"Worker script not found: {self._worker_path}")
 

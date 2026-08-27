@@ -2,13 +2,13 @@
 
 Usage::
 
-    uv run python src/uncertain_feedback/data_collection/video_to_frames.py \\
+    uv run python src/uncertain_feedback/data_collection/dataset_video/video_to_frames.py \\
         --video_path ./recording.mov \\
         --output_dir ./video_frames \\
         [--ext jpg]
 
 Every frame is extracted at the video's native FPS.
-The output folder can be passed directly to ``_mhr_inference_worker.py`` via
+The output folder can be passed directly to ``pose_estimation/_inference_worker.py`` via
 ``--image_folder``.
 """
 

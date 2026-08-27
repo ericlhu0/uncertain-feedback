@@ -3,11 +3,11 @@
 Run ``extract_all_frames.py`` first to produce a directory of frame folders,
 then start this server against that directory::
 
-    uv run python src/uncertain_feedback/data_collection/extract_all_frames.py \\
+    uv run python src/uncertain_feedback/data_collection/dataset_video/extract_all_frames.py \\
         --videos_dir ./recordings/ \\
         --frames_dir ./frames/
 
-    uv run python src/uncertain_feedback/data_collection/labeler.py \\
+    uv run python src/uncertain_feedback/data_collection/dataset_video/labeler.py \\
         --frames_dir ./frames/ \\
         [--port 6767]
 
@@ -39,6 +39,8 @@ from typing import Any
 import flask
 from flask import Flask, Response, jsonify, render_template_string, request
 from flask.typing import ResponseReturnValue
+
+from uncertain_feedback.data_collection.common.paths import VIDEO_DATA_DIR
 
 app = Flask(__name__)
 
@@ -915,8 +917,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--frames_dir",
-        default=str(Path(__file__).parent / "data" / "frames"),
-        help="Directory of per-clip frame subdirectories (default: data_collection/frames/).",
+        default=str(VIDEO_DATA_DIR / "frames"),
+        help="Per-clip frame subdirectories (default: data/dataset_video/frames/).",
     )
     parser.add_argument(
         "--port", type=int, default=6767, help="Port to serve on (default: 6767)."

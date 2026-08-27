@@ -1,20 +1,26 @@
 """Flask web app for captioning a generated correction-clip set.
 
 The labeling step between stage (a) and stage (b) of the correction-clip
-pipeline. ``generate_correction_clips.py`` writes a manifest whose ``caption``
-fields are empty; this serves each run's motion next to the bound that produced it
-and writes typed captions straight back into that manifest, so
-``build_correction_dataset.py`` can read it with no further hand-editing::
+pipeline. ``generate.py`` writes a manifest whose ``captions`` lists are empty;
+this serves each run's motion next to the bound that produced it and writes typed
+captions straight back into that manifest, so ``build_dataset.py`` can read it
+with no further hand-editing::
 
-    uv run python evaluation/generate_correction_clips.py \\
-        --out_dir outputs/correction_clips --n_runs 32
+    uv run python \\
+        src/uncertain_feedback/data_collection/dataset_auto_correction/generate.py
 
-    uv run python evaluation/label_correction_clips.py \\
-        [--clips_dir outputs/correction_clips] [--port 6768]
+    uv run python \\
+        src/uncertain_feedback/data_collection/dataset_auto_correction/label.py \\
+        [--clips_dir <clip set>] [--port 6768]
 
 Then open http://localhost:6768 (SSH-tunnel:
 ``ssh -L 6768:localhost:6768 user@host``). Captions save on blur; runs left blank
 are skipped by stage (b).
+
+A run holds *several* captions — ``+ caption`` adds a row, ``✕`` drops one — and
+stage (b) writes them as the lines of that clip's text file, which the humanml
+loader samples one of per epoch. Several phrasings of one correction therefore
+train as one motion, not as duplicates of it.
 
 Each launch forks its own session directory off the clip set
 (``<clips_dir>/session_<timestamp>/``, see :func:`new_session_dir`) and labels
@@ -24,11 +30,28 @@ and pass several directories to stage (b) to train on them together.
 
 Each run animates in three orthogonal projections drawn in the browser from the
 trajectories on disk — stage (a) writes no video, so a clip set stays a few hundred
-KB. Playback covers the *whole* story, walking the naive rollout from frame 0 to
-the trigger and then into the corrected window, with the transition marked on the
-scrubber and in the wrist trail. Reads only ``manifest.json``, ``naive.npy``,
-``geometry.npz`` and the per-run ``clip.npy``, so it needs neither the MDM
-environment nor a GPU.
+KB. Playback covers the *whole* story, walking that run's naive rollout from frame 0
+to the trigger and then into the corrected window, with the transition marked on the
+scrubber and in the wrist trail. Reads only ``manifest.json``, ``geometry.npz`` and
+the per-run ``naive.npy`` / ``clip.npy``, so it needs neither the MDM environment
+nor a GPU.
+
+**Draft caption** hands the first sentence to a VLM: the server renders *one* image
+of the selected window — the arm where it starts, the arm where it ends, and the
+paths the wrist and elbow sweep between them — shows it to ``llm_cost.model``, and
+appends the reply as a new caption row for the
+labeler to edit or drop. The number beside the button is how many drafts one click
+asks for: they come back from *one* completion, one per line, so the model can make
+them differ on purpose rather than by sampling noise
+(:data:`~uncertain_feedback.data_collection.dataset_auto_correction.captioning.DRAFT_N_INSTRUCTION`
+asks it to vary both wording and level of abstraction). The prompt behind them is
+editable in the *Draft caption prompt* panel, which starts at
+:data:`~uncertain_feedback.data_collection.dataset_auto_correction.captioning.DRAFT_PROMPT`
+and is stored per session as the manifest's ``caption_prompt``. It is the only part of this tool that reaches the network, and
+it needs ``OPENAI_API_KEY`` in the environment.
+
+``autolabel.py`` runs that same draft over a whole clip set with no human in the
+loop; both call :mod:`.captioning`, so the two label sets are drawn the same way.
 """
 
 from __future__ import annotations
@@ -37,14 +60,22 @@ import argparse
 import json
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import flask
 import numpy as np
 from flask import Flask, jsonify, render_template_string, request
 from flask.typing import ResponseReturnValue
 
-from evaluation.correction_clips import (
+from uncertain_feedback.data_collection.common.paths import DEFAULT_CLIP_SET
+from uncertain_feedback.data_collection.dataset_auto_correction.captioning import (
+    DRAFT_PROMPT,
+    MAX_DRAFTS,
+    caption_model,
+    caption_prompt_from,
+    draft_captions,
+)
+from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
     MAX_WINDOW,
     MIN_WINDOW,
     ClipSource,
@@ -58,11 +89,14 @@ from uncertain_feedback.planners.mpc.kinematics import (
     SMPL_BONE_PAIRS_22,
     SmplLeftArmFK,
 )
+from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
+
+if TYPE_CHECKING:
+    from uncertain_feedback.llm.openai_model import OpenAIModel
 
 app = Flask(__name__)
 
-# Relative to the repo root, which is where every entry point is run from.
-DEFAULT_CLIPS_DIR = "outputs/correction_clips"
+DEFAULT_CLIPS_DIR = DEFAULT_CLIP_SET
 
 # The 5-joint arm chain fk() returns is sequential:
 # [spine3, left_collar, left_shoulder, left_elbow, left_wrist].
@@ -104,7 +138,12 @@ def _save_manifest(manifest: dict[str, Any]) -> None:
 
 _GEN_LOCK = threading.Lock()
 _FILE_LOCK = threading.Lock()
+# Draft caption renders through matplotlib and then waits on the network, so its
+# own lock keeps concurrent clicks from interleaving renders or piling up calls.
+_SUGGEST_LOCK = threading.Lock()
 _SOURCE: list[ClipSource] = []
+_MODEL: list[OpenAIModel] = []
+_MESH: list[SmplMeshCache] = []
 
 
 def _source() -> ClipSource:
@@ -112,6 +151,44 @@ def _source() -> ClipSource:
     if not _SOURCE:
         _SOURCE.append(clip_source_from_dir(_clips_dir()))
     return _SOURCE[0]
+
+
+def _row_captions(row: dict[str, Any]) -> list[str]:
+    """A run's captions; rows captioned before the list existed hold one string."""
+    if "captions" in row:
+        return [str(c) for c in row["captions"]]
+    return [c for c in [str(row.get("caption", "")).strip()] if c]
+
+
+def _mesh() -> SmplMeshCache:
+    """The clip set's body as a posable SMPL mesh, fitted on first use.
+
+    Fitting the torso is a few seconds of optimization and the body never
+    changes within a clip set, so the first Draft caption pays for it and the
+    rest reuse it.
+    """
+    if not _MESH:
+        _MESH.append(SmplMeshCache(_geometry()["body_pos"]))
+    return _MESH[0]
+
+
+def _caption_prompt() -> str:
+    """This session's Draft caption prompt: the labeler's, else the stock one."""
+    return caption_prompt_from(_clips_dir())
+
+
+def _caption_model() -> OpenAIModel:
+    """The lazily-built VLM behind Draft caption; needs ``OPENAI_API_KEY``.
+
+    Built on the first click rather than at startup, so a labeling session that
+    never drafts a caption never constructs the OpenAI client.
+    """
+    if not _MODEL:
+        model = _source().run_cfg.llm_cost.model
+        if model is None:
+            raise ValueError("Draft caption needs llm_cost.model in the planner YAML.")
+        _MODEL.append(caption_model(model))
+    return _MODEL[0]
 
 
 def _ensure_run(index: int) -> dict[str, Any] | None:
@@ -144,6 +221,7 @@ def _ensure_run(index: int) -> dict[str, Any] | None:
 
 def _prefetch(index: int) -> None:
     """Warm run ``index`` in the background so Next lands instantly."""
+
     def work() -> None:
         with app.app_context():
             _ensure_run(index)
@@ -235,6 +313,16 @@ _PAGE = """
              border-radius:6px; resize:vertical; min-height:58px; color:var(--ink); }
   textarea:focus { outline:2px solid var(--accent); outline-offset:-1px;
                    border-color:transparent; }
+  .caprow { display:flex; align-items:flex-start; gap:8px; }
+  .caprow textarea { min-height:44px; }
+  .drop { margin-top:12px; color:var(--muted); padding:5px 9px; }
+  .drop:hover:not(:disabled) { border-color:var(--after); color:var(--after); }
+  .hint { color:var(--muted); font-size:12px; }
+  #ndraft { width:48px; font:13px inherit; padding:5px 6px; color:var(--ink);
+            border:1px solid var(--line); border-radius:6px; }
+  details.prompt { margin-top:14px; }
+  details.prompt summary { color:var(--muted); font-size:12.5px; cursor:pointer; }
+  details.prompt textarea { min-height:104px; font-size:13px; }
   .nav { display:flex; align-items:center; gap:10px; margin-top:12px; }
   .status { color:var(--muted); font-size:12px; }
   .status.saved { color:var(--accent); }
@@ -288,20 +376,39 @@ _PAGE = """
       <span><i style="background:#eb6834"></i>rest of the rollout (context)</span>
       <span><i style="background:#e34948;height:8px;width:8px;border-radius:50%"></i>goal</span>
     </div>
-    <textarea id="caption"
-      placeholder="e.g. raise my arm without twisting my shoulder inward"></textarea>
+    <div id="captions"></div>
+    <div class="nav">
+      <button id="addcap">+ caption</button>
+      <span class="hint">each caption becomes one line of this clip's text file</span>
+    </div>
     <div class="nav">
       <button id="prev">← Prev</button>
       <button id="next" class="primary">Next →</button>
+      <button id="draft">Draft caption</button>
+      <input type="number" id="ndraft" min="1" max="5" value="1"
+             title="drafts to add per click">
       <span id="busy">planning the next correction…</span>
       <span class="status" id="status"></span>
     </div>
+    <details class="prompt">
+      <summary>Draft caption prompt</summary>
+      <textarea id="prompt">{{ caption_prompt }}</textarea>
+      <div class="nav"><button id="resetprompt">restore default</button>
+        <span class="hint">sent with the two rendered poses; saved with this session</span>
+      </div>
+    </details>
   </div>
   <div class="sub" style="margin-top:10px">writing to {{ manifest_path }}</div>
 </div>
 
 <script>
 const VIEWS = [[0, 1], [2, 1], [0, 2]];
+// Each panel puts the first axis rightward and the second up, which places the
+// camera on their cross product: +Z for Front, but -X for Side and -Y for Top —
+// the person's right, and below the floor. Mirroring those two horizontally puts
+// the viewer on the person's left and above instead, so the left arm is the near
+// one in every panel and does not read as the right arm.
+const VIEW_FLIP = [false, true, true];
 // Blue = the frames that become the training clip; orange = the rest of the oracle
 // rollout, where the correction was still heading. Adjacent slots in the project's
 // validated categorical order, so the pair stays separable under CVD.
@@ -318,6 +425,7 @@ const phaseAlpha = (s, m) => (inPrefix(s, m) && !inClip(s, m) ? .45 : 1);
 const phaseName = (s, m) => inClip(s, m) ? 'clip'
   : (inPrefix(s, m) ? 'clip prefix (pinned)'
   : (s <= m.transition ? 'naive approach' : 'rollout, outside clip'));
+const DEFAULT_PROMPT = {{ default_prompt|tojson }};
 const canvases = [...document.querySelectorAll('canvas')];
 const el = id => document.getElementById(id);
 let cur = null, idx = 0, timer = null;
@@ -327,13 +435,14 @@ function project(pts, ia, ib, box, pad) {
                        box.h - pad - (p[ib] - box.lo[ib]) * box.k]);
 }
 
-function drawView(cv, ia, ib, m, frame) {
+function drawView(cv, ia, ib, m, frame, flip) {
   const dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth, h = cv.clientHeight;
   if (cv.width !== Math.round(w * dpr)) { cv.width = w * dpr; cv.height = h * dpr; }
   const c = cv.getContext('2d');
   c.setTransform(dpr, 0, 0, dpr, 0, 0);
   c.clearRect(0, 0, w, h);
+  if (flip) { c.translate(w, 0); c.scale(-1, 1); }
 
   // One shared square scale per view so the arm never rescales mid-playback.
   const pad = 14, span = Math.max(m.span[ia], m.span[ib]) || 0.1;
@@ -385,7 +494,8 @@ function drawView(cv, ia, ib, m, frame) {
 function render() {
   if (!cur) return;
   const m = cur.motion, f = +el('scrub').value, last = m.frames.length - 1;
-  canvases.forEach((cv, i) => drawView(cv, VIEWS[i][0], VIEWS[i][1], m, f));
+  canvases.forEach((cv, i) =>
+    drawView(cv, VIEWS[i][0], VIEWS[i][1], m, f, VIEW_FLIP[i]));
   el('fnum').textContent = `${f} / ${last} · ${phaseName(f, m)}`;
 
   // Clip bar mirrors the same [anchor - n_prefix + 1 .. clip_end] span.
@@ -482,12 +592,57 @@ function showMeta() {
     ` · residual violation ${r.window_violation.max_violation.toFixed(3)} rad`;
 }
 
+// A run carries a list of captions. The rows live in the DOM and every save
+// sends all of them, so an emptied box is a deletion and the server never has to
+// merge partial edits.
+const capRows = () => [...document.querySelectorAll('#captions textarea')];
+
+function addCap(text, focus) {
+  const row = document.createElement('div');
+  row.className = 'caprow';
+  const box = document.createElement('textarea');
+  box.placeholder = 'e.g. raise my arm without twisting my shoulder inward';
+  box.value = text || '';
+  box.addEventListener('blur', saveCaption);
+  const drop = document.createElement('button');
+  drop.className = 'drop';
+  drop.textContent = '✕';
+  drop.title = 'remove this caption';
+  drop.addEventListener('click', async () => {
+    row.remove();
+    if (!capRows().length) addCap('', false);
+    await saveCaption();
+  });
+  row.append(box, drop);
+  el('captions').append(row);
+  if (focus) box.focus();
+  return box;
+}
+
+function showCaptions(list) {
+  el('captions').innerHTML = '';
+  (list && list.length ? list : ['']).forEach(c => addCap(c, false));
+}
+
 async function saveCaption() {
   if (!cur) return;
   await fetch('/caption', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({run_id: cur.run.run_id, caption: el('caption').value})
-  }).then(r => r.json()).then(d => { cur.done = d.done; });
+    body: JSON.stringify({run_id: cur.run.run_id, captions: capRows().map(b => b.value)})
+  }).then(r => r.json()).then(d => { cur.done = d.done; cur.run.captions = d.captions; });
+  el('status').className = 'status saved';
+  el('status').textContent = 'saved';
+}
+
+// Per session, not per run: the manifest keeps it, so a reopened session drafts
+// with the wording the labeler settled on.
+async function savePrompt() {
+  await fetch('/prompt', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prompt: el('prompt').value})
+  });
+  el('status').className = 'status saved';
+  el('status').textContent = 'prompt saved';
 }
 
 async function show(i) {
@@ -504,14 +659,14 @@ async function show(i) {
   showMeta();
   el('progress').textContent =
     `run ${idx + 1} · ${cur.generated} generated · ${cur.done} captioned`;
-  el('caption').value = r.caption || '';
+  showCaptions(r.captions);
   el('scrub').max = m.frames.length - 1;
   el('scrub').value = 0;
   el('prev').disabled = idx === 0;
   el('next').disabled = false;
   el('status').textContent = '';
   render();
-  el('caption').focus();
+  capRows()[0].focus();
 }
 
 el('scrub').addEventListener('input', () => { stop(); render(); });
@@ -529,20 +684,45 @@ el('play').addEventListener('click', () => {
 
 el('next').addEventListener('click', async () => {
   await saveCaption();
-  el('status').className = 'status saved';
-  el('status').textContent = 'saved';
   await show(idx + 1);
 });
+
+el('addcap').addEventListener('click', () => addCap('', true));
 
 el('prev').addEventListener('click', async () => {
   await saveCaption();
   if (idx > 0) await show(idx - 1);
 });
 
-el('caption').addEventListener('blur', async () => {
-  await saveCaption();
-  el('status').className = 'status saved';
-  el('status').textContent = 'saved';
+// Ask the VLM about the window as it is currently cut, under whatever prompt the
+// panel holds. Drafts arrive as new caption rows and are saved by the same blur
+// handler as typed ones, so nothing is written without the labeler seeing it.
+el('draft').addEventListener('click', async () => {
+  if (!cur) return;
+  const asked = cur.run.run_id;
+  el('draft').disabled = true;
+  el('status').className = 'status';
+  el('status').textContent = 'drafting…';
+  const res = await fetch('/suggest', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({run_id: asked, n: +el('ndraft').value,
+                          prompt: el('prompt').value})
+  });
+  el('draft').disabled = false;
+  if (!res.ok) { el('status').textContent = 'draft failed — see the server log'; return; }
+  const data = await res.json();
+  if (!cur || cur.run.run_id !== asked) return;   // labeler moved on while it ran
+  capRows().forEach(b => { if (!b.value.trim()) b.parentElement.remove(); });
+  const added = data.captions.map(c => addCap(c, false));
+  el('status').textContent = `drafted ${added.length} — edit, then Next`;
+  if (!added.length) addCap('', true); else added[added.length - 1].focus();
+});
+
+el('prompt').addEventListener('blur', savePrompt);
+
+el('resetprompt').addEventListener('click', async () => {
+  el('prompt').value = DEFAULT_PROMPT;
+  await savePrompt();
 });
 
 initDrag();
@@ -562,8 +742,14 @@ def page() -> str:
     return render_template_string(
         _PAGE,
         manifest_path=_manifest_path(),
-        view_labels=["Front (XY)", "Side (ZY)", "Top (XZ)"],
+        view_labels=[
+            "Front (XY) — from the front",
+            "Side (ZY) — from the person's left",
+            "Top (XZ) — from above",
+        ],
         wrist=_WRIST,
+        caption_prompt=_caption_prompt(),
+        default_prompt=DRAFT_PROMPT,
     )
 
 
@@ -577,11 +763,11 @@ def run(index: int) -> ResponseReturnValue:
     _prefetch(index + 1)
     return jsonify(
         {
-            "run": row,
+            "run": {**row, "captions": _row_captions(row)},
             "motion": _motion(manifest, row),
             "index": index,
             "generated": len(manifest["runs"]),
-            "done": sum(1 for r in manifest["runs"] if r["caption"].strip()),
+            "done": sum(1 for r in manifest["runs"] if _row_captions(r)),
         }
     )
 
@@ -591,7 +777,7 @@ def _motion(manifest: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     clips_dir = _clips_dir()
     geo = _geometry()
 
-    naive = np.load(clips_dir / manifest["naive_file"])
+    naive = np.load(clips_dir / row["naive_file"])
     continuation = np.load(clips_dir / row["continuation_file"])
     motion, transition = motion_frames(naive, continuation, row["trigger_step"])
     anchor = row["clip_anchor"]
@@ -599,7 +785,7 @@ def _motion(manifest: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     positions = arm_positions(motion, geo["fk"], geo["spine3_pos"], geo["spine3_aa"])
 
     body = np.asarray(geo["body_pos"], dtype=np.float64)
-    goal = np.asarray(manifest["goal"], dtype=np.float64) + geo["spine3_pos"]
+    goal = np.asarray(row["goal"], dtype=np.float64) + geo["spine3_pos"]
     extent = np.concatenate([positions.reshape(-1, 3), body, goal[None]])
     lo, hi = extent.min(axis=0), extent.max(axis=0)
     return {
@@ -631,10 +817,8 @@ def clip() -> ResponseReturnValue:
     clips_dir = _clips_dir()
     with _FILE_LOCK:
         manifest = _load_manifest()
-        row = next(
-            r for r in manifest["runs"] if r["run_id"] == payload.get("run_id")
-        )
-        naive = np.load(clips_dir / manifest["naive_file"])
+        row = next(r for r in manifest["runs"] if r["run_id"] == payload.get("run_id"))
+        naive = np.load(clips_dir / row["naive_file"])
         continuation = np.load(clips_dir / row["continuation_file"])
         motion, _ = motion_frames(naive, continuation, row["trigger_step"])
         row.update(
@@ -649,18 +833,67 @@ def clip() -> ResponseReturnValue:
     return jsonify({"ok": True, "run": row})
 
 
+@app.route("/suggest", methods=["POST"])
+def suggest() -> ResponseReturnValue:
+    """Draft a caption for the run's *currently selected* window with the VLM.
+
+    Renders the described window as one image — start pose, end pose and the wrist
+    and elbow traces between them (``/clip`` rewrites the window on every drag, so
+    the draft always describes what the labeler is looking at) — and asks the model
+    for ``n`` sentences under the panel's prompt, in one completion so the phrasings
+    differ deliberately. The manifest is untouched: drafts land in caption rows and
+    save on blur like typed ones.
+    """
+    payload: Any = request.get_json(silent=True) or {}
+    with _FILE_LOCK:
+        row = next(
+            r for r in _load_manifest()["runs"] if r["run_id"] == payload.get("run_id")
+        )
+    prompt = str(payload.get("prompt", "")).strip() or _caption_prompt()
+    n_drafts = min(max(int(payload.get("n", 1)), 1), MAX_DRAFTS)
+    with _SUGGEST_LOCK:
+        captions = draft_captions(
+            _clips_dir(),
+            row,
+            _source().context,
+            _mesh(),
+            _caption_model(),
+            prompt,
+            n_drafts,
+        )
+    return jsonify({"captions": captions})
+
+
 @app.route("/caption", methods=["POST"])
 def caption() -> ResponseReturnValue:
-    """Write one run's caption into the manifest."""
+    """Write one run's captions into the manifest.
+
+    The client sends every row it holds, so an emptied box is a deletion; blanks
+    are dropped here rather than stored.
+    """
     payload: Any = request.get_json(silent=True) or {}
+    captions = [str(c).strip() for c in payload.get("captions", []) if str(c).strip()]
     with _FILE_LOCK:
         manifest = _load_manifest()
         for row in manifest["runs"]:
             if row["run_id"] == payload.get("run_id"):
-                row["caption"] = str(payload.get("caption", "")).strip()
+                row["captions"] = captions
         _save_manifest(manifest)
-        done = sum(1 for r in manifest["runs"] if r["caption"].strip())
-    return jsonify({"ok": True, "done": done})
+        done = sum(1 for r in manifest["runs"] if _row_captions(r))
+    return jsonify({"ok": True, "done": done, "captions": captions})
+
+
+@app.route("/prompt", methods=["POST"])
+def caption_prompt() -> ResponseReturnValue:
+    """Store this session's Draft caption prompt; blank restores the stock one."""
+    payload: Any = request.get_json(silent=True) or {}
+    with _FILE_LOCK:
+        manifest = _load_manifest()
+        manifest["caption_prompt"] = (
+            str(payload.get("prompt", "")).strip() or DRAFT_PROMPT
+        )
+        _save_manifest(manifest)
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +910,7 @@ def main() -> None:
         "--clips_dir",
         default=DEFAULT_CLIPS_DIR,
         help=(
-            f"Clip set from evaluation/generate_correction_clips.py (default: "
+            "Clip set from generate.py (default: "
             f"{DEFAULT_CLIPS_DIR}). A new session directory is forked off it, so "
             "the set itself is never written to."
         ),

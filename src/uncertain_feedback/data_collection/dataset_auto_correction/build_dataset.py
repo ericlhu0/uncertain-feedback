@@ -1,42 +1,46 @@
 """Turn hand-labeled correction clips into a HumanML3D-format finetune dataset.
 
 Stage (b) of the correction-clip pipeline. Reads the clip sets written by
-``evaluation/generate_correction_clips.py`` and the labeling sessions forked off
-them — planner-space ``(K, 7)`` clips plus a manifest whose ``caption`` fields
-have been filled in by hand — and encodes each captioned clip into HML263.
+``generate.py`` and the labeling sessions forked off them — planner-space
+``(K, 7)`` clips plus a manifest whose ``captions`` lists have been filled in by
+hand — and encodes each captioned clip into HML263. A clip's captions become the
+lines of its text file, which the humanml loader samples one of per epoch, so
+several phrasings of one correction train as one motion rather than as copies.
 
 ``--clips_dir`` takes several directories, which is how separate labeling
 sessions become one training set::
 
-    uv run python src/uncertain_feedback/data_collection/build_correction_dataset.py \\
-        --clips_dir outputs/correction_clips outputs/correction_clips/session_* \\
+    uv run python \\
+        src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \\
+        --clips_dir <clip set> <clip set>/session_* \\
         --output_dir .../motion-diffusion-model/dataset/correction_demo1
 
 Clips are encoded with :func:`smpl_arm_aa_seq_to_hml263_frames` — the *same*
 function inference uses to build its pinned prefix — so training clips and
 query-time prefixes share a body and an encoding by construction. That function
 normalizes, so its output is un-normalized here to match the raw
-``new_joint_vecs`` convention of :mod:`build_mdm_dataset`.
+``new_joint_vecs`` convention of :mod:`dataset_video.build_dataset`.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import spacy
 from spacy.language import Language
 
 from uncertain_feedback.consts import MDM_ROOT
-from uncertain_feedback.data_collection.build_mdm_dataset import (
-    _write_text_file,
+from uncertain_feedback.data_collection.common.dataset import (
+    copy_stats,
     write_splits,
+    write_text_file,
 )
-from uncertain_feedback.data_collection.smpl_to_hml263 import load_hml_stats
+from uncertain_feedback.data_collection.common.hml263 import load_hml_stats
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_arm_aa_seq_to_hml263_frames,
 )
@@ -55,6 +59,15 @@ _DEFAULT_STATS_DIR = _DATASET_ROOT / "custom1_seatedcanon"
 _MAX_AMPLIFICATION = 3.0
 _AMPLIFICATION_FLOOR = 0.05
 _MAX_TRANSPLANT_ATTEMPTS = 20
+
+
+def run_captions(run: dict[str, Any]) -> list[str]:
+    """A run's captions, blanks dropped.
+
+    Sets labeled before captions became a list carry a single ``caption`` string.
+    """
+    raw: list[str] = run.get("captions", [run.get("caption", "")])
+    return [c.strip() for c in raw if c.strip()]
 
 
 @dataclass(frozen=True)
@@ -97,17 +110,14 @@ def transplant_is_valid(
     """Whether a transplanted clip is anatomically and behaviourally usable."""
     arm_aa = q_to_arm_aa(moved, context.fk.elbow_hinge_axis)
     if any(
-        float(limit.violation(arm_aa).max()) > 0.0
-        for limit in DEFAULT_ARM_JOINT_LIMITS
+        float(limit.violation(arm_aa).max()) > 0.0 for limit in DEFAULT_ARM_JOINT_LIMITS
     ):
         return False
     before = arm_feature_series(clip, context)[feature]
     after = arm_feature_series(moved, context)[feature]
     excursion = abs(float(before[-1] - before[n_prefix - 1]))
     moved_excursion = abs(float(after[-1] - after[n_prefix - 1]))
-    return moved_excursion <= max(
-        _AMPLIFICATION_FLOOR, _MAX_AMPLIFICATION * excursion
-    )
+    return moved_excursion <= max(_AMPLIFICATION_FLOOR, _MAX_AMPLIFICATION * excursion)
 
 
 def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-locals
@@ -126,11 +136,11 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     all — ids are handed out across the whole run, never per directory.
 
     ``transplants`` adds that many augmented copies of each captioned clip,
-    each replaying its correction from a *randomly drawn* frame of the naive
-    rollout (:func:`transplant_clip`), so a behaviour labeled once high up the
-    reach also appears with the arm low — what the pinned prefix conditions on at
-    inference. Draws that leave the anatomical box or distort the bounded feature
-    are rejected and redrawn.
+    each replaying its correction from a *randomly drawn* frame of that run's own
+    naive rollout (:func:`transplant_clip`), so a behaviour labeled once high up
+    the reach also appears with the arm low — what the pinned prefix conditions on
+    at inference. Draws that leave the anatomical box or distort the bounded
+    feature are rejected and redrawn.
     """
     hml_mean, hml_std = load_hml_stats(hml_stats_dir)
     fk = SmplLeftArmFK()
@@ -142,8 +152,10 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     ids: list[str] = []
     rng = np.random.default_rng(seed)
 
-    def encode(clip: np.ndarray, caption: str, base_pose: np.ndarray, label: str) -> None:
-        """Write one clip and its caption out as the next dataset id."""
+    def encode(
+        clip: np.ndarray, captions: list[str], base_pose: np.ndarray, label: str
+    ) -> None:
+        """Write one clip and its captions out as the next dataset id."""
         arm_aa = q_to_arm_aa(clip, fk.elbow_hinge_axis)  # (K, 3, 3)
         norm = smpl_arm_aa_seq_to_hml263_frames(
             base_pose, arm_aa, hml_mean, hml_std, fk
@@ -151,14 +163,13 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
         raw = (norm * (hml_std + 1e-8) + hml_mean).astype(np.float32)
         id_str = f"{len(ids) + 1:06d}"
         np.save(output_dir / "new_joint_vecs" / f"{id_str}.npy", raw)
-        _write_text_file(output_dir / "texts" / f"{id_str}.txt", [caption], nlp)
+        write_text_file(output_dir / "texts" / f"{id_str}.txt", captions, nlp)
         ids.append(id_str)
-        print(f"{label} -> {id_str}: {raw.shape} {caption!r}")
+        print(f"{label} -> {id_str}: {raw.shape} {captions}")
 
     for clips_dir in clips_dirs:
         manifest = json.loads((clips_dir / "manifest.json").read_text(encoding="utf-8"))
         base_pose = np.load(clips_dir / manifest["base_pose_file"])  # (263,)
-        naive = np.load(clips_dir / manifest["naive_file"])
         geo = np.load(clips_dir / manifest["geometry_file"])
         geo_fk = SmplLeftArmFK()
         geo_fk.collar_aa = geo["collar_aa"]
@@ -167,12 +178,18 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
         )
         n_prefix = manifest["n_prefix_frames"]
         for run in manifest["runs"]:
-            caption = run["caption"].strip()
-            if not caption:
+            captions = run_captions(run)
+            if not captions:
                 print(f"{clips_dir.name}/{run['run_id']}: no caption — skipping")
                 continue
             clip = np.load(clips_dir / run["clip_file"])  # (K, 7)
-            encode(clip, caption, base_pose, f"{clips_dir.name}/{run['run_id']}")
+            # The run's own naive rollout, since every run has its own scenario;
+            # the manifest-level fallback keeps sets captioned under the old
+            # single-scenario layout buildable.
+            naive = np.load(
+                clips_dir / run.get("naive_file", manifest.get("naive_file"))
+            )
+            encode(clip, captions, base_pose, f"{clips_dir.name}/{run['run_id']}")
 
             for _ in range(transplants):
                 for _attempt in range(_MAX_TRANSPLANT_ATTEMPTS):
@@ -183,7 +200,7 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
                     ):
                         encode(
                             moved,
-                            caption,
+                            captions,
                             base_pose,
                             f"{clips_dir.name}/{run['run_id']}@{start}",
                         )
@@ -201,8 +218,7 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
 
     write_splits(output_dir, ids, val_fraction, test_fraction, seed)
 
-    for stat_file in ("Mean.npy", "Std.npy"):
-        shutil.copy(hml_stats_dir / stat_file, output_dir / stat_file)
+    copy_stats(hml_stats_dir, output_dir)
 
     print(f"\nDataset written to {output_dir}")
 
@@ -216,7 +232,7 @@ def main() -> None:
         nargs="+",
         help=(
             "One or more clip sets or labeling sessions to encode together, e.g. "
-            "outputs/correction_clips outputs/correction_clips/session_*."
+            "<clip set> <clip set>/session_*."
         ),
     )
     parser.add_argument(

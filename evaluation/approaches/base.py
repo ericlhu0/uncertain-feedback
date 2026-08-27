@@ -11,7 +11,6 @@ from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.grounders.mdm import MdmGrounder
 from evaluation.approaches.grounders.nominal import NominalGrounder
 from evaluation.approaches.steering import NoSteering, Steering
-from evaluation.rig import EvalRig, base_extra_costs
 from evaluation.structs import (
     GroundingResult,
     InteractionTask,
@@ -19,7 +18,9 @@ from evaluation.structs import (
     RoundContext,
 )
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
+from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs
 from uncertain_feedback.simulated_users import SimulatedUser
+
 
 class Approach:
     """A system variant under evaluation: grounder x cost_gen x steering.
@@ -63,7 +64,7 @@ class Approach:
 
     def reset(
         self,
-        rig: EvalRig,
+        rig: PlanningRig,
         user: SimulatedUser,
         task: InteractionTask,
         episode_dir: Path,

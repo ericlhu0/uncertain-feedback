@@ -8,9 +8,9 @@ from typing import Callable
 
 import numpy as np
 
-from evaluation.rig import EvalRig
 from evaluation.structs import GroundingResult, InteractionTask
 from uncertain_feedback.planners.mpc.kinematics import SMPL_JOINT_NAMES_22
+from uncertain_feedback.planners.rig import PlanningRig
 from uncertain_feedback.simulated_users import SimulatedUser
 
 ClusterSelector = Callable[[dict[int, np.ndarray]], tuple[int, float]]
@@ -36,12 +36,12 @@ class Grounder(abc.ABC):
     requires_generator: bool = False
 
     def __init__(self) -> None:
-        self._rig: EvalRig | None = None
+        self._rig: PlanningRig | None = None
         self._user: SimulatedUser | None = None
         self._episode_dir = Path(".")
 
     @property
-    def rig(self) -> EvalRig:
+    def rig(self) -> PlanningRig:
         """The bound rig; valid after :meth:`reset`."""
         assert self._rig is not None, "reset() must run before use"
         return self._rig
@@ -54,7 +54,7 @@ class Grounder(abc.ABC):
 
     def reset(
         self,
-        rig: EvalRig,
+        rig: PlanningRig,
         user: SimulatedUser,
         task: InteractionTask,
         episode_dir: Path,

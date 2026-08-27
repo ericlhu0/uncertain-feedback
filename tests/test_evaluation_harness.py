@@ -13,8 +13,8 @@ from evaluation.approaches import (
 )
 from evaluation.benchmarks.base import InteractionBenchmark
 from evaluation.episode import run_episode
-from evaluation.rig import build_rig
 from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.rig import build_rig
 from uncertain_feedback.simulated_users import get_persona
 
 _SMOKE_MPC = (
@@ -77,9 +77,7 @@ def test_keypoint_baseline_episode_smoke(tmp_path: Path) -> None:
     grounder._interpret = (  # type: ignore[method-assign]
         lambda text, scene: {"joint": "wrist", "keypoint": np.array([0.1, 0.3, 0.2])}
     )
-    approach = Approach(
-        name="llm_keypoint", grounder=grounder, cost_gen=NoCostGen()
-    )
+    approach = Approach(name="llm_keypoint", grounder=grounder, cost_gen=NoCostGen())
     approach.reset(rig, user, task, tmp_path / "episode")
     result = run_episode(rig, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()

@@ -17,7 +17,7 @@ freezes instead of moving.
 
 Usage::
 
-    uv run python src/uncertain_feedback/data_collection/build_speed_dataset.py \\
+    uv run python src/uncertain_feedback/data_collection/dataset_video/build_speed_dataset.py \\
         --output_dir ./speed_mdm_dataset/
 
 Reads cached positions directly (``<frames_dir>/../mdm_cache``) — no pose
@@ -28,22 +28,24 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 from pathlib import Path
 
 import numpy as np
 import spacy
 
-from uncertain_feedback.data_collection.build_mdm_dataset import (
-    _lock_body_to_frame0,
-    _write_text_file,
+from uncertain_feedback.consts import MDM_ROOT
+from uncertain_feedback.data_collection.common.dataset import (
+    copy_stats,
+    lock_body_to_frame0,
+    write_text_file,
 )
-from uncertain_feedback.data_collection.mhr_to_hml263_pipeline import (
-    resample_positions,
-)
-from uncertain_feedback.data_collection.smpl_to_hml263 import (
+from uncertain_feedback.data_collection.common.hml263 import (
     load_hml_stats,
     positions_to_hml263,
+)
+from uncertain_feedback.data_collection.common.paths import VIDEO_DATA_DIR
+from uncertain_feedback.data_collection.pose_estimation.mhr_to_hml263_pipeline import (
+    resample_positions,
 )
 
 _CACHE_VERSION = 2
@@ -271,9 +273,9 @@ def build(
                 motion_id += 1
                 id_str = f"{motion_id:06d}"
                 hml263 = positions_to_hml263(pos, hml_mean, hml_std, normalize=False)
-                hml263 = _lock_body_to_frame0(hml263)
+                hml263 = lock_body_to_frame0(hml263)
                 np.save(output_dir / "new_joint_vecs" / f"{id_str}.npy", hml263)
-                _write_text_file(
+                write_text_file(
                     output_dir / "texts" / f"{id_str}.txt",
                     _variant_captions(variant, base, caption_style),
                     nlp,
@@ -291,17 +293,16 @@ def build(
     for name, ids in splits.items():
         (output_dir / f"{name}.txt").write_text("\n".join(ids) + "\n", encoding="utf-8")
         print(f"{name}: {len(ids)} motions")
-    for stat in ("Mean.npy", "Std.npy"):
-        shutil.copy(hml_stats_dir / stat, output_dir / stat)
+    copy_stats(hml_stats_dir, output_dir)
     print(f"{motion_id} motions total ({n_cond} conditional) → {output_dir}")
 
 
 def main() -> None:
-    _here = Path(__file__).parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache_dir", default=str(_here / "data" / "mdm_cache"))
+    parser.add_argument("--cache_dir", default=str(VIDEO_DATA_DIR / "mdm_cache"))
     parser.add_argument(
-        "--labels_json", default=str(_here / "data" / "frames" / "labels.json")
+        "--labels_json",
+        default=str(VIDEO_DATA_DIR / "frames" / "labels.json"),
     )
     parser.add_argument("--output_dir", required=True)
     parser.add_argument(
@@ -312,14 +313,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--hml_stats_dir",
-        default=str(
-            _here.parent
-            / "motion_generators"
-            / "mdm"
-            / "motion-diffusion-model"
-            / "dataset"
-            / "HumanML3D"
-        ),
+        default=str(MDM_ROOT / "motion-diffusion-model" / "dataset" / "HumanML3D"),
     )
     args = parser.parse_args()
     build(

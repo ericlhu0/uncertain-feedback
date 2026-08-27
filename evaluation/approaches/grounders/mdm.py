@@ -9,10 +9,10 @@ import numpy as np
 
 from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.steering import NoSteering, Steering
-from evaluation.rig import EvalRig
 from evaluation.structs import GroundingResult, InteractionTask
 from uncertain_feedback.motion_generators.steering import SteeringSpec
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.rig import PlanningRig
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty import UqConfig, UqSelector, make_clusterer
 
@@ -43,7 +43,7 @@ class MdmGrounder(Grounder):
 
     def reset(
         self,
-        rig: EvalRig,
+        rig: PlanningRig,
         user: SimulatedUser,
         task: InteractionTask,
         episode_dir: Path,

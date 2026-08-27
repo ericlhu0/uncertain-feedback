@@ -1,4 +1,4 @@
-"""Shared evaluation rig: config, kinematics, optionally the motion generator."""
+"""Shared planning rig: config, kinematics, optionally the motion generator."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from uncertain_feedback.simulated_users import SimulatedUser
 
 
 @dataclass(frozen=True)
-class EvalRig:
+class PlanningRig:
     """The loaded planner config plus everything episodes plan against."""
 
     cfg: MpcRunConfig
@@ -34,7 +34,7 @@ class EvalRig:
     initial_hml_pose: np.ndarray | None
 
 
-def build_rig(config_path: Path, *, seed: int, load_generator: bool) -> EvalRig:
+def build_rig(config_path: Path, *, seed: int, load_generator: bool) -> PlanningRig:
     """Load the planner config and derive the episode-planning context.
 
     ``load_generator=False`` skips the heavyweight motion-generator load for
@@ -79,7 +79,7 @@ def build_rig(config_path: Path, *, seed: int, load_generator: bool) -> EvalRig:
         spine3_aa=spine3_aa,
         time_of_day=cfg.simulated_user.time_of_day,
     )
-    return EvalRig(
+    return PlanningRig(
         cfg=cfg,
         fk=fk,
         context=context,
@@ -92,7 +92,7 @@ def build_rig(config_path: Path, *, seed: int, load_generator: bool) -> EvalRig:
     )
 
 
-def base_extra_costs(rig: EvalRig, user: SimulatedUser) -> CompositeTrajectoryCost:
+def base_extra_costs(rig: PlanningRig, user: SimulatedUser) -> CompositeTrajectoryCost:
     """Hand-authored comfort costs plus the persona's joint-box limits."""
     return CompositeTrajectoryCost(
         [*build_extra_costs(rig.cfg.costs, rig.context).terms(), user.limit_cost()]

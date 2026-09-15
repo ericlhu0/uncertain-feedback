@@ -1,0 +1,9 @@
+# The no_learning menu under classifier guidance from the persona's hidden
+# bounds: the known-preference upper bound for the bound-transfer menu metric.
+defaults:
+  - grounder: mdm
+  - cost_gen: none
+  - steering: cg
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: no_learning_cg

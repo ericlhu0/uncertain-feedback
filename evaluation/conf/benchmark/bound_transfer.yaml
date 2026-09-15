@@ -1,0 +1,17 @@
+# Bound transfer: learn on each persona's curated first goal, then probe the
+# menus proposed on its transfer goals (mdm_llm_transfer.yaml). max_rounds caps
+# the learning goal only; the probes take one menu each.
+_target_: evaluation.benchmarks.base.InteractionBenchmark
+name: bound_transfer
+personas:
+  [
+    adhesive_capsulitis,
+    stroke_flexor_synergy,
+    painful_arc,
+    cross_body_pain,
+    elbow_contracture,
+  ]
+verbalizers: [everyday]
+use_persona_goals: true
+max_goals: 5
+max_rounds: 5

@@ -6,6 +6,8 @@ Loads every ``interactions.pkl`` an episode wrote under the roots and runs the
 cost-learning metric on the pooled :class:`Interaction` list: success within k
 feedback rounds per approach and, for goal sequences, per goal index; the
 breakdown of goal results; per-round grounding quality against feedback events.
+Every ``menu.csv`` a bound-transfer run wrote is pooled into ``all_menus.csv``
+with mean menu violation per approach and goal index.
 """
 
 from __future__ import annotations
@@ -137,6 +139,19 @@ def main() -> None:
             rows,
             {"continuation_mean_violation": "continuation mean violation (rad)"},
             args.out / "violation_vs_events.png",
+        )
+    menus = [
+        pd.read_csv(path)
+        for root in args.roots
+        for path in sorted(root.rglob("menu.csv"))
+    ]
+    if menus:
+        menu = pd.concat(menus, ignore_index=True)
+        menu.to_csv(args.out / "all_menus.csv", index=False)
+        print(
+            menu.groupby(["approach", "goal_index"])["violation"]
+            .agg(["mean", "count"])
+            .to_string()
         )
     print(f"[evaluation] analysis written to {args.out}")
 

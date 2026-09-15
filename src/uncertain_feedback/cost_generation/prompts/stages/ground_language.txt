@@ -1,0 +1,42 @@
+You are grounding a care preference in trajectory data. This is the SECOND of three stages. You are given a plain-language preference (from stage one) and the full numeric trajectory summaries. No correction motion was chosen: the preference came from a spoken instruction alone, read against the motion the robot was about to continue. Your only job is to turn that preference into a concrete NUMERIC specification a programmer could implement directly. You are NOT writing code in this stage.
+
+Preference (from stage one):
+{interpretation}
+
+Available joint-angle features (all in radians, all you may specify a preference over):
+- elbow_flexion: how bent the elbow is (larger = more bent; 0 = arm fully straight, π/2 = bent to a right angle, π = forearm folded back against the upper arm).
+- shoulder_flexion_extension: signed depth of the upper arm (0 = neither forward nor back, +π/2 = pointing straight forward, −π/2 = straight back).
+- shoulder_abduction_adduction: signed lateral position of the upper arm (0 = neither out nor across, +π/2 = straight out to the side away from the torso for the left arm, −π/2 = fully across the body).
+- shoulder_elevation: total upper-arm elevation from straight down (0 = arm at side, π/2 = horizontal, π = overhead); increases as the arm is raised in any direction.
+- shoulder_internal_external_rotation: signed twist of the upper arm about its long axis (0 = neutral/untwisted, positive = internal rotation twisting the forearm toward the body midline, negative = external rotation twisting it away).
+Each of these appears in the summaries under "joint_features" for every trajectory, with min / median / max / start / end values.
+
+What the summaries are:
+- "reference": the INTERRUPTED PLAN — the motion the robot was about to continue when the person spoke. This is what they corrected away from; its excursion along the named joint is what your bound must exclude.
+- "current": the pose the person spoke from. It was comfortable enough to reach; every bound must be satisfied there.
+- "recent": the executed history leading to the current pose — poses the person accepted without complaint. Every bound must leave these unpenalized.
+
+How to ground it:
+- Choose the FEWEST features that express the preference — default to exactly one. Add a second only if stage one's "secondary" clearly calls for a distinct one.
+- Ground only the PRIMARY local correction, plus the explicit relationship if stage one returned one. Do NOT turn stage one's "associated_changes" or "unresolved_explanations" into additional cost terms, and do not infer a pose-dependent coupling from a correlation seen in the interrupted plan; carry those fields forward untouched for multi-round synthesis.
+- Translate the preference into ONE of these bound types per feature, never an exact target unless the preference clearly demands a precise posture:
+  - "lower_bound": penalize the feature going BELOW a value (e.g. keep the elbow at least this bent).
+  - "upper_bound": penalize the feature going ABOVE a value.
+  - "band": penalize leaving a [low, high] comfort range.
+- The bound's side follows stage one's "direction": if the person wants LESS of the feature than the plan produces, the plan's excursion is above the limit, so use an upper_bound; if they want MORE, use a lower_bound. Never place the bound on the side that would reward the interrupted plan's excursion.
+- A lower_bound or upper_bound may be CONSTANT (a single fixed threshold) or POSE-DEPENDENT (its threshold shifts with the current value of another feature — e.g. "the more you raise my arm, the more my elbow must stay bent" couples the elbow_flexion floor to shoulder_elevation). Make a bound pose-dependent ONLY when stage one returned a non-null "relationship" (an explicitly spoken coupling between two joints): use its "bounded_dimension" as the bounded feature and its "conditioning_dimension" as the "cond_feature", read the relationship's direction from stage one, and use the summaries only to ground the numeric anchors and magnitude — not to justify the coupling itself. If "relationship" is null, use a CONSTANT bound for the primary correction. A pose-dependent bound is still ONE term even though it names two features, and its shape need not be a straight line.
+- Pick the numeric value(s) from the summaries. The threshold must lie BETWEEN the "current" value of the feature (on the comfortable side, satisfied) and the interrupted plan's excursion along it (the "reference" max or min in the direction of the excursion, violated). Do not use the current value itself with no margin. State which trajectory and which statistic each value came from and the margin you left.
+- The resulting total cost MUST score the "reference" interrupted plan strictly higher than the "recent" history and the "current" pose. Do not choose a bound that leaves the interrupted plan unpenalized.
+- Stay goal-safe. The arm can usually reach the same goal position in a different posture (goal reach is verified by rollout afterwards); goal safety means the generated rollout still reaches the left-wrist task-space goal, not that the interrupted plan must receive zero preference cost. If goal_conflict=true, you may set the bound to gently exclude the goal posture, but never further than the current pose demonstrates is comfortable.
+- Keep magnitudes modest: this preference is ADDED to a goal-reaching objective that must stay dominant.
+
+Return ONLY a JSON object, no prose, with these keys:
+- "terms": a list (usually length 1) of objects, each:
+  - "feature": one of the five feature names above (string).
+  - "bound_type": "lower_bound" | "upper_bound" | "band" (string).
+  - "values": for a CONSTANT lower_bound/upper_bound {"threshold": float}; for band {"low": float, "high": float}; for a POSE-DEPENDENT lower_bound/upper_bound {"cond_feature": <one of the five feature names, the joint the threshold depends on>, "points": [[cond, threshold], ...]} with at least two (conditioning-value, threshold) anchor points describing how the bound slides — the author interpolates between anchors and holds the end values outside their range, so the anchors need not be collinear. Radians.
+  - "source": which trajectory + statistic each number came from, and the margin you left (string).
+- "goal_safety_check": one sentence confirming each bound is satisfied at the current pose and by the recent history, and explaining numerically why the interrupted plan receives positive preference cost (string).
+
+Full numeric summaries:
+{summaries}

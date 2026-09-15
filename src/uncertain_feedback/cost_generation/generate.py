@@ -51,7 +51,7 @@ class CostGenerationResult:
     cost_dir: Path
     generated_context: GeneratedCostContext
     reference_traj: np.ndarray | None
-    full_correction_traj: np.ndarray
+    full_correction_traj: np.ndarray | None
     summaries: dict[str, Any]
     images: dict[str, Path]
     eval_state: EvalState
@@ -139,9 +139,17 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     install: bool = False,
     save_candidate_videos: bool = False,
     corpus_dir: Path | None = None,
+    language_only: bool = False,
     log_prefix: str = "[experiment]",
 ) -> CostGenerationResult:
-    """Build one prompt context and generate one cost for one cluster/backend."""
+    """Build one prompt context and generate one cost for one cluster/backend.
+
+    ``language_only`` means no correction was chosen and ``cluster_traj`` is the
+    INTERRUPTED plan: it becomes the reference the prompts frame as what the
+    person corrected away from, the recent comfortable history stands in the
+    correction slot, and the ranking check therefore requires the interrupted
+    plan to cost strictly more than the path the person already accepted.
+    """
     cfg_backend = (
         replace(cfg, llm_cost=replace(cfg.llm_cost, backend=backend))
         if backend is not None
@@ -150,14 +158,18 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     window = cfg.preference_window if history_window is None else history_window
     phase_t0 = time.perf_counter()
     _log("phase C building cost-generation context", prefix=log_prefix)
-    reference_q = rollout_reference_trajectory(
-        cfg_backend,
-        current_q,
-        context,
-        base_extra_costs,
-        body_pos,
-        spine3_pos,
-        spine3_aa,
+    reference_q = (
+        canonical_arm_q(cluster_traj, context)
+        if language_only
+        else rollout_reference_trajectory(
+            cfg_backend,
+            current_q,
+            context,
+            base_extra_costs,
+            body_pos,
+            spine3_pos,
+            spine3_aa,
+        )
     )
     goal_pos = (
         np.asarray(cfg_backend.cartesian.goals[0], dtype=np.float64)
@@ -167,17 +179,21 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     cartesian_threshold = (
         cfg_backend.cartesian.threshold if cfg_backend.cartesian is not None else 0.05
     )
-    correction_q = canonical_arm_q(cluster_traj, context)
-    full_correction_q = assemble_full_correction_traj(
-        cfg_backend,
-        q_history,
-        correction_q,
-        context,
-        base_extra_costs,
-        body_pos,
-        spine3_pos,
-        spine3_aa,
-    )
+    if language_only:
+        correction_q = np.asarray(q_history[-(window + 1) :], dtype=np.float64)
+        full_correction_q = None
+    else:
+        correction_q = canonical_arm_q(cluster_traj, context)
+        full_correction_q = assemble_full_correction_traj(
+            cfg_backend,
+            q_history,
+            correction_q,
+            context,
+            base_extra_costs,
+            body_pos,
+            spine3_pos,
+            spine3_aa,
+        )
     rejected_trajs: tuple[np.ndarray, ...] = ()
     prompt_candidate_trajs = candidate_trajs
     if candidate_trajs:
@@ -210,6 +226,8 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         rejected_trajs=rejected_trajs,
     )
     summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
+    if language_only:
+        del summaries["mdm_traj"]
     _log(f"cost-generation context ready in {_elapsed(phase_t0)}", prefix=log_prefix)
 
     images: dict[str, Path] = {}
@@ -218,14 +236,25 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         _log(
             f"rendering cost prompt images to {cost_dir / 'images'}", prefix=log_prefix
         )
-        images = render_prompt_images(
-            generated_context,
-            cost_dir / "images",
-            prompt_candidate_trajs,
-            highlight_label,
-            reference_traj=reference_q,
-            goal_pos=goal_pos,
-        )
+        if language_only:
+            rendered = render_prompt_images(
+                generated_context,
+                cost_dir / "images",
+                {0: reference_q},
+                0,
+                goal_pos=goal_pos,
+                highlight_name="interrupted plan",
+            )
+            images = {"interrupted_plan_img": rendered["current_cluster_traj_img"]}
+        else:
+            images = render_prompt_images(
+                generated_context,
+                cost_dir / "images",
+                prompt_candidate_trajs,
+                highlight_label,
+                reference_traj=reference_q,
+                goal_pos=goal_pos,
+            )
         _log(
             f"rendered {len(images)} prompt image(s) in {_elapsed(images_t0)}",
             prefix=log_prefix,
@@ -269,6 +298,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         eval_state=eval_state,
         save_candidate_videos=save_candidate_videos,
         corpus_dir=corpus_dir,
+        language_only=language_only,
     )
     cost_t0 = time.perf_counter()
     _log(

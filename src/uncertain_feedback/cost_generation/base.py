@@ -108,6 +108,7 @@ class CostGenerator(ABC):
         eval_state: Any | None = None,
         save_candidate_videos: bool = False,
         corpus_dir: Path | None = None,
+        language_only: bool = False,
     ) -> None:
         self.context = context
         self.instruction = instruction
@@ -123,6 +124,7 @@ class CostGenerator(ABC):
         self.eval_state = eval_state
         self.save_candidate_videos = save_candidate_videos
         self.corpus_dir = corpus_dir
+        self.language_only = language_only
         self._comfortable_corpus: tuple[np.ndarray, np.ndarray, np.ndarray] | None = (
             None
         )
@@ -180,7 +182,10 @@ class CostGenerator(ABC):
     def interpret(self, llm: Any) -> str:
         """Stage one: read the correction (instruction + contrast images + compact summary)."""
         text, image_paths = build_interpret_prompt(
-            self.instruction, self.summaries, self.images if self.use_images else {}
+            self.instruction,
+            self.summaries,
+            self.images if self.use_images else {},
+            language_only=self.language_only,
         )
         image_input = [str(path) for path in image_paths] or None
         return self._run_stage(llm, "interpret", text, image_input=image_input)
@@ -188,7 +193,10 @@ class CostGenerator(ABC):
     def ground(self, llm: Any, interpretation: str) -> str:
         """Stage two: turn the preference into a concrete numeric spec (full summaries)."""
         text = build_ground_prompt(
-            interpretation, self.summaries, self.corpus_grounding_note()
+            interpretation,
+            self.summaries,
+            self.corpus_grounding_note(),
+            language_only=self.language_only,
         )
         return self._run_stage(llm, "ground", text)
 
@@ -501,6 +509,7 @@ def create_cost_generator(
     eval_state: Any | None = None,
     save_candidate_videos: bool = False,
     corpus_dir: Path | None = None,
+    language_only: bool = False,
 ) -> CostGenerator:
     """Build the cost generator selected by ``cfg.backend``.
 
@@ -534,6 +543,7 @@ def create_cost_generator(
         "eval_state": eval_state,
         "save_candidate_videos": save_candidate_videos,
         "corpus_dir": corpus_dir,
+        "language_only": language_only,
     }
     backend = cfg.backend
     if backend == "llm":

@@ -60,6 +60,11 @@ IMAGE_PLACEHOLDERS: dict[str, str] = {
         "reference and the gold star to see where your cost must NOT get in the way of "
         "the original goal."
     ),
+    "interrupted_plan_img": (
+        "An image showing the INTERRUPTED PLAN's full arm motion is attached — the "
+        "motion the robot was about to continue when the person spoke, which they are "
+        "correcting away from."
+    ),
 }
 
 
@@ -92,6 +97,10 @@ def corpus_grounding_note(corpus_dir: Path) -> str:
 _STAGES_DIR = _DIR / "stages"
 _INTERPRET_HEAD = _read(_STAGES_DIR / "interpret.txt")
 _GROUND_HEAD = _read(_STAGES_DIR / "ground.txt")
+# Language-only variants: no chosen correction exists; the only trajectory shown
+# is the interrupted plan, framed as what the person corrected away from.
+_INTERPRET_LANGUAGE_HEAD = _read(_STAGES_DIR / "interpret_language.txt")
+_GROUND_LANGUAGE_HEAD = _read(_STAGES_DIR / "ground_language.txt")
 _AUTHOR_HEAD = _read(_STAGES_DIR / "author.txt")
 _REFINE_HEAD = _read(_STAGES_DIR / "refine.txt")
 _COMBINE_HEAD = _read(_STAGES_DIR / "combine.txt")
@@ -156,14 +165,17 @@ def build_interpret_prompt(
     instruction: str,
     summaries: dict[str, Any],
     images: dict[str, Path],
+    language_only: bool = False,
 ) -> tuple[str, list[Path]]:
     """Build the stage-one (interpret) prompt and its attached images.
 
     Sees the instruction, the contrast images, and a compact summary only — no
     runtime API, output contract, or numeric grounding. Returns a plain-language
-    preference JSON.
+    preference JSON. ``language_only`` selects the variant for an utterance with
+    no chosen correction, where the only trajectory is the interrupted plan.
     """
-    template, ordered_paths = _substitute_images(_INTERPRET_HEAD, images)
+    head = _INTERPRET_LANGUAGE_HEAD if language_only else _INTERPRET_HEAD
+    template, ordered_paths = _substitute_images(head, images)
     text = template.replace("{instruction}", instruction).replace(
         "{summaries}", _dump(compact_summaries(summaries))
     )
@@ -174,12 +186,16 @@ def build_ground_prompt(
     interpretation: str,
     summaries: dict[str, Any],
     corpus_note: str | None = None,
+    language_only: bool = False,
 ) -> str:
     """Build the stage-two (ground) prompt: preference + full numbers -> numeric spec.
 
-    Text only — no images, no runtime API, no code contract.
+    Text only — no images, no runtime API, no code contract. ``language_only``
+    selects the variant whose bound must exclude the interrupted plan rather than
+    prefer a chosen correction.
     """
-    text = _GROUND_HEAD.replace("{interpretation}", interpretation).replace(
+    head = _GROUND_LANGUAGE_HEAD if language_only else _GROUND_HEAD
+    text = head.replace("{interpretation}", interpretation).replace(
         "{summaries}", _dump(summaries)
     )
     return text if corpus_note is None else "\n\n".join([text, corpus_note])

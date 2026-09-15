@@ -101,6 +101,7 @@ def render_prompt_images(
     highlight_label: int | None = None,
     reference_traj: np.ndarray | None = None,
     goal_pos: np.ndarray | None = None,
+    highlight_name: str = "chosen",
 ) -> dict[str, Path]:
     """Render the per-purpose overlay images grounding the LLM cost prompt.
 
@@ -144,6 +145,7 @@ def render_prompt_images(
             goal_pos=goal_pos,
             include_others=include_others,
             include_reference=include_reference,
+            highlight_name=highlight_name,
         )
         return path
 

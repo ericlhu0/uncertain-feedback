@@ -1002,6 +1002,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         goal_pos: np.ndarray | None = None,
         include_others: bool = True,
         include_reference: bool = True,
+        highlight_name: str = "chosen",
     ) -> None:
         """Render a shared-axis overlay anchored on the highlighted cluster.
 
@@ -1230,10 +1231,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             ax=axes[-1],
             shrink=0.8,
             pad=0.04,
-            label="chosen frame (light=early, dark=late)",
+            label=f"{highlight_name} frame (light=early, dark=late)",
         )
         legend_handles = [
-            plt.Line2D([0], [0], color="steelblue", linewidth=2, label="chosen path"),
+            plt.Line2D(
+                [0], [0], color="steelblue", linewidth=2, label=f"{highlight_name} path"
+            ),
             plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="current"),
         ]
         if other_labels:

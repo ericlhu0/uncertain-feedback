@@ -1,0 +1,9 @@
+# Cost learning anchored on the executed correction (the generator's intended
+# framing): the oracle correction is the "chosen" path the LLM distills.
+defaults:
+  - grounder: oracle
+  - cost_gen: immediate
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: oracle_chosen

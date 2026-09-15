@@ -2353,11 +2353,211 @@ compositions, and the output layout) is at
 The code under `evaluation/` is unchanged; document the new protocol here once
 it is decided.
 
+### Interaction metrics
 
+`benchmarks/episode.py`'s `run_episode` returns one `Interaction` per goal
+(`benchmarks/structs.py`): the task, approach and persona, the oracle path and initial
+rollout, and every `FeedbackRound` with its trigger pose, nominal plan, hidden intent,
+utterance, candidate menu and chosen correction, the persona's judgement of the menu, the
+learning outcome, the executed correction and the continuation with its re-trigger step.
+Every metric function takes that object. `evaluation/metrics/cost_learning/rows.py`
+flattens it: `round_rows` gives one record per feedback round, `goal_row` one per goal
+(`result`, `resolved`, `reached`, `rounds_used`, executed violation; a goal that hit the
+round cap keeps the cap as its count), `episode_summary` the episode record. `success.py`
+takes a list of interactions, pooled across episodes and runs. The primary metric is
+**success at k** (`success_at_k`): the fraction of goals resolved within `k` feedback rounds,
+for `k = 0..max_rounds`. `k = 0` is the zero-shot case, the goal completed with no feedback,
+which is what a cost learned on an earlier goal buys on a later one; a capped or stalled goal
+never counts at any `k`, so failures need no sentinel value. The resolve rate is success at
+the cap and the zero-shot rate success at `k = 0`; group with `by=("approach", "goal_index")`
+for the transfer view. `goal_table` gives the raw goal rows, whose `result` column separates
+`capped` from `goal_not_reached`, the signature of an over-conservative learned cost.
+
+Each episode pickles its interactions to `interactions.pkl`, and
+
+```bash
+uv run python evaluation/analyze_results.py outputs/ multirun/ --out analysis/
 ```
 
+pools every one under the roots and writes `all_goals.csv`, `all_rounds.csv`,
+`goal_results.csv` (result breakdown per approach), `success_at_k.csv` / `.png` (one line per
+approach), and, when the runs have goal sequences, `success_at_k_by_goal.csv` and
+`success_by_goal.png` (zero-shot and within-cap success by goal index), plus the per-event
+grounding and violation plots.
 
+### Running the cost-learning benchmark
+
+`evaluation/run_experiment.py` plays one (approach, benchmark, seed) through hydra:
+
+```bash
+uv run python evaluation/run_experiment.py -m seed=0 \
+    approach=oracle_no_learning,oracle_language,nominal_language,mdm_language \
+    benchmark=cost_learning load_generator=true \
+    mpc_config=src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
+    hydra.sweep.dir=outputs/cost_learning/seed0
+uv run python evaluation/analyze_results.py outputs/cost_learning --out outputs/cost_learning/analysis
 ```
+
+The four arms share the `language_only` cost generator (the LLM is anchored on the
+utterance and nominal plan, never on the executed correction; since 2026-09-11 the
+generator runs its language-only prompt variants, `stages/interpret_language.txt` and
+`stages/ground_language.txt`, which frame the nominal plan as the INTERRUPTED plan the
+person corrected away from, put the recent comfortable history in the correction slot,
+and require the generated cost to score the interrupted plan strictly above that history;
+before that the nominal plan filled the chosen-correction slot and the must-rank rule
+forced costs that rewarded the violating plan) and differ in the grounder,
+i.e. in which correction is executed each round before replanning with the learned cost:
+`oracle_language` executes the persona's own oracle window (`grounder/oracle.yaml`,
+`OracleGrounder`: the hidden-cost oracle path from the intent's join index, shifted onto the
+trigger pose; `Approach.begin_goal` hands it the goal's oracle path), `mdm_language` the
+MDM-grounded cluster the persona picks, `nominal_language` nothing (the nominal plan is
+"executed"), and `oracle_no_learning` is the floor: the oracle correction each round, no
+cost learning. `benchmark/cost_learning.yaml` is the six personas with curated goals in
+`mdm_llm_transfer.yaml`, everyday feedback, one goal each, five rounds. `load_generator=true`
+loads MDM for every arm so all four share the pose file's body and start pose; without it a
+generator-free arm needs an `arm:` pose in the config and runs on the T-pose rig. Feedback
+rounds are anchored on the last frame before the trigger with no violation (as
+`build_sampled_case` does), since the simulated user rejects any candidate whose frames
+violate and every candidate starts at the feedback pose. The verbalizer's feature dead band
+(`FEATURE_DEAD_BAND` in `simulated_users/verbalizers.py`, and `has_feedback_content`'s
+default) is 0.05 rad: at the former 0.15 rad a marginal re-violation left the persona with
+nothing to say and ended the episode as `no_feedback_content`.
+
+Each run dir holds `task_NN_<persona>_<verbalizer>/` episode directories with
+`interactions.pkl`, `episode_summary.json`, `executed.npy`, per goal `goal_NN/oracle_path.npy`
+and `initial_rollout.npy`, and per round `goal_NN/round_NN/trajectories.npz`: `q_feedback`,
+`nominal_plan`, `correction_q`, `continuation` (canonical q), `correction` and every
+`candidate_<label>` (left-arm axis-angles), and for the MDM grounder the raw diffusion draws
+`samples` (float32, SMPL joint positions or arm axis-angles, whichever was clustered) with
+their `sample_labels`, so a round can be re-scored later without regenerating. `goals.csv`
+at the run root is the goal table for a quick look.
+
+**On procedurally generated scenarios.** `benchmark/procedural.yaml`
+(`ScenarioBenchmark`, `evaluation/benchmarks/scenarios.py`) replaces the persona list with a
+scenario directory written by `generate_scenarios.py` (see *Generate informative correction
+scenarios*): every accepted case supplies its own start pose (`naive[0]`), goal and, for
+`--sampled-bounds` sets, the synthetic user serialized in `selection.json`, rebuilt by
+`user_from_dict`; fixed-persona sets resolve the persona by name. `scenario_dir` points at
+the set, `recommended_only: true` keeps only the cases the audit's `visual_review` marked
+recommended. Pair it with `evaluation/conf/mpc_procedural.yaml`, which is the transfer
+config's feedback/uq/llm_cost stack at the sampler's pacing (`max_angle_delta` 0.0025,
+`simulated_user.nominal_steps` 40 = the 40-frame correction window the cases were selected
+on); the pose file's body is the geometry the scenarios were generated with, so
+`load_generator=true` reproduces each case's stored trigger.
+
+```bash
+uv run python evaluation/run_experiment.py -m seed=0 \
+    approach=oracle_no_learning,oracle_language,nominal_language,mdm_language \
+    benchmark=procedural load_generator=true \
+    mpc_config=evaluation/conf/mpc_procedural.yaml \
+    hydra.sweep.dir=outputs/cost_learning/procedural_s23_seed0
+uv run python evaluation/analyze_results.py outputs/cost_learning/procedural_s23_seed0 \
+    --out outputs/cost_learning/analysis_procedural_s23_seed0
+```
+
+Episodes are independent, so spread them over processes with hydra's joblib launcher:
+`tasks=0,1,...` sweeps the benchmark's task indices (each (approach, task) pair becomes
+one job; an index the set lacks is skipped), and `benchmark.scenario_dir=<dir>` points a
+batch at a freshly generated set. `analyze_results.py` pools every `interactions.pkl`
+under its roots, so a partially finished sweep is scorable at any time.
+
+```bash
+uv run python evaluation/run_experiment.py -m hydra/launcher=joblib hydra.launcher.n_jobs=6 \
+    seed=24 approach=oracle_no_learning,oracle_language,nominal_language,mdm_language \
+    tasks=0,1,2,3,4,5,6,7 benchmark=procedural benchmark.scenario_dir=outputs/procedural_bounds_s24 \
+    load_generator=true mpc_config=evaluation/conf/mpc_procedural.yaml \
+    hydra.sweep.dir=outputs/cost_learning/procedural_batches/s24
+```
+
+### Bound transfer: do later proposals respect the learned bound?
+
+`evaluation/run_bound_transfer.py` asks whether the corrections an approach proposes on a
+*later* goal respect a bound it learned on an earlier one. Per task the approach learns on the
+persona's first goal, a full `run_episode` under `task_NN_.../learn`, and keeps what it learned.
+Every later goal is then probed (`benchmarks/transfer.py`, `probe_menu`): the goal is rolled
+with the base comfort costs only, so the feedback situation is the same for every approach and
+exists even when the learned cost would have avoided it; the persona attributes and verbalizes
+at the last clean frame before the trigger, the approach proposes its menu there, and each
+candidate is scored by the grounding `correction_violation` against the hidden bound
+(`metrics/cost_learning/menu.py`, `menu_rows`, one record per candidate as proposed, before the
+chooser's magnitude). Each probe starts where the persona's oracle execution of the previous
+goal ended, so the test reaches do not depend on how well learning went. A goal whose unlearned
+plan never violates yields no probe. `benchmark/bound_transfer.yaml` is the five personas with
+transfer goals in `mdm_llm_transfer.yaml`, everyday feedback, five rounds on the learning goal.
+
+```bash
+uv run python evaluation/run_bound_transfer.py -m seed=0 \
+    approach=no_learning,no_learning_cg \
+    benchmark=bound_transfer load_generator=true \
+    mpc_config=src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
+    hydra.sweep.dir=outputs/bound_transfer/seed0
+uv run python evaluation/analyze_results.py outputs/bound_transfer/seed0 \
+    --out outputs/bound_transfer/analysis_seed0
+```
+
+Each run writes `menu.csv` at its root (persona, approach, goal index, utterance, number of
+learned terms, candidate label, whether the chooser picked it, violation) and per probe
+`probe_NN/menu.npz` (`q_feedback`, `nominal_plan`, `candidate_<label>`) and `oracle_path.npy`;
+`probes.pkl` per task holds the `MenuProbe` records. `analyze_results.py` pools every `menu.csv`
+under its roots into `all_menus.csv` and prints mean menu violation per approach and goal index.
+Today no grounder conditions on the learned cost, so the learning goal changes nothing about the
+menu and the pilot arms skip cost generation: `no_learning` is MDM's unconditioned menu and
+`no_learning_cg` (`approach/no_learning_cg.yaml`, classifier guidance from the hidden bounds) its
+known-preference upper bound, at the transfer config's `feedback.uq.steering.guidance_weight` of
+2e5 (in the seed-0 pilot a sixth of steered candidates still violated at the 1e5 default, and doubling
+the weight did not change that fraction). A learning arm (`mdm_language`, `full`) reports the same menus at
+LLM cost; the metric starts moving once steering or filtering from the learned cost is wired in.
+
+### Grounding metrics on sampled cases
+
+`evaluation/metrics/grounding/` scores one grounding round against the hidden bound and
+the oracle correction, with no cost generation or MPC tracking in the loop:
+`violation.py` averages over frames the radians by which a correction exceeds the case's
+hidden bound (per frame, so MDM clips, LLM waypoint paths and the naive continuation compare
+on their own clocks), `progress.py` locates the correction's endpoint on the oracle's
+anatomical-feature path (`arc_progress`, 1 = the oracle's own end; `alignment`, the cosine
+between the two movement directions there; `per_feature` signed fractions of the oracle's
+net change), and `expressivity.py` measures how spread a case's candidate menu is (`diversity` in [0, 1], normalized by the candidates'
+RMS displacement — in anatomical-feature space, and as `position_diversity` in elbow/wrist
+position space, the one a person watching the menu perceives; the two disagree when
+candidates reach similar hand positions through different joint configurations). `score.py`
+runs them on one case. The progress metric's implementation lives in
+`simulated_users/progress.py`, since the simulated user's default chooser selects by it.
+
+`run_grounding.py` applies them to a grounder on the sampled cases of a captioned clip set,
+the way the simulated user would use it: the grounder proposes a menu, the user's chooser
+(`simulated_user.chooser`, `oracle_progress` by default: over the config's magnitude grid,
+any hidden-bound violation at any frame rules a candidate out, and among the rest the one
+whose endpoint lands nearest the oracle correction's end along its path wins, ties broken by
+alignment; `intent_aligned` picks by the nominal-vs-oracle intent contrast instead, which
+points against the oracle's own motion in 8 of these 20 cases) picks a candidate and
+magnitude, and that scaled correction is what violation and progress score. Diversity is scored over
+the whole menu. The naive continuation is scored alongside as the `nominal` reference.
+```
+uv run python evaluation/run_grounding.py --grounder llm \
+    --clips-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips_auto200_s5 \
+    --n-cases 20 --out-dir outputs/grounding_llm_auto200_s5
+uv run python evaluation/run_grounding.py --grounder mdm \
+    --model-path /home/eric/safe-contact/data/mdm_save/correction_auto200_s5_from_deployed_8k/model000763071.pt \
+    --clips-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips_auto200_s5 \
+    --n-cases 20 --out-dir outputs/grounding_mdm_auto200_s5
+```
+Case `i` is run `i` of the clip set (`build_sampled_case` replays the seed's draw order),
+so the run's first VLM caption is the utterance and its hidden bound and oracle window are
+the ground truth; the correction starts one frame before the bound crossing, and the
+grounder sees the naive continuation from there as its nominal plan. `llm` is `LlmTrajectoryGrounder` (4 interpretations, 5 waypoints interpolated to 50
+frames, positions output, the config's `llm_cost.model`; one GPT call per case, ~70-90 s,
+needs `OPENAI_API_KEY`). `mdm` is `MdmGrounder` with the config's `feedback.uq` (500
+samples, 4 clusters, no steering) on `--model-path`, loading the generator and asserting
+its body matches the clip set's (GPU); its cluster means are re-anchored onto the trigger pose
+the way production does (`feedback.anchor_correction`, default on) — raw means start ~10 cm
+from it, the pinned-frame seam. Writes `cases.csv` (one row per case: chooser pick,
+`chosen_*` and `nominal_*` metrics, menu diversity), `summary.csv` (means plus the fraction
+of cases with an acceptable candidate), and per case `trajectories.npz` (oracle, nominal,
+every candidate) plus, for `llm`, the grounder's `interpretations_00.json`. A case whose
+`trajectories.npz` exists is re-scored from it (shifted onto the case's start frame)
+rather than grounded again, so a rerun costs no API calls or sampling.
+
 ### Visualizing the oracle correction
 
 A grounder is scored against a hidden target. The **sampled** case source — the
@@ -2715,3 +2915,72 @@ editing the persona later will not silently redraw a past demo.
 
 ## Thanks
 This repository is based on [python-starter](https://github.com/tomsilver/python-starter), which is a general starter repository (not limited to research project code).
+
+### Procedural-grounding workstream (removed)
+
+The procedural independent-DOF grounding dataset builder, its isolated fine-tune
+path and its tests were removed on 2026-09-06: the fine-tune did not reach GPT
+parity and no checkpoint was promoted. The written record — `GROUNDING_RESULTS.md`
+and `HANDOFF_GROUNDING.md` — was archived out of the repo the same day to
+`/share/bhattacharjee/eric_data/repo_doc_archive/root_docs/`; the run artifacts stay
+under `outputs/grounding_component_20260905/` and `outputs/recipe_20260906/`.
+
+### Generate informative correction scenarios
+
+Select reaches for fixed personas before evaluating any learned method:
+
+```bash
+uv run python evaluation/generate_scenarios.py \
+  --geometry-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips \
+  --out-dir outputs/informative_scenarios_s17
+```
+
+The cached `geometry.npz` and manifest supply the body and clavicle; `--mpc-config`
+(default `evaluation/conf/mpc_demo_low1.yaml`) supplies planning settings, without
+loading MDM. The sampler uses 0.0025 action spread and a 600-step rollout budget.
+`--personas NAME ...`, `--seed` (17), and `--max-attempts` (300 per persona) control
+sampling. The output directory must be new. `--no-render` selects only;
+`--render-only --out-dir <existing directory>` renders saved cases.
+
+Starts and goal witness poses must satisfy the fixed hidden preference. Accepted
+nominal reaches must reach the goal, cross the preference after 8 history frames,
+and leave 40 future frames. Both counterfactual branches restart MPC with the same seed from the last strictly
+comfortable frame before crossing; only the oracle receives the hidden cost. Over the 40-frame (2 s) comparison window,
+nominal peak violation must exceed 0.15 rad, elbow/wrist position RMS contrast
+must exceed 4 cm, and at least one bounded/conditioning feature must have 0.15 rad
+RMS contrast. The oracle must move at least 5 cm, reach the same goal, and stay
+within the existing 0.02 rad violation tolerance over its entire continuation.
+These are explicit pilot selection criteria, not validated perceptual thresholds.
+
+Outputs: `selection.json` records attempts and rejection reasons; each accepted
+persona NPZ stores full naive/oracle paths, aligned correction windows, goal and
+trigger. SMPL mesh MP4s show shared pre-trigger history, then nominal versus oracle
+motion at 20 fps, with one-second holds at the trigger and end. Comparison MP4s
+put nominal front/side views on the left and oracle front/side views on the right.
+`*_oracle_full.mp4` additionally shows the complete corrected reach to the goal.
+Inspect them for body intersections and clear corrections before using the set.
+A persona with no accepted case remains in the rejection audit and has no NPZ.
+This generates scenario artifacts; it does not alter the existing cost-learning
+benchmark or claim improved learning results.
+
+Generate synthetic preferences jointly with their reaches using the same acceptance
+criteria and SMPL review:
+
+```bash
+uv run python evaluation/generate_scenarios.py \
+  --geometry-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips \
+  --sampled-bounds 4 --seed 23 --out-dir outputs/procedural_bounds_s23
+```
+
+`--sampled-bounds N` replaces the fixed persona list with N case slots, alternating
+constant and linear coupled bounds. The sampler draws a bounded feature, upper/lower
+direction, and (for coupling) another feature and a signed slope of magnitude 0.5–2.0.
+It places a threshold on `f - slope*g` between a comfortable history/goal witness
+and a nominal excursion. Couplings must change their threshold by at least 0.15 rad
+in the proposed correction window. Bounds are drawn from elbow flexion, shoulder
+elevation, abduction, and flexion; pure twist is excluded from this visual pilot.
+Up to 128 cheap bound proposals are tried per reach, followed by the same matched
+nominal/oracle feasibility and contrast checks. `--max-attempts` limits reaches per
+case slot. Every proposed user that reaches scoring is serialized in its audit row
+under `user`; rejected slots remain recorded. These are synthetic preferences,
+not clinical personas, and are not automatically added to the persona registry.

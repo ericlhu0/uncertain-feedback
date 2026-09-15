@@ -1,0 +1,9 @@
+# No correction trajectory: language goes straight to cost generation and the
+# nominal plan is what gets executed.
+defaults:
+  - grounder: none
+  - cost_gen: language_only
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: nominal_language

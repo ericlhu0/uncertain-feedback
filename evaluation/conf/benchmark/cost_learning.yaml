@@ -1,0 +1,18 @@
+# Cost-learning benchmark: every persona with curated goals in
+# mdm_llm_transfer.yaml, everyday feedback, one goal each. Pair with
+# mpc_config=src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml.
+_target_: evaluation.benchmarks.base.InteractionBenchmark
+name: cost_learning
+personas:
+  [
+    adhesive_capsulitis,
+    stroke_flexor_synergy,
+    painful_arc,
+    cross_body_pain,
+    triceps_long_head_contracture,
+    elbow_contracture,
+  ]
+verbalizers: [everyday]
+use_persona_goals: true
+max_goals: 1
+max_rounds: 5

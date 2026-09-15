@@ -1,0 +1,8 @@
+# Cost learning from language, with the MDM-grounded correction executed each round.
+defaults:
+  - grounder: mdm
+  - cost_gen: language_only
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: mdm_language

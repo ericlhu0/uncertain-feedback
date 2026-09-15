@@ -1,0 +1,8 @@
+# Floor: the oracle correction is executed each round but nothing is learned.
+defaults:
+  - grounder: oracle
+  - cost_gen: none
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: oracle_no_learning

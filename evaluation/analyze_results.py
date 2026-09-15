@@ -1,11 +1,17 @@
-"""Aggregate evaluation runs into per-approach tables and per-round plots.
+"""Aggregate evaluation runs into per-approach tables and plots.
 
 uv run python evaluation/analyze_results.py outputs/ multirun/ --out analysis/
+
+Loads every ``interactions.pkl`` an episode wrote under the roots and runs the
+cost-learning metric on the pooled :class:`Interaction` list: success within k
+feedback rounds per approach and, for goal sequences, per goal index; the
+breakdown of goal results; per-round grounding quality against feedback events.
 """
 
 from __future__ import annotations
 
 import argparse
+import pickle
 from pathlib import Path
 
 import matplotlib
@@ -15,30 +21,60 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # pylint: disable=wrong-import-position
 import pandas as pd  # pylint: disable=wrong-import-position
 
+from evaluation.benchmarks.structs import (
+    Interaction,
+)  # pylint: disable=wrong-import-position
+from evaluation.metrics.cost_learning.success import (  # pylint: disable=wrong-import-position
+    goal_table,
+    success_at_k,
+)
+from evaluation.metrics.cost_learning.rounds import (
+    round_rows,
+)  # pylint: disable=wrong-import-position
 
-def _collect(roots: list[Path], filename: str) -> pd.DataFrame:
-    frames = []
+
+def _collect(roots: list[Path]) -> list[Interaction]:
+    interactions: list[Interaction] = []
     for root in roots:
-        for path in sorted(root.rglob(filename)):
-            frame = pd.read_csv(path)
-            if not frame.empty:
-                frames.append(frame)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+        for path in sorted(root.rglob("interactions.pkl")):
+            with open(path, "rb") as file:
+                interactions.extend(pickle.load(file))
+    return interactions
 
 
-def _episode_table(episodes: pd.DataFrame) -> pd.DataFrame:
-    grouped = episodes.groupby(["approach", "benchmark"])
-    return pd.DataFrame(
-        {
-            "episodes": grouped.size(),
-            "resolved_rate": grouped["all_goals_resolved"].mean(),
-            "reached_rate": grouped["all_goals_reached"].mean(),
-            "mean_feedback_events": grouped["feedback_events"].mean(),
-            "mean_executed_violation": grouped["executed_mean_violation"].mean(),
-        }
-    ).reset_index()
+def _plot_success_at_k(curve: pd.DataFrame, path: Path) -> None:
+    fig, axis = plt.subplots(figsize=(5.5, 4))
+    for approach, group in curve.groupby("approach"):
+        axis.plot(group["k"], group["success"], marker="o", label=str(approach))
+    axis.set_xlabel("feedback rounds k")
+    axis.set_xticks(sorted(curve["k"].unique()))
+    axis.set_ylabel("fraction of goals resolved within k")
+    axis.set_ylim(0, 1.02)
+    axis.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def _plot_by_goal(curve: pd.DataFrame, max_k: int, path: Path) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    for axis, k, label in (
+        (axes[0], 0, "zero-shot success (no feedback)"),
+        (axes[1], max_k, f"success within {max_k} rounds"),
+    ):
+        at_k = curve[curve["k"] == k]
+        for approach, group in at_k.groupby("approach"):
+            axis.plot(
+                group["goal_index"], group["success"], marker="o", label=str(approach)
+            )
+        axis.set_ylabel(label)
+        axis.set_ylim(0, 1.02)
+        axis.set_xlabel("goal index in sequence")
+        axis.set_xticks(sorted(curve["goal_index"].unique()))
+        axis.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def _plot_by_event(rows: pd.DataFrame, columns: dict[str, str], path: Path) -> None:
@@ -58,22 +94,35 @@ def _plot_by_event(rows: pd.DataFrame, columns: dict[str, str], path: Path) -> N
 
 
 def main() -> None:
-    """Aggregate results.csv/episodes.csv trees into tables and plots."""
+    """Pool every interactions.pkl under the roots into tables and plots."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("roots", type=Path, nargs="+", help="Run/multirun dirs")
     parser.add_argument("--out", type=Path, default=Path("evaluation_analysis"))
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    episodes = _collect(args.roots, "episodes.csv")
-    rows = _collect(args.roots, "results.csv")
-    if episodes.empty:
-        raise SystemExit("No episodes.csv found under the given roots.")
+    interactions = _collect(args.roots)
+    if not interactions:
+        raise SystemExit("No interactions.pkl found under the given roots.")
 
-    table = _episode_table(episodes)
-    table.to_csv(args.out / "aggregate_episodes.csv", index=False)
-    print(table.to_string(index=False))
+    goals = goal_table(interactions)
+    goals.to_csv(args.out / "all_goals.csv", index=False)
+    results = pd.crosstab(goals["approach"], goals["result"], normalize="index")
+    results.to_csv(args.out / "goal_results.csv")
+    print(results.to_string())
 
+    max_k = max(item.task.max_rounds for item in interactions)
+    curve = success_at_k(interactions, max_k)
+    curve.to_csv(args.out / "success_at_k.csv", index=False)
+    print(curve.pivot(index="k", columns="approach", values="success").to_string())
+    _plot_success_at_k(curve, args.out / "success_at_k.png")
+
+    if len({item.goal_index for item in interactions}) > 1:
+        by_goal = success_at_k(interactions, max_k, by=("approach", "goal_index"))
+        by_goal.to_csv(args.out / "success_at_k_by_goal.csv", index=False)
+        _plot_by_goal(by_goal, max_k, args.out / "success_by_goal.png")
+
+    rows = pd.DataFrame([row for item in interactions for row in round_rows(item)])
     if not rows.empty:
         rows.to_csv(args.out / "all_rounds.csv", index=False)
         _plot_by_event(

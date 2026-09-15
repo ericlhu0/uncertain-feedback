@@ -15,6 +15,19 @@ sessions become one training set::
         --clips_dir <clip set> <clip set>/session_* \\
         --output_dir .../motion-diffusion-model/dataset/correction_demo1
 
+``--consistent_captions`` reconciles those lines with the clip before encoding:
+a caption whose direction words the measured motion does not follow is dropped —
+on the wrist's three axes, the elbow's three, and the elbow angle, all through
+:mod:`motion_facts` — and down lines are duplicated until the up:down line ratio
+matches the up:down motion ratio. Each transplanted copy is re-filtered against
+its own measured motion, since replaying the joint deltas from another pose can
+flip a world-frame axis. Off by default, so the original build is unchanged.
+
+``--templated_captions`` goes further and does not read the labeled lines at all:
+every motion gets the short single-axis imperatives
+:mod:`templated_captions` writes from its own measured facts, which are true by
+construction and land inside the ten words a bag-of-words text encoder can weigh.
+
 Clips are encoded with :func:`smpl_arm_aa_seq_to_hml263_frames` — the *same*
 function inference uses to build its pinned prefix — so training clips and
 query-time prefixes share a body and an encoding by construction. That function
@@ -41,6 +54,16 @@ from uncertain_feedback.data_collection.common.dataset import (
     write_text_file,
 )
 from uncertain_feedback.data_collection.common.hml263 import load_hml_stats
+from uncertain_feedback.data_collection.dataset_auto_correction.motion_facts import (
+    MotionFacts,
+    asserted,
+    caption_conflicts,
+    motion_facts,
+)
+from uncertain_feedback.data_collection.dataset_auto_correction.templated_captions import (
+    templated_captions,
+    templated_report,
+)
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_arm_aa_seq_to_hml263_frames,
 )
@@ -77,6 +100,118 @@ class _GeometryContext:
     fk: SmplLeftArmFK
     spine3_pos: np.ndarray
     spine3_aa: np.ndarray
+
+
+def consistent_captions(captions: list[str], facts: MotionFacts) -> list[str]:
+    """The lines of *captions* whose direction words agree with the measured motion.
+
+    A motion with no text is not trainable, so a run every line of which
+    contradicts it keeps its least-contradictory line rather than dropping out.
+    """
+    kept = [c for c in captions if not caption_conflicts(c, facts)]
+    if kept:
+        return kept
+    return [min(captions, key=lambda c: len(caption_conflicts(c, facts)))]
+
+
+def rebalance_vertical(
+    captions: dict[str, list[str]], vertical: dict[str, int]
+) -> dict[str, int]:
+    """Duplicate down lines until the up:down line ratio matches the motion ratio.
+
+    The humanml loader draws one line per motion per epoch, so the line ratio is
+    the text prior the model learns, and the captioner's is far more up-heavy than
+    the clips are. Duplicating rather than capping keeps every phrasing: a
+    repeated line is simply drawn more often.
+    """
+    up_motions = sum(1 for sign in vertical.values() if sign > 0)
+    down_motions = sum(1 for sign in vertical.values() if sign < 0)
+    down_by_run = {
+        label: [line for line in lines if asserted(line).get("wrist_dy", 0) < 0]
+        for label, lines in captions.items()
+    }
+    # One line from every run before any run's second, so the added weight spreads
+    # over all the descending clips instead of piling onto the first few.
+    down_lines = [
+        (label, lines[i])
+        for i in range(max(len(lines) for lines in down_by_run.values()))
+        for label, lines in down_by_run.items()
+        if i < len(lines)
+    ]
+    up_total = sum(
+        1
+        for lines in captions.values()
+        for line in lines
+        if asserted(line).get("wrist_dy", 0) > 0
+    )
+    deficit = round(up_total * down_motions / up_motions) - len(down_lines)
+    added: dict[str, int] = {}
+    for i in range(max(deficit, 0)):
+        label, line = down_lines[i % len(down_lines)]
+        captions[label].append(line)
+        added[label] = added.get(label, 0) + 1
+    return added
+
+
+@dataclass(frozen=True)
+class _Clip:
+    """One captioned clip, with everything encoding and filtering it need."""
+
+    label: str
+    clip: np.ndarray
+    naive: np.ndarray
+    captions: list[str]
+    feature: str
+    base_pose: np.ndarray
+    context: _GeometryContext
+    n_prefix: int
+
+
+def clean_captions(clips: list[_Clip]) -> dict[str, list[str]]:
+    """Reconcile every clip's caption lines with the motion it actually makes.
+
+    Lines contradicting the wrist's, the elbow's or the elbow angle's measured
+    travel are dropped, then down lines are duplicated until the up:down line
+    ratio matches the up:down motion ratio. Reports what each run kept, dropped
+    and gained.
+    """
+    kept: dict[str, list[str]] = {}
+    vertical: dict[str, int] = {}
+    fallbacks: list[str] = []
+    for entry in clips:
+        facts = motion_facts(entry.clip, entry.context, entry.n_prefix)
+        vertical[entry.label] = facts.signs()["wrist_dy"]
+        kept[entry.label] = consistent_captions(entry.captions, facts)
+        if all(caption_conflicts(c, facts) for c in entry.captions):
+            fallbacks.append(entry.label)
+    added = rebalance_vertical(kept, vertical)
+
+    print("\n=== caption consistency ===")
+    for entry in clips:
+        n_added = added.get(entry.label, 0)
+        n_kept = len(kept[entry.label]) - n_added
+        note = (
+            " (all lines contradict — kept the least)"
+            if entry.label in fallbacks
+            else ""
+        )
+        print(
+            f"{entry.label}: {len(entry.captions)} lines -> {n_kept} kept, "
+            f"{len(entry.captions) - n_kept} dropped, {n_added} added{note}"
+        )
+    lines = [line for entry in clips for line in kept[entry.label]]
+    up_lines = sum(1 for line in lines if asserted(line).get("wrist_dy", 0) > 0)
+    down_lines = sum(1 for line in lines if asserted(line).get("wrist_dy", 0) < 0)
+    up_motions = sum(1 for sign in vertical.values() if sign > 0)
+    down_motions = sum(1 for sign in vertical.values() if sign < 0)
+    print(
+        f"total: {sum(len(e.captions) for e in clips)} lines -> {len(lines)} "
+        f"({sum(added.values())} duplicated), {len(fallbacks)} runs kept only "
+        f"their least-contradictory line\n"
+        f"up:down = {up_lines}:{down_lines} lines over "
+        f"{up_motions}:{down_motions} motions\n"
+    )
+    return kept
 
 
 def transplant_clip(
@@ -120,6 +255,24 @@ def transplant_is_valid(
     return moved_excursion <= max(_AMPLIFICATION_FLOOR, _MAX_AMPLIFICATION * excursion)
 
 
+def transplant_captions(
+    captions: list[str], moved: np.ndarray, context: _GeometryContext, n_prefix: int
+) -> tuple[list[str], bool]:
+    """*captions* re-filtered against a transplanted copy's own measured motion.
+
+    A transplant replays joint deltas from a different base pose, so a
+    world-frame direction the base clip made need not survive the move: the sign
+    of a non-zero axis flips on 6-20% of copies (flexion, being a joint angle,
+    never does). Filtering the base clip alone therefore leaves ~10% of a copy's
+    surviving lines false of the copy. Returns the kept lines and whether every
+    line contradicted, so the fallback's rate can be reported.
+    """
+    facts = motion_facts(moved, context, n_prefix)
+    return consistent_captions(captions, facts), all(
+        caption_conflicts(caption, facts) for caption in captions
+    )
+
+
 def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-locals
     clips_dirs: list[Path],
     output_dir: Path,
@@ -128,6 +281,8 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     test_fraction: float,
     seed: int = 42,
     transplants: int = 0,
+    consistent: bool = False,
+    templated: bool = False,
 ) -> None:
     """Encode every captioned clip across *clips_dirs* into one MDM dataset.
 
@@ -141,6 +296,18 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     the reach also appears with the arm low — what the pinned prefix conditions on
     at inference. Draws that leave the anatomical box or distort the bounded
     feature are rejected and redrawn.
+
+    ``consistent`` runs the captions through :func:`clean_captions` first, so a
+    clip trains only on lines whose direction words its wrist actually follows,
+    and every transplant through :func:`transplant_captions`, so a copy trains
+    only on the lines still true of where it landed.
+
+    ``templated`` discards the labeled captions entirely and writes each motion —
+    every transplant included — the short single-axis lines
+    :func:`~...templated_captions.templated_captions` generates from its own
+    measured facts, still gated by :func:`consistent_captions` so a template that
+    stops agreeing with the word table shows up as a dropped line. It supersedes
+    ``consistent``, whose work the generated lines already do.
     """
     hml_mean, hml_std = load_hml_stats(hml_stats_dir)
     fk = SmplLeftArmFK()
@@ -167,6 +334,7 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
         ids.append(id_str)
         print(f"{label} -> {id_str}: {raw.shape} {captions}")
 
+    clips: list[_Clip] = []
     for clips_dir in clips_dirs:
         manifest = json.loads((clips_dir / "manifest.json").read_text(encoding="utf-8"))
         base_pose = np.load(clips_dir / manifest["base_pose_file"])  # (263,)
@@ -176,40 +344,96 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
         context = _GeometryContext(
             fk=geo_fk, spine3_pos=geo["spine3_pos"], spine3_aa=geo["spine3_aa"]
         )
-        n_prefix = manifest["n_prefix_frames"]
         for run in manifest["runs"]:
             captions = run_captions(run)
-            if not captions:
+            if not captions and not templated:
                 print(f"{clips_dir.name}/{run['run_id']}: no caption — skipping")
                 continue
-            clip = np.load(clips_dir / run["clip_file"])  # (K, 7)
-            # The run's own naive rollout, since every run has its own scenario;
-            # the manifest-level fallback keeps sets captioned under the old
-            # single-scenario layout buildable.
-            naive = np.load(
-                clips_dir / run.get("naive_file", manifest.get("naive_file"))
+            clips.append(
+                _Clip(
+                    label=f"{clips_dir.name}/{run['run_id']}",
+                    clip=np.load(clips_dir / run["clip_file"]),  # (K, 7)
+                    # The run's own naive rollout, since every run has its own
+                    # scenario; the manifest-level fallback keeps sets captioned
+                    # under the old single-scenario layout buildable.
+                    naive=np.load(
+                        clips_dir / run.get("naive_file", manifest.get("naive_file"))
+                    ),
+                    captions=captions,
+                    feature=run["feature"],
+                    base_pose=base_pose,
+                    context=context,
+                    n_prefix=manifest["n_prefix_frames"],
+                )
             )
-            encode(clip, captions, base_pose, f"{clips_dir.name}/{run['run_id']}")
 
-            for _ in range(transplants):
-                for _attempt in range(_MAX_TRANSPLANT_ATTEMPTS):
-                    start = int(rng.integers(0, len(naive)))
-                    moved = transplant_clip(clip, naive, start, n_prefix)
-                    if transplant_is_valid(
-                        clip, moved, run["feature"], context, n_prefix
-                    ):
-                        encode(
-                            moved,
-                            captions,
-                            base_pose,
-                            f"{clips_dir.name}/{run['run_id']}@{start}",
+    templated_records: list[tuple[list[str], MotionFacts]] = []
+    n_templated_dropped = 0
+
+    def generated(clip: np.ndarray, entry: _Clip) -> list[str]:
+        """*clip*'s own templated lines, gated and recorded for the report."""
+        nonlocal n_templated_dropped
+        facts = motion_facts(clip, entry.context, entry.n_prefix)
+        lines = templated_captions(facts)
+        kept = consistent_captions(lines, facts)
+        n_templated_dropped += len(lines) - len(kept)
+        templated_records.append((kept, facts))
+        return kept
+
+    cleaned = clean_captions(clips) if consistent and not templated else {}
+    n_transplants = 0
+    n_transplant_dropped = 0
+    n_transplant_fallbacks = 0
+    for entry in clips:
+        captions = (
+            generated(entry.clip, entry)
+            if templated
+            else cleaned.get(entry.label, entry.captions)
+        )
+        encode(entry.clip, captions, entry.base_pose, entry.label)
+
+        for _ in range(transplants):
+            for _attempt in range(_MAX_TRANSPLANT_ATTEMPTS):
+                start = int(rng.integers(0, len(entry.naive)))
+                moved = transplant_clip(entry.clip, entry.naive, start, entry.n_prefix)
+                if transplant_is_valid(
+                    entry.clip, moved, entry.feature, entry.context, entry.n_prefix
+                ):
+                    moved_captions = captions
+                    if templated:
+                        moved_captions = generated(moved, entry)
+                    elif consistent:
+                        moved_captions, fell_back = transplant_captions(
+                            captions, moved, entry.context, entry.n_prefix
                         )
-                        break
-                else:
-                    print(
-                        f"{clips_dir.name}/{run['run_id']}: no valid transplant in "
-                        f"{_MAX_TRANSPLANT_ATTEMPTS} draws — skipping one copy"
+                        n_transplants += 1
+                        n_transplant_dropped += len(captions) - len(moved_captions)
+                        n_transplant_fallbacks += int(fell_back)
+                    encode(
+                        moved,
+                        moved_captions,
+                        entry.base_pose,
+                        f"{entry.label}@{start}",
                     )
+                    break
+            else:
+                print(
+                    f"{entry.label}: no valid transplant in "
+                    f"{_MAX_TRANSPLANT_ATTEMPTS} draws — skipping one copy"
+                )
+
+    if templated_records:
+        print(templated_report(templated_records))
+        print(f"{n_templated_dropped} generated lines dropped by the fact check\n")
+
+    if n_transplants:
+        print(
+            f"\n=== transplant consistency ===\n"
+            f"{n_transplants} transplants re-filtered against their own motion: "
+            f"{n_transplant_dropped} lines dropped, {n_transplant_fallbacks} "
+            f"({n_transplant_fallbacks / n_transplants:.1%}) kept only their "
+            f"least-contradictory line\n"
+        )
 
     if not ids:
         raise RuntimeError(
@@ -262,6 +486,27 @@ def main() -> None:
             "appears at other points of the reach (default: 0, no augmentation)."
         ),
     )
+    parser.add_argument(
+        "--consistent_captions",
+        action="store_true",
+        help=(
+            "Drop caption lines whose direction words contradict the clip's own "
+            "measured motion — the wrist's and the elbow's three axes and the "
+            "elbow angle — then duplicate down lines until the up:down line "
+            "ratio matches the up:down motion ratio (default: off, every "
+            "caption is trained on as written)."
+        ),
+    )
+    parser.add_argument(
+        "--templated_captions",
+        action="store_true",
+        help=(
+            "Ignore the labeled captions and write every motion — transplants "
+            "included — short single-axis imperatives generated from its own "
+            "measured facts, at most 10 words each (default: off, the labeled "
+            "captions are used). Supersedes --consistent_captions."
+        ),
+    )
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--test_fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -275,6 +520,8 @@ def main() -> None:
         test_fraction=args.test_fraction,
         seed=args.seed,
         transplants=args.transplants,
+        consistent=args.consistent_captions,
+        templated=args.templated_captions,
     )
 
 

@@ -37,7 +37,7 @@ _LOG = "[autolabel]"
 # :data:`~uncertain_feedback.simulated_users.visual.PROMPT`, which describes the
 # before/after image pair that verbalizer renders at evaluation time; this one
 # describes the single window image :func:`render_window` draws.
-DRAFT_PROMPT = "You are role-playing a care recipient whose arm a caregiver robot is moving. The image shows you from three angles. Your left arm in orange is where it is now, in blue where you want it to end up, and the two traces are the paths your wrist and your elbow take between them, with arrows pointing the way they travel. Say one short sentence to the caregiver to tell them how to move your arm. Sometimes it's easier to talk about how parts of the arm are moving, and sometimes it's easier to talk about joints, and some verbs already imply a direction. Use casual phrases that a real care recipient would actually say, and they don't have to be full sentences. Keep the description simple and pretty much one short phrase, so there shouldn't be commas; don't give a bunch of directions. Do not say things like please."
+DRAFT_PROMPT = "You are role-playing a care recipient whose arm a caregiver robot is moving. The image shows you from three angles. Your left arm in orange is where it is now, in blue where you want it to end up, and the two traces are the paths your wrist and your elbow take between them, with arrows pointing the way they travel. Say one short sentence to the caregiver to tell them how to move your arm. Sometimes it's easier to talk about how parts of the arm are moving, and sometimes it's easier to talk about joints, and some verbs already imply a direction so you don't always have to specify that. Use casual phrases that a real care recipient would actually say, and they don't have to be full sentences. Keep the description simple and pretty much one short phrase, so there shouldn't be commas; don't give a bunch of directions. Do not say things like please. Give instructions that only specify one motion, so don't compound actions by saying first do x, then do y; it's ok if that instruction doesn't fully specify the motion, but it should give at least a rough idea of what the motion is. Make sure you get the direction of the correction correct! The motion is from the orange arm towards the blue arm."
 
 # Appended to the prompt when one draft call asks for several captions. One
 # completion rather than N, so the model sees the phrasings it has already written
@@ -47,8 +47,8 @@ DRAFT_N_INSTRUCTION = (
     "Give exactly {n} different ways of saying it, one per line, and nothing "
     "else — no numbering, bullets or quotes. Every line asks for the same change, "
     "but vary the expression and the level of abstraction: some naming the body "
-    "part and the direction concretely, others asking loosely for the outcome or "
-    "for how it should feel."
+    "part and the direction concretely, others asking loosely for the outcome."
+    "It's also possible that there are multiple ways of expressing the same motion using different features of the arm, so add some diversity when it makes sense."
 )
 
 MAX_DRAFTS = 5

@@ -86,14 +86,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--margin_range",
-        type=float,
-        nargs=2,
-        default=(0.05, 0.20),
-        metavar=("LOW", "HIGH"),
-        help="Radians the sampled bound sits past the naive feature value.",
-    )
-    parser.add_argument(
         "--min_goal_distance",
         type=float,
         default=0.25,
@@ -122,7 +114,6 @@ def main() -> None:
             n_runs=args.n_runs,
             seed=args.seed,
             trigger_window=tuple(args.trigger_window),
-            margin_range=tuple(args.margin_range),
             correction_frames=tuple(args.correction_frames),
             max_angle_delta=args.max_angle_delta,
             min_goal_distance=args.min_goal_distance,

@@ -3,15 +3,17 @@
 Stage (a) of the correction-clip finetune pipeline. Every run draws its own
 scenario — a start arm configuration and a Cartesian goal, both sampled from the
 anatomical feature box (:func:`sample_arm_q`) — and rolls a naive MPC reach
-between them. It then samples a hidden comfort bound *anchored on that rollout*
-(so the naive path is guaranteed to violate it), replans from the induced trigger
-step under the oracle cost, and saves the whole rollout.
+between them. It then samples a hidden comfort bound *the rollout crosses* — a
+crossing frame is drawn and the bound placed in the gap the rollout opens there
+(:func:`sample_violating_bound`), so the naive path is guaranteed to violate it
+— replans from the induced trigger step under the oracle cost, and saves the
+whole rollout.
 
 A run's naive approach and oracle rollout join into one continuous motion
 (:func:`motion_frames`), and a clip is a *cut* out of it: ``n_prefix`` frames of
 history up to an anchor, then a window of what follows
-(:func:`assemble_clip`). The sampled default anchors at the trigger, but the
-labeling UI can drag the cut anywhere along the motion — later stretches of the
+(:func:`assemble_clip`). The sampled default anchors the cut at the trigger, but
+the labeling UI can drag it anywhere along the motion — later stretches of the
 same rollout are often the interesting ones — and :meth:`ClipSource.cut` rewrites
 the clip with no replan.
 
@@ -106,12 +108,6 @@ class CorrectionClipConfig:
     path per clip at 0.0079 m/frame, 0.00125 (the default) gives 8.2 s and
     0.186 m at 0.0042 m/frame. Clip length and padding are unaffected.
 
-    ``margin_range`` is *not* a size knob, despite looking like one — it sets how
-    far past the naive value the bound sits, i.e. which way and how insistently
-    the correction deviates, not how far the arm travels in the window. Halving
-    it left wrist path within a centimetre while making corrections less distinct
-    from the naive path, so it is left wide.
-
     ``trigger_window`` counts naive frames, so it has to scale with
     ``max_angle_delta``: (12, 100) suits the 165-frame reach at 0.00125, (6, 50)
     the 85-frame reach at 0.0025. ``min_goal_distance`` scales with it too — it
@@ -132,7 +128,6 @@ class CorrectionClipConfig:
     features: tuple[str, ...] = FEATURE_NAMES
     bound_types: tuple[str, ...] = ("upper_bound", "lower_bound")
     trigger_window: tuple[int, int] = (12, 100)
-    margin_range: tuple[float, float] = (0.05, 0.20)
     correction_frames: tuple[int, int] = (42, 56)
     max_angle_delta: float = 0.00125
     min_goal_distance: float = 0.25
@@ -146,8 +141,8 @@ class SampledBound:
     feature: str
     bound_type: str
     value: float
-    margin: float
-    anchor_step: int
+    peak_violation: float
+    crossing_step: int
     trigger_step: int
 
 
@@ -225,15 +220,21 @@ def sample_violating_bound(
     cfg: CorrectionClipConfig,
     threshold: float,
 ) -> SampledBound:
-    """Sample a hidden bound the naive rollout is guaranteed to violate.
+    """Sample a hidden bound the naive rollout is guaranteed to cross.
 
-    The bound sits ``margin`` radians on the wrong side of the naive
-    trajectory's own feature value at a random anchor step, so that step always
-    violates it and :func:`first_violation_step` on the naive rollout *is* the
-    trigger the bound induces — at or before the anchor, since the features are
-    not monotonic. Samples whose induced trigger falls outside
-    ``cfg.trigger_window`` are rejected, which also discards bounds pointing the
-    way the naive path already moves.
+    The crossing step is drawn directly and the bound placed in the gap between
+    the feature's running extremum over the frames before it and its value at
+    it. Every earlier frame therefore has positive clearance, the crossing step
+    is the first frame on the wrong side, and the trigger the bound induces
+    lands at or shortly after it, as the violation builds through ``threshold``
+    — the reverse of placing the bound past a value the rollout already passed,
+    which dragged the trigger back to the start of the window. A step setting no
+    running record opens no gap and is redrawn.
+
+    :func:`first_violation_step` on the naive rollout stays the accept test: it
+    also sees the joint-limit term the gap arithmetic ignores, and rejects
+    bounds whose violation never reaches ``threshold``. Samples triggering
+    outside ``cfg.trigger_window`` are rejected too.
     """
     feats = arm_feature_series(naive_q, context)
     low, high = cfg.trigger_window
@@ -246,10 +247,20 @@ def sample_violating_bound(
     for _ in range(_MAX_SAMPLE_ATTEMPTS):
         feature = str(rng.choice(cfg.features))
         bound_type = str(rng.choice(cfg.bound_types))
-        anchor = int(rng.integers(low, high + 1))
-        margin = float(rng.uniform(*cfg.margin_range))
-        offset = -margin if bound_type == "upper_bound" else margin
-        value = float(feats[feature][anchor]) + offset
+        step = int(rng.integers(low, high + 1))
+        series = feats[feature]
+        if bound_type == "upper_bound":
+            floor = float(series[:step].max())
+            if series[step] <= floor:
+                continue
+            value = float(rng.uniform(floor, series[step]))
+            peak_violation = float(series.max()) - value
+        else:
+            ceiling = float(series[:step].min())
+            if series[step] >= ceiling:
+                continue
+            value = float(rng.uniform(series[step], ceiling))
+            peak_violation = value - float(series.min())
         user = synthetic_user(feature, bound_type, value)
         trigger = first_violation_step(user, context, naive_q, threshold)
         if trigger is not None and low <= trigger <= high:
@@ -258,13 +269,13 @@ def sample_violating_bound(
                 feature=feature,
                 bound_type=bound_type,
                 value=value,
-                margin=margin,
-                anchor_step=anchor,
+                peak_violation=peak_violation,
+                crossing_step=step,
                 trigger_step=trigger,
             )
     raise RuntimeError(
         f"No sampled bound triggered inside {cfg.trigger_window} within "
-        f"{_MAX_SAMPLE_ATTEMPTS} attempts — widen trigger_window or margin_range."
+        f"{_MAX_SAMPLE_ATTEMPTS} attempts — widen trigger_window."
     )
 
 
@@ -464,8 +475,8 @@ class ClipSource:
             "feature": sampled.feature,
             "bound_type": sampled.bound_type,
             "bound_value": sampled.value,
-            "margin": sampled.margin,
-            "anchor_step": sampled.anchor_step,
+            "peak_violation": sampled.peak_violation,
+            "crossing_step": sampled.crossing_step,
             "trigger_step": sampled.trigger_step,
             "continuation_frames": int(len(continuation)),
             "continuation_reach": goal_reach(
@@ -567,7 +578,6 @@ def clip_source_from_dir(out_dir: Path) -> ClipSource:
         features=tuple(stored["features"]),
         bound_types=tuple(stored["bound_types"]),
         trigger_window=(stored["trigger_window"][0], stored["trigger_window"][1]),
-        margin_range=(stored["margin_range"][0], stored["margin_range"][1]),
         correction_frames=(
             stored["correction_frames"][0],
             stored["correction_frames"][1],
@@ -629,8 +639,8 @@ def generate_correction_clips(cfg: CorrectionClipConfig) -> Path:
     run_cfg = replace(rig.cfg, max_angle_delta=cfg.max_angle_delta, seed=cfg.seed)
     # UNRESTRICTED is `bounds=()`: it carries the anatomical joint box into the
     # cost stack and nothing else. No persona's comfort bounds enter this
-    # pipeline — every bound is sampled per run, anchored on the naive rollout
-    # this base cost produces.
+    # pipeline — every bound is sampled per run off the naive rollout this base
+    # cost produces.
     base = base_extra_costs(rig, UNRESTRICTED)
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
@@ -675,7 +685,6 @@ def generate_correction_clips(cfg: CorrectionClipConfig) -> Path:
             "features": list(cfg.features),
             "bound_types": list(cfg.bound_types),
             "trigger_window": list(cfg.trigger_window),
-            "margin_range": list(cfg.margin_range),
             "correction_frames": list(cfg.correction_frames),
             "max_angle_delta": cfg.max_angle_delta,
             "min_goal_distance": cfg.min_goal_distance,

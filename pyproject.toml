@@ -58,6 +58,7 @@ dependencies = [
    "flask",
    "openai>=1.0.0",
    "ssik",
+   "hydra-joblib-launcher>=1.2.0",
 ]
 
 [project.optional-dependencies]

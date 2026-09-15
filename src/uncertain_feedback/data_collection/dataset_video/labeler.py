@@ -849,7 +849,7 @@ def autolabel(clip_name: str) -> ResponseReturnValue:
     if not start_path.exists() or not end_path.exists():
         return jsonify({"error": "frame file not found"}), 404
 
-    model = flask.current_app.config.get("OPENAI_MODEL", "gpt-5.4")
+    model = flask.current_app.config.get("OPENAI_MODEL", "gpt-5.6-luna")
     try:
         captions = _autolabel_many(start_path, end_path, model, variants=variants)
     except Exception as exc:  # pylint: disable=broad-except
@@ -874,7 +874,7 @@ def autolabel_batch(clip_name: str) -> ResponseReturnValue:
 
     frames_dir = Path(flask.current_app.config["FRAMES_DIR"])
     clip_dir = frames_dir / clip_name
-    model = flask.current_app.config.get("OPENAI_MODEL", "gpt-5.4")
+    model = flask.current_app.config.get("OPENAI_MODEL", "gpt-5.6-luna")
 
     def process(item: dict[str, Any]) -> dict[str, Any]:
         sf = int(item.get("start_frame", 0))
@@ -925,8 +925,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--openai-model",
-        default="gpt-5.4",
-        help="OpenAI model for AI captioning (default: gpt-5.4).",
+        default="gpt-5.6-luna",
+        help="OpenAI model for AI captioning (default: gpt-5.6-luna).",
     )
     args = parser.parse_args()
 

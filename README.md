@@ -2096,6 +2096,55 @@ same scenario as `mpc_demo_low2_across.yaml` with a ~60 deg shoulder-elevation
 floor. It lifts the mean end elevation across the six candidates from 42.0 to
 56.7 deg and cuts the mean steering cost from 11.5 to 4.6.
 
+### Rendering an executed trajectory as an SMPL mesh
+
+Every feedback-configured run writes `executed_trajectory.npy` (shape `(T, 7)`)
+to `<llm_cost.artifact_dir>/<timestamp>/trajectory_00/`. Turn one into a mesh
+video — the same fitted SMPL body the demo runner draws, front and side view
+side by side:
+
+```bash
+uv run python src/uncertain_feedback/utils/mesh_video.py \
+  outputs/<run>/<timestamp>/trajectory_00/executed_trajectory.npy \
+  outputs/<run>/mesh.mp4 \
+  --fps 20 --resolution 720
+```
+
+`--views front side` selects the panels, `--pose` overrides the HML263 body pose
+supplying the torso (default `consts.MDM_START_POSE_PATH`, matching the runner).
+Rendering is offscreen through EGL, so it needs no display but does need a GPU.
+
+To show the correction itself — the sentence on screen, every cluster the user
+was offered fanning out from the arm's pose at the trigger, then the run
+continuing in the chosen cluster's colour — add the round's candidate means:
+
+```bash
+uv run python src/uncertain_feedback/utils/mesh_video.py \
+  outputs/<run>/<timestamp>/trajectory_00/executed_trajectory.npy \
+  outputs/<run>/correction.mp4 \
+  --cluster-means outputs/<run>/<timestamp>/trajectory_00/round_00/cluster_means.npz \
+  --trigger-step 8 --caption "raise my arm a bit higher" \
+  --hide-clusters 0 1 --hold-seconds 2 --goal -0.18 0.12 0.22
+```
+
+`--hide-clusters` drops candidates from the drawing without recolouring the
+rest (each label keeps its palette slot). `--hold-seconds` lingers on the two
+beats worth reading — the frame the feedback lands on, and the last frame the
+candidates are up — by duplicating those frames in the output; the body's arm
+takes the chosen colour on the frame *after* the trigger, so that first pause
+reads as the sentence landing rather than as the pick already made. `--goal`
+marks the Cartesian wrist goal with a charcoal sphere, taking it in the same
+spine3-relative frame as the config's `cartesian.goals`.
+
+`cluster_means.npz` is written next to `correction.npy` on every UQ round: one
+`cluster_<label>` array per candidate (anchored to the arm pose at the trigger,
+the way `feedback.anchor_correction` anchors the chosen one) plus
+`chosen_label`. Read `trigger_step` from `trajectory_summary.json`. The chosen
+cluster is drawn as the body's own arm tinted its colour rather than as a
+seventh ghost: the executed motion *is* that mean being tracked, and a second
+mesh on the same arm z-fights. For side-by-side clips, `render_layers(...,
+bounds=...)` takes a shared camera box so a bigger motion reads as bigger.
+
 ### Cartesian MPC Without MDM or UQ
 A config whose only module section is `cartesian:` is direct Cartesian
 wrist-goal MPC. This path does not generate motion or run clustering. If you

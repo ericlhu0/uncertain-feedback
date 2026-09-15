@@ -54,7 +54,7 @@ def test_medoid_is_min_summed_distance_member() -> None:
     positions = _two_group_positions(n_per_group=4)
     clusterer = make_clusterer("kmeans_end_pose", 2, fk=object())  # type: ignore[arg-type]
     labels = clusterer.cluster_positions(positions)
-    features = clusterer._position_features
+    features = clusterer.features
     for label, idx in clusterer.medoid_indices(labels).items():
         members = np.flatnonzero(labels == label)
         sums = [
@@ -66,7 +66,7 @@ def test_medoid_is_min_summed_distance_member() -> None:
 
 def test_medoid_indices_requires_prior_clustering() -> None:
     clusterer = make_clusterer("kmeans_end_pose", 2, fk=object())  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="cluster_positions"):
+    with pytest.raises(ValueError, match="cluster_positions first"):
         clusterer.medoid_indices(np.zeros(4, dtype=np.intp))
 
 

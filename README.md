@@ -2193,10 +2193,10 @@ trajectory all see the anchored version.
 `llm_cost.backend` selects how the cost is generated:
 
 Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
-`gpt-5.6-luna` with `xhigh` reasoning effort. Reasoning effort follows the model
-(`gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`); any other model is sent without
-one. The demo-runner config (`mdm_llm_transfer.yaml`)
-pins `gpt-5.6-sol`.
+`gpt-5.6-luna` with `high` reasoning effort. Reasoning effort follows the model
+(`gpt-5.6-luna` → `high`, `gpt-5.6-sol` → `low`); any other model is sent without
+one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-5.6-luna`;
+`gpt-5.6-sol` is not used for now.
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
   images + compact summary, including rollout-labeled chosen-vs-marked-wrong terminal
@@ -2502,7 +2502,8 @@ Stages (each stage's controls unlock once the previous one ran):
    mode, other steering knobs stay YAML-only); scoring events and any
    prompt/cost conflict warning appear in the log panel. Each cluster is
    represented by its medoid — an actual MDM sample — rather than the
-   elementwise mean. Every
+   elementwise mean, exactly as `UqSelector` does for the planner and
+   evaluation paths. Every
    cluster option is automatically integrated into the full corrected
    trajectory — executed history → scaled correction → comfort-only goal
    continuation — so cards show what actually happens if that option is taken:

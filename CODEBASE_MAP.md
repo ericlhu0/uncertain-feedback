@@ -54,7 +54,7 @@ uncertain-feedback/
 │   │       │   ├── __init__.py       # Re-exports the planner-side cost API
 │   │       │   ├── base.py           # Cost terms + registry + preference learning
 │   │       │   └── generated.py      # Compiled-cost runtime: context, compile/exec, response parsing
-│   │       ├── rollout.py            # Headless rollout primitives: run_planning_loop, rollout_reference_trajectory, assemble_full_correction_traj, make_cost_eval_rollout, rollout_to_goal, goal_reach
+│   │       ├── rollout.py            # Headless rollout primitives: run_planning_loop, rollout_reference_trajectory, assemble_full_correction_traj, make_cost_eval_rollout, rollout_to_goal, goal_reach, wrist_goal_distances (per-frame spine3-relative wrist distance to a goal, q or axis-angle states)
 │   │       ├── mpc.py                # ArmMPC — the one planner class, composed from the module slots below
 │   │       ├── action_spaces/        # ActionSpace ABC + RolloutBatch/StageCost contract
 │   │       │   ├── base.py           # ABC: rollouts/shape_costs/command/execute/hold
@@ -104,7 +104,7 @@ uncertain-feedback/
 │   │       ├── __init__.py           # staged prompt builders + image placeholder substitution
 │   │       ├── runtime_api.txt       # Shared technical contract
 │   │       ├── output_contract.txt   # Shared output rules
-│   │       └── stages/               # interpret.txt, ground.txt, author.txt, refine.txt, combine.txt
+│   │       └── stages/               # interpret.txt, ground.txt, author.txt, refine.txt, combine.txt; interpret_language.txt + ground_language.txt = the `language_only` variants (`generate_cost_for_cluster(language_only=True)`: cluster_traj is the INTERRUPTED plan -> `reference`, recent history fills the correction slot, no `mdm_traj` summary, one `interrupted_plan_img`; ranking then requires the plan to cost more than the accepted history)
 │   ├── evaluation_mechanism/         # How the method scores its own generated costs (LLM-facing)
 │   │   ├── __init__.py               # Façade
 │   │   ├── eval_state.py             # EvalState/EvalMpcConfig (picklable rollout state for agent backend)
@@ -158,12 +158,14 @@ uncertain-feedback/
 │   │   ├── base.py                   # SimulatedUser, HiddenBound/CoupledBound, violations, cluster choice, oracle cost term
 │   │   ├── attribution.py            # attribute_correction: nominal-vs-oracle-window contrast → CorrectionIntent
 │   │   ├── verbalizers.py            # vague/everyday/motion_directive/joint_resolved verbalizers + VERBALIZERS registry
-│   │   ├── visual.py                 # VisualVerbalizer: VLM speaks from rendered pose images, disk-cached
-│   │   ├── chooser.py                # choose_correction: oracle-path lexicographic cluster+magnitude chooser; oracle_cluster_scores
+│   │   ├── visual.py                 # PROMPT + render_pose_image (desired pose in blue over the current one in orange; the evaluation-time pair — the clip labeler now draws its own single image instead) and VisualVerbalizer: VLM speaks from those images, disk-cached
+│   │   ├── clip_caption.py           # ClipCaptionVerbalizer: speaks the way the clip pipeline captions clips — same render_correction_summary window image + DRAFT_PROMPT via captioning.caption_model, one casual phrase, disk-cached; needs body_pos (bind_verbalizer threads rig.body_pos); registered as "clip_caption"
+│   │   ├── chooser.py                # choose_correction: cluster+magnitude chooser over the magnitude grid. Modes: `oracle_progress` (default; zero hidden-bound violation at any frame, then endpoint nearest the oracle correction's end along its feature path via `progress.correction_progress`, ties by alignment; `oracle_path` must be the oracle *correction*), `intent_aligned` (cosine with the nominal-vs-oracle `CorrectionIntent`, no dead band since 2026-09-09), `progress` (legacy remaining-arc), `random`; all fall back to the least-violating pair. oracle_cluster_scores
+│   │   ├── progress.py               # `correction_progress(oracle, generated, context)` -> `ProgressResult(arc_progress, alignment, per_feature, ...)`: the generated endpoint projected onto the oracle's anchored anatomical-feature polyline (arclength fraction, unclamped) and the cosine of the two local headings; `feature_path`. Re-exported by `evaluation/metrics/grounding/progress.py`
 │   │   ├── personas.py               # Clinically motivated personas (PERSONAS registry)
 │   │   └── viz.py                    # render_hidden_bounds: shaded forbidden regions + trajectories
 │   ├── data_collection/              # One folder per data-generation method (each ends in a HumanML3D dataset dir), plus the building blocks they share. `sam-3d-body/` and `MHR/` submodules sit at this level
-│   │   ├── data/                     # **Gitignored**, ~3 GB: the data each method generates, in a subfolder named after that method's package — `dataset_video/` (videos/, frames/ + labels.json, mdm_cache/, mdm_cache.mirrored_bak_*) and `dataset_auto_correction/` (one dir per clip set, each with its `session_*` labeling forks; `clips/` is the flagless default both `generate.py` and `label.py` use). Every entry point defaults in here via `common/paths.py`, never via `Path(__file__)` arithmetic
+│   │   ├── data/                     # **Gitignored**, ~3.4 GB: the data each method generates, in a subfolder named after that method's package — `dataset_video/` (videos/, frames/ + labels.json, mdm_cache/, mdm_cache.mirrored_bak_*) and `dataset_auto_correction/` (one dir per clip set, each with its `session_*` labeling forks; `clips/` is the flagless default both `generate.py` and `label.py` use). Every entry point defaults in here via `common/paths.py`, never via `Path(__file__)` arithmetic
 │   │   ├── common/                   # Shared building blocks — no dataset comes out of these
 │   │   │   ├── paths.py              # DATA_ROOT / VIDEO_DATA_DIR / AUTO_CORRECTION_DATA_DIR / DEFAULT_CLIP_SET: the per-method `data/` homes, absolute (the MDM loader chdir()s into its submodule and never restores, so a relative default would move under a run). Imports only pathlib, so a path lookup never drags in the pose-estimation stack
 │   │   │   ├── hml263.py             # positions → HML263 via official HumanML3D process_file
@@ -282,13 +284,15 @@ MdmMotionGenerator.generate_left_arm_trajectory()   [mdm_api.py]
     │   XyzPositionClusterer.cluster()                [clustering/xyz_clusterer.py]
     │       KMeans on FK positions at frame ~100
     │       (Demo Runner instead builds the clusterer via make_clusterer
-    │        from uq.clusterer / its UI dropdown, and represents each cluster
-    │        by its medoid sample rather than the mean)
+    │        from uq.clusterer / its UI dropdown)
+    │       Each cluster is represented by its medoid sample — an actual
+    │       MDM sample — never the elementwise mean (UqSelector and Demo
+    │       Runner alike; `UqClusterResult.cluster_means` holds medoids)
     │       │
     │       ▼
     │   pick_cluster() / pick_cluster_positions()     [cluster_picker.py]
     │       Interactive matplotlib window
-    │       Returns chosen label → cluster mean trajectory
+    │       Returns chosen label → medoid of the picked (possibly refined) samples
     │
     ▼  chosen (n_frames, 3, 3) trajectory
     │
@@ -393,8 +397,9 @@ Expose `min_value`, `max_value`, `feature_values()`, `with_range()` so the runne
 
 A third, narrower cost surface, used **only inside diffusion sampling** (§14) — never to score or select a trajectory. `build_user_bound_cost(user, hml_mean, hml_std)` compiles a persona's `HiddenBound`/`CoupledBound` terms into a differentiable `x̂0 → (N,)` torch cost with `HiddenCostTerm`'s shape (time-averaged square of the summed per-frame violation, weight omitted: resampling is scale-free and cg folds the scale into λ). Caveats, all deliberate:
 
-- **World-frame features.** Flexion and elevation are read straight off the RIC joint positions in the HML263 block, so no IK runs in the loop (the numpy IK path costs ~8.5 s per scoring event). Elbow flexion matches `arm_feature_series` exactly; shoulder elevation is measured from world-down instead of torso-down, so the two agree only for an unleaned torso — which is what `test_torch_position_features_match_arm_feature_series` pins (upright fixture, `spine3_aa = 0`). Demo runs use `frozen_body=False`, so the body *can* lean and the steering signal then reads slightly stricter than the oracle.
-- **Not every term is representable.** Only `elbow_flexion` and `shoulder_elevation` bounds are supported; `JointBoxLimit` is structurally excluded (it needs axis-angles). `build_user_bound_cost` prints the terms it skips and returns `None` when nothing is left.
+- **Facing-frame features.** Flexion, elevation and abduction are read straight off the RIC joint positions in the HML263 block, so no IK runs in the loop (the numpy IK path costs ~8.5 s per scoring event). Elbow flexion matches `arm_feature_series` exactly; shoulder elevation is measured from world-down instead of torso-down, and shoulder abduction from the root's lateral axis instead of spine3's, so the two agree only for an unleaned, untwisted torso — which is what `test_torch_position_features_match_arm_feature_series` pins (upright fixture, `spine3_aa = 0`). Demo runs use `frozen_body=False`, so the body *can* lean and the steering signal then reads slightly stricter than the oracle.
+- **Not every term is representable.** Only `elbow_flexion`, `shoulder_elevation` and `shoulder_abduction_adduction` bounds (and coupled/conditioned terms over them) are supported; `JointBoxLimit` is structurally excluded (it needs axis-angles). `build_user_bound_cost` prints the terms it skips and returns `None` when nothing is left.
+- **TODO(frame) — abduction is read in the wrong yaw frame.** RIC positions sit in the pelvis-facing frame, `arm_feature_series` in spine3's, and abduction (unlike elevation) is yaw-dependent, so coupled bounds conditioned on it (`cross_body_pain`, sampled coupled bounds) steer toward a threshold offset by the pelvis-to-spine3 twist. Fix noted in the module docstring: build the lateral axis per frame from the RIC shoulder pair and tighten the parity test to a twisted `spine3_aa`. Added 2026-09-11.
 - **Time-averaged, so mildly hackable** toward violating late frames only. Acceptable here because the cost never decides anything: oracle evaluation and cluster scoring keep going through the exact IK path.
 
 ### Cost structure
@@ -477,10 +482,10 @@ When `llm_cost.enabled: true` in the YAML:
 | `corrections.*`        | CorrectionConfig | `trigger_threshold` (default 0.02 rad). Restricted users trigger on a new above-threshold episode after returning to comfort; legacy `transfer.trigger_threshold` is accepted as a fallback. |
 | `cartesian.*`          | CartesianConfig | Presence enables the Cartesian goal space: `goals` (non-empty list of [x,y,z]), `threshold` |
 | `costs.*`              | dict     | Named cost terms with their params                   |
-| `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
+| `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `high`, `gpt-5.6-sol` → `low`; every shipped config uses luna, sol is not used for now), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets). Consumed (with `persona_goals`) by the repo-root `evaluation/` benchmarks: `InteractionBenchmark(use_persona_goals=true)` appends them to a persona's goal sequence. Legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
 | `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments. Consumed by the repo-root `evaluation/` benchmarks (`InteractionBenchmark(use_persona_goals=true)` resolves each persona's cartesian + transfer goals into its task's goal sequence); nothing in `src/` applies it. Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
-| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings. `chooser` (`intent_aligned` [default] \| `progress` \| `random`) selects the candidate-choice model in `simulated_users/chooser.py` — intent-aligned picks the comfortable candidate best aligned with the private `CorrectionIntent`; acceptability = mean playback violation ≤ trigger threshold. The repo-root `evaluation/` episode loop consumes `magnitudes`, `nominal_steps`, and `time_of_day`; `verbalizer`/`seed`/`max_rounds` are superseded there by the benchmark's task fields (verbalizer grid, hydra seed, per-benchmark round cap) and remain unconsumed: `verbalizer` (`vague` \| `everyday` [default] \| `motion_directive` \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20), `time_of_day` (session clock in hours `[0, 24)` seen by time-conditioned personas via `MpcCostContext.time_of_day`; default unset = untimed) |
+| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings. `chooser` (`oracle_progress` [default] \| `intent_aligned` \| `progress` \| `random`) selects the candidate-choice model in `simulated_users/chooser.py` — oracle_progress rejects any hidden-bound violation and picks the endpoint nearest the oracle correction's end along its path (ties by alignment); intent-aligned picks the comfortable candidate best aligned with the private `CorrectionIntent`; acceptability = peak playback violation ≤ trigger threshold (any frame past the limit rules the candidate out, the same max-based test the execution trigger uses). The repo-root `evaluation/` episode loop consumes `magnitudes`, `nominal_steps`, and `time_of_day`; `verbalizer`/`seed`/`max_rounds` are superseded there by the benchmark's task fields (verbalizer grid, hydra seed, per-benchmark round cap) and remain unconsumed: `verbalizer` (`vague` \| `everyday` [default] \| `motion_directive` \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20), `time_of_day` (session clock in hours `[0, 24)` seen by time-conditioned personas via `MpcCostContext.time_of_day`; default unset = untimed) |
 
 ---
 
@@ -1137,7 +1142,7 @@ The hidden bounds are the evaluation ground truth for method-level evaluation
   lexicographic — pain filter (max violation ≤ 0.02 rad, the trigger
   threshold) then score `min_j(‖end − oracle[j]‖ + remaining_arc(j))` over
   `j ≥ min_join`; candidates and the oracle path are canonicalized to 7-DOF q
-  (`arm_features.canonical_arm_q`) before scoring. All-painful → lowest mean
+  (`arm_features.canonical_arm_q`) before scoring. All-painful → lowest peak
   violation with `no_acceptable_cluster=True`. Returns frozen `ChoiceResult`
   (label, magnitude, per-cluster acceptability + scores).
 - Features come from the shared `arm_features.arm_feature_series()` implementation
@@ -1297,4 +1302,7 @@ only — nothing switches mode automatically.
 Validated defaults (do not re-derive): `resample_steps=(15,25,35,45)`, `temperature=0.5`,
 `guide_from=10`, `guidance_weight=1e5`. `resample_steps`/`guide_from` live in loop-index space
 over `diffusion.num_timesteps` (50 for the current checkpoint); indices past the end never
-fire. Experiment scripts and results behind these numbers are in `steering_experiments/`.
+fire. The experiment scripts and results behind these numbers were archived on
+2026-09-06 to `/share/bhattacharjee/eric_data/repo_doc_archive/steering_experiments/`.
+
+

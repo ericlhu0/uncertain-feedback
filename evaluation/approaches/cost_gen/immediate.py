@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from evaluation.approaches.cost_gen.base import CostGen
-from evaluation.structs import LearnOutcome, RoundContext
+from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost
 
 
@@ -14,11 +14,4 @@ class ImmediateCostGen(CostGen):
         return list(self._generated)
 
     def learn(self, ctx: RoundContext) -> LearnOutcome:
-        generated, _ = self._generate(ctx)
-        if generated is None:
-            return LearnOutcome(cost_accepted=False, unified_installed=False)
-        return LearnOutcome(
-            cost_accepted=True,
-            unified_installed=False,
-            description=generated.description,
-        )
+        return self.record(ctx, self.generate(ctx))

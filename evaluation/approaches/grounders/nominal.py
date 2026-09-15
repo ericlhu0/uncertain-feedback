@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from evaluation.approaches.grounders.base import ClusterSelector, Grounder
-from evaluation.structs import GroundingResult
+from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
@@ -24,9 +24,8 @@ class NominalGrounder(Grounder):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
-        goal: np.ndarray,
     ) -> GroundingResult:
-        del text, q_feedback, goal
+        del text, q_feedback
         nominal_aa = q_to_arm_aa(nominal_plan, self.rig.fk.elbow_hinge_axis)
         candidates: dict[int, np.ndarray] = {0: nominal_aa}
         _, magnitude = cluster_selector(candidates)

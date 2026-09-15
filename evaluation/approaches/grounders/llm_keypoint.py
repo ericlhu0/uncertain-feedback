@@ -20,7 +20,7 @@ from evaluation.approaches.grounders.base import (
     ClusterSelector,
     Grounder,
 )
-from evaluation.structs import GroundingResult, InteractionTask
+from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.costs import extract_json_object
 from uncertain_feedback.planners.mpc.kinematics import (
     ELBOW_CHAIN_IDX,
@@ -46,7 +46,7 @@ _KEYPOINT_SYSTEM_PROMPT = (
 _JOINT_CHAINS = {"elbow": ELBOW_CHAIN_IDX, "wrist": WRIST_CHAIN_IDX}
 
 
-class KeypointGrounder(Grounder):
+class LlmKeypointGrounder(Grounder):
     """Candidates are single LLM-proposed keypoint edits of the nominal plan."""
 
     def __init__(
@@ -65,10 +65,10 @@ class KeypointGrounder(Grounder):
         self,
         rig: PlanningRig,
         user: SimulatedUser,
-        task: InteractionTask,
+        seed: int,
         episode_dir: Path,
     ) -> None:
-        super().reset(rig, user, task, episode_dir)
+        super().reset(rig, user, seed, episode_dir)
         self._history: list[str] = []
         self._llm: Any = None
 
@@ -118,9 +118,8 @@ class KeypointGrounder(Grounder):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
-        goal: np.ndarray,
     ) -> GroundingResult:
-        del q_feedback, goal
+        del q_feedback
         rig = self.rig
         nominal_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
         arm_pos = rig.fk.fk_batch(nominal_aa, rig.spine3_pos, rig.spine3_aa)

@@ -88,15 +88,11 @@ _TRACE_COLOR = "cornflowerblue"
 _ELBOW_RANGE_COLOR = "red"
 _WRIST_IDX = 20  # left_wrist in the 22-joint array
 
-# 3D camera angles: (title, elev, azim)
-_3D_VIEWS = [
-    ("Perspective", 45, -60),
-    ("p2", 45, 60),
-    ("p3", 45, -120),
-]
-
-# Single view used in compact (1-panel) mode — overhead diagonal
+# Single 3-D camera angle used in compact (1-panel) mode: (title, elev, azim)
 _COMPACT_VIEW = ("Perspective", 65, -90)
+
+# Default layout: one row of the three square orthographic panels
+_DEFAULT_FIGSIZE = (12.0, 4.0)
 
 
 # 2D orthographic projections
@@ -119,6 +115,9 @@ _ORTHO_VIEWS = [
         "Top (XZ)", 0, 2, "X (m), + = person's left", "Z (m), + = person's front"
     ),
 ]
+
+# In _ORTHO_VIEWS order, once `_faces_viewer` has flipped the horizontal axis.
+_VIEWPOINTS = ("from the front", "from the person's left", "from above")
 
 
 @dataclasses.dataclass
@@ -379,7 +378,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                         background skeleton.  When provided (e.g. sitting pose)
                         it replaces the default T-pose for the grey backdrop.
             compact:    If ``True``, build a single 3-D panel instead of the
-                        full 6-panel layout.  Faster to render and encode.
+                        three orthographic panels.
             elbow_height_range: Optional ``(min_y, max_y)`` world-space Y bounds
                         for acceptable elbow height, shown as red planes.
             show_target_arm: If ``False``, omit the static dashed blue
@@ -389,16 +388,13 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         target_full = self._full_body_positions(target_q, spine3_pos, spine3_aa)
         ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
 
-        # Use body reference + target to set axis limits
-        all_pts = np.vstack([ref_body, target_full])
-        mg = 0.15
-        lims = [(all_pts[:, i].min() - mg, all_pts[:, i].max() + mg) for i in range(3)]
+        # Use body reference + target arm to set axis limits
+        all_pts = np.vstack([ref_body, target_full[LEFT_ARM_JOINT_INDICES_22]])
         if elbow_height_range is not None:
-            low_y, high_y = elbow_height_range
-            lims[1] = (
-                min(lims[1][0], low_y - mg),
-                max(lims[1][1], high_y + mg),
-            )
+            band = np.tile(all_pts.mean(axis=0), (2, 1))
+            band[:, 1] = elbow_height_range
+            all_pts = np.vstack([all_pts, band])
+        lims = _cube_lims(all_pts)
 
         plt.ion()
         fig, artists_3d, artists_2d = self._build_figure(
@@ -616,7 +612,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         mdm_goal_q: np.ndarray | None = None,
         fps: int = 20,
     ) -> None:
-        """Render a pre-computed rollout to video using the 6-panel MPC layout.
+        """Render a pre-computed rollout to video using the 3-panel MPC layout.
 
         Args:
             rollout:         ``(T, 3, 3)`` arm axis-angle frames.
@@ -647,16 +643,12 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 ]
             )  # (T, 22, 3)
             ref_body = body_pos if body_pos is not None else self.fk.tpose_all_joints
-            mg = 0.15
-            all_pts = np.vstack([all_pos.reshape(-1, 3), ref_body])
-            lims = [
-                (float(all_pts[:, i].min()) - mg, float(all_pts[:, i].max()) + mg)
-                for i in range(3)
-            ]
+            arm_pts_all = all_pos[:, LEFT_ARM_JOINT_INDICES_22].reshape(-1, 3)
+            lims = _cube_lims(np.vstack([arm_pts_all, ref_body]))
 
             # Create figure with Agg canvas directly — avoids touching global pyplot
             # state (no matplotlib.use() call), making this safe to call from threads.
-            agg_fig = _MplFigure(figsize=(20, 9))
+            agg_fig = _MplFigure(figsize=_DEFAULT_FIGSIZE)
             FigureCanvasAgg(agg_fig)
 
             # Use MDM goal as the static dashed reference (matches live visualizer),
@@ -859,11 +851,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         all_pts = np.concatenate(
             [ref_body, positions.reshape(-1, 3), current_positions], axis=0
         )
-        mins = np.min(all_pts, axis=0)
-        maxs = np.max(all_pts, axis=0)
-        center = (mins + maxs) / 2.0
-        radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
-        lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
+        lims = _cube_lims(all_pts)
 
         n_samples = min(12, positions.shape[0])
         sample_indices = (
@@ -1086,11 +1074,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         if goal_world is not None:
             extra_pts.append(goal_world.reshape(1, 3))
         all_pts = np.concatenate([ref_body, current_positions] + extra_pts, axis=0)
-        mins = np.min(all_pts, axis=0)
-        maxs = np.max(all_pts, axis=0)
-        center = (mins + maxs) / 2.0
-        radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
-        lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
+        lims = _cube_lims(all_pts)
 
         def _sampled_arm_frames(
             ax: Axes,
@@ -1281,6 +1265,173 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         fig.savefig(save_path, dpi=150)
         plt.close(fig)
 
+    def render_oracle_overlay(  # pylint: disable=too-many-locals
+        self,
+        save_path: str | Path,
+        *,
+        oracle_traj: np.ndarray,
+        nominal_traj: np.ndarray,
+        current_q: np.ndarray,
+        spine3_pos: np.ndarray,
+        spine3_aa: np.ndarray,
+        body_pos: np.ndarray | None = None,
+        goal_pos: np.ndarray | None = None,
+        title: str | None = None,
+    ) -> None:
+        """Render the evaluation oracle against the nominal plan it replaces.
+
+        Both trajectories leave the same trigger pose (orange), so the picture
+        reads as the correction the grounder has to produce: the oracle window
+        in green, the nominal continuation in red, wrist paths solid.
+
+        Args:
+            save_path:     Output image path (.png).
+            oracle_traj:   ``(T, 3, 3)`` oracle-window arm axis-angle frames.
+            nominal_traj:  ``(T, 3, 3)`` nominal-plan arm axis-angle frames.
+            current_q:     ``(3, 3)`` shared trigger pose.
+            spine3_pos:    ``(3,)`` spine3 world position.
+            spine3_aa:     ``(3,)`` spine3 world axis-angle.
+            body_pos:      ``(22, 3)`` reference body; falls back to a
+                           translated T-pose when ``None``.
+            goal_pos:      ``(3,)`` spine3-relative wrist goal, or ``None``.
+            title:         Figure suptitle (persona and utterance).
+        """
+        save_path = Path(save_path)
+        wrist_chain_idx = 4  # left_wrist in the 5-joint arm chain
+        trajs = (
+            np.asarray(oracle_traj, dtype=np.float64),
+            np.asarray(nominal_traj, dtype=np.float64),
+        )
+        cmap_names = ("Greens", "Reds")
+        line_colors = ("green", "firebrick")
+        chains = [self.fk.fk_batch(traj, spine3_pos, spine3_aa) for traj in trajs]
+        current_positions = self.fk.fk(current_q, spine3_pos, spine3_aa)
+        cur_full = self.fk.full_body_positions(current_q, spine3_pos, spine3_aa)
+        ref_body = (
+            body_pos
+            if body_pos is not None
+            else self.fk.tpose_all_joints + (spine3_pos - self.fk.tpose_spine3_pos)
+        )
+        goal_world = (
+            spine3_pos + np.asarray(goal_pos, dtype=np.float64)
+            if goal_pos is not None
+            else None
+        )
+
+        # Limits come from the arm layers only — the body is context and would
+        # otherwise shrink a 20-frame correction to a few pixels.
+        all_pts = [current_positions, *(chain.reshape(-1, 3) for chain in chains)]
+        if goal_world is not None:
+            all_pts.append(goal_world.reshape(1, 3))
+        lims = _cube_lims(np.concatenate(all_pts, axis=0))
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        for ax, view in zip(axes, _ORTHO_VIEWS):
+            ax.set_aspect("equal")
+            ax.set_title(view.title, fontsize=9)
+            ax.set_xlabel(view.hl, fontsize=8)
+            ax.set_ylabel(view.vl, fontsize=8)
+            ax.set_xlim(*lims[view.hi])
+            ax.set_ylim(*lims[view.vi])
+            ax.tick_params(labelsize=7)
+
+            _draw_bones_2d(
+                ax,
+                ref_body,
+                ArmVisualizer.BODY_BONES,
+                view.hi,
+                view.vi,
+                ArmVisualizer.BODY_COLOR,
+                alpha=0.45,
+                lw=1.2,
+            )
+            for traj, chain, cmap_name, line_color in zip(
+                trajs, chains, cmap_names, line_colors
+            ):
+                cmap = plt.get_cmap(cmap_name)
+                denom = max(1, traj.shape[0] - 1)
+                n_samples = min(8, traj.shape[0])
+                for frame_idx in np.linspace(0, denom, n_samples).round().astype(int):
+                    full = self.fk.full_body_positions(
+                        traj[frame_idx], spine3_pos, spine3_aa
+                    )
+                    _draw_bones_2d(
+                        ax,
+                        full,
+                        LEFT_ARM_BONE_PAIRS_22,
+                        view.hi,
+                        view.vi,
+                        cmap(0.3 + 0.7 * (frame_idx / denom)),
+                        alpha=0.5,
+                        lw=1.2,
+                    )
+                wrist = chain[:, wrist_chain_idx]
+                ax.plot(
+                    wrist[:, view.hi],
+                    wrist[:, view.vi],
+                    color=line_color,
+                    alpha=0.9,
+                    linewidth=1.6,
+                )
+                ax.scatter(
+                    wrist[-1, view.hi],
+                    wrist[-1, view.vi],
+                    marker="o",
+                    color=line_color,
+                    s=35,
+                    zorder=5,
+                )
+            if goal_world is not None:
+                ax.scatter(
+                    goal_world[view.hi],
+                    goal_world[view.vi],
+                    marker="*",
+                    color="gold",
+                    edgecolors="black",
+                    linewidths=0.5,
+                    s=180,
+                    zorder=6,
+                )
+            _draw_bones_2d(
+                ax,
+                cur_full,
+                LEFT_ARM_BONE_PAIRS_22,
+                view.hi,
+                view.vi,
+                "tab:orange",
+                alpha=1.0,
+                lw=2.2,
+            )
+
+        legend_handles = [
+            plt.Line2D([0], [0], color="green", linewidth=2, label="oracle correction"),
+            plt.Line2D([0], [0], color="firebrick", linewidth=2, label="nominal plan"),
+            plt.Line2D([0], [0], color="tab:orange", linewidth=2, label="trigger pose"),
+        ]
+        if goal_world is not None:
+            legend_handles.append(
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="*",
+                    color="gold",
+                    markeredgecolor="black",
+                    linestyle="",
+                    markersize=11,
+                    label="goal",
+                )
+            )
+        axes[0].legend(handles=legend_handles, fontsize=7, loc="best")
+        if title is not None:
+            fig.suptitle(title, fontsize=10)
+        fig.tight_layout(rect=(0, 0, 1, 0.94) if title is not None else None)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        # Equal-aspect axes throw off tight_layout's height estimate, clipping
+        # the x labels; bbox_inches re-measures at save time.
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[oracle-overlay] saved {save_path}")
+
     def render_correction_summary(
         self,
         save_path: str | Path,
@@ -1323,26 +1474,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         all_pts = np.concatenate(
             [start_verts, end_verts[arm_faces.ravel()], chain.reshape(-1, 3)]
         )
-        mins, maxs = np.min(all_pts, axis=0), np.max(all_pts, axis=0)
-        center = (mins + maxs) / 2.0
-        radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
-        lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
-
-        # Each panel puts `hi` rightward and `vi` up, so the camera sits on
-        # hi x vi: +Z for Front, but -X for Side and -Y for Top, which would leave
-        # the left arm behind the body and the top view under the floor. Flipping
-        # the horizontal axis of those two swaps the handedness, so every panel
-        # looks from + of its remaining axis — the person's front, their left, and
-        # above — and the moving arm is the near one everywhere.
-        def _faces_viewer(view: _OrthoView) -> bool:
-            return (view.hi, view.vi, 3 - view.hi - view.vi) in (
-                (0, 1, 2),
-                (1, 2, 0),
-                (2, 0, 1),
-            )
-
-        # In _ORTHO_VIEWS order, once flipped.
-        viewpoints = ("from the front", "from the person's left", "from above")
+        lims = _cube_lims(all_pts)
 
         layers = (
             (start_verts, mesh.faces, (0.74, 0.74, 0.72), 1.0, 1),
@@ -1385,7 +1517,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             )
 
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-        for ax, view, viewpoint in zip(axes, _ORTHO_VIEWS, viewpoints):
+        for ax, view, viewpoint in zip(axes, _ORTHO_VIEWS, _VIEWPOINTS):
             ax.set_aspect("equal")
             ax.set_title(f"{view.title} — {viewpoint}", fontsize=9)
             ax.set_xlabel(view.hl, fontsize=8)
@@ -1507,11 +1639,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         if goal_world is not None:
             extra_pts.append(goal_world.reshape(1, 3))
         all_pts = np.concatenate([ref_body, current_positions] + extra_pts, axis=0)
-        mins = np.min(all_pts, axis=0)
-        maxs = np.max(all_pts, axis=0)
-        center = (mins + maxs) / 2.0
-        radius = max(float(np.max(maxs - mins)) / 2.0, 0.05)
-        lims = [(center[i] - radius, center[i] + radius) for i in range(3)]
+        lims = _cube_lims(all_pts)
 
         def _sampled_arm_frames(
             ax: Axes,
@@ -1881,7 +2009,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 
         Args:
             body_pos: ``(22, 3)`` positions for the grey background body.
-            compact:  If ``True``, build a single 3-D panel (faster to render).
+            compact:  If ``True``, build a single 3-D panel instead of the
+                      three orthographic panels.
             fig:      Pre-created figure to use.  When ``None`` (default) a new
                       figure is created via ``plt.figure()``.  Pass a figure
                       with a non-interactive canvas (e.g. ``FigureCanvasAgg``)
@@ -1905,26 +2034,18 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                 target_full,
                 ref_body,
                 lims,
-                compact=True,
                 elbow_height_range=elbow_height_range,
                 show_target_arm=show_target_arm,
             )
             return fig, artists_3d, []
 
         if fig is None:
-            fig = plt.figure(figsize=(20, 9))
-        gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
-        fig.suptitle("SMPL Left Arm MPC (CEM)", fontsize=13, y=1.01)
+            fig = plt.figure(figsize=_DEFAULT_FIGSIZE)
+        gs = gridspec.GridSpec(1, 3, figure=fig, wspace=0.3)
+        # Placeholder so tight_layout reserves the band `_update_artists` writes
+        # the step and distance into.
+        fig.suptitle(" ", fontsize=9)
 
-        artists_3d = self._build_3d_panels(
-            fig,
-            gs,
-            target_full,
-            ref_body,
-            lims,
-            elbow_height_range=elbow_height_range,
-            show_target_arm=show_target_arm,
-        )
         artists_2d = self._build_2d_panels(
             fig,
             gs,
@@ -1934,7 +2055,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             elbow_height_range=elbow_height_range,
             show_target_arm=show_target_arm,
         )
-        return fig, artists_3d, artists_2d
+        return fig, [], artists_2d
 
     def _build_3d_panels(  # pylint: disable=too-many-locals
         self,
@@ -1943,13 +2064,11 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         target_full: np.ndarray,
         ref_body: np.ndarray,
         lims: list[tuple[float, float]],
-        compact: bool = False,
         elbow_height_range: tuple[float, float] | None = None,
         show_target_arm: bool = True,
     ) -> list[dict]:
-        views = [_COMPACT_VIEW] if compact else _3D_VIEWS
         artists: list[dict] = []
-        for col, (title, elev, azim) in enumerate(views):
+        for col, (title, elev, azim) in enumerate([_COMPACT_VIEW]):
             ax: Axes3D = fig.add_subplot(gs[0, col], projection="3d")
             ax.view_init(elev=elev, azim=azim)
             ax.set_title(title, fontsize=9)
@@ -2081,13 +2200,14 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         show_target_arm: bool = True,
     ) -> list[dict]:
         artists: list[dict] = []
-        for col, view in enumerate(_ORTHO_VIEWS):
-            ax = fig.add_subplot(gs[1, col])
+        for col, (view, viewpoint) in enumerate(zip(_ORTHO_VIEWS, _VIEWPOINTS)):
+            ax = fig.add_subplot(gs[0, col])
             ax.set_aspect("equal")
-            ax.set_title(view.title, fontsize=9)
+            ax.set_title(f"{view.title} — {viewpoint}", fontsize=9)
             ax.set_xlabel(view.hl, fontsize=8)
             ax.set_ylabel(view.vl, fontsize=8)
-            ax.set_xlim(*lims[view.hi])
+            low, high = lims[view.hi]
+            ax.set_xlim(*((low, high) if _faces_viewer(view) else (high, low)))
             ax.set_ylim(*lims[view.vi])
             ax.tick_params(labelsize=7)
             elbow_height_lines = _add_elbow_height_lines_2d(
@@ -2131,13 +2251,23 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     s=28,
                     alpha=0.4,
                     zorder=4,
+                    label="target" if col == 0 else None,
                 )
 
-            scat = ax.scatter([], [], color=ArmVisualizer.TARGET_COLOR, s=35, zorder=5)
+            scat = ax.scatter(
+                [],
+                [],
+                color=ArmVisualizer.TARGET_COLOR,
+                s=35,
+                zorder=5,
+                label="current" if col == 0 else None,
+            )
             lines = [
                 ax.plot([], [], color=ArmVisualizer.TARGET_COLOR, lw=1.8)[0]
                 for _ in LEFT_ARM_BONE_PAIRS_22
             ]
+            if col == 0 and show_target_arm:
+                ax.legend(loc="upper left", fontsize=7)
             (trace,) = ax.plot(
                 [], [], color=_TRACE_COLOR, lw=1, alpha=0.6, linestyle=":"
             )
@@ -2179,6 +2309,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "preview_scat": preview_scat,
                     "cartesian_goal_scat": cartesian_goal_scat,
                     "elbow_height_lines": elbow_height_lines,
+                    "is_main": col == 0,
                 }
             )
         return artists
@@ -2214,6 +2345,33 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
 # ---------------------------------------------------------------------------
 # Module-level drawing helpers (private, used internally by ArmVisualizer)
 # ---------------------------------------------------------------------------
+
+
+def _faces_viewer(view: _OrthoView) -> bool:
+    """Whether ``view`` already looks from + of the axis neither panel axis uses.
+
+    Each panel puts ``hi`` rightward and ``vi`` up, so the camera sits on
+    ``hi x vi``: +Z for Front, but -X for Side and -Y for Top, which would leave
+    the left arm behind the body and the top view under the floor. Flipping the
+    horizontal axis of those two swaps the handedness, so every panel looks from
+    + of its remaining axis — the person's front, their left, and above — and the
+    moving arm is the near one everywhere.
+    """
+    return (view.hi, view.vi, 3 - view.hi - view.vi) in (
+        (0, 1, 2),
+        (1, 2, 0),
+        (2, 0, 1),
+    )
+
+
+def _cube_lims(
+    points: np.ndarray, min_radius: float = 0.05
+) -> list[tuple[float, float]]:
+    """Per-axis limits of one shared extent around ``points``, so panels are square."""
+    mins, maxs = np.min(points, axis=0), np.max(points, axis=0)
+    center = (mins + maxs) / 2.0
+    radius = max(float(np.max(maxs - mins)) / 2.0, min_radius)
+    return [(center[i] - radius, center[i] + radius) for i in range(3)]
 
 
 def _compute_lims(
@@ -2282,6 +2440,7 @@ def _update_artists(  # pylint: disable=too-many-locals
     trace_color: str = _TRACE_COLOR,
 ) -> None:
     """Update all mutable artists for a single frame/step."""
+    step_str = f"{step}/{n_steps}" if n_steps is not None else str(step)
     for a3 in artists_3d:
         a3["scat"]._offsets3d = (  # pylint: disable=protected-access
             arm_pts[:, 0],
@@ -2299,7 +2458,6 @@ def _update_artists(  # pylint: disable=too-many-locals
             a3["trace"].set_3d_properties(wrist_trace[:, 2])
             a3["trace"].set_color(trace_color)
         if a3["is_main"]:
-            step_str = f"{step}/{n_steps}" if n_steps is not None else str(step)
             a3["ax"].set_title(
                 f"Perspective   step {step_str}   dist={dist:.4f} rad",
                 fontsize=8,
@@ -2315,6 +2473,10 @@ def _update_artists(  # pylint: disable=too-many-locals
         if len(wrist_trace):
             a2["trace"].set_data(wrist_trace[:, a2["hi"]], wrist_trace[:, a2["vi"]])
             a2["trace"].set_color(trace_color)
+        if a2["is_main"] and not artists_3d:
+            a2["ax"].figure.suptitle(
+                f"step {step_str}   dist={dist:.4f} rad", fontsize=9
+            )
 
 
 def _elbow_plane_vertices(

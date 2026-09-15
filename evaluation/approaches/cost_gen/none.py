@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from evaluation.approaches.cost_gen.base import CostGen
-from evaluation.structs import LearnOutcome, RoundContext
+from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost
 
 

@@ -1,0 +1,3 @@
+# Oracle grounding: the persona's own ideal correction window from the trigger
+# pose; isolates cost learning from grounding error.
+_target_: evaluation.approaches.grounders.oracle.OracleGrounder

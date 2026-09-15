@@ -11,12 +11,8 @@ from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.grounders.mdm import MdmGrounder
 from evaluation.approaches.grounders.nominal import NominalGrounder
 from evaluation.approaches.steering import NoSteering, Steering
-from evaluation.structs import (
-    GroundingResult,
-    InteractionTask,
-    LearnOutcome,
-    RoundContext,
-)
+from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
+from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs
 from uncertain_feedback.simulated_users import SimulatedUser
@@ -66,12 +62,12 @@ class Approach:
         self,
         rig: PlanningRig,
         user: SimulatedUser,
-        task: InteractionTask,
+        seed: int,
         episode_dir: Path,
     ) -> None:
         """Bind the episode and drop all learned state."""
         self._base = base_extra_costs(rig, user)
-        self.grounder.reset(rig, user, task, episode_dir)
+        self.grounder.reset(rig, user, seed, episode_dir)
         self.cost_gen.reset(rig, self._base, episode_dir)
 
     def planning_costs(self) -> CompositeTrajectoryCost:
@@ -80,18 +76,19 @@ class Approach:
             [*self._base.terms(), *self.cost_gen.learned_terms()]
         )
 
+    def begin_goal(self, goal: np.ndarray, oracle_path: np.ndarray) -> None:
+        """Announce the goal and its oracle path before the goal's rounds."""
+        self.grounder.begin_goal(goal, oracle_path)
+
     def ground(
         self,
         text: str,
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
-        goal: np.ndarray,
     ) -> GroundingResult:
         """Turn one utterance into candidate motions and a selected correction."""
-        return self.grounder.ground(
-            text, q_feedback, nominal_plan, cluster_selector, goal
-        )
+        return self.grounder.ground(text, q_feedback, nominal_plan, cluster_selector)
 
     def learn(self, ctx: RoundContext) -> LearnOutcome:
         """Distill the resolved correction into persistent planner costs."""

@@ -8,7 +8,7 @@ from typing import Callable
 
 import numpy as np
 
-from evaluation.structs import GroundingResult, InteractionTask
+from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.kinematics import SMPL_JOINT_NAMES_22
 from uncertain_feedback.planners.rig import PlanningRig
 from uncertain_feedback.simulated_users import SimulatedUser
@@ -56,14 +56,18 @@ class Grounder(abc.ABC):
         self,
         rig: PlanningRig,
         user: SimulatedUser,
-        task: InteractionTask,
+        seed: int,
         episode_dir: Path,
     ) -> None:
         """Bind the episode; subclasses extend for per-episode state."""
-        del task
+        del seed
         self._rig = rig
         self._user = user
         self._episode_dir = episode_dir
+
+    def begin_goal(self, goal: np.ndarray, oracle_path: np.ndarray) -> None:
+        """Called once per goal before any round; the oracle grounder reads it."""
+        del goal, oracle_path
 
     @abc.abstractmethod
     def ground(
@@ -72,7 +76,6 @@ class Grounder(abc.ABC):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
-        goal: np.ndarray,
     ) -> GroundingResult:
         """Turn one utterance into candidate motions and a selected correction.
 

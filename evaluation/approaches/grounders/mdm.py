@@ -9,7 +9,7 @@ import numpy as np
 
 from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.steering import NoSteering, Steering
-from evaluation.structs import GroundingResult, InteractionTask
+from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.motion_generators.steering import SteeringSpec
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.planners.rig import PlanningRig
@@ -45,10 +45,10 @@ class MdmGrounder(Grounder):
         self,
         rig: PlanningRig,
         user: SimulatedUser,
-        task: InteractionTask,
+        seed: int,
         episode_dir: Path,
     ) -> None:
-        super().reset(rig, user, task, episode_dir)
+        super().reset(rig, user, seed, episode_dir)
         cfg = rig.cfg
         if cfg.feedback is None or cfg.feedback.uq is None:
             raise ValueError("MdmGrounder requires feedback: (with uq:).")
@@ -61,7 +61,7 @@ class MdmGrounder(Grounder):
         self._uq_cfg = uq
         assert rig.gen is not None
         self._steering_spec = self.steering.spec(
-            rig.gen, user, uq.steering, seed=task.seed
+            rig.gen, user, uq.steering, seed=seed
         )
 
     def ground(
@@ -70,9 +70,8 @@ class MdmGrounder(Grounder):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
-        goal: np.ndarray,
     ) -> GroundingResult:
-        del nominal_plan, goal
+        del nominal_plan
         rig = self.rig
         assert rig.gen is not None and rig.initial_hml_pose is not None
         assert self._uq_cfg is not None
@@ -95,9 +94,20 @@ class MdmGrounder(Grounder):
             body_pos=rig.body_pos,
             steering=self._steering_spec,
         )
+        candidates = result.cluster_means
+        if rig.cfg.feedback.anchor_correction:
+            # The same re-anchoring production applies (planners/run.py): drop
+            # the echoed prefix frame and start the demonstrated shape at the
+            # live configuration, so no candidate carries the frame-0 seam.
+            candidates = {
+                label: rig.fk.anchor_arm_trajectory(mean, q_feedback, rig.spine3_aa)
+                for label, mean in candidates.items()
+            }
         return GroundingResult(
-            candidates=result.cluster_means,
+            candidates=candidates,
             chosen_label=result.chosen_label,
             magnitude=result.scale,
-            correction_traj=result.chosen_mean,
+            correction_traj=candidates[result.chosen_label],
+            samples=result.samples,
+            sample_labels=result.labels,
         )

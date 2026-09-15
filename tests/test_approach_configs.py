@@ -12,6 +12,7 @@ from hydra.utils import instantiate
 
 from evaluation.approaches import (
     Approach,
+    BridgePotentialFieldGrounder,
     ClassifierGuidanceSteering,
     ConsolidateCostGen,
     ImmediateCostGen,
@@ -19,10 +20,9 @@ from evaluation.approaches import (
     NoCostGen,
     NominalGrounder,
     NoSteering,
-    ParameterizedEditGrounder,
 )
 from evaluation.benchmarks.base import InteractionBenchmark
-from evaluation.episode import run_episode
+from evaluation.benchmarks.episode import run_episode
 from uncertain_feedback.planners.rig import build_rig
 from uncertain_feedback.simulated_users import get_persona
 
@@ -47,7 +47,7 @@ def test_every_approach_yaml_instantiates(name: str) -> None:
 
 def test_axis_overrides_compose_from_any_approach() -> None:
     approach = _instantiate(
-        "edit_baseline", overrides=["grounder=none", "cost_gen=language_only"]
+        "bridge_baseline", overrides=["grounder=none", "cost_gen=language_only"]
     )
     assert isinstance(approach.grounder, NominalGrounder)
     assert isinstance(approach.cost_gen, ImmediateCostGen)
@@ -73,7 +73,7 @@ def test_steering_requires_the_mdm_grounder() -> None:
     with pytest.raises(ValueError, match="mdm grounder"):
         Approach(
             name="bad",
-            grounder=ParameterizedEditGrounder(),
+            grounder=BridgePotentialFieldGrounder(),
             cost_gen=NoCostGen(),
             steering=ClassifierGuidanceSteering(),
         )
@@ -102,9 +102,12 @@ def test_nominal_grounder_episode_smoke(tmp_path: Path) -> None:
     approach = Approach(
         name="cost_only", grounder=NominalGrounder(), cost_gen=NoCostGen()
     )
-    approach.reset(rig, user, task, tmp_path / "episode")
+    approach.reset(rig, user, task.seed, tmp_path / "episode")
     result = run_episode(rig, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
-    assert result["summary"]["goal_results"], "episode recorded no goal results"
-    rows = result["rows"]
-    assert all(row["n_candidates"] == 1 for row in rows)
+    assert result, "episode recorded no interactions"
+    assert all(
+        len(rnd.grounding.candidates) == 1
+        for interaction in result
+        for rnd in interaction.rounds
+    )

@@ -1,7 +1,0 @@
-defaults:
-  - grounder: edit
-  - cost_gen: immediate
-  - steering: none
-  - _self_
-_target_: evaluation.approaches.base.Approach
-name: edit_baseline

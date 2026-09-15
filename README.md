@@ -2096,6 +2096,55 @@ same scenario as `mpc_demo_low2_across.yaml` with a ~60 deg shoulder-elevation
 floor. It lifts the mean end elevation across the six candidates from 42.0 to
 56.7 deg and cuts the mean steering cost from 11.5 to 4.6.
 
+### Rendering an executed trajectory as an SMPL mesh
+
+Every feedback-configured run writes `executed_trajectory.npy` (shape `(T, 7)`)
+to `<llm_cost.artifact_dir>/<timestamp>/trajectory_00/`. Turn one into a mesh
+video — the same fitted SMPL body the demo runner draws, front and side view
+side by side:
+
+```bash
+uv run python src/uncertain_feedback/utils/mesh_video.py \
+  outputs/<run>/<timestamp>/trajectory_00/executed_trajectory.npy \
+  outputs/<run>/mesh.mp4 \
+  --fps 20 --resolution 720
+```
+
+`--views front side` selects the panels, `--pose` overrides the HML263 body pose
+supplying the torso (default `consts.MDM_START_POSE_PATH`, matching the runner).
+Rendering is offscreen through EGL, so it needs no display but does need a GPU.
+
+To show the correction itself — the sentence on screen, every cluster the user
+was offered fanning out from the arm's pose at the trigger, then the run
+continuing in the chosen cluster's colour — add the round's candidate means:
+
+```bash
+uv run python src/uncertain_feedback/utils/mesh_video.py \
+  outputs/<run>/<timestamp>/trajectory_00/executed_trajectory.npy \
+  outputs/<run>/correction.mp4 \
+  --cluster-means outputs/<run>/<timestamp>/trajectory_00/round_00/cluster_means.npz \
+  --trigger-step 8 --caption "raise my arm a bit higher" \
+  --hide-clusters 0 1 --hold-seconds 2 --goal -0.18 0.12 0.22
+```
+
+`--hide-clusters` drops candidates from the drawing without recolouring the
+rest (each label keeps its palette slot). `--hold-seconds` lingers on the two
+beats worth reading — the frame the feedback lands on, and the last frame the
+candidates are up — by duplicating those frames in the output; the body's arm
+takes the chosen colour on the frame *after* the trigger, so that first pause
+reads as the sentence landing rather than as the pick already made. `--goal`
+marks the Cartesian wrist goal with a charcoal sphere, taking it in the same
+spine3-relative frame as the config's `cartesian.goals`.
+
+`cluster_means.npz` is written next to `correction.npy` on every UQ round: one
+`cluster_<label>` array per candidate (anchored to the arm pose at the trigger,
+the way `feedback.anchor_correction` anchors the chosen one) plus
+`chosen_label`. Read `trigger_step` from `trajectory_summary.json`. The chosen
+cluster is drawn as the body's own arm tinted its colour rather than as a
+seventh ghost: the executed motion *is* that mean being tracked, and a second
+mesh on the same arm z-fights. For side-by-side clips, `render_layers(...,
+bounds=...)` takes a shared camera box so a bigger motion reads as bigger.
+
 ### Cartesian MPC Without MDM or UQ
 A config whose only module section is `cartesian:` is direct Cartesian
 wrist-goal MPC. This path does not generate motion or run clustering. If you
@@ -2297,51 +2346,65 @@ explicit round instructions enter the agent prompt.
 
 ## Method-level evaluation
 
-Scripts that evaluate the *whole* pipeline end to end live in the repo-root
-`evaluation/` directory, outside `src/`, structured as **benchmarks × approaches ×
-metrics** with hydra configs (see `evaluation/README.md` for the full guide and the
-paper-experiment → config mapping). Built on the per-stage façades
-(`motion_generators`, `uncertainty`, `cost_generation`, `evaluation_mechanism`,
-`planners.mpc.rollout`, `simulated_users`).
+**Archived 2026-09-06 for a blank slate.** The previous description of the
+`evaluation/` harness (benchmarks x approaches x metrics, the named approach
+compositions, and the output layout) is at
+`/share/bhattacharjee/eric_data/repo_doc_archive/extracted_sections/readme_method_level_evaluation.md`.
+The code under `evaluation/` is unchanged; document the new protocol here once
+it is decided.
 
-CPU-only smoke run (no MDM, no LLM):
-
-```
-uv run python evaluation/run_single_experiment.py approach=edit_baseline \
-    approach/cost_gen=none benchmark=smoke mpc_config=evaluation/conf/mpc_smoke.yaml
-```
-
-Single experiment / sweep / aggregation:
 
 ```
-uv run python evaluation/run_single_experiment.py approach=full benchmark=personas_core
-uv run python evaluation/run_single_experiment.py -m seed=0,1,2 \
-    approach=full,no_steering benchmark=abstraction_sweep
-uv run python evaluation/analyze_results.py multirun/ --out evaluation_analysis/
+
+
+```
+### Visualizing the oracle correction
+
+A grounder is scored against a hidden target. The **sampled** case source — the
+scenario generator in `data_collection/dataset_auto_correction/clips.py` — draws
+a start arm configuration and a Cartesian goal, rolls a naive reach between
+them, then samples a hidden bound the reach is *guaranteed* to cross
+(`sample_violating_bound` places it in the gap the rollout opens at a drawn
+crossing frame). The crossing induces the trigger step the clip set cuts on; the
+evaluation case instead starts one frame *before* the crossing, the last naive frame
+with positive clearance, and replans the oracle from there under that bound (a correction
+anchored on a frame already past the pain threshold could never pass the simulated user's
+peak-violation test; both steps are recorded in `oracle_cases.json`). To see those cases:
+
+```bash
+uv run python evaluation/visualize_oracle.py \
+  --clips-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips_auto500_s1 \
+  --n-cases 6 --out-dir outputs/oracle_viz
 ```
 
-An approach composes three modules via hydra config groups — a grounder
-(`approach/grounder=`: `mdm`, `none`, `edit`, `bridge`, `bridge_llm`,
-`keypoint`, `llm_*`), a cost-gen setting (`approach/cost_gen=`: `none`,
-`immediate`, `consolidate`, `language_only`), and a steering method
-(`approach/steering=`: `none` or `cg`, mdm-only). Named compositions: `full`,
-`no_steering`, `immediate_only`, `no_learning`, `language_only_learning`
-(mdm-grounder ablations), `cost_only` (no grounding — language goes straight
-to cost generation), `edit_baseline` (predefined parameterized edits, no
-text-to-motion model), `bridge_baseline` / `bridge_llm` / `llm_keypoint`
-(potential-field and LLM-interpreted predefined edits), and the pure-agent
-arms `agent_waypoint`, `agent_sparse_waypoints`, `agent_dense_positions`,
-`agent_dense_anatomical` (an LLM writes 4 candidate corrections as
-trajectories, no motion prior; all non-MDM grounders need
-`mpc_config=evaluation/conf/mpc_edit_baseline.yaml`). Benchmarks: `smoke`,
-`personas_core`, `abstraction_sweep` (verbalizer sweep), `lifelong` (per-persona
-goal sequences; pair with `mpc_config=...mdm_llm_transfer.yaml`). Outputs land in
-hydra's `outputs/`/`multirun/` dirs as `results.csv` (per feedback round) and
-`episodes.csv` (per episode), plus per-round `.npy`/cost artifacts.
+`--clips-dir` supplies the body geometry and the sampling config (via
+`clip_source_from_dir`, so no MDM load and no GPU). The draw order matches
+`ClipSource.generate`, so case `i` reproduces run `i` of the clip set generated
+with that seed — verified against `manifest.json`'s recorded `motion_facts`.
+`--first-case` shifts the range for held-out cases.
 
-Note the in-`src` package `evaluation_mechanism/` is a different thing: it is how the
-method scores its *own* generated cost functions, and the `agent` backend's sandbox
-imports it at runtime.
+Per case this writes `case_NNN_overlay.png` (3-view overlay: oracle correction in
+green, nominal continuation in red, shared trigger pose in orange, goal star),
+`case_NNN_bound.png` (the bounded feature over time with the forbidden region
+shaded and both futures traced through it — the only legible view when the bound
+is on a rotation), `case_NNN_oracle.mp4` / `case_NNN_nominal.mp4`, and one
+`oracle_cases.json` with the sampled bound, crossing and trigger steps, and the
+measured motion facts.
+
+The **persona** source renders the fixed-bound interaction benchmark in
+`evaluation/benchmarks/` instead:
+
+```bash
+uv run python evaluation/visualize_oracle.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
+  --out-dir outputs/oracle_viz_persona
+```
+
+`--personas` restricts the set (default: every bounded persona with
+`persona_goals` in the config, first cartesian goal only). `--no-generator`
+skips the MDM load and needs a config with `arm:` angles, at the cost of the sit
+pose's body geometry. A persona whose nominal rollout never violates its bounds
+produces no correction and is skipped with a log line.
 
 ## Demo runner web tool
 

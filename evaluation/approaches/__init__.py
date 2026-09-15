@@ -11,11 +11,11 @@ from evaluation.approaches.grounders import (
     BridgeInterpreterGrounder,
     BridgePotentialFieldGrounder,
     Grounder,
-    KeypointGrounder,
+    LlmKeypointGrounder,
     LlmTrajectoryGrounder,
     MdmGrounder,
     NominalGrounder,
-    ParameterizedEditGrounder,
+    OracleGrounder,
 )
 from evaluation.approaches.steering import (
     ClassifierGuidanceSteering,
@@ -32,12 +32,12 @@ __all__ = [
     "CostGen",
     "Grounder",
     "ImmediateCostGen",
-    "KeypointGrounder",
+    "LlmKeypointGrounder",
     "LlmTrajectoryGrounder",
     "MdmGrounder",
     "NoCostGen",
     "NoSteering",
     "NominalGrounder",
-    "ParameterizedEditGrounder",
+    "OracleGrounder",
     "Steering",
 ]

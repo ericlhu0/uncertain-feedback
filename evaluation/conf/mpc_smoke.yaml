@@ -1,5 +1,5 @@
 # CPU-only MpcRunConfig for harness smoke runs: no MDM pose, no LLM.
-# Pair with approach=edit_baseline (requires_generator: false) and
+# Pair with approach=bridge_baseline (requires_generator: false) and
 # approach/cost_gen=none.
 steps: 80
 horizon: 8

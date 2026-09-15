@@ -5,7 +5,7 @@ from __future__ import annotations
 import abc
 from typing import Sequence
 
-from evaluation.structs import InteractionTask
+from evaluation.benchmarks.structs import InteractionTask
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.simulated_users import PERSONAS
 

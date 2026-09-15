@@ -2346,51 +2346,65 @@ explicit round instructions enter the agent prompt.
 
 ## Method-level evaluation
 
-Scripts that evaluate the *whole* pipeline end to end live in the repo-root
-`evaluation/` directory, outside `src/`, structured as **benchmarks × approaches ×
-metrics** with hydra configs (see `evaluation/README.md` for the full guide and the
-paper-experiment → config mapping). Built on the per-stage façades
-(`motion_generators`, `uncertainty`, `cost_generation`, `evaluation_mechanism`,
-`planners.mpc.rollout`, `simulated_users`).
+**Archived 2026-09-06 for a blank slate.** The previous description of the
+`evaluation/` harness (benchmarks x approaches x metrics, the named approach
+compositions, and the output layout) is at
+`/share/bhattacharjee/eric_data/repo_doc_archive/extracted_sections/readme_method_level_evaluation.md`.
+The code under `evaluation/` is unchanged; document the new protocol here once
+it is decided.
 
-CPU-only smoke run (no MDM, no LLM):
-
-```
-uv run python evaluation/run_single_experiment.py approach=edit_baseline \
-    approach/cost_gen=none benchmark=smoke mpc_config=evaluation/conf/mpc_smoke.yaml
-```
-
-Single experiment / sweep / aggregation:
 
 ```
-uv run python evaluation/run_single_experiment.py approach=full benchmark=personas_core
-uv run python evaluation/run_single_experiment.py -m seed=0,1,2 \
-    approach=full,no_steering benchmark=abstraction_sweep
-uv run python evaluation/analyze_results.py multirun/ --out evaluation_analysis/
+
+
+```
+### Visualizing the oracle correction
+
+A grounder is scored against a hidden target. The **sampled** case source — the
+scenario generator in `data_collection/dataset_auto_correction/clips.py` — draws
+a start arm configuration and a Cartesian goal, rolls a naive reach between
+them, then samples a hidden bound the reach is *guaranteed* to cross
+(`sample_violating_bound` places it in the gap the rollout opens at a drawn
+crossing frame). The crossing induces the trigger step the clip set cuts on; the
+evaluation case instead starts one frame *before* the crossing, the last naive frame
+with positive clearance, and replans the oracle from there under that bound (a correction
+anchored on a frame already past the pain threshold could never pass the simulated user's
+peak-violation test; both steps are recorded in `oracle_cases.json`). To see those cases:
+
+```bash
+uv run python evaluation/visualize_oracle.py \
+  --clips-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips_auto500_s1 \
+  --n-cases 6 --out-dir outputs/oracle_viz
 ```
 
-An approach composes three modules via hydra config groups — a grounder
-(`approach/grounder=`: `mdm`, `none`, `edit`, `bridge`, `bridge_llm`,
-`keypoint`, `llm_*`), a cost-gen setting (`approach/cost_gen=`: `none`,
-`immediate`, `consolidate`, `language_only`), and a steering method
-(`approach/steering=`: `none` or `cg`, mdm-only). Named compositions: `full`,
-`no_steering`, `immediate_only`, `no_learning`, `language_only_learning`
-(mdm-grounder ablations), `cost_only` (no grounding — language goes straight
-to cost generation), `edit_baseline` (predefined parameterized edits, no
-text-to-motion model), `bridge_baseline` / `bridge_llm` / `llm_keypoint`
-(potential-field and LLM-interpreted predefined edits), and the pure-agent
-arms `agent_waypoint`, `agent_sparse_waypoints`, `agent_dense_positions`,
-`agent_dense_anatomical` (an LLM writes 4 candidate corrections as
-trajectories, no motion prior; all non-MDM grounders need
-`mpc_config=evaluation/conf/mpc_edit_baseline.yaml`). Benchmarks: `smoke`,
-`personas_core`, `abstraction_sweep` (verbalizer sweep), `lifelong` (per-persona
-goal sequences; pair with `mpc_config=...mdm_llm_transfer.yaml`). Outputs land in
-hydra's `outputs/`/`multirun/` dirs as `results.csv` (per feedback round) and
-`episodes.csv` (per episode), plus per-round `.npy`/cost artifacts.
+`--clips-dir` supplies the body geometry and the sampling config (via
+`clip_source_from_dir`, so no MDM load and no GPU). The draw order matches
+`ClipSource.generate`, so case `i` reproduces run `i` of the clip set generated
+with that seed — verified against `manifest.json`'s recorded `motion_facts`.
+`--first-case` shifts the range for held-out cases.
 
-Note the in-`src` package `evaluation_mechanism/` is a different thing: it is how the
-method scores its *own* generated cost functions, and the `agent` backend's sandbox
-imports it at runtime.
+Per case this writes `case_NNN_overlay.png` (3-view overlay: oracle correction in
+green, nominal continuation in red, shared trigger pose in orange, goal star),
+`case_NNN_bound.png` (the bounded feature over time with the forbidden region
+shaded and both futures traced through it — the only legible view when the bound
+is on a rotation), `case_NNN_oracle.mp4` / `case_NNN_nominal.mp4`, and one
+`oracle_cases.json` with the sampled bound, crossing and trigger steps, and the
+measured motion facts.
+
+The **persona** source renders the fixed-bound interaction benchmark in
+`evaluation/benchmarks/` instead:
+
+```bash
+uv run python evaluation/visualize_oracle.py \
+  --mpc-config src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
+  --out-dir outputs/oracle_viz_persona
+```
+
+`--personas` restricts the set (default: every bounded persona with
+`persona_goals` in the config, first cartesian goal only). `--no-generator`
+skips the MDM load and needs a config with `arm:` angles, at the cost of the sit
+pose's body geometry. A persona whose nominal rollout never violates its bounds
+produces no correction and is skipped with a log line.
 
 ## Demo runner web tool
 

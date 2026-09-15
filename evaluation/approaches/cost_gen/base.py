@@ -5,7 +5,7 @@ from __future__ import annotations
 import abc
 from pathlib import Path
 
-from evaluation.structs import LearnOutcome, RoundContext
+from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from uncertain_feedback.cost_generation import (
     CostGenerationResult,
     CostRound,
@@ -56,10 +56,8 @@ class CostGen(abc.ABC):
     def learn(self, ctx: RoundContext) -> LearnOutcome:
         """Distill the resolved correction into persistent planner costs."""
 
-    def _generate(
-        self, ctx: RoundContext
-    ) -> tuple[GeneratedPythonCost | None, CostGenerationResult]:
-        """One round of cost generation; records the round on success."""
+    def generate(self, ctx: RoundContext) -> CostGenerationResult:
+        """Generate immediate evidence without changing accumulated costs."""
         rig = self._rig
         assert rig is not None, "reset() must run before use"
         language_only = self.source == "nominal"
@@ -83,12 +81,19 @@ class CostGen(abc.ABC):
             candidate_trajs=None if language_only else ctx.grounding.candidates,
             highlight_label=None if language_only else ctx.grounding.chosen_label,
             undesirable_labels=frozenset() if language_only else ctx.rejected_labels,
+            language_only=language_only,
             install=False,
             log_prefix="[evaluation]",
         )
+        return generation
+
+    def record(
+        self, ctx: RoundContext, generation: CostGenerationResult
+    ) -> LearnOutcome:
+        """Record already-generated evidence without another immediate call."""
         generated = generation.generated_cost
         if generated is None:
-            return None, generation
+            return LearnOutcome(False, False)
         self._generated.append(generated)
         state_path = ctx.round_dir / "state.pkl"
         generation.eval_state.save(state_path)
@@ -112,4 +117,4 @@ class CostGen(abc.ABC):
                 grounding=generation.grounding,
             )
         )
-        return generated, generation
+        return LearnOutcome(True, False, generated.description)

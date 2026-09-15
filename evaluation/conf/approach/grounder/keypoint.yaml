@@ -1,2 +1,0 @@
-_target_: evaluation.approaches.grounders.keypoint.KeypointGrounder
-displacement_cap: 0.4

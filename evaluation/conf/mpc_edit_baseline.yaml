@@ -1,5 +1,5 @@
 # mdm_llm.yaml with the MDM pose file replaced by its decoded arm axis-angles,
-# for approaches that skip the motion-generator load (edit_baseline).
+# for approaches that skip the motion-generator load (every non-mdm grounder).
 steps: 300
 horizon: 10
 n_mpc_samples: 200

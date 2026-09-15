@@ -17,8 +17,8 @@ from evaluation.approaches.grounders.llm_trajectory import (
     feature_rows,
 )
 from evaluation.benchmarks.base import InteractionBenchmark
-from evaluation.episode import run_episode
-from evaluation.structs import InteractionTask
+from evaluation.benchmarks.episode import run_episode
+from evaluation.benchmarks.structs import InteractionTask
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.planners.rig import PlanningRig, build_rig
 from uncertain_feedback.simulated_users import get_persona
@@ -71,7 +71,7 @@ def _smoke_task(rig: PlanningRig) -> InteractionTask:
 def _bind(
     grounder: LlmTrajectoryGrounder, rig: PlanningRig, tmp_path: Path, *responses: str
 ) -> _FakeModel:
-    grounder.reset(rig, get_persona(_PERSONA), _smoke_task(rig), tmp_path)
+    grounder.reset(rig, get_persona(_PERSONA), _smoke_task(rig).seed, tmp_path)
     model = _FakeModel(*responses)
     grounder._llm = model
     return model
@@ -116,7 +116,7 @@ def test_dense_position_frames_become_four_candidates(tmp_path: Path) -> None:
     selector = _Selector()
 
     result = grounder.ground(
-        "lift it higher", np.asarray(rig.q0), _nominal_plan(rig), selector, _GOAL
+        "lift it higher", np.asarray(rig.q0), _nominal_plan(rig), selector
     )
 
     assert len(result.candidates) == 4
@@ -138,7 +138,7 @@ def test_anatomical_frames_reproduce_the_requested_angles(tmp_path: Path) -> Non
     _bind(grounder, rig, tmp_path, _response("frames", rows.tolist(), 2))
 
     result = grounder.ground(
-        "bend my elbow more", np.asarray(rig.q0), _nominal_plan(rig), _Selector(), _GOAL
+        "bend my elbow more", np.asarray(rig.q0), _nominal_plan(rig), _Selector()
     )
 
     assert len(result.candidates) == 2
@@ -168,7 +168,7 @@ def test_single_waypoint_lands_the_arm_on_the_waypoint(tmp_path: Path) -> None:
     _bind(grounder, rig, tmp_path, _response("waypoints", waypoint.tolist(), 1))
 
     result = grounder.ground(
-        "stop there", np.asarray(rig.q0), _nominal_plan(rig), _Selector(), _GOAL
+        "stop there", np.asarray(rig.q0), _nominal_plan(rig), _Selector()
     )
 
     reached = rig.fk.fk(result.candidates[0][-1], rig.spine3_pos, rig.spine3_aa)
@@ -182,7 +182,7 @@ def test_unparseable_response_falls_back_to_the_nominal_plan(tmp_path: Path) -> 
     _bind(grounder, rig, tmp_path, "sorry, I cannot help with that")
     nominal = _nominal_plan(rig)
 
-    result = grounder.ground("move it", np.asarray(rig.q0), nominal, _Selector(), _GOAL)
+    result = grounder.ground("move it", np.asarray(rig.q0), nominal, _Selector())
 
     assert len(result.candidates) == 1
     np.testing.assert_allclose(
@@ -199,7 +199,7 @@ def test_agent_waypoint_episode_smoke(tmp_path: Path) -> None:
     target[3:6] += 0.2
     rows = _position_rows(rig, target[None]).tolist()
     episode_dir = tmp_path / "episode"
-    approach.reset(rig, get_persona(_PERSONA), _smoke_task(rig), episode_dir)
+    approach.reset(rig, get_persona(_PERSONA), _smoke_task(rig).seed, episode_dir)
     grounder._llm = _FakeModel(_response("waypoints", rows, 4))
 
     result = run_episode(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from evaluation.approaches.cost_gen.base import CostGen
-from evaluation.structs import LearnOutcome, RoundContext
+from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from uncertain_feedback.cost_generation import (
     CombineCostGenerator,
     CostGenerationResult,
@@ -34,9 +34,16 @@ class ConsolidateCostGen(CostGen):
         return [self._unified] if self._unified is not None else []
 
     def learn(self, ctx: RoundContext) -> LearnOutcome:
-        generated, generation = self._generate(ctx)
-        if generated is None:
+        return self.record(ctx, self.generate(ctx))
+
+    def record(
+        self, ctx: RoundContext, generation: CostGenerationResult
+    ) -> LearnOutcome:
+        outcome = super().record(ctx, generation)
+        generated = generation.generated_cost
+        if not outcome.cost_accepted:
             return LearnOutcome(cost_accepted=False, unified_installed=False)
+        assert generated is not None
         unified_installed = False
         if len(self._cost_rounds) == 1:
             self._unified = generated

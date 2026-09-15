@@ -23,7 +23,7 @@ from evaluation.approaches.grounders.base import (
     ClusterSelector,
     Grounder,
 )
-from evaluation.structs import GroundingResult, InteractionTask
+from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.costs import extract_json_object
 from uncertain_feedback.planners.mpc.kinematics import (
     ELBOW_CHAIN_IDX,
@@ -79,9 +79,8 @@ class BridgePotentialFieldGrounder(Grounder):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
-        goal: np.ndarray,
     ) -> GroundingResult:
-        del text, q_feedback, goal
+        del text, q_feedback
         rig = self.rig
         nominal_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
         arm_pos = rig.fk.fk_batch(nominal_aa, rig.spine3_pos, rig.spine3_aa)
@@ -142,10 +141,10 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
         self,
         rig: PlanningRig,
         user: SimulatedUser,
-        task: InteractionTask,
+        seed: int,
         episode_dir: Path,
     ) -> None:
-        super().reset(rig, user, task, episode_dir)
+        super().reset(rig, user, seed, episode_dir)
         self._history: list[str] = []
         self._llm: Any = None
 
@@ -189,9 +188,8 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
         q_feedback: np.ndarray,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
-        goal: np.ndarray,
     ) -> GroundingResult:
-        del q_feedback, goal
+        del q_feedback
         rig = self.rig
         nominal_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
         arm_pos = rig.fk.fk_batch(nominal_aa, rig.spine3_pos, rig.spine3_aa)

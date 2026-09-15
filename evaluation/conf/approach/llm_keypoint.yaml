@@ -1,5 +1,5 @@
 defaults:
-  - grounder: keypoint
+  - grounder: llm_keypoint
   - cost_gen: immediate
   - steering: none
   - _self_

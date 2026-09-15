@@ -7,7 +7,7 @@ from typing import Callable
 
 import numpy as np
 
-from evaluation.structs import InteractionTask
+from evaluation.benchmarks.structs import InteractionTask
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.simulated_users import (
@@ -30,6 +30,7 @@ def bind_verbalizer(
     oracle_path: np.ndarray,
     episode_key: str,
     cache_dir: Path,
+    body_pos: np.ndarray | None = None,
 ) -> BoundVerbalizer:
     """Bind the task's verbalizer to its episode state (rng, VLM, oracle)."""
     if task.verbalizer == "scripted":
@@ -65,6 +66,26 @@ def bind_verbalizer(
             cache_dir,
         )
         return lambda intent, q_trigger, event_index: visual.verbalize(
+            intent,
+            q_trigger,
+            oracle_path,
+            context,
+            episode_key,
+            event_index,
+            window=cfg.simulated_user.nominal_steps,
+        )
+    if task.verbalizer == "clip_caption":
+        # Imported lazily so non-caption episodes never touch the OpenAI client.
+        from uncertain_feedback.simulated_users.clip_caption import (  # pylint: disable=import-outside-toplevel
+            ClipCaptionVerbalizer,
+        )
+
+        if cfg.llm_cost.model is None:
+            raise ValueError("verbalizer: clip_caption needs llm_cost.model.")
+        if body_pos is None:
+            raise ValueError("verbalizer: clip_caption needs body_pos.")
+        clip_caption = ClipCaptionVerbalizer(cfg.llm_cost.model, cache_dir, body_pos)
+        return lambda intent, q_trigger, event_index: clip_caption.verbalize(
             intent,
             q_trigger,
             oracle_path,

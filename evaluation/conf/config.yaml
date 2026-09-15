@@ -8,8 +8,14 @@ seed: 0
 mpc_config: src/uncertain_feedback/planners/mpc/configs/mdm_llm.yaml
 # Truncate the benchmark's task list (debugging aid).
 max_tasks: null
-# Override simulated_user.chooser (intent_aligned | progress | random).
+# Run only these task indices (null = all); sweep it to spread one benchmark's
+# episodes over parallel jobs, e.g. -m tasks=0,1,2,3 hydra/launcher=joblib.
+tasks: null
+# Override simulated_user.chooser (oracle_progress | intent_aligned | progress | random).
 sim_chooser: null
+# Load the motion generator even for approaches that do not ground with it, so
+# every arm shares the pose file's body and start pose (null = only if needed).
+load_generator: null
 
 # run/sweep dirs are anchored to the launch cwd: the MDM loader os.chdir()s
 # into its submodule, which would otherwise relocate later jobs' output dirs.

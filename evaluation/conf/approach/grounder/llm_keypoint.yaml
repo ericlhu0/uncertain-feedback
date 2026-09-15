@@ -1,0 +1,2 @@
+_target_: evaluation.approaches.grounders.llm_keypoint.LlmKeypointGrounder
+displacement_cap: 0.4

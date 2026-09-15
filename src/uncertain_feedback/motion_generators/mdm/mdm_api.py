@@ -206,6 +206,8 @@ class MdmMotionGenerator(
         seed:       Random seed passed to ``fixseed`` for reproducibility.
         lock_seed:  Reset the seed before every generation so repeated calls
                     with identical inputs produce identical samples.
+        guidance_param: Classifier-free guidance scale, overriding the
+                    ``mdm_config.yaml`` value; ``None`` keeps that default.
     """
 
     # Class-level so it is readable on instances built without __init__.
@@ -216,6 +218,7 @@ class MdmMotionGenerator(
         model_path: str | Path | None = None,
         seed: int = 10,
         lock_seed: bool = False,
+        guidance_param: float | None = None,
     ) -> None:
         super().__init__()
         self._model_path = (
@@ -223,6 +226,7 @@ class MdmMotionGenerator(
         ).resolve()
         self._seed = seed
         self._lock_seed = lock_seed
+        self._guidance_param = guidance_param
         self._fixseed: Callable[[int], None] | None = None
 
         # Populated lazily by _ensure_loaded().
@@ -281,6 +285,9 @@ class MdmMotionGenerator(
         _cfg["model_path"] = str(self._model_path)
         for _k, _v in _cfg.items():
             setattr(args, _k, _v)
+        if self._guidance_param is not None:
+            args.guidance_param = self._guidance_param
+        print(f"MDM classifier-free guidance scale: {args.guidance_param}")
 
         if getattr(args, "pred_len", 0) == 0:
             args.pred_len = getattr(args, "context_len", 0)

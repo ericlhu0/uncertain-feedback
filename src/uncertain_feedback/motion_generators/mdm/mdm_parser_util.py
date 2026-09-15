@@ -560,6 +560,19 @@ def add_edit_options(parser):
         action="store_true",
         help="Freeze all non-left-arm body features for every frame, not just the prefix.",
     )
+    group.add_argument(
+        "--n_prefix",
+        default=1,
+        type=int,
+        help="Leading frames pinned entirely to the start pose (mdm_api uses N_PREFIX_FRAMES).",
+    )
+    group.add_argument(
+        "--raw_weights",
+        action="store_true",
+        help="Load the raw weights even when the checkpoint's args.json says use_ema, "
+        "matching inference. --use_ema is a 'model' group flag, so it is otherwise "
+        "restored from args.json and cannot be turned off from the command line.",
+    )
 
 
 def add_evaluation_options(parser):

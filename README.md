@@ -196,10 +196,10 @@ labeling sessions underneath it. Pass a new `--out_dir` instead.
 
 Only this step needs the GPU/MDM env — it loads the generator once for the body
 geometry and caches it to `geometry.npz`. Knobs:
-`--seed`, `--trigger_window LOW HIGH` (accepted range for the naive rollout's first
-violation), `--margin_range LOW HIGH` (radians the bound sits past the naive feature
-value), `--correction_frames LOW HIGH` (corrected frames kept per clip, before the
-prefix), `--min_goal_distance` and `--max_angle_delta`.
+`--seed`, `--trigger_window LOW HIGH` (the range the bound's crossing step is drawn from,
+and the accepted range for the naive rollout's first violation), `--correction_frames LOW
+HIGH` (corrected frames kept per clip, before the prefix), `--min_goal_distance` and
+`--max_angle_delta`.
 
 The config still supplies everything except the reach: `evaluation/conf/mpc_demo_low1.yaml`
 gives the body `pose:`, the MPC settings, `cartesian.threshold`,
@@ -228,15 +228,29 @@ low1 start, which is representative of a mid-length sampled reach:
 
 Clip length and padding are unaffected, so lowering it buys smaller, gentler corrections
 outright; the cost is generation time (~4–13 s per run instead of ~3–7 s, hidden by the
-prefetch). `--margin_range` looks like a size knob but is **not** — it sets how far past the
-naive value the bound sits, i.e. which way and how insistently the correction deviates, not
-how far the arm travels in the window. Halving it moved wrist path by under a centimetre
-while making corrections less distinct from the naive path, so it is left wide.
+prefetch).
+
+`clips_elbow500_s{1,2,3,4}` — 125 runs each at seeds 1–4, `--max_angle_delta 0.0025
+--trigger_window 6 50`, the same `mpc_demo_low1.yaml` body and base pose as
+`clips_auto500_s{1,2,3,4}` — were generated with a since-removed rejection floor that
+redrew any run whose clip window moved the elbow less than 0.03 m on either the lateral or
+the vertical axis, so every one of those clips has a captionable elbow direction (elbow net
+travel 0.143 m and wrist net 0.242 m, 2.2× and 1.9× the default-paced clips). The
+`generate.py` in this tree no longer has that flag, so the sets are not reproducible from it.
+
+The hidden bound is placed so the naive rollout *crosses* it at a directly sampled frame:
+a `crossing_step` is drawn from `--trigger_window`, and the bound value is drawn from the
+gap between the feature's running extremum over the earlier frames and its value at that
+step. Every frame before the crossing therefore has positive clearance, and the trigger the
+bound induces lands at or shortly after the crossing as the violation builds through
+`corrections.trigger_threshold`. The manifest records the value, the `crossing_step` and
+the `peak_violation` the naive path reaches.
 
 `--trigger_window` counts naive frames, so it must scale with `--max_angle_delta`:
-`(12, 100)` suits the ~165-frame reaches, `(6, 50)` the ~85-frame ones. Reaches vary per run
-now (74–191 frames on a 4-run sample at the defaults), and a scenario whose reach is shorter
-than the window's low end is redrawn. Pushing its top end near the end of the reach starts
+`(12, 100)` suits the ~165-frame reaches, `(6, 50)` the ~85-frame ones. Because the crossing
+step is drawn from it, the window now *places* the trigger rather than merely bracketing it.
+Reaches vary per run now (74–191 frames on a 4-run sample at the defaults), and a scenario
+whose reach is shorter than the window's low end is redrawn. Pushing its top end near the end of the reach starts
 producing continuations too short to fill the window, which get padded by holding the last
 frame (recorded as `pad_frames`).
 
@@ -341,6 +355,23 @@ whichever is used is recorded as the labeled set's `caption_prompt`. Needs `OPEN
 and `llm_cost.model`; costs one VLM call per run (~4 s each, plus the one-off mesh fit) and
 leaves each run's `suggest.png` behind, which is what to look at when checking the captions.
 
+**Give the set a second register before building.** The stock draft prompt asks the model to speak
+as the care recipient, so every line of an auto-labeled set says "my" — while a quarter of
+the utterances the deployed model is asked to ground say "your", and CLIP puts "my" and
+"your" versions of one sentence further apart (cosine 0.88–0.91) than it puts *raise* from
+*lower* (0.92). `augment_captions.py` appends a second-person rewrite of every line, so one
+motion trains both registers without generating or re-captioning a clip:
+```
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/augment_captions.py \
+    --clips_dir .../data/dataset_auto_correction/clips_auto100_v2
+```
+It is a deterministic pronoun substitution (my/me/mine/I/myself → your/you/yours/you/
+yourself), not an LLM call: the drafts contain no other first-person form, so a rewrite is
+exact and free. Text-only and **in place** like `autolabel.py` — copy the set first if its
+captions matter — and re-running is a no-op, since a rewrite already in the list is not
+appended again. On `clips_auto100` it took 499 lines to 997, half of each register (the one
+line with no pronoun is left alone).
+
 Playback covers the **whole** story in three colour-coded phases:
 
 | colour | phase | frames |
@@ -438,6 +469,192 @@ and an encoding by construction. `--hml_stats_dir` defaults to `dataset/custom1_
 **not** `dataset/HumanML3D` (that path is the fine-tune swap slot and holds whichever
 dataset trained last).
 
+**`--consistent_captions` makes the text agree with the motion** (off by default, so the
+original build is byte-identical without it). The VLM captions each window from one image
+and is up-biased: on `clips_auto100` the caption lines say up:down 2.27:1 while the clips'
+wrists move 46 up / 40 down / 14 flat, 25 "up" lines sit on descending clips, and 42
+directional lines sit on clips that barely move on the axis they name. Since the loader
+samples one line per motion per epoch, that line ratio *is* the text prior the model learns —
+which is why "raise" worked and "lower" did not. With the flag on, each run's window is
+measured by `motion_facts.py` — and any line whose direction words disagree with it is dropped: the
+wrist's and the elbow's three axes (±0.02 m dead band) and the elbow angle (±0.05 rad), so
+elbow in/out, elbow up/down and bend/straighten are now checked alongside the hand's up/down
+and left/right. A direction word is attributed to the part named last before it, so "move my
+hand toward my right and my elbow forward" is checked as hand-inward and elbow-forward. Down
+lines are then duplicated until the up:down line ratio matches the up:down motion ratio —
+duplicated rather than capped, because one line per motion per epoch means a repeated line is
+simply drawn more often, and no phrasing is lost. A run whose
+every line contradicts its clip keeps its least-contradictory line, since a motion with no
+text is not trainable. The build prints a per-run and total report of lines kept, dropped and
+duplicated. Measured on the encoded motions of `correction_auto100_v2`, vertical words that
+agree with the wrist's actual travel go from 80.3% to 95.5%. On `clips_auto100`'s 499
+image-only lines the wrist-x/y check dropped 103 (21%); all seven quantities drop 170 (34%),
+the extra ones being depth (27), elbow up/down (17), bend/straighten (15) and elbow in/out
+(9) claims that were never looked at before.
+
+**Transplants are filtered too** (since 2026-09-02; it used to be the base clip only).
+`--transplants` replays a clip's *joint* deltas from another base pose, so the world-frame
+facts measured on the base clip need not hold for its copies: over 400 transplants of
+`clips_auto100` (4 each, seed 42), the sign of a non-zero axis changed on 6-20% of copies
+(wrist depth worst at 20%, wrist height best at 6%) while elbow flexion, being a joint angle,
+never changed (0/320) — which left 10% of the lines that survive the base-clip filter false
+for the transplant they were copied onto. With `--consistent_captions`, `transplant_captions`
+now measures each accepted transplant with `motion_facts` and re-runs `consistent_captions`
+on the base clip's kept text against *that* copy's own motion, so a flipped axis drops the
+line from the copy and leaves it on the original. The same fallback applies per copy — a
+transplant every line of which contradicts keeps its least-contradictory one, since a motion
+with no text is not trainable — and the build prints a `=== transplant consistency ===` total
+of transplants re-filtered, lines dropped and fallbacks fired. The rebalance's duplicated down lines are
+re-checked along with the rest, so a duplicate that is false of a copy is dropped from that
+copy together with the line it duplicates. Still prefer flexion and height words when both fit: those are the ones that
+survive a transplant.
+
+`correction_auto100_v2` is `correction_auto100` with both fixes and no new clips — the same
+100 clips, 500 motions and splits, only the text differs (4510 lines, 718 unique, registers
+55/45, up:down 1.15 against a 46:40 motion split):
+```
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \
+    --clips_dir .../data/dataset_auto_correction/clips_auto100_v2 \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto100_v2 \
+    --transplants 4 --consistent_captions
+```
+
+`correction_auto200_s5` is the same recipe on 200 fresh clips: `clips_auto200_s5` (generated
+2026-09-08 at the defaults, seed 5, `mpc_demo_low1.yaml`, captioned by `autolabel.py --n_captions 5`,
+then `augment_captions.py` added 629 second-person lines). 200 x (1 + 4 transplants) = 999
+motions (1 transplant rejected), 799/100/100 split. `--consistent_captions` took the base
+clips' 1629 lines to 1478 (123 duplicated, 10 runs down to their least-contradictory line),
+up:down 396:461 lines over 79:92 motions, and re-filtered the 799 transplants: 328 lines
+dropped, 49 copies (6.1%) down to one line:
+```
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \
+    --clips_dir .../data/dataset_auto_correction/clips_auto200_s5 \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto200_s5 \
+    --transplants 4 --consistent_captions
+```
+
+`correction_auto600_grounded` is the 600-clip grounded set — the 100 `clips_auto100` clips
+re-captioned as `clips_auto100_grounded` plus 500 new clips (`clips_auto500_s{1,2,3,4}`, 125
+runs at seeds 1-4 off the same `mpc_demo_low1.yaml` body and base pose), every one captioned
+by `autolabel.py --grounded --n_captions 6` (the fact-grounded captioner, removed 2026-09-08;
+the `--templated_captions` build path below superseded it). 3585 of the 3600 lines asked for survived the
+captioner's own check (99.6%), so `--consistent_captions` had nothing left to drop on the base
+clips (0 dropped, 0 duplicated, 0 fallbacks) and its work here is all per-transplant: 893 of
+the 1200 copies' inherited lines dropped, 21 copies (1.8%) down to their least-contradictory
+line. 1800 motions (600 x (1 + 2 transplants), 0 rejections), 50-64 frames, 1440/180/180
+split, 9862 lines / 2007 unique, registers 50/50, up:down 1.08 against a 1.09 motion ratio
+and left:right 0.65 against 0.79. Vertical words that agree with the **encoded** wrist travel:
+99.7% (4438/4451), the 13 misses all lines on a copy whose encoded height lands inside the
+dead band rather than sign flips:
+```
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \
+    --clips_dir .../data/dataset_auto_correction/clips_auto100_grounded \
+        .../data/dataset_auto_correction/clips_auto500_s{1,2,3,4} \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto600_grounded \
+    --transplants 2 --consistent_captions
+```
+Seven of the 600 clips measure inside the dead band on every axis, so the captioner had
+nothing true to say and a few of their lines are meta-commentary ("No directional change can
+be requested from these measurements") rather than speech — ~10 lines of 9862. Blank those
+runs' `captions` in their manifests if they matter; stage (b) then skips them.
+
+**`--templated_captions` throws the labeled text away and writes it from the facts.** Since 2026-09-09 it also encodes runs that were never captioned (a templated build needs no labels), so a freshly generated clip set can go straight into a templated build without `autolabel.py`. The
+grounded captioner's lines are long and multi-axis — 10–14 words, 47% of them naming the
+elbow as well as the hand — while the instructions the model is tested on are mostly short
+and single-axis ("Lower my hand."). MDM conditions on a frozen CLIP text embedding, which is
+close to a bag of words, so every extra direction a caption names dilutes the one being
+asked for. With this flag every motion — each transplant included, measured on its own
+landing — gets the lines `templated_captions.py` generates from its `motion_facts`: one
+imperative per axis outside the dead band in **both** grammatical persons ("Lower my hand." /
+"Lower your hand."), one two-clause line joining the two axes that move most ("Move my hand
+down and straighten my elbow."), and two synonym paraphrases of the axis that moves most
+("Bring my hand down.", "Drop my hand lower."), also in both persons. Axes are ranked by
+travel in dead-band units so metres and radians compare; the elbow's depth axis has no
+template (no short natural imperative for it) so it never contributes a line. Every line is
+at most 10 words — inside MDM's 20-token caption truncation with room to spare — and is put
+through the same `consistent_captions` gate the VLM lines face, so a template that stops
+agreeing with `motion_facts`' word table shows up as a dropped line. It supersedes
+`--consistent_captions`, whose work generated lines already do. The build prints a
+`=== templated captions ===` block with lines per motion, unique lines, the register split
+and the up:down / left:right line ratios against the motion ratios.
+
+`correction_auto600_templated` is `correction_auto600_grounded`'s motions with that text —
+byte-identical `new_joint_vecs` and splits (same clips, same seed, same draws), text the only
+difference, so the two isolate captions from data. 1800 motions, 24058 lines / **153 unique**
+(against the grounded set's 9862 / 2007 — a small vocabulary drawn many times, which is the
+point), 13.4 lines per motion, max 9 words, registers 12921 first / 11137 second (the gap is
+the one-per-motion two-clause line, written first-person), up:down 1.04 against a 1.09 motion
+ratio and left:right 0.76 against 0.79 — closer than the grounded set's 0.65. 95 lines
+dropped by the gate, all of them on the 19 motions whose every axis measures inside the dead
+band, where the generator names the largest axis anyway and the gate cuts it back to one line
+(the same fallback the VLM path takes when every line contradicts):
+```
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \
+    --clips_dir .../data/dataset_auto_correction/clips_auto100_grounded \
+        .../data/dataset_auto_correction/clips_auto500_s{1,2,3,4} \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto600_templated \
+    --transplants 2 --templated_captions
+```
+
+**The elbow-rich datasets.** Every checkpoint trained on the 600 default-paced clips has
+essentially *no* text control over where the elbow goes — the up/down flip separates the two
+instructions at Cohen's d ≈ 0 and the four elbow-position categories sit at 0.2–0.7, which is
+the prior rather than the words — because half of those clips move the elbow less than the
+2 cm dead band, so no caption in them could name an elbow direction. `clips_elbow500_s{1,2,3,4}`
+fixes that at the source, and two datasets build on it (their grounded twins exist as well,
+`correction_elbow500_grounded` and `correction_auto1100_grounded`, and are the same motions
+with `autolabel.py --grounded` text):
+
+```
+# 500 elbow-rich clips alone
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \
+    --clips_dir .../data/dataset_auto_correction/clips_elbow500_s{1,2,3,4} \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_elbow500_templated \
+    --transplants 2 --templated_captions
+
+# the 600 old clips plus the 500 elbow-rich ones
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \
+    --clips_dir .../data/dataset_auto_correction/clips_auto100_grounded \
+        .../data/dataset_auto_correction/clips_auto500_s{1,2,3,4} \
+        .../data/dataset_auto_correction/clips_elbow500_s{1,2,3,4} \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_templated \
+    --transplants 2 --templated_captions
+```
+
+`correction_elbow500_templated`: 1499 motions (500 × (1 + 2 transplants), one clip's
+transplants rejected), 1199/150/150 split, 23743 lines / **157 unique**.
+`correction_auto1100_templated`: 3299 motions, 2639/330/330 split, 47744 lines / 167 unique —
+the 600 old clips and the 500 new ones together. It is **not** a concatenation of the two
+smaller builds: the 1499 elbow motions do reappear byte-identical, but merging a fourth clip
+source shifts the transplant anchor stream, so the old clips' 1200 transplants land on
+different naive frames (639 of `correction_auto600_templated`'s 1769 distinct arrays survive
+— the base clips plus a few transplants that redrew the same anchor) and the ids are
+renumbered. The elbow share of the text is what the clips bought: lines naming an elbow
+direction (in / out / up / down) are 27.5% of the elbow-only set and 22.2% of the combined
+one, against the old 600's dead-elbow captions. The grounded twins are 8480 lines / 1570
+unique and 18364 lines / 2959 unique, with 34.6% / 29.3% elbow-direction lines — more varied
+phrasing, an order of magnitude fewer draws per line.
+
+**Paraphrase the templated text with an LLM instead of widening the vocabulary by hand.**
+Templated captions are true by construction but come from ~170 lines, so the model meets
+few of the ways people actually ask for a change. `paraphrase_captions.py` keeps every
+templated line as the ground truth and asks a text-only LLM, once per distinct line-set,
+for `--n` things a care recipient might say to request the same change — varied register,
+verbs, abstraction, complaints as well as requests. Each paraphrase passes the builder's
+own direction-word check (`motion_facts.asserted`: it may not claim a direction the source
+lines do not state). The output is a new dataset dir whose `new_joint_vecs`, stats and
+splits are the source's (motions symlinked) and whose texts are source + paraphrases, so a
+fine-tune on it isolates language coverage. Completions cache in `<out>/paraphrases.json`.
+```
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/paraphrase_captions.py \
+    --src src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_elbow500_templated \
+    --out src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_elbow500_paraphrased \
+    --n 12   # --model gpt-5.6-luna, --workers 16 by default; ~1 min per 500 line-sets
+```
+`correction_elbow500_paraphrased` (2026-09-09): 554 line-sets drafted, 16214 of 17988
+paraphrases kept (90%), **3250 unique lines** against the templated set's 157, on the same
+1499 motions and splits.
+
 Fine-tune on it from the **stock** checkpoint. `finetune_standing.sh` already resumes from
 `./save/humanml_enc_512_50steps/model000750000.pt`, so pass no `--resume_checkpoint`
 (MDM's argparse is last-flag-wins, so passing one would override it). Note the runner
@@ -459,7 +676,213 @@ bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
 bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
     correction_auto100 correction_auto100_lr1e5_5k 1e-5 \
     --gen_during_training --start_pose mdm_sit_pose.pt --n_prefix 8
+
+# NOT YET RUN: same recipe on the dual-register, motion-consistent rebuild of the same
+# clips. The motion count is unchanged (500), so 5000 steps is still ~80 epochs; add
+# --save_interval 1000 to write 6 checkpoints (~1.8 GB) instead of 21 (~6.1 GB).
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto100_v2 correction_auto100_v2_lr1e5_5k 1e-5 \
+    --gen_during_training --start_pose mdm_sit_pose.pt --n_prefix 8
+
+# NOT YET RUN: the 600-clip grounded set. 1800 motions x 0.8 = 1440 train ids is 180 steps
+# per epoch at batch 8, so 15000 steps is ~83 epochs — the same epoch budget as the runs
+# above, not 3x the training. Trailing args are forwarded verbatim after the runner's own
+# --num_steps 5000 --save_interval 250, and MDM's argparse is last-flag-wins, so these
+# override them. NO --gen_during_training: it re-samples the test split at every save.
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto600_grounded correction_auto600_grounded_lr1e5_15k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 15000 --save_interval 1000
+
+# ran 2026-09-02: the same recipe and motions with templated short captions.
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto600_templated correction_auto600_templated_lr1e5_15k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 15000 --save_interval 5000
+
+# ran 2026-09-02: CURRICULUM — a short grounded phase on top of the templated model.
+# BEST 600-clip result so far at the 2419-step checkpoint (model000767500.pt); the full
+# 5000 steps overshoots and gives the grounded up-bias back, so stop early.
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto600_grounded correction_auto600_templated_then_grounded_5k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 5000 --save_interval 2500 \
+    --resume_checkpoint /share/bhattacharjee/eric_data/mdm_save/correction_auto600_templated_lr1e5_15k/model000765081.pt
+
+# ran 2026-09-02: the ELBOW-RICH sets, both with templated captions. 2639 train ids is
+# 329 steps per epoch, so 26500 steps is ~80 epochs — the same epoch budget again; the
+# 500-clip set's 1199 train ids need only 12000 steps for it.
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto1100_templated correction_auto1100_templated_lr1e5_26k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 26500 --save_interval 5000
+
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_elbow500_templated correction_elbow500_templated_lr1e5_12k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 12000 --save_interval 5000
+
+# NOT RUN: the grounded set again, but continuing the DEPLOYED weights rather than the
+# stock base — the trailing --resume_checkpoint overrides the runner's.
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto600_grounded correction_auto600_grounded_from_deployed_10k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 10000 --save_interval 5000 \
+    --resume_checkpoint /share/bhattacharjee/eric_data/mdm_save/correction_auto100_lr1e5_5k/model000755051.pt
+
+# ran 2026-09-08: CONTINUE THE DEPLOYED WEIGHTS on 200 new default-paced clips. 799 train
+# ids is 100 steps per epoch, so 8000 steps is ~80 epochs; model + optimizer state resume
+# from the deployed checkpoint, so the step counter starts at 755051.
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto200_s5 correction_auto200_s5_from_deployed_8k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 8000 --save_interval 2000 \
+    --resume_checkpoint /home/eric/safe-contact/data/mdm_save/correction_auto100_lr1e5_5k/model000755051.pt
+# launched 2026-09-09 02:17 as one chain (outputs/mdm_overnight_20260909/run_chain.sh, logs
+# and `grounding_*` results there, chain.log for timing): the paraphrase-augmented twins of
+# the templated sets, a local retrain of the templated E500 control, and a 1000-clip set with
+# pacing diversity (clips_elbow500_s5-8: seeds 5-6 at max_angle_delta 0.0025, s7 at 0.00375
+# with --trigger_window 4 33, s8 at 0.005 with --trigger_window 3 25, all with the
+# since-removed 0.03 m elbow-travel floor), built templated then paraphrased. Each checkpoint is scored with run_grounding.py
+# (mdm grounder, clips_auto200_s5, 20 cases) next to the deployed checkpoint.
+# CAVEAT: the chain's first elbow1000/elbow2000 builds silently held only the 500 captioned
+# clips (templated builds skipped uncaptioned runs until the 2026-09-09 fix), so those two
+# checkpoints are E500-paraphrased trained 2x/4x longer and were renamed
+# `correction_elbow500_paraphrased_lr1e5_24k` / `_48k`. run_chain2.sh (11:38) rebuilt the
+# real 1000- and 2000-clip sets, trained `correction_elbow1000_paraphrased_lr1e5_24000` and
+# `correction_elbow2000_paraphrased_lr1e5_48000`, and extended every score to 80 cases.
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_elbow500_paraphrased correction_elbow500_paraphrased_lr1e5_12k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 12000 --save_interval 4000
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_elbow500_templated correction_elbow500_templated_lr1e5_12k_local 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 12000 --save_interval 4000
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto1100_paraphrased correction_auto1100_paraphrased_lr1e5_26k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 26500 --save_interval 5000
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_elbow1000_paraphrased correction_elbow1000_paraphrased_lr1e5_24k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --num_steps 24000 --save_interval 6000
 ```
+
+**Results (2026-09-09, `run_grounding.py --grounder mdm`, `clips_auto200_s5`, 80 cases, final
+checkpoint of each run; mean ± SE; paired deltas are against `elbow500_templated_local` on the
+same 80 cases, so the `elbow500_*` rows differ from it in TEXT ONLY).** Higher is better for
+arc progress, alignment and acceptable rate; lower for violation. Analysis script:
+`outputs/mdm_overnight_20260909/analyze_grounding.py`.
+
+| checkpoint | motions | unique lines | arc progress | Δ paired | alignment | Δ paired | violation | acceptable | diversity |
+|---|---|---|---|---|---|---|---|---|---|
+| `deployed` (`correction_auto100_lr1e5_5k`) | 500 | ~700 | 0.488 ± 0.062 | +0.17 ± 0.11 | 0.138 ± 0.053 | −0.08 ± 0.06 | 0.009 | 0.74 | 0.710 |
+| `elbow500_templated_lr1e5_12k_local` (control) | 1499 | 157 | 0.322 ± 0.111 | — | 0.220 ± 0.048 | — | 0.009 | 0.83 | 0.737 |
+| `elbow500_paraphrased_lr1e5_12k` | 1499 | 3250 | 0.455 ± 0.090 | +0.13 ± 0.09 | 0.280 ± 0.051 | +0.06 ± 0.06 | 0.009 | 0.76 | 0.723 |
+| `elbow500_paraphrased_lr1e5_48k` (4x steps) | 1499 | 3310 | 0.434 ± 0.104 | +0.11 ± 0.15 | 0.333 ± 0.052 | +0.11 ± 0.07 | 0.011 | 0.76 | 0.716 |
+| **`auto1100_paraphrased_lr1e5_26k` (DEPLOYED 2026-09-09)** | 3299 | 5257 | 0.511 ± 0.068 | +0.19 ± 0.12 | **0.390 ± 0.047** | **+0.17 ± 0.06** | **0.007** | **0.84** | **0.765** |
+| `elbow1000_paraphrased_lr1e5_24000` | 2995 | 4241 | **0.619 ± 0.072** | **+0.30 ± 0.10** | 0.285 ± 0.041 | +0.06 ± 0.06 | 0.012 | 0.78 | 0.702 |
+| `elbow2000_paraphrased_lr1e5_48000` | 5994 | 5374 | 0.589 ± 0.085 | +0.27 ± 0.10 | 0.320 ± 0.048 | +0.10 ± 0.07 | 0.022 | 0.63 | 0.657 |
+
+Reading: (1) **paraphrasing the templated text helps on identical motions** — every
+`*_paraphrased` row beats the templated control on arc progress and alignment, and the 1100-set
+paraphrase is the only one whose alignment gain (+0.17 ± 0.06) is clearly significant; (2)
+**more clips help arc progress** (elbow1000 +0.30 ± 0.10 over the control and above the
+deployed checkpoint), (3) but the 2000-clip run (seeds 9–16 add faster pacings) buys arc
+progress with more violation and a 0.63 acceptable rate, i.e. it overshoots the hidden bound
+more often — pacing diversity or 320 epochs at lr 1e-5 is the suspect, not clip count per se;
+(4) 4x longer training on the 500-clip set changes nothing significant. Best single
+checkpoint for the simulated user's chooser: `elbow1000_paraphrased` on progress,
+`auto1100_paraphrased` on alignment/violation/acceptability.
+
+
+**What the three caption sources are worth** (8 poses x 100 samples, pronoun twins,
+seed 0, 704 (pose, instruction) cells; the `g` rows are guidance at 4 poses, 352 cells).
+Measured with the since-removed checkpoint-adherence benchmark; the numbers are kept as a
+record and are not reproducible from the current tree. All three 600-clip runs train the *same 1800
+motions*, so the differences are text alone:
+
+| checkpoint | check_rate ± SE (g 2.5) | adh "Lift my hand up." | adh "Lower my hand." | spread | g 7.5 | g 10 |
+|---|---|---|---|---|---|---|
+| `correction_auto100_lr1e5_5k` (deployed) | 0.541 ± 0.010 | 0.955 | 0.318 | 0.084 | 0.560 | 0.551 |
+| `correction_auto600_grounded_lr1e5_15k` | 0.510 ± 0.011 | 0.990 | **0.144** | 0.081 | 0.582 | 0.595 |
+| `correction_auto600_templated_lr1e5_15k` | 0.516 ± 0.010 | 0.824 | **0.460** | **0.100** | **0.589** | **0.601** |
+| `…templated_then_grounded_5k/model000767500.pt` (+2419) | **0.529 ± 0.012** | 0.954 | 0.273 | 0.082 | — | **0.602** |
+| `…templated_then_grounded_5k/model000770122.pt` (+5041) | 0.494 ± 0.010 | 0.853 | 0.334 | 0.088 | — | 0.570 |
+| `correction_auto1100_templated_lr1e5_26k` (E1100) | 0.545 ± 0.012 | 0.986 | 0.310 | 0.090 | 0.588 | 0.597 |
+| `correction_elbow500_templated_lr1e5_12k` (E500) | **0.550 ± 0.010** | 0.918 | **0.540** | **0.116** | **0.612** | **0.605** |
+
+**Short templated captions fix the up-bias.**
+The grounded run raises the arm for almost anything ("Lower my hand." adherence 0.144 against
+"Lift my hand up." 0.990); templating the text alone takes "Lower my hand." to 0.460 (and its
+per-check rate from 0.25 to 0.78 at guidance 7.5-10) at the cost of 0.17 on "Lift my hand
+up.", and it is the only checkpoint whose sample spread *survives* strong guidance (0.070 at
+g 10 against 0.048 for the grounded run), so the direction gain is not bought by mode
+collapse. It is also the best of all three at the guidance these models actually work best at.
+A **curriculum** — templated first, then a *short* grounded phase — is the only thing that
+has beaten both: 2419 more steps on the grounded text lifts check_rate to 0.529 ± 0.012 (paired
+vs templated +0.013 ± 0.006, p = 0.02) and is statistically indistinguishable from the deployed
+checkpoint (−0.011 ± 0.008, p = 0.18, sign test 339/682), while topping every checkpoint on the
+16 real verbalizer utterances (`evaluation` style 0.600 at g 2.5 and 0.695 at g 10). The gain is
+confined to those real utterances — the synthetic `vlm`/`compositional` styles do not move
+(0.484/0.489 against templated's 0.481/0.494) — and it costs most of the down-fix (0.273 against
+0.460) and all of the extra diversity (spread 0.082 against 0.100), so the grounded phase is
+buying phrasing at the price of the direction prior. **Stop it early:** running the full 5000
+steps hands the up-bias straight back (check_rate 0.494, up−down d 0.61 from 1.46 at 2419 steps).
+Prefer one caption style per dataset, and pick it by which failure you care
+about (direction fidelity → templated, phrasing coverage → grounded). The deployed 100-clip
+checkpoint still wins at the default guidance 2.5; nothing at 600 clips has beaten it there.
+
+**Elbow-rich clips are what finally gave the model text control of the elbow, and they beat
+every 600-clip recipe.** Both runs are the same fine-tune shape (stock base, lr 1e-5,
+`--start_pose mdm_sit_pose.pt --n_prefix 8`, ~80 epochs: 26500 steps on 2639 train ids /
+12000 on 1199), scored the same way. The direction-flip Cohen's d on the shared quantity —
+how far apart a checkpoint puts two *opposite* instructions — is where the new data shows up:
+
+| flip (d, guidance 2.5 / 7.5 / 10) | deployed | grounded600 | templated600 | curriculum | E1100 | E500 |
+|---|---|---|---|---|---|---|
+| hand up − down (`wrist_dy`) | 1.27 / 0.74 / 0.60 | 1.35 / 2.05 / 2.21 | 0.87 / 1.74 / 1.90 | 1.25 / — / 2.18 | **1.68 / 2.82 / 3.07** | 1.21 / 2.02 / 2.04 |
+| hand left − right (`wrist_dx`) | 0.27 / 0.18 / 0.13 | 0.22 / 0.17 / 0.12 | 0.39 / 0.86 / 0.94 | 0.47 / — / 1.16 | 0.43 / **1.03 / 1.16** | 0.36 / 0.74 / 0.74 |
+| **elbow up − down** (`elbow_dy`) | 0.16 / 0.32 / 0.33 | 0.13 / 0.56 / 0.65 | 0.14 / 0.39 / 0.49 | 0.19 / — / 0.65 | **0.86 / 1.30 / 1.42** | 0.28 / 0.49 / 0.58 |
+| **elbow out − in** (`elbow_dx`) | 0.58 / 0.80 / 0.67 | 0.07 / 0.22 / 0.26 | 0.17 / 0.48 / 0.55 | 0.20 / — / 0.59 | 0.41 / **0.84 / 0.89** | 0.15 / 0.43 / 0.50 |
+| bend − straighten (`elbow_flexion_delta`) | 0.61 / 0.72 / 0.68 | 0.29 / 0.53 / 0.51 | 0.25 / 0.59 / 0.64 | −0.01 / — / −0.90 | −0.11 / −0.46 / −0.57 | 0.34 / **0.83 / 0.83** |
+
+Elbow *position* was previously unlearnable from this data — every 600-clip checkpoint
+separates "Lift my elbow up." from "Lower my elbow." at d ≈ 0.13–0.19 at guidance 2.5, which
+is the pose prior and not the sentence, because half those clips move the elbow less than the
+dead band. `correction_auto1100_templated` takes that to **0.86 (5×)** and to 1.42 at
+guidance 10, and it is the best hand-axis separator too (up−down 3.07, left−right 1.16 at
+g 10). Per-category at g 2.5, "Lift my elbow up." goes 0.38 → 0.83 (deployed → E1100); at
+g 10 "Move my elbow out." goes 0.30 → 0.71 while every 600-clip run sits at 0.10–0.21. The
+cost is flexion: E1100's bend−straighten d is *negative* (−0.11 to −0.57), i.e. it now moves
+the forearm the wrong way for "Bend my elbow." (per-check 0.34 at g 2.5 against the deployed 0.61) — the elbow-rich clips are
+dominated by bounds that swing the upper arm (64% rotation + flexion/extension), so
+"bend"/"straighten" got *less* signal than before while the position axes got more.
+
+**The old 600 clips no longer help.** `correction_elbow500_templated` — the 500 new clips
+alone, less than half the data and half the steps — matches or beats E1100 at every guidance
+and is never significantly worse: paired over the cells, E1100 − E500 = −0.005 ± 0.006
+(p = 0.46) at g 2.5, −0.025 ± 0.015 (p = 0.10) at g 7.5, −0.009 ± 0.017 (p = 0.61) at g 10.
+E500 holds the **best overall adherence rate at all three guidances**: 0.550 ± 0.010 at 2.5
+(paired vs templated600 +0.034 ± 0.005, p < 1e-4; vs the deployed checkpoint +0.009 ± 0.006,
+p = 0.15), 0.612 ± 0.018 at 7.5 and 0.605 ± 0.019 at 10 (vs deployed +0.052, p = 0.002 and
++0.054, p = 0.002) — the **first checkpoint to beat the deployed one at the default guidance
+as well as at 7.5–10**. It also keeps the down-fix ("Lower my hand." 0.540, against
+templated600's 0.460 and the deployed 0.318) *and* the most diverse clouds of any run
+(spread 0.116 at g 2.5, 0.075 at g 10 against the deployed 0.084 / 0.052), so none of it is
+mode collapse, and unlike E1100 it keeps flexion pointing the right way (bend−straighten
+0.83 at g 7.5–10, the best of any checkpoint). What it gives up is the 16 real verbalizer
+utterances, where the curriculum still leads (0.600 at g 2.5 / 0.695 at g 10 against E500's
+0.584 / 0.629 and E1100's 0.594 / 0.655) — long landmark-bearing phrasings still want the
+grounded text.
+
+**Use `correction_elbow500_templated_lr1e5_12k/model000762070.pt`, at guidance 7.5–10 where
+the instruction set is varied.** Both elbow runs share the templated captions' one
+pathology: "Move my hand forward." collapses under strong guidance (per-check 0.11 at g 7.5
+and 0.06 at g 10, against the deployed checkpoint's 0.72 / 0.70), the same hole `correction_auto600_templated`
+already had, because the depth axis has the fewest template lines.
+
+**Resuming from something other than the stock base needs no change to the runner.** It
+passes `--resume_checkpoint ./save/humanml_enc_512_50steps/model000750000.pt` *before* the
+trailing args, and MDM's argparse is last-flag-wins, so appending your own
+`--resume_checkpoint` wins. Two places record which one was actually used: the log line
+`loading model from checkpoint: <path>` and the run's `args.json`. Step numbering continues
+from the checkpoint's own step (`parse_resume_step_from_filename`), so a 10000-step run off
+`model000755051.pt` writes `model000760051.pt`, `model000765051.pt` and a final checkpoint at
+the end of the epoch that crosses the budget — not `model000760000.pt`. The `opt<step>.pt`
+next to a fine-tuned checkpoint exists, so its Adam state *is* restored and would carry that
+run's lr; `train_leftarm.py` resets the param groups afterwards and prints
+`[train_leftarm] optimizer state loaded; lr reset to 1e-05`, which is the line to check.
 
 **Pick the recipe by diversity, not by loss** (val splits contain transplants of training
 clips, so val loss is meaningless here). Measured on left-wrist trajectories across the 6
@@ -505,8 +928,8 @@ arm" −0.049 m, "Move my hand down" −0.094 m, "Bring my elbow down and in" �
 the steering is not bought with diversity. From the *sit* pose the absolute `dy` stays
 positive even for "down" prompts — that is the start pose bottoming out, not the checkpoint.
 
-After training, flip `use_ema` to false in `save/<run>/args.json` if you will sample from
-`sample_leftarm.py` (`mdm_api` is safe either way — `mdm_configs/mdm_config.yaml` overlays
+After training, pass `--raw_weights` to `sample_leftarm.py`, or flip `use_ema` to false in
+`save/<run>/args.json` (`mdm_api` is safe either way — `mdm_configs/mdm_config.yaml` overlays
 it). Then point `consts.MDM_MODEL_WEIGHTS_PATH` at the checkpoint.
 
 **Try it in the demo runner, on the scenario the clips were trained on.** Launch the demo

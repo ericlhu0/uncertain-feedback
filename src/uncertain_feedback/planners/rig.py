@@ -34,8 +34,19 @@ class PlanningRig:
     initial_hml_pose: np.ndarray | None
 
 
-def build_rig(config_path: Path, *, seed: int, load_generator: bool) -> PlanningRig:
+def build_rig(
+    config_path: Path,
+    *,
+    seed: int,
+    load_generator: bool,
+    model_path: Path | None = None,
+    guidance_param: float | None = None,
+) -> PlanningRig:
     """Load the planner config and derive the episode-planning context.
+
+    ``model_path`` overrides the generator's default weights, so one evaluation
+    run can score a checkpoint other than the deployed one; ``guidance_param``
+    overrides the generator's classifier-free guidance scale.
 
     ``load_generator=False`` skips the heavyweight motion-generator load for
     approaches that ground feedback without it; the start pose then comes from
@@ -49,7 +60,7 @@ def build_rig(config_path: Path, *, seed: int, load_generator: bool) -> Planning
         if cfg.pose is None:
             raise ValueError("MDM-grounded evaluation requires a pose: file.")
         gen: MotionGenerator | None = make_motion_generator(
-            cfg.motion_generator, None, seed=seed
+            cfg.motion_generator, model_path, seed=seed, guidance_param=guidance_param
         )
         assert gen is not None
         loaded_pose = gen.load_pose(cfg.pose)

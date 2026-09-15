@@ -74,6 +74,7 @@ from uncertain_feedback.simulated_users import (
     choose_cluster,
     get_persona,
 )
+from uncertain_feedback.uncertainty.clustering import make_clusterer
 from uncertain_feedback.utils.plot import ArmVisualizer
 
 
@@ -531,6 +532,16 @@ def build_run(
         feedback=cfg.feedback,
         constraints=cfg.constraints,
         robot_actions=cfg.robot_actions,
+        # Without this ArmMPC falls back to its own XyzPositionClusterer and the
+        # config's `clusterer:` is silently dropped — the demo runner and
+        # evaluation/approaches/system.py both resolve the name.
+        clusterer=(
+            None
+            if cfg.feedback is None or cfg.feedback.uq is None
+            else make_clusterer(
+                cfg.feedback.uq.clusterer, cfg.feedback.uq.n_clusters, fk=fk
+            )
+        ),
     )
 
     mpc.set_visualization_mode(capture=args.save is not None, compact=compact)
@@ -1172,6 +1183,11 @@ def main() -> None:
     """Parse CLI arguments and run the configured MPC planner."""
     args = build_parser().parse_args()
     artifact_base_dir = Path.cwd().resolve()
+    # Every video is written after the MDM loader has os.chdir()ed into its
+    # submodule, so a relative path would land there (or fail) instead of here.
+    for dest in ("save", "env_video", "save_motion"):
+        if getattr(args, dest) is not None:
+            setattr(args, dest, Path(getattr(args, dest)).resolve())
     cfg = load_mpc_config(args.mpc_config)
     # Checked before build_run, which on env: real already talks to the hardware.
     if args.interactive and cfg.feedback is None:

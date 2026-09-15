@@ -18,6 +18,7 @@ def _build_mdm(
     model_path: Path | None,
     seed: int | None,
     lock_seed: bool,
+    guidance_param: float | None,
 ) -> MotionGenerator:
     from uncertain_feedback.motion_generators.mdm.mdm_api import (  # pylint: disable=import-outside-toplevel
         MdmMotionGenerator,
@@ -27,11 +28,12 @@ def _build_mdm(
         model_path=model_path,
         seed=10 if seed is None else seed,
         lock_seed=lock_seed,
+        guidance_param=guidance_param,
     )
 
 
 MOTION_GENERATOR_BUILDERS: dict[
-    str, Callable[[Path | None, int | None, bool], MotionGenerator]
+    str, Callable[[Path | None, int | None, bool, float | None], MotionGenerator]
 ] = {
     "mdm": _build_mdm,
 }
@@ -42,16 +44,18 @@ def make_motion_generator(
     model_path: Path | None,
     seed: int | None = None,
     lock_seed: bool = False,
+    guidance_param: float | None = None,
 ) -> MotionGenerator:
     """Construct the motion generator selected by ``name``.
 
     Backend-specific options are forwarded only to backends that support them.
     MDM uses ``seed`` and can reset it before every generation when
-    ``lock_seed`` is true.
+    ``lock_seed`` is true, and ``guidance_param`` overrides its classifier-free
+    guidance scale.
     """
     if name not in MOTION_GENERATOR_BUILDERS:
         raise ValueError(
             f"Unknown motion_generator '{name}'. "
             f"Available: {sorted(MOTION_GENERATOR_BUILDERS)}"
         )
-    return MOTION_GENERATOR_BUILDERS[name](model_path, seed, lock_seed)
+    return MOTION_GENERATOR_BUILDERS[name](model_path, seed, lock_seed, guidance_param)

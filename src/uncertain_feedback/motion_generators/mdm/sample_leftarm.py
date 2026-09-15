@@ -161,7 +161,9 @@ def main():
     model, diffusion = create_model_and_diffusion(args, data)
 
     print(f"Loading checkpoints from [{args.model_path}]...")
-    load_saved_model(model, args.model_path, use_avg=args.use_ema)
+    load_saved_model(
+        model, args.model_path, use_avg=args.use_ema and not args.raw_weights
+    )
 
     model = ClassifierFreeSampleModel(
         model
@@ -210,7 +212,7 @@ def main():
     apply_leftarm_inpainting(
         model_kwargs,
         start_pose=sitting_pose,
-        n_prefix=1,
+        n_prefix=args.n_prefix,
         batch_size=args.num_samples,
         n_frames=n_frames,
         fix_body=args.fix_body,

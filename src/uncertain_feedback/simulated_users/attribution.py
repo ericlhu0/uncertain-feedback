@@ -96,7 +96,7 @@ def attribute_correction(
 
 
 def has_feedback_content(
-    intent: CorrectionIntent, feature_dead_band: float = 0.15
+    intent: CorrectionIntent, feature_dead_band: float = 0.05
 ) -> bool:
     """Level-invariant termination check: any feature delta above the dead-band."""
     return any(

@@ -2,11 +2,16 @@
 
 Modes model different users picking among candidate corrections:
 
-- ``intent_aligned`` (default): the comfortable candidate whose motion best
-  aligns with the user's private correction intent (the same
-  :class:`CorrectionIntent` the verbalizers phrase) — a person who knows what
-  they want even when their words were vague, with no knowledge of the oracle
-  path geometry.
+- ``oracle_progress`` (default): among candidates that never violate a hidden
+  bound at any frame (zero tolerance, not the pain threshold), the one whose
+  endpoint lands closest to the oracle correction's own end along its
+  feature-space path (:func:`~.progress.correction_progress`; ``arc_progress``
+  nearest 1), ties broken by ``alignment``. ``oracle_path`` must be the oracle
+  *correction* the candidates are meant to reproduce, from ``min_join`` on.
+- ``intent_aligned``: the comfortable candidate whose motion best aligns with
+  the user's private correction intent (the same :class:`CorrectionIntent` the
+  verbalizers phrase) — a person who knows what they want even when their
+  words were vague, with no knowledge of the oracle path geometry.
 - ``progress``: the legacy oracle-path chooser — comfortable candidates scored
   by how much of the internal oracle path would remain after taking them.
   Superhuman path knowledge; kept for ablation.
@@ -36,14 +41,13 @@ from uncertain_feedback.simulated_users.base import (
     compute_violations,
     feature_series,
 )
+from uncertain_feedback.simulated_users.progress import correction_progress
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
-CHOOSER_MODES = ("intent_aligned", "progress", "random")
+CHOOSER_MODES = ("oracle_progress", "intent_aligned", "progress", "random")
 
-_FEATURE_DEAD_BAND = 0.15
-_OFFSET_DEAD_BAND = 0.05
-# Offsets are meters, features radians; weight offsets so the dead-bands match.
-_OFFSET_WEIGHT = _FEATURE_DEAD_BAND / _OFFSET_DEAD_BAND
+# Offsets are meters, features radians; 5 cm of offset weighs as much as 0.15 rad.
+_OFFSET_WEIGHT = 0.15 / 0.05
 
 _ELBOW_CHAIN_IDX = 3
 _WRIST_CHAIN_IDX = 4
@@ -62,15 +66,10 @@ class ChoiceResult:
 
 
 def _desired_vector(intent: CorrectionIntent) -> np.ndarray:
-    """Concatenated desired change (features then offsets), dead-banded."""
-    parts = []
-    for name in ATTRIBUTED_FEATURES:
-        delta = intent.feature_deltas[name]
-        parts.append(-delta if abs(delta) > _FEATURE_DEAD_BAND else 0.0)
+    """Concatenated desired change (features then offsets)."""
+    parts = [-intent.feature_deltas[name] for name in ATTRIBUTED_FEATURES]
     for offset in (intent.wrist_offset, intent.elbow_offset):
-        offset = np.asarray(offset, dtype=np.float64)
-        active = float(np.linalg.norm(offset)) > _OFFSET_DEAD_BAND
-        parts.extend((-offset * _OFFSET_WEIGHT) if active else np.zeros(3))
+        parts.extend(-np.asarray(offset, dtype=np.float64) * _OFFSET_WEIGHT)
     return np.asarray(parts, dtype=np.float64)
 
 
@@ -98,15 +97,16 @@ def choose_correction(
     threshold: float = 0.02,
     magnitudes: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5),
     *,
-    mode: str = "intent_aligned",
+    mode: str = "oracle_progress",
     intent: CorrectionIntent | None = None,
     rng: np.random.Generator | None = None,
 ) -> ChoiceResult:
     """Pick a (cluster, magnitude) the user would accept, per ``mode``.
 
-    All modes reject candidates whose playback exceeds the pain ``threshold``;
-    when none survives, the lowest mean-violation candidate is returned with
-    ``no_acceptable_cluster=True``.
+    Candidates whose playback exceeds the pain ``threshold`` at any frame are
+    rejected, matching the execution-time trigger; ``oracle_progress`` rejects
+    any violation at all. When none survives, the lowest peak-violation
+    candidate is returned with ``no_acceptable_cluster=True``.
     """
     if mode not in CHOOSER_MODES:
         raise ValueError(f"Unknown chooser mode {mode!r}; expected {CHOOSER_MODES}.")
@@ -118,6 +118,7 @@ def choose_correction(
 
     oracle_q = canonical_arm_q(oracle_path, context).reshape(-1, 7)
     tail = oracle_q[min_join:]
+    limit = 0.0 if mode == "oracle_progress" else threshold
     step_lengths = np.linalg.norm(np.diff(tail, axis=0), axis=-1)
     remaining_arc = np.concatenate([np.cumsum(step_lengths[::-1])[::-1], [0.0]])
 
@@ -147,18 +148,24 @@ def choose_correction(
             )
             scores[label] = min(progress, scores.get(label, np.inf))
             violations = compute_violations(user, context, candidate)
-            mean_violation = float(np.mean(violations))
-            if mean_violation < fallback_violation:
-                fallback_violation = mean_violation
+            peak_violation = float(np.max(violations))
+            if peak_violation < fallback_violation:
+                fallback_violation = peak_violation
                 fallback = (label, magnitude)
-            # A demo is acceptable when it is not painful on average — a brief
-            # graze of the limit does not make a person reject the motion. The
-            # execution-time trigger (first_violation_step) stays max-based.
-            if mean_violation > threshold:
+            # Any frame past the limit makes the demo painful, so the same
+            # max-based test the execution trigger (first_violation_step) uses
+            # rules the candidate out here.
+            if peak_violation > limit:
                 continue
             acceptable[label] = True
             acceptable_pairs.append((label, magnitude))
-            if mode == "progress":
+            if mode == "oracle_progress":
+                result = correction_progress(tail, candidate, context)
+                pair_keys[(label, magnitude)] = (
+                    -abs(result.arc_progress - 1.0),
+                    result.alignment,
+                )
+            elif mode == "progress":
                 pair_keys[(label, magnitude)] = (-progress, 0.0)
             elif mode == "intent_aligned":
                 assert desired is not None

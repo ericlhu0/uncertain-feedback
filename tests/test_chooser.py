@@ -54,7 +54,9 @@ def _user(context: MpcCostContext, max_flexion: float | None) -> SimulatedUser:
 def test_do_nothing_cluster_loses_to_progress(context: MpcCostContext) -> None:
     oracle = _q_traj(list(np.linspace(0.0, 1.0, 21)))
     means = {0: _aa_mean(context, 0.0), 1: _aa_mean(context, 0.5)}
-    result = choose_correction(_user(context, None), context, means, oracle)
+    result = choose_correction(
+        _user(context, None), context, means, oracle, mode="progress"
+    )
     assert result.label == 1
     assert not result.no_acceptable_cluster
     assert result.acceptable == {0: True, 1: True}
@@ -64,7 +66,9 @@ def test_do_nothing_cluster_loses_to_progress(context: MpcCostContext) -> None:
 def test_painful_cluster_is_filtered(context: MpcCostContext) -> None:
     oracle = _q_traj(list(np.linspace(0.0, 1.2, 21)))
     means = {0: _aa_mean(context, 0.2), 1: _aa_mean(context, 1.2)}
-    result = choose_correction(_user(context, 0.45), context, means, oracle)
+    result = choose_correction(
+        _user(context, 0.45), context, means, oracle, mode="progress"
+    )
     assert result.scores[1] < result.scores[0]
     assert result.label == 0
     assert result.acceptable == {0: True, 1: False}
@@ -74,7 +78,9 @@ def test_painful_cluster_is_filtered(context: MpcCostContext) -> None:
 def test_all_painful_falls_back_to_least_violating(context: MpcCostContext) -> None:
     oracle = _q_traj(list(np.linspace(0.0, 1.0, 21)))
     means = {0: _aa_mean(context, 0.4), 1: _aa_mean(context, 1.0)}
-    result = choose_correction(_user(context, 0.05), context, means, oracle)
+    result = choose_correction(
+        _user(context, 0.05), context, means, oracle, mode="progress"
+    )
     assert result.no_acceptable_cluster
     assert result.label == 0
     assert result.magnitude == 0.5
@@ -84,7 +90,9 @@ def test_all_painful_falls_back_to_least_violating(context: MpcCostContext) -> N
 def test_grid_finds_scaled_only_acceptable_variant(context: MpcCostContext) -> None:
     oracle = _q_traj(list(np.linspace(0.0, 1.0, 21)))
     means = {0: _aa_mean(context, 1.0)}
-    result = choose_correction(_user(context, 0.6), context, means, oracle)
+    result = choose_correction(
+        _user(context, 0.6), context, means, oracle, mode="progress"
+    )
     assert not result.no_acceptable_cluster
     assert result.label == 0
     assert result.magnitude == 0.5

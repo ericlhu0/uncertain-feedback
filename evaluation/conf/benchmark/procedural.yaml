@@ -1,0 +1,10 @@
+# Cost-learning benchmark on procedurally generated scenarios: each accepted
+# case in scenario_dir (generate_scenarios.py --sampled-bounds) supplies its
+# synthetic user, start pose and goal. Pair with
+# mpc_config=evaluation/conf/mpc_procedural.yaml (the sampler's pacing).
+_target_: evaluation.benchmarks.scenarios.ScenarioBenchmark
+name: procedural
+scenario_dir: outputs/procedural_bounds_s23
+verbalizers: [everyday]
+max_rounds: 3
+recommended_only: false

@@ -9,7 +9,7 @@ feedback:
   text_time: 10
   uq:
     diffusion_samples: 500
-    n_clusters: 3
+    n_clusters: 4
     auto_cluster: 1
     scale: 1.0
     # Steer diffusion sampling toward the simulated user's hidden bounds.

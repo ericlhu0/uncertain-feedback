@@ -4,15 +4,27 @@ Used to build the steering cost passed to
 :class:`~uncertain_feedback.motion_generators.steering.SteeringSpec`: the whole
 point is to score a diffusion sample *inside* the denoising loop, which rules
 out the numpy IK path (``arm_aa_from_positions_batch`` costs seconds per call).
-Instead the two features the personas' bounds need are computed straight from
+Instead the features the personas' bounds need are computed straight from
 the RIC joint positions in the HML263 block, in torch, on device.
 
 The features mirror ``arm_features.arm_feature_series`` geometrically but read
-world-frame positions: elbow flexion is frame-invariant and matches exactly,
-while shoulder elevation is measured from world-down rather than torso-down, so
-the two agree only for an unleaned torso. That approximation is fine for
-steering (it never leaves the sampler); trajectory *evaluation* keeps using the
-exact IK-based oracle.
+positions in the root's facing frame: elbow flexion is frame-invariant and
+matches exactly, shoulder elevation is measured from world-down rather than
+torso-down, and shoulder abduction from the root's lateral axis rather than
+spine3's, so the two agree only for an unleaned, untwisted torso. That
+approximation is fine for steering (it never leaves the sampler); trajectory
+*evaluation* keeps using the exact IK-based oracle.
+
+TODO(frame): shoulder abduction is the one feature here that is not
+yaw-invariant, and it is read in the root's facing frame (HML263 RIC positions
+are rotated so the pelvis faces +z) while ``arm_feature_series`` reads it in the
+spine3 frame. Any pelvis-to-spine3 twist becomes a constant abduction offset, so a
+coupled bound conditioned on abduction (``cross_body_pain``, the sampled coupled
+bounds) is steered toward a slightly displaced threshold. Fix: define the lateral
+axis per frame from the RIC shoulder pair (joints 16/17, left minus right) and
+measure abduction against it, which also makes elevation torso-relative; then
+tighten ``test_torch_position_features_match_arm_feature_series`` to a twisted
+``spine3_aa``. Introduced 2026-09-11 with abduction support.
 
 This module imports torch at module scope — import it lazily from anywhere that
 must stay torch-free (config parsing, the abstract generator interface).
@@ -31,7 +43,11 @@ from uncertain_feedback.simulated_users.base import (
     SimulatedUser,
 )
 
-SUPPORTED_FEATURES = ("elbow_flexion", "shoulder_elevation")
+SUPPORTED_FEATURES = (
+    "elbow_flexion",
+    "shoulder_elevation",
+    "shoulder_abduction_adduction",
+)
 
 _RIC_OFFSET = 4  # root rotation/velocity block preceding the RIC positions
 _N_RIC_JOINTS = 21  # SMPL joints minus the root
@@ -60,6 +76,16 @@ def flexion_elevation(
     return flexion, elevation
 
 
+def shoulder_abduction(shoulder: torch.Tensor, elbow: torch.Tensor) -> torch.Tensor:
+    """Return the upper arm's signed angle out of the sagittal plane.
+
+    The arcsine of the upper arm's lateral component, as in
+    ``arm_feature_series`` (positive = abducted, for the left arm +x).
+    """
+    upper = torch.nn.functional.normalize(elbow - shoulder, dim=-1)
+    return torch.asin(upper[..., 0].clamp(-1.0 + _ACOS_EPS, 1.0 - _ACOS_EPS))
+
+
 def features_from_hml(
     x0: torch.Tensor, hml_mean: torch.Tensor, hml_std: torch.Tensor
 ) -> dict[str, torch.Tensor]:
@@ -75,10 +101,17 @@ def features_from_hml(
         *denorm.shape[:2], _N_RIC_JOINTS, 3
     )
     ric = ric[:, N_PREFIX_FRAMES:]
-    flexion, elevation = flexion_elevation(
-        ric[:, :, _L_SHOULDER], ric[:, :, _L_ELBOW], ric[:, :, _L_WRIST]
+    shoulder, elbow, wrist = (
+        ric[:, :, _L_SHOULDER],
+        ric[:, :, _L_ELBOW],
+        ric[:, :, _L_WRIST],
     )
-    return {"elbow_flexion": flexion, "shoulder_elevation": elevation}
+    flexion, elevation = flexion_elevation(shoulder, elbow, wrist)
+    return {
+        "elbow_flexion": flexion,
+        "shoulder_elevation": elevation,
+        "shoulder_abduction_adduction": shoulder_abduction(shoulder, elbow),
+    }
 
 
 def bound_violation(bound: Bound, features: dict[str, torch.Tensor]) -> torch.Tensor:

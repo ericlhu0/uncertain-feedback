@@ -22,7 +22,7 @@ from uncertain_feedback.simulated_users.attribution import (
     has_feedback_content,
 )
 
-FEATURE_DEAD_BAND = 0.15
+FEATURE_DEAD_BAND = 0.05
 OFFSET_DEAD_BAND = 0.05
 _MAGNITUDE_SMALL = 0.12
 _MAGNITUDE_LARGE = 0.25

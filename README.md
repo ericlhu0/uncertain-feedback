@@ -2063,6 +2063,39 @@ uv run python src/uncertain_feedback/planners/run.py \
   --live
 ```
 
+### Steering the sampler from the config (`feedback.uq.steering.bounds`)
+
+By default the steering cost is compiled from the running persona's hidden
+bounds, so `user: unrestricted` samples unsteered. Stating bounds under
+`steering:` instead steers toward a cost written in the config, leaving the
+persona alone — the sampler is pulled one way while the person being moved is
+still whoever `user:` says:
+
+```yaml
+feedback:
+  uq:
+    steering:
+      mode: "cg"
+      guidance_weight: 1.0e5
+      bounds:
+        - feature: shoulder_elevation
+          bound_type: lower_bound
+          low: 1.05
+```
+
+Each entry is a `HiddenBound` (`feature`, `bound_type`, `low`/`high`), compiled
+by the same `torch_features.build_user_bound_cost` path as a persona's, so the
+same feature support applies (`shoulder_elevation`, `elbow_flexion`; joint boxes
+are structurally unscorable from positions and are dropped). The compiled cost
+is the squared hinge `clip(low - feature, 0, None) ** 2` averaged over the
+unpinned frames — for a single bound that is a summed hinge up to the frame
+count, which `cg` absorbs into `guidance_weight`.
+
+`evaluation/conf/mpc_demo_low2_across_steered.yaml` is a worked example: the
+same scenario as `mpc_demo_low2_across.yaml` with a ~60 deg shoulder-elevation
+floor. It lifts the mean end elevation across the six candidates from 42.0 to
+56.7 deg and cuts the mean steering cost from 11.5 to 4.6.
+
 ### Cartesian MPC Without MDM or UQ
 A config whose only module section is `cartesian:` is direct Cartesian
 wrist-goal MPC. This path does not generate motion or run clustering. If you
@@ -2160,10 +2193,10 @@ trajectory all see the anchored version.
 `llm_cost.backend` selects how the cost is generated:
 
 Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
-`gpt-5.6-luna` with `xhigh` reasoning effort. Reasoning effort follows the model
-(`gpt-5.6-luna` → `xhigh`, `gpt-5.6-sol` → `low`); any other model is sent without
-one. The demo-runner config (`mdm_llm_transfer.yaml`)
-pins `gpt-5.6-sol`.
+`gpt-5.6-luna` with `high` reasoning effort. Reasoning effort follows the model
+(`gpt-5.6-luna` → `high`, `gpt-5.6-sol` → `low`); any other model is sent without
+one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-5.6-luna`;
+`gpt-5.6-sol` is not used for now.
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
   images + compact summary, including rollout-labeled chosen-vs-marked-wrong terminal
@@ -2469,7 +2502,8 @@ Stages (each stage's controls unlock once the previous one ran):
    mode, other steering knobs stay YAML-only); scoring events and any
    prompt/cost conflict warning appear in the log panel. Each cluster is
    represented by its medoid — an actual MDM sample — rather than the
-   elementwise mean. Every
+   elementwise mean, exactly as `UqSelector` does for the planner and
+   evaluation paths. Every
    cluster option is automatically integrated into the full corrected
    trajectory — executed history → scaled correction → comfort-only goal
    continuation — so cards show what actually happens if that option is taken:

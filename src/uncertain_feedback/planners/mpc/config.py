@@ -26,6 +26,7 @@ from uncertain_feedback.planners.mpc.constraints import CONSTRAINT_BUILDERS
 from uncertain_feedback.planners.mpc.costs import available_cost_names
 from uncertain_feedback.planners.mpc.feedback import FeedbackConfig
 from uncertain_feedback.planners.mpc.goal_spaces import CartesianConfig
+from uncertain_feedback.simulated_users.base import HiddenBound
 from uncertain_feedback.uncertainty.uq_selector import UqConfig
 
 # Keys of the retired name-based planner schema; present only to fail loudly
@@ -80,8 +81,8 @@ class SimulatedUserConfig:
     magnitudes: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5)
     nominal_steps: int = 20
     time_of_day: float | None = None
-    # Candidate-selection model: intent_aligned | progress | random.
-    chooser: str = "intent_aligned"
+    # Candidate-selection model: oracle_progress | intent_aligned | progress | random.
+    chooser: str = "oracle_progress"
 
 
 @dataclass(frozen=True)
@@ -262,8 +263,21 @@ def _str_list(value: Any, name: str) -> list[str]:
     return out
 
 
+def _parse_steering_bound(data: dict[str, Any]) -> HiddenBound:
+    """Parse one ``feedback.uq.steering.bounds`` entry into a hidden bound."""
+    return HiddenBound(
+        feature=str(data["feature"]),
+        bound_type=str(data["bound_type"]),
+        low=None if data.get("low") is None else _float(data["low"], "steering.low"),
+        high=(
+            None if data.get("high") is None else _float(data["high"], "steering.high")
+        ),
+    )
+
+
 def _parse_steering(data: dict[str, Any]) -> SteeringConfig:
     steps = data.get("resample_steps")
+    bounds = data.get("bounds") or ()
     return SteeringConfig(
         mode=str(data.get("mode", SteeringConfig.mode)),
         resample_steps=(
@@ -283,6 +297,7 @@ def _parse_steering(data: dict[str, Any]) -> SteeringConfig:
         guidance_weight=_float(
             data.get("guidance_weight", 1e5), "feedback.uq.steering.guidance_weight"
         ),
+        bounds=tuple(_parse_steering_bound(bound) for bound in bounds),
     )
 
 
@@ -487,9 +502,10 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     if time_of_day is not None and not 0.0 <= time_of_day < 24.0:
         raise ValueError("simulated_user.time_of_day must be in [0, 24).")
     chooser_value = str(simulated_user_data.get("chooser", default_sim_user.chooser))
-    if chooser_value not in ("intent_aligned", "progress", "random"):
+    if chooser_value not in ("oracle_progress", "intent_aligned", "progress", "random"):
         raise ValueError(
-            "simulated_user.chooser must be intent_aligned, progress, or random."
+            "simulated_user.chooser must be oracle_progress, intent_aligned, "
+            "progress, or random."
         )
     simulated_user = SimulatedUserConfig(
         verbalizer=str(

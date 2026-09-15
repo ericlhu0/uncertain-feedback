@@ -226,6 +226,7 @@ def test_torch_position_features_match_arm_feature_series() -> None:
 
     from uncertain_feedback.motion_generators.mdm.torch_features import (
         flexion_elevation,
+        shoulder_abduction,
     )
 
     fk = SmplLeftArmFK()
@@ -237,14 +238,19 @@ def test_torch_position_features_match_arm_feature_series() -> None:
         q_to_arm_aa(q, fk.elbow_hinge_axis), context.spine3_pos, context.spine3_aa
     )  # (N, 5, 3)
 
-    flexion, elevation = flexion_elevation(
-        *(torch.tensor(positions[:, idx], dtype=torch.float64) for idx in (2, 3, 4))
+    shoulder, elbow, wrist = (
+        torch.tensor(positions[:, idx], dtype=torch.float64) for idx in (2, 3, 4)
     )
+    flexion, elevation = flexion_elevation(shoulder, elbow, wrist)
+    abduction = shoulder_abduction(shoulder, elbow)
 
     expected = arm_feature_series(q, context)
     np.testing.assert_allclose(flexion.numpy(), expected["elbow_flexion"], atol=1e-6)
     np.testing.assert_allclose(
         elevation.numpy(), expected["shoulder_elevation"], atol=1e-6
+    )
+    np.testing.assert_allclose(
+        abduction.numpy(), expected["shoulder_abduction_adduction"], atol=1e-6
     )
 
 

@@ -15,7 +15,12 @@ MDM_MODEL_WEIGHTS_PATH = (
     # DATA_DIR / "mdm_save" / "correction_demo1_lr1e5_5k" / "model000752000.pt" 
     
     # fine tuned on 100 auto-generated trajectories and corrections
-    DATA_DIR / "mdm_save" / "correction_auto100_lr1e5_5k" / "model000755051.pt"
+    # DATA_DIR / "mdm_save" / "correction_auto100_lr1e5_5k" / "model000755051.pt"
+
+    # 1100 clips (600 default-paced + 500 elbow-rich), templated captions plus LLM
+    # paraphrases; best alignment / violation / acceptable rate on the 80-case
+    # grounding eval of 2026-09-09 (README, "Results (2026-09-09 ...)")
+    DATA_DIR / "mdm_save" / "correction_auto1100_paraphrased_lr1e5_26k" / "model000776650.pt"
 )
 
 # Default whole-body HML263 start pose, used by every MPC config that does not

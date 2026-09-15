@@ -18,6 +18,11 @@ from uncertain_feedback.cost_generation.prompts import (
 )
 
 ALL_IMAGES = {key: Path(f"{key}.png") for key in IMAGE_PLACEHOLDERS}
+CHOSEN_IMAGES = [
+    "current_cluster_traj_img",
+    "other_clusters_traj_img",
+    "reference_traj_img",
+]
 
 
 def test_interpret_prompt_fills_placeholders_without_code_contract() -> None:
@@ -57,10 +62,31 @@ def test_interpret_prompt_fills_placeholders_without_code_contract() -> None:
         in text
     )
     assert "Large chosen-versus-marked-wrong separation alone is not enough" in text
-    assert [p.name for p in attached] == [f"{key}.png" for key in IMAGE_PLACEHOLDERS]
-    for key, placeholder in IMAGE_PLACEHOLDERS.items():
-        assert placeholder in text
+    assert [p.name for p in attached] == [f"{key}.png" for key in CHOSEN_IMAGES]
+    for key in CHOSEN_IMAGES:
+        assert IMAGE_PLACEHOLDERS[key] in text
+    assert IMAGE_PLACEHOLDERS["interrupted_plan_img"] not in text
     assert "candidate the person explicitly marked as wrong" in text
+
+
+def test_language_only_interpret_and_ground_frame_plan_as_interrupted() -> None:
+    text, attached = build_interpret_prompt(
+        "keep my arm closer to my body",
+        {"reference": {"joint_features": {}}, "current": {}, "recent": {}},
+        ALL_IMAGES,
+        language_only=True,
+    )
+    assert [p.name for p in attached] == ["interrupted_plan_img.png"]
+    assert IMAGE_PLACEHOLDERS["interrupted_plan_img"] in text
+    for key in CHOSEN_IMAGES:
+        assert IMAGE_PLACEHOLDERS[key] not in text
+        assert "{" + key + "}" not in text
+    assert "the path the person CHOSE" not in text
+    assert "correcting AWAY from" in text
+    ground = build_ground_prompt("{}", {}, language_only=True)
+    assert "INTERRUPTED PLAN" in ground
+    assert "strictly higher than the \"recent\" history" in ground
+    assert "score the chosen correction strictly lower" not in ground
 
 
 def test_unavailable_image_dropped_without_attachment() -> None:

@@ -33,7 +33,7 @@ def _intent(
 
 
 def test_all_verbalizers_return_none_below_dead_band() -> None:
-    quiet = _intent({"shoulder_elevation": 0.1}, wrist=(0.0, 0.3, 0.0))
+    quiet = _intent({"shoulder_elevation": 0.04}, wrist=(0.0, 0.3, 0.0))
     rng = np.random.default_rng(0)
     assert verbalize_vague(quiet) is None
     assert verbalize_joint_resolved(quiet) is None

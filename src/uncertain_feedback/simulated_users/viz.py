@@ -152,6 +152,7 @@ def render_hidden_bounds(
     fig.suptitle(f"hidden bounds: {user.name}")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150)
+    # Long feature names push the panel title past the figure edge.
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path

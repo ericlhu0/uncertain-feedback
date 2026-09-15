@@ -14,6 +14,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+from uncertain_feedback.planners.mpc.arm_features import arm_aa_from_state
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
@@ -21,7 +22,7 @@ from uncertain_feedback.planners.mpc.costs import (
     MpcCostContext,
 )
 from uncertain_feedback.planners.mpc.goal_spaces import CartesianConfig
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.mpc.kinematics import WRIST_CHAIN_IDX, q_to_arm_aa
 from uncertain_feedback.planners.mpc.mpc import ArmMPC
 
 
@@ -313,3 +314,18 @@ def goal_reach(
         "distance": distance,
         "threshold": float(cfg.cartesian.threshold),
     }
+
+
+def wrist_goal_distances(
+    context: MpcCostContext,
+    trajectory: np.ndarray,
+    goal: np.ndarray,
+) -> np.ndarray:
+    """Per-frame spine3-relative wrist distance to ``goal``, for q or axis-angle states."""
+    arm_aa = arm_aa_from_state(np.asarray(trajectory, dtype=np.float64), context)
+    positions = context.fk.fk_batch(arm_aa, context.spine3_pos, context.spine3_aa)
+    wrist_rel = positions[:, WRIST_CHAIN_IDX, :] - context.spine3_pos
+    return np.asarray(
+        np.linalg.norm(wrist_rel - np.asarray(goal, dtype=np.float64), axis=-1),
+        dtype=np.float64,
+    )

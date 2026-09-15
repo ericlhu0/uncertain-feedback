@@ -1,0 +1,37 @@
+You are the caregiver of a person with limited arm mobility. The robot was already moving their arm toward a useful goal when they interrupted it with one spoken instruction. No correction motion was shown to them and none was chosen: the ONLY evidence of what they want is the spoken instruction, read against the motion the robot was about to continue (the interrupted plan) and the poses they had already accepted without complaint (the recent history). The interrupted plan is what they are correcting AWAY from; it is not something they chose. This is the FIRST of three stages: your only job here is to say, in plain human language, what the person actually wanted — how the interrupted plan was about to move them wrongly and which way they want it changed. You are NOT writing code and NOT choosing any numbers in this stage.
+
+Instruction:
+{instruction}
+
+{interrupted_plan_img}
+In the attached image the blue arm is the INTERRUPTED PLAN (sampled poses along the motion the robot was about to continue, no start/end markers), and the orange arm is the pose the person was in when they spoke. The GOLD STAR is the original left-wrist task-space goal.
+
+In the compact summary, "reference" is the interrupted plan, "current" is the pose the person spoke from, and "recent" is the executed history leading to it — poses the person accepted without complaint.
+
+How to think:
+- The spoken instruction defines the correction. Read which way the interrupted plan moves each joint from the current pose (the "reference" ranges against the "current" values) and find the joint dimension whose motion in the plan is what the instruction asks to change. The direction the person wants is the OPPOSITE of the plan's excursion along that dimension, or a limit on it — never the plan's own direction.
+- Write ONE plain sentence a caregiver would say out loud about what the person wanted — e.g. "they did not want the arm swinging out to the side any further" or "they wanted the elbow kept more bent than the robot was about to straighten it."
+- Name the single dimension the instruction is about, and name it as a JOINT being held differently — this is the PRIMARY local correction the next stage grounds first. Use exactly one of: elbow bend (flexion), shoulder raised forward/back (flexion/extension), arm out to the side vs. across the body (abduction/adduction), overall arm height regardless of direction (elevation), or arm rotation. The primary correction uses exactly one such dimension; only an explicit relationship spoken in the instruction may additionally name a bounded dimension and a conditioning dimension (see "relationship" below).
+- Note whether the instruction suggests the person is uncomfortable reaching the original goal (gold star) the way the plan was going, or whether the goal is still fine and they just want the motion shaped along the way.
+- Do not treat every detail of the interrupted plan as evidence: only the excursion the instruction names matters now. Record other persistent structure as associated evidence without turning it into a preference from one utterance.
+- Treat your interpretation as the simplest LOCAL explanation of this one instruction at the current pose — provisional evidence for later rounds, not automatically a global mobility restriction.
+
+Return ONLY a JSON object, no prose, with these keys:
+- "preference": the one plain caregiver sentence (string).
+- "distinguishing_dimension": the JOINT the instruction is about, as one of exactly these five: "elbow flexion", "shoulder flexion/extension", "shoulder abduction/adduction", "shoulder elevation", "shoulder internal/external rotation".
+- "direction": which way along that joint the person wants the arm held relative to the interrupted plan (string), e.g. "more bent", "raised more forward", "less out to the side" — the direction away from the plan's excursion, never the plan's own direction.
+- "secondary": an optional second preference only if the instruction clearly states one, else "" (string).
+- "goal_conflict": true only if the instruction implies the person is uncomfortable reaching the original goal that way; false if the goal is still reachable and they only want the motion shaped (boolean).
+- "relationship": an object or null. Non-null ONLY when the SPOKEN INSTRUCTION explicitly relates two joints (e.g. "bend my elbow more as you raise my arm", "I can't bend my elbow that much while my arm is raised"). When non-null: {"bounded_dimension": the joint whose acceptable range is constrained, "conditioning_dimension": the joint its range depends on, "relationship_direction": in words, how the bound on the bounded dimension shifts as the conditioning dimension changes, "evidence": a string that MUST quote the instruction, prefixed "instruction: '...'"}. Correlated joint changes seen only in the interrupted plan do NOT license a relationship — leave it null and record them under "associated_changes".
+- "associated_changes": a list (possibly empty). Each item is a persistent, meaningful change in the interrupted plan that is neither the primary local correction nor explicitly stated: {"dimension", "direction", "temporal_scope", "evidence"}. Include only persistent structure — never incidental wiggles or timing.
+- "unresolved_explanations": a list (possibly empty) of short strings naming competing explanations this one instruction cannot decide between (e.g. "constant elbow-flexion preference", "pose-dependent elbow-flexion/shoulder-elevation preference"). Carried forward for multi-round synthesis, not acted on now.
+- "evidence": an object with keys "preference", "distinguishing_dimension", and "direction"; each value is ONE short string citing the strongest basis for that conclusion, prefixed by its kind: "images: ..." (what the attached image showed), "summary: ..." (which trajectory's feature/statistic and its value), or "instruction: '...'" (a short quote).
+
+Rules:
+- "direction" must point away from the interrupted plan's excursion along the named joint, consistent with the instruction.
+- "relationship" must be non-null only when the spoken instruction explicitly relates two features; its evidence must cite the instruction, not merely trajectory correlation.
+- "associated_changes" should include only persistent, meaningful changes — not incidental wiggles. Empty "associated_changes" and "unresolved_explanations" lists are valid.
+- If observed structure cannot be expressed by the current cost API, preserve it as evidence rather than inventing an unsupported cost.
+
+Compact summary:
+{summaries}

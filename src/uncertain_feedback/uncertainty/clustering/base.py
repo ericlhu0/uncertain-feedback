@@ -21,6 +21,12 @@ import numpy as np
 from sklearn.cluster import AgglomerativeClustering, KMeans
 
 
+def medoid_index(features: np.ndarray) -> int:
+    """Index of the row minimizing summed distance to all rows of ``features``."""
+    dists = np.linalg.norm(features[:, None] - features[None, :], axis=-1)
+    return int(dists.sum(axis=1).argmin())
+
+
 def agglomerative_labels(features: np.ndarray, n_clusters: int) -> np.ndarray:
     """Partition a feature matrix with average-linkage agglomerative clustering.
 
@@ -58,7 +64,7 @@ class TrajectoryClusterer(ABC):
     def __init__(self, n_clusters: int, random_state: int = 0) -> None:
         self._n_clusters = n_clusters
         self._random_state = random_state
-        self._position_features: np.ndarray | None = None
+        self._features: np.ndarray | None = None
 
     @property
     def n_clusters(self) -> int:
@@ -145,11 +151,12 @@ class TrajectoryClusterer(ABC):
         trajectories = np.asarray(trajectories, dtype=np.float64)
         self._validate_num_samples(trajectories.shape[0])
         feature_t0 = time.perf_counter()
-        features = self._to_features(trajectories)
+        features = self._to_features(trajectories).astype(np.float64)
         print(
             "[timing] clustering feature extraction: "
             f"{time.perf_counter() - feature_t0:.3f}s"
         )
+        self._features = features
         return self._fit_predict(features)
 
     def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
@@ -173,29 +180,32 @@ class TrajectoryClusterer(ABC):
             "[timing] position clustering feature extraction: "
             f"{time.perf_counter() - feature_t0:.3f}s"
         )
-        self._position_features = features
+        self._features = features
         return self._fit_predict(features)
+
+    @property
+    def features(self) -> np.ndarray:
+        """``(num_samples, n_features)`` matrix from the most recent fit."""
+        if self._features is None:
+            raise ValueError("Call cluster or cluster_positions first.")
+        return self._features
 
     def medoid_indices(self, labels: np.ndarray) -> dict[int, int]:
         """Return per-cluster medoid sample indices in the clusterer's feature space.
 
-        Uses the features cached by the most recent :meth:`cluster_positions`
-        call, so labels must come from that same call.
+        Uses the features cached by the most recent :meth:`cluster` or
+        :meth:`cluster_positions` call, so labels must come from that same call.
 
         Args:
-            labels: ``(num_samples,)`` integer labels from
-                :meth:`cluster_positions`.
+            labels: ``(num_samples,)`` integer labels from the last fit.
 
         Returns:
             Mapping from cluster label to the index (into the clustered batch)
             of the member minimizing summed distance to its cluster.
         """
-        if self._position_features is None:
-            raise ValueError("Call cluster_positions before medoid_indices.")
+        features = self.features
         medoids: dict[int, int] = {}
         for label in np.unique(labels):
             idx = np.flatnonzero(labels == label)
-            members = self._position_features[idx]
-            dists = np.linalg.norm(members[:, None] - members[None, :], axis=-1)
-            medoids[int(label)] = int(idx[dists.sum(axis=1).argmin()])
+            medoids[int(label)] = int(idx[medoid_index(features[idx])])
         return medoids

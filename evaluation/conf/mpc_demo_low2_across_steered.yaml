@@ -1,0 +1,86 @@
+# Steered variant of mpc_demo_low2_across.yaml: identical scenario, but the
+# diffusion sampler is pulled toward a shoulder-elevation floor while it draws
+# the 500 candidates.
+#
+# The steering cost is
+#
+#     violation = clip(shoulder_elevation_min - shoulder_elevation, 0, None)
+#     cost      = sum(violation ** 2, over frames)
+#
+# stated here as `feedback.uq.steering.bounds`. `torch_features.bound_violation`
+# is that same hinge, and `build_user_bound_cost` squares and averages it over
+# frames — mean rather than sum, which for a single bound differs only by the
+# frame count, and classifier guidance absorbs a constant into
+# `guidance_weight`. So the compiled cost is the one written above, in the
+# differentiable form `cg` needs.
+#
+# `user:` stays `unrestricted` on purpose: the bound is a steering target for
+# the sampler, not a restriction on the person, so nothing else about the run
+# changes (no persona cluster chooser, no discomfort re-triggers).
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.01
+
+# demo_runner initial pose "low2"
+arm:
+  - [-0.07725532398944447, -0.3987584748029073, -0.2849146783698185]
+  - [0.37, -0.61, -0.64]
+  - [0.011781478320298147, -0.2944062093401433, 0.24834942337626373]
+
+user: unrestricted
+
+feedback:
+  max_playback_delta: 0.05
+  trajectory_fraction: 1
+  frames: 50
+  text_time: 8
+  uq:
+    # Demo-runner clustering defaults (planners/mpc/configs/mdm_llm_transfer.yaml
+    # plus config.py's `clusterer` default), so the candidates here are the same
+    # ones the web tool would offer.
+    diffusion_samples: 500
+    n_clusters: 6
+    clusterer: agglo_end_pose
+    user_cluster: true
+    # `scale` is a magnitude knob applied to the chosen mean only, not a
+    # clustering setting: the demo runner's 0.5 would draw the picked arm at half
+    # the magnitude of the very candidates it is overlaid on.
+    scale: 1.0
+    steering:
+      mode: "cg"
+      guide_from: 10
+      guidance_weight: 1.0e5
+      # ~60 deg. Above every unsteered candidate's end elevation (24.7-59.4 deg),
+      # so any shift toward the floor is the steering and not the prompt.
+      bounds:
+        - feature: shoulder_elevation
+          bound_type: lower_bound
+          low: 1.05
+    # Index, not a prompt-matched pick. The 6 agglo_end_pose candidates for
+    # "raise my arm a bit higher" from this start are a magnitude ladder — wrist
+    # rise +27.0 / +11.6 / +43.4 / +31.9 / +4.5 / +18.7 cm for clusters 0-5.
+    # Cluster 3 (+31.9 cm) is the demo pick: a full, clearly readable lift. On
+    # "a bit" alone cluster 1 (+11.6 cm) is the closer literal match, and 4
+    # (+4.5 cm) barely moves at all — a run that picks it looks like the
+    # correction did nothing.
+    auto_cluster: 3
+
+corrections:
+  trigger_threshold: 0.02
+
+# demo_runner goal "across"
+cartesian:
+  goals:
+    - [-0.18, 0.12, 0.22]
+  threshold: 0.05
+
+preference_learning: false
+preference_alpha: 0
+
+simulated_user:
+  time_of_day: 9.0
+
+llm_cost:
+  enabled: false
+  artifact_dir: outputs/low2_across_steered

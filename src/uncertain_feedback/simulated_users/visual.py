@@ -33,32 +33,33 @@ PROMPT = (
 )
 
 
+def render_pose_image(
+    path: Path,
+    pose_aa: np.ndarray,
+    current_aa: np.ndarray,
+    context: MpcCostContext,
+) -> None:
+    """Render one arm pose (blue) against the current pose (orange) for :data:`PROMPT`."""
+    # Duplicate the single frame so the pose lands on the dark, legible end
+    # of the overlay's light-to-dark frame gradient.
+    ArmVisualizer(context.fk).render_cluster_contrast_overlay(
+        path,
+        mdm_trajs={0: np.stack([pose_aa, pose_aa])},
+        highlight_label=0,
+        current_q=current_aa,
+        spine3_pos=context.spine3_pos,
+        spine3_aa=context.spine3_aa,
+        include_others=False,
+        include_reference=False,
+    )
+
+
 class VisualVerbalizer:
     """VLM-backed verbalizer with a per-(episode, round) disk cache."""
 
     def __init__(self, model: OpenAIModel, cache_dir: Path) -> None:
         self._model = model
         self._cache_dir = cache_dir
-
-    def _render_pose(
-        self,
-        path: Path,
-        pose_aa: np.ndarray,
-        current_aa: np.ndarray,
-        context: MpcCostContext,
-    ) -> None:
-        # Duplicate the single frame so the pose lands on the dark, legible end
-        # of the overlay's light-to-dark frame gradient.
-        ArmVisualizer(context.fk).render_cluster_contrast_overlay(
-            path,
-            mdm_trajs={0: np.stack([pose_aa, pose_aa])},
-            highlight_label=0,
-            current_q=current_aa,
-            spine3_pos=context.spine3_pos,
-            spine3_aa=context.spine3_aa,
-            include_others=False,
-            include_reference=False,
-        )
 
     def verbalize(
         self,
@@ -83,8 +84,8 @@ class VisualVerbalizer:
         target_aa = arm_aa_from_state(oracle_path[target_index], context)
         now_path = self._cache_dir / f"{episode_key}_round{round_index}_now.png"
         desired_path = self._cache_dir / f"{episode_key}_round{round_index}_desired.png"
-        self._render_pose(now_path, trigger_aa, trigger_aa, context)
-        self._render_pose(desired_path, target_aa, trigger_aa, context)
+        render_pose_image(now_path, trigger_aa, trigger_aa, context)
+        render_pose_image(desired_path, target_aa, trigger_aa, context)
 
         text = self._model.get_full_output(
             PROMPT, image_input=[str(now_path), str(desired_path)]

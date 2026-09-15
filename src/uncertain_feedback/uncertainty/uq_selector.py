@@ -4,7 +4,12 @@ Instead of blindly following a single diffusion sample, :class:`UqSelector`
 draws multiple samples, clusters them with a
 :class:`~uncertain_feedback.uncertainty.clustering.base.TrajectoryClusterer`,
 presents the clusters (interactively or through a headless selector), and
-returns the mean trajectory of the chosen cluster.
+returns the medoid sample of the chosen cluster.
+
+Every cluster is represented by its medoid — the member sample closest to the
+rest of its cluster in the clusterer's feature space — rather than the
+elementwise mean, so each candidate is a motion the diffusion model actually
+produced. The Demo Runner does the same.
 """
 
 from __future__ import annotations
@@ -22,7 +27,10 @@ from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster_positions,
     scale_trajectory,
 )
-from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
+from uncertain_feedback.uncertainty.clustering.base import (
+    TrajectoryClusterer,
+    medoid_index,
+)
 from uncertain_feedback.uncertainty.clustering.xyz_clusterer import (
     XyzPositionClusterer,
 )
@@ -53,12 +61,15 @@ class UqClusterResult:
 
     chosen_label: int
     labels: np.ndarray
-    cluster_means: dict[int, np.ndarray]
+    cluster_means: dict[int, np.ndarray]  # per-cluster medoid trajectories
     scale: float = 1.0
+    # Every finite drawn sample, in the space it was clustered in: SMPL joint
+    # positions (n, frames, 22, 3) or left-arm axis-angles (n, frames, 3, 3).
+    samples: np.ndarray | None = None
 
     @property
     def chosen_mean(self) -> np.ndarray:
-        """Return the selected cluster mean trajectory."""
+        """Return the selected cluster's medoid trajectory."""
         return self.cluster_means[self.chosen_label]
 
 
@@ -114,7 +125,7 @@ class UqSelector:
         2. Cluster them with the configured :class:`TrajectoryClusterer`.
         3. Show the interactive cluster-picker window (blocks until chosen),
            unless ``cluster_selector`` or ``auto_cluster`` picks headlessly.
-        4. Compute (and scale) the mean trajectory of the selected cluster.
+        4. Take (and scale) the medoid trajectory of the selected cluster.
 
         Args:
             gen:        Motion generator (already loaded or lazy).
@@ -125,7 +136,7 @@ class UqSelector:
             frozen_body: If ``True``, freeze non-left-arm body features during
                         MDM generation.
             cluster_selector: Optional headless chooser called with the
-                        cluster-mean trajectories ``{label: (T, 3, 3)}``;
+                        cluster-medoid trajectories ``{label: (T, 3, 3)}``;
                         returns the chosen label, or a ``(label, magnitude)``
                         tuple whose magnitude overrides ``default_scale``
                         (used by simulated-user experiments). Takes precedence
@@ -169,6 +180,20 @@ class UqSelector:
             f"[timing] MDM generation pipeline: {time.perf_counter() - generation_t0:.3f}s"
         )
 
+        # A rare diffusion sample comes back non-finite and crashes
+        # AgglomerativeClustering.
+        if positions is not None:
+            finite = np.isfinite(positions).all(axis=(1, 2, 3))
+            if not finite.all():
+                print(f"Dropping {int((~finite).sum())} non-finite MDM samples.")
+                positions = positions[finite]
+        else:
+            assert trajectories is not None
+            finite = np.isfinite(trajectories).all(axis=(1, 2, 3))
+            if not finite.all():
+                print(f"Dropping {int((~finite).sum())} non-finite MDM samples.")
+                trajectories = trajectories[finite]
+
         print("Clustering trajectories …")
         cluster_t0 = time.perf_counter()
         if positions is not None:
@@ -179,17 +204,17 @@ class UqSelector:
         print(f"[timing] clustering total: {time.perf_counter() - cluster_t0:.3f}s")
         print(f"labels shape: {labels.shape}")
 
+        root_features = self._clusterer.features
         cluster_means: dict[int, np.ndarray] = {}
-        for label in sorted(int(v) for v in np.unique(labels)):
+        for label, medoid in sorted(self._clusterer.medoid_indices(labels).items()):
             if positions is not None:
-                selected_positions = positions[labels == label].mean(axis=0)
                 cluster_means[label] = gen.smpl_positions_to_left_arm_trajectory(
-                    selected_positions,
+                    positions[medoid],
                     spine3_aa=base_spine_aa,
                 )
             else:
                 assert trajectories is not None
-                cluster_means[label] = trajectories[labels == label].mean(axis=0)
+                cluster_means[label] = trajectories[medoid]
 
         if cluster_selector is not None:
             selection = cluster_selector(cluster_means)
@@ -235,10 +260,12 @@ class UqSelector:
                     recluster=self._clusterer.cluster_positions,  # type: ignore[attr-defined]
                     n_clusters=self._clusterer.n_clusters,
                 )
-                refined_positions = positions[pick_result.sample_indices].mean(axis=0)
+                medoid = pick_result.sample_indices[
+                    medoid_index(root_features[pick_result.sample_indices])
+                ]
                 cluster_means[pick_result.root_label] = (
                     gen.smpl_positions_to_left_arm_trajectory(
-                        refined_positions,
+                        positions[medoid],
                         spine3_aa=base_spine_aa,
                     )
                 )
@@ -261,9 +288,10 @@ class UqSelector:
                     recluster=self._clusterer.cluster,
                     n_clusters=self._clusterer.n_clusters,
                 )
-                cluster_means[pick_result.root_label] = trajectories[
-                    pick_result.sample_indices
-                ].mean(axis=0)
+                medoid = pick_result.sample_indices[
+                    medoid_index(root_features[pick_result.sample_indices])
+                ]
+                cluster_means[pick_result.root_label] = trajectories[medoid]
             chosen_label = pick_result.root_label
             scale = pick_result.scale
             print(
@@ -272,7 +300,7 @@ class UqSelector:
             print(f"User selected cluster {chosen_label} at magnitude {scale:.2f}.")
 
         # Scale the chosen cluster's motion magnitude (direction preserved).
-        # Only the tracked cluster is scaled; other means stay at raw scale.
+        # Only the tracked cluster is scaled; other medoids stay at raw scale.
         if scale != 1.0:
             cluster_means[chosen_label] = scale_trajectory(
                 cluster_means[chosen_label], scale
@@ -282,4 +310,5 @@ class UqSelector:
             labels=np.asarray(labels, dtype=np.intp),
             cluster_means=cluster_means,
             scale=scale,
+            samples=positions if positions is not None else trajectories,
         )

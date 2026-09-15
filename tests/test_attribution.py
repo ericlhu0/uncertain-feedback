@@ -67,10 +67,10 @@ def test_no_content_below_dead_band() -> None:
     intent = CorrectionIntent(
         join_index=0,
         feature_deltas={
-            "elbow_flexion": 0.05,
-            "shoulder_flexion_extension": -0.1,
+            "elbow_flexion": 0.02,
+            "shoulder_flexion_extension": -0.03,
             "shoulder_abduction_adduction": 0.0,
-            "shoulder_elevation": 0.14,
+            "shoulder_elevation": 0.04,
         },
         wrist_offset=np.zeros(3),
         elbow_offset=np.zeros(3),

@@ -26,6 +26,7 @@ from uncertain_feedback.planners.mpc.constraints import CONSTRAINT_BUILDERS
 from uncertain_feedback.planners.mpc.costs import available_cost_names
 from uncertain_feedback.planners.mpc.feedback import FeedbackConfig
 from uncertain_feedback.planners.mpc.goal_spaces import CartesianConfig
+from uncertain_feedback.simulated_users.base import HiddenBound
 from uncertain_feedback.uncertainty.uq_selector import UqConfig
 
 # Keys of the retired name-based planner schema; present only to fail loudly
@@ -262,8 +263,21 @@ def _str_list(value: Any, name: str) -> list[str]:
     return out
 
 
+def _parse_steering_bound(data: dict[str, Any]) -> HiddenBound:
+    """Parse one ``feedback.uq.steering.bounds`` entry into a hidden bound."""
+    return HiddenBound(
+        feature=str(data["feature"]),
+        bound_type=str(data["bound_type"]),
+        low=None if data.get("low") is None else _float(data["low"], "steering.low"),
+        high=(
+            None if data.get("high") is None else _float(data["high"], "steering.high")
+        ),
+    )
+
+
 def _parse_steering(data: dict[str, Any]) -> SteeringConfig:
     steps = data.get("resample_steps")
+    bounds = data.get("bounds") or ()
     return SteeringConfig(
         mode=str(data.get("mode", SteeringConfig.mode)),
         resample_steps=(
@@ -283,6 +297,7 @@ def _parse_steering(data: dict[str, Any]) -> SteeringConfig:
         guidance_weight=_float(
             data.get("guidance_weight", 1e5), "feedback.uq.steering.guidance_weight"
         ),
+        bounds=tuple(_parse_steering_bound(bound) for bound in bounds),
     )
 
 

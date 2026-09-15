@@ -42,6 +42,7 @@ def _features(seed: int = 0, n: int = 4, t: int = 7) -> dict[str, np.ndarray]:
     return {
         "elbow_flexion": rng.uniform(0.0, 2.8, size=(n, t)),
         "shoulder_elevation": rng.uniform(0.0, 3.0, size=(n, t)),
+        "shoulder_abduction_adduction": rng.uniform(-1.2, 1.2, size=(n, t)),
     }
 
 
@@ -141,6 +142,13 @@ def test_resample_indices_ess_matches_the_softmax_weights() -> None:
             intercept=0.4,
             slope=0.3,
         ),
+        CoupledBound(
+            feature="shoulder_elevation",
+            bound_type="upper_bound",
+            cond_feature="shoulder_abduction_adduction",
+            intercept=2.2,
+            slope=-4.4,
+        ),
     ],
 )
 def test_torch_bound_violation_matches_numpy(bound) -> None:
@@ -177,7 +185,7 @@ def test_supported_bounds_skips_unsupported_features_and_joint_boxes() -> None:
         slope=-0.65,
     )
     unsupported_feature = HiddenBound(
-        feature="shoulder_abduction_adduction", bound_type="upper_bound", high=1.0
+        feature="shoulder_flexion_extension", bound_type="upper_bound", high=1.0
     )
     unsupported_condition = HiddenBound(
         feature="elbow_flexion",

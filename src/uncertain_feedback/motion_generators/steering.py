@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from uncertain_feedback.motion_generators.base import MotionGenerator
-    from uncertain_feedback.simulated_users.base import SimulatedUser
+    from uncertain_feedback.simulated_users.base import Bound, SimulatedUser
 
 STEERING_MODES = ("off", "cg", "resample")
 
@@ -47,6 +47,12 @@ class SteeringConfig:
     ``resample_steps`` and ``guide_from`` are indices into the denoising loop
     (0 = the first, noisiest step), not diffusion timesteps. Entries at or past
     the sampler's step count simply never fire.
+
+    ``bounds`` steers toward a cost stated in the config instead of the running
+    persona's hidden bounds. That decouples *what the sampler is pulled toward*
+    from *who is being moved*: an unrestricted persona can be steered, and a
+    restricted one keeps its own bounds for scoring while the sampler follows
+    these. Same compiler either way, so the same feature support applies.
     """
 
     mode: str = "cg"
@@ -54,6 +60,7 @@ class SteeringConfig:
     temperature: float = 0.5
     guide_from: int = 10
     guidance_weight: float = 1e5
+    bounds: tuple["Bound", ...] = ()
 
     def __post_init__(self) -> None:
         if self.mode not in STEERING_MODES:
@@ -100,10 +107,11 @@ def build_steering_spec(
     config: SteeringConfig,
     seed: int,
 ) -> SteeringSpec | None:
-    """Compile ``user``'s bounds into a steering spec, or ``None`` if unsteerable.
+    """Compile the steering cost, or ``None`` if unsteerable.
 
+    The bounds come from ``config.bounds`` when it is set, else from ``user``.
     Skips (with a printed reason) when the backend does not implement steering
-    or the persona has no bounds the torch feature path supports.
+    or neither source has bounds the torch feature path supports.
     """
     if config.mode == "off":
         return None
@@ -113,9 +121,21 @@ def build_steering_spec(
     if not isinstance(gen, MdmMotionGenerator):
         print("steering: unsupported backend, sampling unsteered")
         return None
-    cost = gen.build_user_steering_cost(user)
+    target = user
+    if config.bounds:
+        from dataclasses import replace  # pylint: disable=import-outside-toplevel
+
+        # Joint boxes come off with the bounds: they are structurally unscorable
+        # from positions, so keeping them only prints a "skipping" line.
+        target = replace(
+            user,
+            name=f"{user.name}+steering.bounds",
+            bounds=tuple(config.bounds),
+            joint_limits=(),
+        )
+    cost = gen.build_user_steering_cost(target)
     if cost is None:
-        print(f"steering: no supported bounds for {user.name}, sampling unsteered")
+        print(f"steering: no supported bounds for {target.name}, sampling unsteered")
         return None
     return SteeringSpec(cost=cost, config=config, seed=seed)
 

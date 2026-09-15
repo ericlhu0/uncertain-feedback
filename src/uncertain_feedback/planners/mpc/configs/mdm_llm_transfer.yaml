@@ -10,8 +10,12 @@ feedback:
   uq:
     diffusion_samples: 500
     n_clusters: 6
-    scale: 0.5
+    scale: 1.0
     user_cluster: true
+    # Applies to steered evaluation arms only (the approach sets the mode);
+    # raised from the 1.0e5 default after the 2026-09-11 bound-transfer pilot.
+    steering:
+      guidance_weight: 2.0e5
 
 user: adhesive_capsulitis
 
@@ -77,7 +81,7 @@ preference_alpha: 0
 llm_cost:
   enabled: true
   backend: llm
-  model: gpt-5.6-sol
+  model: gpt-5.6-luna
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true

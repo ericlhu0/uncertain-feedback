@@ -3,13 +3,22 @@
 ## Getting Started
 Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model` and download the [required weights](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#mdm-is-now-40x-faster--04-secsample), [data](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#2-get-data) and [SMPL model](https://github.com/GuyTevet/motion-diffusion-model/blob/main/prepare/download_smpl_files.sh)
 
-On hosts with shared storage, `motion-diffusion-model/save` is a **symlink** to
-`consts.DATA_DIR / "mdm_save"` (`/share/bhattacharjee/eric_data/mdm_save` on
-`bhattacharjee-compute-02`) so every checkpoint — the stock
-`humanml_enc_512_50steps/` and all fine-tunes — lives on NFS rather than in the
-submodule. Every `./save/...` path below resolves through it unchanged; a
-fine-tune writes ~6 GB there, so check `df` before starting one, and never
-delete an existing run directory under it.
+`motion-diffusion-model/save` is a **symlink** to `consts.DATA_DIR / "mdm_save"`
+so every checkpoint — the stock `humanml_enc_512_50steps/` and all fine-tunes —
+lives outside the submodule. Every `./save/...` path below resolves through it
+unchanged; a fine-tune writes ~6 GB there, so check `df` before starting one,
+and never delete an existing run directory under it.
+
+`consts.DATA_DIR` is host-specific and both it and the symlink must be repointed
+when the repo moves to a new machine:
+
+- `bhattacharjee-compute-02` (NFS): `/share/bhattacharjee/eric_data`
+- current workstation: `<repo parent>/data`, i.e. `DATA_DIR = PROJECT_ROOT.parent.parent.parent / "data"`
+
+```
+ln -sfn "$(uv run python -c 'from uncertain_feedback import consts; print(consts.DATA_DIR / "mdm_save")')" \
+  src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save
+```
 
 ### Kinova Gen3 URDF
 
@@ -770,9 +779,20 @@ arc progress, alignment and acceptable rate; lower for violation. Analysis scrip
 | `elbow500_templated_lr1e5_12k_local` (control) | 1499 | 157 | 0.322 ± 0.111 | — | 0.220 ± 0.048 | — | 0.009 | 0.83 | 0.737 |
 | `elbow500_paraphrased_lr1e5_12k` | 1499 | 3250 | 0.455 ± 0.090 | +0.13 ± 0.09 | 0.280 ± 0.051 | +0.06 ± 0.06 | 0.009 | 0.76 | 0.723 |
 | `elbow500_paraphrased_lr1e5_48k` (4x steps) | 1499 | 3310 | 0.434 ± 0.104 | +0.11 ± 0.15 | 0.333 ± 0.052 | +0.11 ± 0.07 | 0.011 | 0.76 | 0.716 |
-| **`auto1100_paraphrased_lr1e5_26k` (DEPLOYED 2026-09-09)** | 3299 | 5257 | 0.511 ± 0.068 | +0.19 ± 0.12 | **0.390 ± 0.047** | **+0.17 ± 0.06** | **0.007** | **0.84** | **0.765** |
+| `auto1100_paraphrased_lr1e5_26k` (deployed 2026-09-09 to 2026-09-16) | 3299 | 5257 | 0.511 ± 0.068 | +0.19 ± 0.12 | 0.390 ± 0.047 | +0.17 ± 0.06 | **0.007** | **0.84** | **0.765** |
+| **`auto1100_vlm_lr1e5_26k/model000765000.pt` (15k steps; DEPLOYED 2026-09-16)** | 3300 | 2729 | 0.609 ± 0.066 | +0.10 ± 0.09 | **0.432 ± 0.041** | +0.04 ± 0.06 | 0.011 | 0.74 | 0.737 |
 | `elbow1000_paraphrased_lr1e5_24000` | 2995 | 4241 | **0.619 ± 0.072** | **+0.30 ± 0.10** | 0.285 ± 0.041 | +0.06 ± 0.06 | 0.012 | 0.78 | 0.702 |
 | `elbow2000_paraphrased_lr1e5_48000` | 5994 | 5374 | 0.589 ± 0.085 | +0.27 ± 0.10 | 0.320 ± 0.048 | +0.10 ± 0.07 | 0.022 | 0.63 | 0.657 |
+
+**Pure-VLM control (2026-09-15).** The same 1100 clips recaptioned by `autolabel.py --n_captions 5`
+(stock prompt, no fact filter, no augmentation; clip-set copies `clips_*_vlm`, dataset
+`correction_auto1100_vlm`, same fine-tune recipe, checkpoints every 5000 steps evaluated on the same
+80 cases in `outputs/vlm_dataset_20260915/grounding_auto1100_vlm*`). Alignment peaks at 15k steps
+(0.43) and then oscillates (0.28 / 0.33 / 0.35 at 20k / 25k / 26.5k); "hand down" utterances and
+upper bounds on abduction, elevation and elbow flexion are where it trails the paraphrased text, and
+acceptable rate never reaches the paraphrased run's 0.84. The 15k checkpoint was deployed 2026-09-16 as the
+first checkpoint to match the paraphrased run on alignment; the paraphrased-vs-VLM caption question is
+one seed each and not settled.
 
 Reading: (1) **paraphrasing the templated text helps on identical motions** — every
 `*_paraphrased` row beats the templated control on arc progress and alignment, and the 1100-set

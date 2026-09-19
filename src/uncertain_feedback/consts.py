@@ -8,19 +8,25 @@ MDM_ROOT = PROJECT_ROOT / "motion_generators" / "mdm"
 # Host-shared storage for artifacts too big for git or home quota (MDM
 # checkpoints live under DATA_DIR / "mdm_save").  Must exist on every host that
 # runs the pipeline.
-DATA_DIR = Path("/share/bhattacharjee/eric_data")
+# DATA_DIR = Path("/share/bhattacharjee/eric_data")
+DATA_DIR = PROJECT_ROOT.parent.parent.parent / "data"
 
 MDM_MODEL_WEIGHTS_PATH = (
     # fine tuned on only corrections off one trajectory and "raise my arm up a bit"
-    # DATA_DIR / "mdm_save" / "correction_demo1_lr1e5_5k" / "model000752000.pt" 
-    
+    # DATA_DIR / "mdm_save" / "correction_demo1_lr1e5_5k" / "model000752000.pt"
     # fine tuned on 100 auto-generated trajectories and corrections
     # DATA_DIR / "mdm_save" / "correction_auto100_lr1e5_5k" / "model000755051.pt"
-
     # 1100 clips (600 default-paced + 500 elbow-rich), templated captions plus LLM
     # paraphrases; best alignment / violation / acceptable rate on the 80-case
     # grounding eval of 2026-09-09 (README, "Results (2026-09-09 ...)")
-    DATA_DIR / "mdm_save" / "correction_auto1100_paraphrased_lr1e5_26k" / "model000776650.pt"
+    # DATA_DIR / "mdm_save" / "correction_auto1100_paraphrased_lr1e5_26k" / "model000776650.pt"
+    # the same 1100 clips recaptioned by the VLM with no fact filter (pure-VLM recipe),
+    # 15k-step checkpoint: best alignment of its run on the 80-case grounding eval of
+    # 2026-09-15 (README, "Results (2026-09-09 ...)" table)
+    DATA_DIR
+    / "mdm_save"
+    / "correction_auto1100_vlm_lr1e5_26k"
+    / "model000765000.pt"
 )
 
 # Default whole-body HML263 start pose, used by every MPC config that does not

@@ -81,6 +81,7 @@ from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 # pylint: enable=wrong-import-position
 
 if TYPE_CHECKING:
+    from uncertain_feedback.planners.mpc.goal_spaces.regions import GoalRegion
     from uncertain_feedback.planners.mpc.mpc import ArmMPC
 
 # Internal style constants
@@ -556,25 +557,21 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
 
-    def update_cartesian_target(self, world_pos: np.ndarray) -> None:
-        """Draw (or move) the blue star marking the Cartesian wrist goal.
+    def update_goal_region(
+        self, marker_world: np.ndarray | None, outlines_world: list[np.ndarray]
+    ) -> None:
+        """Draw (or move) the goal marker star and the region outline.
 
         Args:
-            world_pos: ``(3,)`` world-space position of the target wrist point.
+            marker_world: ``(3,)`` world-space representative goal point, or
+                ``None`` to hide the star.
+            outlines_world: world-space ``(K, 3)`` polylines tracing the
+                region's boundary (empty for a point goal).
         """
-        assert (
-            self._live is not None
-        ), "update_cartesian_target() called before open_live()"
-        for a3 in self._live.artists3d:
-            a3["cartesian_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
-                [world_pos[0]],
-                [world_pos[1]],
-                [world_pos[2]],
-            )
-        for a2 in self._live.artists2d:
-            a2["cartesian_goal_scat"].set_offsets(
-                [[world_pos[a2["hi"]], world_pos[a2["vi"]]]]
-            )
+        assert self._live is not None, "update_goal_region() called before open_live()"
+        _set_goal_region_artists(
+            self._live.artists3d, self._live.artists2d, marker_world, outlines_world
+        )
         self._live.fig.canvas.draw_idle()
         self._live.fig.canvas.flush_events()
 
@@ -607,7 +604,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
         spine3_pos: np.ndarray | None = None,
         spine3_aa: np.ndarray | None = None,
         body_pos: np.ndarray | None = None,
-        cartesian_goal: np.ndarray | None = None,
+        cartesian_goal: np.ndarray | GoalRegion | None = None,
         frame_colors: list[str] | None = None,
         mdm_goal_q: np.ndarray | None = None,
         fps: int = 20,
@@ -621,7 +618,8 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             spine3_aa:       ``(3,)`` spine3 world axis-angle.
             body_pos:        ``(22, 3)`` static body backdrop positions.
             cartesian_goal:  ``(3,)`` Cartesian wrist goal offset relative to
-                             spine3 (same convention as the MPC planner).
+                             spine3 (same convention as the MPC planner), or a
+                             ``GoalRegion`` drawn as marker plus outline.
             frame_colors:    Per-frame arm color strings (len == len(rollout)).
                              Defaults to ``TARGET_COLOR`` for all frames.
             mdm_goal_q:      ``(3, 3)`` arm axis-angles for the MDM trajectory
@@ -665,24 +663,23 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             )
 
             if cartesian_goal is not None:
+                from uncertain_feedback.planners.mpc.goal_spaces.regions import (  # pylint: disable=import-outside-toplevel
+                    as_goal_region,
+                )
+
                 s3 = (
                     np.asarray(spine3_pos, dtype=np.float64)
                     if spine3_pos is not None
                     else self.fk.tpose_spine3_pos
                 )
-                world_goal = s3 + np.asarray(cartesian_goal, dtype=np.float64)
-                for a3 in artists_3d:
-                    a3[
-                        "cartesian_goal_scat"
-                    ]._offsets3d = (  # pylint: disable=protected-access
-                        [world_goal[0]],
-                        [world_goal[1]],
-                        [world_goal[2]],
-                    )
-                for a2 in artists_2d:
-                    a2["cartesian_goal_scat"].set_offsets(
-                        [[world_goal[a2["hi"]], world_goal[a2["vi"]]]]
-                    )
+                region = as_goal_region(cartesian_goal)
+                marker = region.marker()
+                _set_goal_region_artists(
+                    artists_3d,
+                    artists_2d,
+                    s3 + marker if marker is not None else None,
+                    [s3 + line for line in region.outline()],
+                )
 
             if mdm_goal_q is not None:
                 goal_full = self._full_body_positions(mdm_goal_q, spine3_pos, spine3_aa)
@@ -2184,6 +2181,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "preview_lines": preview_lines,
                     "preview_scat": preview_scat,
                     "cartesian_goal_scat": cartesian_goal_scat,
+                    "goal_outline_lines": [],
                     "elbow_planes": elbow_planes,
                 }
             )
@@ -2308,6 +2306,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
                     "preview_lines": preview_lines,
                     "preview_scat": preview_scat,
                     "cartesian_goal_scat": cartesian_goal_scat,
+                    "goal_outline_lines": [],
                     "elbow_height_lines": elbow_height_lines,
                     "is_main": col == 0,
                 }
@@ -2459,7 +2458,7 @@ def _update_artists(  # pylint: disable=too-many-locals
             a3["trace"].set_color(trace_color)
         if a3["is_main"]:
             a3["ax"].set_title(
-                f"Perspective   step {step_str}   dist={dist:.4f} rad",
+                f"Perspective   step {step_str}   dist={dist:.4f}",
                 fontsize=8,
             )
 
@@ -2474,9 +2473,7 @@ def _update_artists(  # pylint: disable=too-many-locals
             a2["trace"].set_data(wrist_trace[:, a2["hi"]], wrist_trace[:, a2["vi"]])
             a2["trace"].set_color(trace_color)
         if a2["is_main"] and not artists_3d:
-            a2["ax"].figure.suptitle(
-                f"step {step_str}   dist={dist:.4f} rad", fontsize=9
-            )
+            a2["ax"].figure.suptitle(f"step {step_str}   dist={dist:.4f}", fontsize=9)
 
 
 def _elbow_plane_vertices(
@@ -2532,6 +2529,43 @@ def _add_elbow_height_lines_2d(
         )
         for y_value in y_values
     ]
+
+
+def _set_goal_region_artists(
+    artists_3d: list[dict],
+    artists_2d: list[dict],
+    marker_world: np.ndarray | None,
+    outlines_world: list[np.ndarray],
+) -> None:
+    for a3 in artists_3d:
+        a3["cartesian_goal_scat"]._offsets3d = (  # pylint: disable=protected-access
+            ([marker_world[0]], [marker_world[1]], [marker_world[2]])
+            if marker_world is not None
+            else ([], [], [])
+        )
+        for line in a3["goal_outline_lines"]:
+            line.remove()
+        a3["goal_outline_lines"] = [
+            a3["ax"].plot(
+                pts[:, 0], pts[:, 1], pts[:, 2], color="royalblue", lw=1.2, alpha=0.6
+            )[0]
+            for pts in outlines_world
+        ]
+    for a2 in artists_2d:
+        hi, vi = a2["hi"], a2["vi"]
+        a2["cartesian_goal_scat"].set_offsets(
+            [[marker_world[hi], marker_world[vi]]]
+            if marker_world is not None
+            else np.empty((0, 2))
+        )
+        for line in a2["goal_outline_lines"]:
+            line.remove()
+        a2["goal_outline_lines"] = [
+            a2["ax"].plot(pts[:, hi], pts[:, vi], color="royalblue", lw=1.2, alpha=0.6)[
+                0
+            ]
+            for pts in outlines_world
+        ]
 
 
 def _update_elbow_height_artists(

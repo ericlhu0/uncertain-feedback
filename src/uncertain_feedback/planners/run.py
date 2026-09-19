@@ -63,6 +63,7 @@ from uncertain_feedback.planners.mpc.costs import (
     replace_generated_costs,
     update_preference_cost,
 )
+from uncertain_feedback.planners.mpc.goal_spaces import goal_point
 from uncertain_feedback.planners.mpc.kinematics import q_reaching_wrist, q_to_arm_aa
 from uncertain_feedback.planners.mpc.rollout import (
     assemble_full_correction_traj,
@@ -549,18 +550,21 @@ def build_run(
     # goal pins the wrist only, so the pose shown is the nearest configuration
     # reaching it — solved against the anchor the env reported, since the goal is
     # relative to that.
-    if cfg.cartesian is not None:
+    shown_goal = (
+        goal_point(cfg.cartesian.goals[0]) if cfg.cartesian is not None else None
+    )
+    if shown_goal is not None:
         env.show_goal(
             q_reaching_wrist(
                 fk,
                 (spine3_pos if spine3_pos is not None else fk.tpose_spine3_pos)
-                + np.asarray(cfg.cartesian.goals[0], dtype=np.float64),
+                + shown_goal,
                 q0,
                 spine3_pos,
                 spine3_aa,
             )
         )
-    else:
+    elif cfg.cartesian is None:
         # Default goal display: arm raised from the initial pose. Shoulder
         # slot, not clavicle — the planner's actions cannot move the girdle.
         default_goal = q0.copy()
@@ -968,12 +972,12 @@ def run_repeated_correction_session(
                     setup.spine3_aa,
                 )
             goal_pos = (
-                np.asarray(cfg.cartesian.goals[0], dtype=np.float64)
+                goal_point(cfg.cartesian.goals[0])
                 if cfg.cartesian is not None
                 else None
             )
             cartesian_threshold = (
-                cfg.cartesian.threshold if cfg.cartesian is not None else 0.05
+                cfg.cartesian.threshold if cfg.cartesian is not None else 0.01
             )
             full_correction_q = assemble_full_correction_traj(
                 cfg,

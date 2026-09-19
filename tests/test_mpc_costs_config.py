@@ -95,6 +95,14 @@ def _stage_costs(mpc: ArmMPC, q_trajs: np.ndarray) -> np.ndarray:
     return mpc._goal_space.stage_cost(mpc._extra_costs)(batch)
 
 
+def _goal_marker(mpc: ArmMPC) -> np.ndarray:
+    goal = mpc.current_cartesian_goal
+    assert goal is not None
+    marker = goal.marker()
+    assert marker is not None
+    return marker
+
+
 def _playback(mpc: ArmMPC) -> MdmFeedback:
     assert mpc._feedback is not None
     return mpc._feedback
@@ -1135,14 +1143,13 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
         feedback=FeedbackConfig(),
     )
 
-    target_world_before = mpc._spine3_pos + mpc.current_cartesian_goal  # type: ignore[operator]
+    marker_before = _goal_marker(mpc)
     mdm_endpoint = np.zeros((3, 3), dtype=np.float64)
     mdm_endpoint[0, 1] = 1.0
     mpc.set_mdm_goal(fk.arm_aa_to_q(mdm_endpoint, spine3_aa))
     mpc.push_trajectory(np.stack([np.zeros((3, 3)), mdm_endpoint]))
-    target_world_after = mpc._spine3_pos + mpc.current_cartesian_goal  # type: ignore[operator]
 
-    np.testing.assert_allclose(target_world_after, target_world_before)
+    np.testing.assert_allclose(_goal_marker(mpc), marker_before)
     wrist_rel = fk.fk(np.zeros((3, 3)), spine3_pos, spine3_aa)[-1] - spine3_pos
     expected_cost = ((wrist_rel - cartesian_goal) ** 2).sum()
     np.testing.assert_allclose(_stage_costs(mpc, q_trajs), [expected_cost])
@@ -1253,8 +1260,9 @@ def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
         def update_trajectory_preview(self, preview_q):
             self.preview_q = preview_q
 
-        def update_cartesian_target(self, world_pos):
-            self.cartesian_targets.append(np.asarray(world_pos, dtype=np.float64))
+        def update_goal_region(self, marker_world, outlines_world):
+            del outlines_world
+            self.cartesian_targets.append(np.asarray(marker_world, dtype=np.float64))
 
         def update_step(self, q, dist, color=TARGET_COLOR):
             del q, dist

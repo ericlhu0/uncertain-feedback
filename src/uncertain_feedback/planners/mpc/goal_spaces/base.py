@@ -9,6 +9,7 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.action_spaces.base import StageCost
 from uncertain_feedback.planners.mpc.costs.base import CompositeTrajectoryCost
+from uncertain_feedback.planners.mpc.goal_spaces.regions import GoalRegion
 
 
 class GoalSpace(ABC):
@@ -30,6 +31,6 @@ class GoalSpace(ABC):
     @abstractmethod
     def progress(
         self, next_q: np.ndarray, on_pop: Callable[[], None]
-    ) -> tuple[np.ndarray, float]:
+    ) -> tuple[GoalRegion, float]:
         """Distance to the front goal, popping it (and calling ``on_pop``)
         when reached."""

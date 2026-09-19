@@ -1150,7 +1150,7 @@ presence of top-level YAML sections, one per module slot:
 
 | Section | Module | Absent means |
 |---|---|---|
-| `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
+| `cartesian:` | goal space: a queue of goal regions (`goals`, `threshold`). Each entry is a spine3-relative wrist point `[x, y, z]` or a region mapping — `{box: {low, high}}`, `{sphere: {center, radius}}` or `{features: {<feature>: [low, high]}}` over the five anatomical features (radians, `null` for one-sided). The goal cost is the squared distance to the region, zero inside, so inside a region only the comfort costs decide where the arm settles. `threshold` pads the region boundary in its own units (metres, or radians for `features`; default 0.01 — the region itself carries the tolerance, so the pad is only numerical slack) | no goal phase (hold after feedback) |
 | `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`). `clusterer` defaults to `agglo_end_pose` and is resolved by `run.py`, the demo runner, and the evaluation approaches alike — runs from before that wiring used `XyzPositionClusterer` (KMeans) regardless of the key | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
@@ -1934,8 +1934,18 @@ feedback:
 
 cartesian:
   goals:
-    - [0.3, 0.5, 0.0]
-  threshold: 0.05
+    - [0.3, 0.5, 0.0]                                   # a wrist point
+    - box: {low: [0.2, 0.4, -0.1], high: [0.4, 0.6, 0.1]}
+    - sphere: {center: [0.3, 0.5, 0.0], radius: 0.08}
+    - features: {elbow_flexion: [1.0, 1.6], shoulder_abduction_adduction: [null, 0.5]}
+  threshold: 0.01
+```
+
+Goals are worked through in order; a region counts as reached as soon as the
+terminal state is inside it (plus `threshold`). `configs/plain_box.yaml` is the
+plain goal-seeking baseline with a box goal:
+```
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/plain_box.yaml --save box.mp4
 ```
 
 `feedback.uq.clusterer` selects the clustering method (used by the demo runner;

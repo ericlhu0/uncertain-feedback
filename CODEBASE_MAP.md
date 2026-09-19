@@ -1,7 +1,7 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-09-11
-**Branch:** mdm-steering
+**Last updated:** 2026-09-16
+**Branch:** goal-regions
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
 
@@ -82,7 +82,7 @@ uncertain-feedback/
 │   │       │   ├── base.py           # ABC: rollouts/shape_costs/command/execute/hold
 │   │       │   ├── human_action_space.py  # HumanArmActions (Gaussian deltas composed on SO(3))
 │   │       │   └── robot_action_space.py  # RobotJointActions + RobotActionsConfig (robot joint deltas projected back through the grasp)
-│   │       ├── goal_spaces/          # GoalSpace ABC
+│   │       ├── goal_spaces/          # GoalSpace ABC; regions.py: GoalRegion + Point/Box/Sphere/FeatureRegion
 │   │       │   ├── base.py           # ABC: stage_cost/reached/progress
 │   │       │   └── cartesian_goal_space.py  # CartesianGoalSpace + CartesianConfig (spine3-relative wrist goals)
 │   │       ├── constraints/          # FeasibilityConstraint ABC + CONSTRAINT_BUILDERS registry
@@ -255,7 +255,7 @@ no sampling) before the goal phase resumes.
 
 | Slot | Base class | Implementations | Config section | Absent means |
 |------|-----------|-----------------|----------------|--------------|
-| goal space | `GoalSpace` (`goal_spaces/base.py`) | `CartesianGoalSpace` — spine3-relative wrist goals, rotation-free | `cartesian:` | no goal phase (hold after feedback) |
+| goal space | `GoalSpace` (`goal_spaces/base.py`) | `CartesianGoalSpace` — a queue of `GoalRegion`s (`goal_spaces/regions.py`): `PointRegion` (a spine3-relative wrist point, today's default), `BoxRegion`, `SphereRegion` in wrist space, `FeatureRegion` (bounds on the five anatomical features). The stage cost is the squared `distance` to the front region (zero inside), `reached`/`progress` test `distance < threshold`; each region also exposes `marker()` (representative wrist point, `None` for feature regions) and `outline()` polylines for the visualizer. `as_goal_region` wraps raw `[x,y,z]` goals, `goal_point` gives legacy point consumers (`run.py`, cost-gen context, demo runner payload, `EvalMpcConfig`) the marker; the `evaluation/` benchmarks still take point goals only | `cartesian:` | no goal phase (hold after feedback) |
 | action space | `ActionSpace` (`action_spaces/base.py`) | `HumanArmActions` — Gaussian deltas composed on SO(3), clavicle zeroed (a robot holding the forearm cannot actuate the shoulder girdle); `RobotJointActions` — robot joint deltas capped at the execution inf-norm cap, projected back through the rigid `MeasuredGrasp` (`project_forearm_frames`) so every cost still scores the human arm, projection residual hard-gated (`max_grasp_residual` over the leading `grasp_residual_frames`) and soft-penalized | `robot_actions:` | human-arm sampling |
 | feedback method | `FeedbackMethod` (`feedback/base.py`) | `MdmFeedback` — validated MDM trajectory played back one rate-limited frame per step (`max_playback_delta` per joint), with an optional UQ layer (`UqSelector`, `uncertainty/uq_selector.py`): draw N diffusion samples, cluster, pick interactively or headlessly (`auto_cluster` / `cluster_selector`), scale, enqueue the chosen mean. The UQ layer can also **steer** sampling toward the user's cost model before clustering (`feedback.uq.steering`, §14) | `feedback:` (nested `uq:`) | no correction phase |
 | constraints | `FeasibilityConstraint` (`constraints/base.py`) | `RobotIkConstraint` — masks rollouts whose leading frames continuation IK (`track_robot_ik_batch`, never execution's enumerating fallback) cannot place within `max_residual`; also screens feedback playback at push time (drop unreachable frames), step time (hold), and via the closest-approach stall-skip (`playback_stall_steps`) | `constraints:` (named entries, `CONSTRAINT_BUILDERS` registry) | unconstrained |
@@ -503,7 +503,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
 | `user`                 | str      | Simulated-user persona name (default `unrestricted`); loaded by `build_run` into `RunSetup.user` for every run |
 | `corrections.*`        | CorrectionConfig | `trigger_threshold` (default 0.02 rad). Restricted users trigger on a new above-threshold episode after returning to comfort; legacy `transfer.trigger_threshold` is accepted as a fallback. |
-| `cartesian.*`          | CartesianConfig | Presence enables the Cartesian goal space: `goals` (non-empty list of [x,y,z]), `threshold` |
+| `cartesian.*`          | CartesianConfig | Presence enables the goal space: `goals` (non-empty list; each entry `[x,y,z]` or one of `{box: {low, high}}`, `{sphere: {center, radius}}`, `{features: {<FEATURE_NAME>: [low\|null, high\|null]}}`; parsed by `_parse_goal_region`, plain lists stay lists), `threshold` (slack past the region boundary — metres, radians for `features`; default 0.01) |
 | `costs.*`              | dict     | Named cost terms with their params                   |
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `high`, `gpt-5.6-sol` → `low`; every shipped config uses luna, sol is not used for now), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets). Consumed (with `persona_goals`) by the repo-root `evaluation/` benchmarks: `InteractionBenchmark(use_persona_goals=true)` appends them to a persona's goal sequence. Legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |

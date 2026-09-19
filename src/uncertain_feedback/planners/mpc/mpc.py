@@ -48,6 +48,7 @@ from uncertain_feedback.planners.mpc.feedback import FeedbackConfig, MdmFeedback
 from uncertain_feedback.planners.mpc.goal_spaces import (
     CartesianConfig,
     CartesianGoalSpace,
+    GoalRegion,
 )
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_DIM,
@@ -211,7 +212,7 @@ class ArmMPC:
 
         self._goal_space: CartesianGoalSpace | None = (
             CartesianGoalSpace(
-                [np.asarray(g, dtype=np.float64) for g in cartesian.goals],
+                list(cartesian.goals),
                 cartesian.threshold,
                 self._fk,
                 self._spine3_pos,
@@ -291,12 +292,12 @@ class ArmMPC:
     # ------------------------------------------------------------------
 
     @property
-    def current_cartesian_goal(self) -> np.ndarray | None:
-        """The active Cartesian goal, or ``None`` without one."""
+    def current_cartesian_goal(self) -> GoalRegion | None:
+        """The active goal region, or ``None`` without one."""
         return self._goal_space.current_goal if self._goal_space is not None else None
 
-    def append_cartesian_goal(self, goal: np.ndarray) -> None:
-        """Add a Cartesian goal to the back of the queue."""
+    def append_cartesian_goal(self, goal: np.ndarray | GoalRegion) -> None:
+        """Add a goal (wrist point or region) to the back of the queue."""
         assert self._goal_space is not None
         self._goal_space.append(goal)
 
@@ -689,7 +690,7 @@ class ArmMPC:
             self._env, current_q, self._actions.command(batch, best)
         )
         goal, dist = goal_space.progress(next_q, on_pop=self.reset_warmstart)
-        self._update_vis(next_q, dist, cartesian_goal=goal)
+        self._update_vis(next_q, dist, goal_region=goal)
         return next_q
 
     # ------------------------------------------------------------------
@@ -736,13 +737,22 @@ class ArmMPC:
             self._vis_config.capture = capture
             self._vis_config.compact = compact
 
+    def _show_goal_region(self, region: GoalRegion) -> None:
+        """Draw the region's marker and outline in world coordinates."""
+        assert self._vis is not None
+        marker = region.marker()
+        self._vis.update_goal_region(
+            self._spine3_pos + marker if marker is not None else None,
+            [self._spine3_pos + line for line in region.outline()],
+        )
+
     def _update_vis(
         self,
         next_q: np.ndarray,
         dist: float,
         *,
         playing: bool = False,
-        cartesian_goal: np.ndarray | None = None,
+        goal_region: GoalRegion | None = None,
     ) -> None:
         """Lazily open the live window, then draw this step.
 
@@ -785,11 +795,9 @@ class ArmMPC:
                 self._goal_space is not None
                 and self._goal_space.current_goal is not None
             ):
-                self._vis.update_cartesian_target(
-                    self._spine3_pos + self._goal_space.current_goal
-                )
-        if cartesian_goal is not None:
-            self._vis.update_cartesian_target(self._spine3_pos + cartesian_goal)
+                self._show_goal_region(self._goal_space.current_goal)
+        if goal_region is not None:
+            self._show_goal_region(goal_region)
         color = ArmVisualizer.MDM_COLOR if playing else ArmVisualizer.TARGET_COLOR
         self._vis.update_step(
             q_to_arm_aa(next_q, self._fk.elbow_hinge_axis),

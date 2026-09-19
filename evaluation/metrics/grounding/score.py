@@ -34,7 +34,9 @@ def candidate_row(
     }
 
 
-def case_row(candidates: dict[int, np.ndarray], context: MpcCostContext) -> dict[str, Any]:
+def case_row(
+    candidates: dict[int, np.ndarray], context: MpcCostContext
+) -> dict[str, Any]:
     """Spread of the case's candidate menu."""
     diversity = candidate_diversity(candidates, context)
     position = candidate_position_diversity(candidates, context)

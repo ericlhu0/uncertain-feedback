@@ -74,7 +74,10 @@ def test_keypoint_baseline_episode_smoke(tmp_path: Path) -> None:
     task = bench.generate_tasks(0, rig.cfg)[0]
     grounder = LlmKeypointGrounder()
     grounder._interpret = (  # type: ignore[method-assign]
-        lambda text, scene: {"joint": "wrist", "keypoint": np.array([0.1, 0.3, 0.2])}
+        lambda text, scene_context: {
+            "joint": "wrist",
+            "keypoint": np.array([0.1, 0.3, 0.2]),
+        }
     )
     approach = Approach(name="llm_keypoint", grounder=grounder, cost_gen=NoCostGen())
     approach.reset(rig, user, task.seed, tmp_path / "episode")

@@ -53,12 +53,6 @@ def probe_menu(
     oracle_costs = CompositeTrajectoryCost(
         [*base.terms(), HiddenCostTerm(user=user, context=rig.context)]
     )
-    rollout_kwargs = dict(
-        body_pos=rig.body_pos,
-        spine3_pos=rig.spine3_pos,
-        spine3_aa=rig.spine3_aa,
-        log_prefix=_LOG,
-    )
     label = f"{task.persona} goal {goal_index}"
 
     oracle_path = rollout_to_goal(
@@ -67,8 +61,11 @@ def probe_menu(
         goal,
         rig.context,
         oracle_costs,
+        rig.body_pos,
+        rig.spine3_pos,
+        rig.spine3_aa,
         progress_label=f"{label} oracle",
-        **rollout_kwargs,
+        log_prefix=_LOG,
     )
     np.save(goal_dir / "oracle_path.npy", oracle_path)
     approach.begin_goal(goal, oracle_path)
@@ -79,8 +76,11 @@ def probe_menu(
         goal,
         rig.context,
         base,
+        rig.body_pos,
+        rig.spine3_pos,
+        rig.spine3_aa,
         progress_label=f"{label} unlearned rollout",
-        **rollout_kwargs,
+        log_prefix=_LOG,
     )
     trigger = first_violation_step(user, rig.context, rollout, threshold)
     if trigger is None:
@@ -95,9 +95,12 @@ def probe_menu(
         goal,
         rig.context,
         base,
+        rig.body_pos,
+        rig.spine3_pos,
+        rig.spine3_aa,
         steps=sim_cfg.nominal_steps,
         stop_at_goal=False,
-        **rollout_kwargs,
+        log_prefix=_LOG,
     )
     intent = attribute_correction(oracle_path, nominal_plan, q_feedback, rig.context)
     verbalize = bind_verbalizer(

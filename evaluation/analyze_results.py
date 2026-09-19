@@ -23,16 +23,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # pylint: disable=wrong-import-position
 import pandas as pd  # pylint: disable=wrong-import-position
 
-from evaluation.benchmarks.structs import (
+from evaluation.benchmarks.structs import (  # pylint: disable=wrong-import-position
     Interaction,
-)  # pylint: disable=wrong-import-position
+)
+from evaluation.metrics.cost_learning.rounds import (  # pylint: disable=wrong-import-position
+    round_rows,
+)
 from evaluation.metrics.cost_learning.success import (  # pylint: disable=wrong-import-position
     goal_table,
     success_at_k,
 )
-from evaluation.metrics.cost_learning.rounds import (
-    round_rows,
-)  # pylint: disable=wrong-import-position
 
 
 def _collect(roots: list[Path]) -> list[Interaction]:

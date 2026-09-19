@@ -94,14 +94,14 @@ class ScenarioBenchmark(Benchmark):
                 continue
             data = np.load(self.scenario_dir / f"{case}.npz")
             user = user_from_dict(row["user"]) if "user" in row else get_persona(case)
-            goal = tuple(float(v) for v in data["goal"])
+            goal_x, goal_y, goal_z = (float(v) for v in data["goal"])
             start = tuple(float(v) for v in data["naive"][0])
             for verbalizer in self.verbalizers:
                 tasks.append(
                     InteractionTask(
                         persona=case,
                         verbalizer=verbalizer,
-                        goals=(goal,),
+                        goals=((goal_x, goal_y, goal_z),),
                         max_rounds=self.max_rounds,
                         seed=seed,
                         user=user,

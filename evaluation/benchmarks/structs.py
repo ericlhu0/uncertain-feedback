@@ -97,10 +97,12 @@ class Interaction:
 
     @property
     def rounds_used(self) -> int:
+        """Feedback rounds this goal consumed."""
         return len(self.rounds)
 
     @property
     def resolved(self) -> bool:
+        """Whether the goal ended without an unresolved violation."""
         return self.result in RESOLVED_RESULTS
 
 

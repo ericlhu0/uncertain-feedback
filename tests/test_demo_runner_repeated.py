@@ -361,7 +361,7 @@ def test_correction_can_be_requested_while_the_user_is_comfortable(
     assert payload["trigger"] == {"step": 2, "reason": "operator", "violation": 0.0}
     assert payload["trajectory"]["n_frames"] == 3
     trajectory = session.trajectory
-    assert trajectory is not None
+    assert trajectory is not None and trajectory.q_feedback is not None
     np.testing.assert_array_equal(trajectory.q_feedback, trajectory.executed[-1])
     assert len(trajectory.q_history) == 3
 
@@ -376,15 +376,15 @@ def test_retroactive_correction_rewinds_the_rollout_and_replans(
         lambda selected, context, q: np.array([0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
-    trajectory = session.trajectory
-    assert trajectory is not None and trajectory.complete
-    planner = trajectory.mpc
+    assert session.trajectory is not None and session.trajectory.complete
+    planner = session.trajectory.mpc
 
     payload = session.request_correction(2)
 
     assert payload["status"] == "paused"
     assert payload["trigger"] == {"step": 2, "reason": "operator", "violation": 0.0}
     assert payload["trajectory"]["n_frames"] == 3
+    trajectory = session.trajectory
     assert trajectory.step == 2
     assert not trajectory.complete
     np.testing.assert_allclose(trajectory.q, trajectory.executed[0] + 2.0)

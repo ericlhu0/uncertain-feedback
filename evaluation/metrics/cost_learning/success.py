@@ -56,4 +56,3 @@ def success_at_k(
         frame["k"] = k
         frames.append(frame)
     return pd.concat(frames, ignore_index=True)
-

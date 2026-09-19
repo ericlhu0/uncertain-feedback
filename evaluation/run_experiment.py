@@ -96,7 +96,9 @@ def _run(cfg: DictConfig) -> None:
     task_ids = list(range(len(tasks)))
     if cfg.tasks is not None:
         selected = (
-            [int(cfg.tasks)] if isinstance(cfg.tasks, int) else [int(i) for i in cfg.tasks]
+            [int(cfg.tasks)]
+            if isinstance(cfg.tasks, int)
+            else [int(i) for i in cfg.tasks]
         )
         task_ids = [i for i in task_ids if i in selected]
     if not task_ids:

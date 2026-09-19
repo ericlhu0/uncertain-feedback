@@ -66,6 +66,7 @@ def test_full_composes_mdm_consolidate_cg() -> None:
 def test_steering_axis_override_disables_cg() -> None:
     approach = _instantiate("full", overrides=["steering=none"])
     assert isinstance(approach.steering, NoSteering)
+    assert isinstance(approach.grounder, MdmGrounder)
     assert approach.grounder.steering is approach.steering
 
 

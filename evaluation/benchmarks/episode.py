@@ -15,10 +15,13 @@ from evaluation.approaches.base import Approach
 from evaluation.approaches.cost_gen.structs import RoundContext
 from evaluation.benchmarks.structs import FeedbackRound, Interaction, InteractionTask
 from evaluation.benchmarks.verbalize import bind_verbalizer
-from evaluation.metrics.grounding.structs import GroundingResult
 from evaluation.metrics.cost_learning.success import goal_row
+from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost, MpcCostContext
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    MpcCostContext,
+)
 from uncertain_feedback.planners.mpc.rollout import goal_reach, rollout_to_goal
 from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs, cfg_with_goal
 from uncertain_feedback.simulated_users import (
@@ -322,7 +325,12 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             )
             retrigger = first_violation_step(user, rig.context, continuation, threshold)
             _save_round_trajectories(
-                round_dir, q_feedback, nominal_plan, grounding, correction_q, continuation
+                round_dir,
+                q_feedback,
+                nominal_plan,
+                grounding,
+                correction_q,
+                continuation,
             )
             grounding = replace(grounding, samples=None, sample_labels=None)
 

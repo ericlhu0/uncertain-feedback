@@ -9,9 +9,11 @@ from uncertain_feedback.simulated_users import SimulatedUser
 
 
 class NoSteering(Steering):
+    """The unsteered baseline: no steering spec is built."""
+
     mode = "off"
 
-    def spec(
+    def spec(  # pylint: disable=useless-return
         self,
         gen: MotionGenerator,
         user: SimulatedUser,

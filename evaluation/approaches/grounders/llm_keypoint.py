@@ -19,6 +19,7 @@ from evaluation.approaches.grounders.base import (
     LANDMARKS,
     ClusterSelector,
     Grounder,
+    required_llm_model,
 )
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.costs import extract_json_object
@@ -56,6 +57,8 @@ class LlmKeypointGrounder(Grounder):
     ) -> None:
         super().__init__()
         self._displacement_cap = displacement_cap
+        self._history: list[str] = []
+        self._llm: Any = None
         # Load the motion generator anyway (unused for grounding) so the rig
         # geometry (decoded pose spine3/body) matches the system arms exactly.
         if use_generator_rig:
@@ -69,8 +72,8 @@ class LlmKeypointGrounder(Grounder):
         episode_dir: Path,
     ) -> None:
         super().reset(rig, user, seed, episode_dir)
-        self._history: list[str] = []
-        self._llm: Any = None
+        self._history = []
+        self._llm = None
 
     def _interpret(self, text: str, scene_context: str) -> dict[str, Any] | None:
         """Return {"joint": str, "keypoint": (3,) array} or None for a no-op."""
@@ -80,7 +83,7 @@ class LlmKeypointGrounder(Grounder):
             )
 
             self._llm = OpenAIModel(
-                model=self.rig.cfg.llm_cost.model,
+                model=required_llm_model(self.rig),
                 system_prompt=_KEYPOINT_SYSTEM_PROMPT,
                 temperature=0.0,
                 reasoning_effort="low",

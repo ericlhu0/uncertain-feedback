@@ -1,5 +1,9 @@
+"""What a grounder returns for one utterance."""
+
 from dataclasses import dataclass
+
 import numpy as np
+
 
 @dataclass(frozen=True)
 class GroundingResult:

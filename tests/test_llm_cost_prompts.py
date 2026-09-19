@@ -85,7 +85,7 @@ def test_language_only_interpret_and_ground_frame_plan_as_interrupted() -> None:
     assert "correcting AWAY from" in text
     ground = build_ground_prompt("{}", {}, language_only=True)
     assert "INTERRUPTED PLAN" in ground
-    assert "strictly higher than the \"recent\" history" in ground
+    assert 'strictly higher than the "recent" history' in ground
     assert "score the chosen correction strictly lower" not in ground
 
 

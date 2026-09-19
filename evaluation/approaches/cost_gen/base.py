@@ -61,15 +61,17 @@ class CostGen(abc.ABC):
         rig = self._rig
         assert rig is not None, "reset() must run before use"
         language_only = self.source == "nominal"
-        if language_only and ctx.nominal_plan is None:
-            raise ValueError("source='nominal' requires RoundContext.nominal_plan.")
+        if language_only:
+            if ctx.nominal_plan is None:
+                raise ValueError("source='nominal' requires RoundContext.nominal_plan.")
+            cluster_traj = ctx.nominal_plan
+        else:
+            cluster_traj = ctx.grounding.correction_traj
         generation = generate_cost_for_cluster(
             mpc=None,
             cfg=cfg_with_goal(rig.cfg, ctx.goal),
             instruction=ctx.utterance_text,
-            cluster_traj=(
-                ctx.nominal_plan if language_only else ctx.grounding.correction_traj
-            ),
+            cluster_traj=cluster_traj,
             current_q=ctx.q_feedback,
             q_history=ctx.q_history,
             context=rig.context,

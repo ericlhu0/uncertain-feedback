@@ -22,6 +22,7 @@ from evaluation.approaches.grounders.base import (
     LANDMARKS,
     ClusterSelector,
     Grounder,
+    required_llm_model,
 )
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.costs import extract_json_object
@@ -137,6 +138,17 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
     BRIDGE's conversational refinement); it never sees the alternatives.
     """
 
+    def __init__(
+        self,
+        attract_gain: float = 0.5,
+        repel_gain: float = 0.05,
+        rho0: float = 0.8,
+        displacement_cap: float = 0.25,
+    ) -> None:
+        super().__init__(attract_gain, repel_gain, rho0, displacement_cap)
+        self._history: list[str] = []
+        self._llm: Any = None
+
     def reset(
         self,
         rig: PlanningRig,
@@ -145,8 +157,8 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
         episode_dir: Path,
     ) -> None:
         super().reset(rig, user, seed, episode_dir)
-        self._history: list[str] = []
-        self._llm: Any = None
+        self._history = []
+        self._llm = None
 
     def _interpret(self, text: str, waypoint_context: str) -> list[dict[str, str]]:
         if self._llm is None:
@@ -155,7 +167,7 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
             )
 
             self._llm = OpenAIModel(
-                model=self.rig.cfg.llm_cost.model,
+                model=required_llm_model(self.rig),
                 system_prompt=_INTERPRETER_SYSTEM_PROMPT,
                 temperature=0.0,
                 reasoning_effort="low",
@@ -202,9 +214,11 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
         stride = max(1, len(wrist) // 8)
         context_lines = []
         for frame in range(0, len(wrist), stride):
-            nearest = min(
-                landmarks, key=lambda n: np.linalg.norm(wrist[frame] - landmarks[n])
-            )
+            distances = {
+                name: np.linalg.norm(wrist[frame] - point)
+                for name, point in landmarks.items()
+            }
+            nearest = min(distances, key=distances.__getitem__)
             context_lines.append(f"waypoint {frame}: {nearest}")
         mods = self._interpret(text, "\n".join(context_lines))
 

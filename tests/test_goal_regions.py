@@ -22,6 +22,7 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.goal_spaces import (
     BoxRegion,
     FeatureRegion,
+    ForearmBoxRegion,
     PointRegion,
     SphereRegion,
     as_goal_region,
@@ -218,3 +219,69 @@ def test_box_goal_reached_and_queue_advances() -> None:
     assert popped == [True]
     assert dist > 0.05
     assert mpc.current_cartesian_goal == far
+
+
+def test_forearm_box_rejects_wrist_only_success() -> None:
+    fk = SmplLeftArmFK()
+    context = _context(fk)
+    aa = q_to_arm_aa(np.zeros((1, Q_DIM)), fk.elbow_hinge_axis)
+    chain = fk.fk_batch(aa, context.spine3_pos, context.spine3_aa)[0]
+    elbow, wrist = chain[-2:] - context.spine3_pos
+    region = ForearmBoxRegion(tuple(wrist - 0.01), tuple(wrist + 0.01))
+    expected = np.linalg.norm(np.maximum(np.abs(elbow - wrist) - 0.01, 0.0))
+    assert expected > 0.1
+    np.testing.assert_allclose(region.distance(wrist[None], aa, context), [expected])
+    enclosing = ForearmBoxRegion(
+        tuple(np.minimum(elbow, wrist) - 0.01),
+        tuple(np.maximum(elbow, wrist) + 0.01),
+    )
+    np.testing.assert_allclose(enclosing.distance(wrist[None], aa, context), [0.0])
+    assert len(enclosing.outline()) == 12
+
+
+def test_care_demo_configs_use_regions() -> None:
+    from pathlib import Path
+
+    configs = (
+        Path(__file__).resolve().parents[1]
+        / "src/uncertain_feedback/planners/mpc/configs"
+    )
+    bathing = load_mpc_config(configs / "bathing.yaml")
+    transfer = load_mpc_config(configs / "transfer.yaml")
+    assert bathing.cartesian is not None
+    assert transfer.cartesian is not None
+    assert isinstance(bathing.cartesian.goals[0], FeatureRegion)
+    assert isinstance(transfer.cartesian.goals[0], ForearmBoxRegion)
+    assert bathing.pose is None and transfer.pose is not None
+    assert transfer.cartesian.goals[0].wrist is not None
+    assert transfer.cartesian.goals[0].elbow is None
+    bed = load_mpc_config(configs / "transfer_bed.yaml")
+    assert bed.pose is not None and bed.pose.exists()
+    assert bed.cartesian is not None
+    assert isinstance(bed.cartesian.goals[0], ForearmBoxRegion)
+
+
+def test_forearm_endpoint_boxes_are_simultaneous() -> None:
+    fk = SmplLeftArmFK()
+    context = _context(fk)
+    aa = q_to_arm_aa(np.zeros((1, Q_DIM)), fk.elbow_hinge_axis)
+    chain = fk.fk_batch(aa, context.spine3_pos, context.spine3_aa)[0]
+    elbow, wrist = chain[-2:] - context.spine3_pos
+    low = tuple(np.minimum(elbow, wrist) - 0.5)
+    high = tuple(np.maximum(elbow, wrist) + 0.5)
+    elbow_box = BoxRegion(tuple(elbow - 0.01), tuple(elbow + 0.01))
+    wrist_box = BoxRegion(tuple(wrist - 0.01), tuple(wrist + 0.01))
+    inside = ForearmBoxRegion(low, high, wrist=wrist_box, elbow=elbow_box)
+    np.testing.assert_allclose(inside.distance(wrist[None], aa, context), [0.0])
+    shifted = np.array([0.1, 0.0, 0.0])
+    outside = ForearmBoxRegion(
+        low,
+        high,
+        wrist=BoxRegion(tuple(wrist - 0.01 + shifted), tuple(wrist + 0.01 + shifted)),
+        elbow=BoxRegion(tuple(elbow - 0.01 + shifted), tuple(elbow + 0.01 + shifted)),
+    )
+    np.testing.assert_allclose(
+        outside.distance(wrist[None], aa, context), [np.hypot(0.09, 0.09)]
+    )
+    np.testing.assert_allclose(inside.marker(), wrist)
+    assert len(inside.outline()) == 36

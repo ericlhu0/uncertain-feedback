@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-09-16
+**Last updated:** 2026-09-23
 **Branch:** goal-regions
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -82,7 +82,7 @@ uncertain-feedback/
 │   │       │   ├── base.py           # ABC: rollouts/shape_costs/command/execute/hold
 │   │       │   ├── human_action_space.py  # HumanArmActions (Gaussian deltas composed on SO(3))
 │   │       │   └── robot_action_space.py  # RobotJointActions + RobotActionsConfig (robot joint deltas projected back through the grasp)
-│   │       ├── goal_spaces/          # GoalSpace ABC; regions.py: GoalRegion + Point/Box/Sphere/FeatureRegion
+│   │       ├── goal_spaces/          # GoalSpace ABC; regions.py: GoalRegion + Point/Box/ForearmBox/Sphere/FeatureRegion
 │   │       │   ├── base.py           # ABC: stage_cost/reached/progress
 │   │       │   └── cartesian_goal_space.py  # CartesianGoalSpace + CartesianConfig (spine3-relative wrist goals)
 │   │       ├── constraints/          # FeasibilityConstraint ABC + CONSTRAINT_BUILDERS registry
@@ -91,7 +91,7 @@ uncertain-feedback/
 │   │       ├── feedback/             # FeedbackMethod ABC
 │   │       │   ├── base.py           # ABC: playback state machine contract
 │   │       │   └── mdm.py            # MdmFeedback + FeedbackConfig (rate-limited MDM playback, stall-skip when constrained)
-│   │       └── configs/              # Example YAML config files
+│   │       └── configs/              # Example YAML config files; bathing.yaml (underarm access), transfer.yaml (seated chair transfer), transfer_bed.yaml (supine bed transfer), plus seated dressing_first_sleeve.yaml, dressing_second_sleeve.yaml, bp_access.yaml, edema_elevation.yaml, wheelchair_armrest.yaml (task-motivated wrist/forearm boxes on the seated pose); transfer goals use broad height/lateral forearm/wrist boxes with shallow depth (0.06–0.18 m; seated Z, supine Y), without a required midline crossing or elbow sub-box
 │   │           ├── mdm.yaml
 │   │           ├── mdm_learn.yaml
 │   │           ├── mdm_llm.yaml
@@ -137,6 +137,8 @@ uncertain-feedback/
 │   │   ├── base.py                   # MotionGenerator ABC (shared backend interface)
 │   │   ├── steering.py               # Diffusion steering: SteeringConfig/Spec/Event, build_steering_spec (shared persona→spec guard chain), particle resampler, classifier-guidance cond_fn, conflict diagnostic (torch-free — imported at config-parse time)
 │   │   └── mdm/
+│   │       ├── transfer_seated_pose.pt # Seated start for transfer and the seated care configs; right arm folded, left arm lowered (normalized HML263)
+│   │       ├── transfer_bed_pose.pt    # Supine transfer start; extended legs and same arm setup (normalized HML263)
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
 │   │       ├── torch_features.py     # Differentiable arm features + hidden-bound cost read off x̂0 (the steering signal; imports torch at module scope, so consumers import it lazily)
 │   │       ├── hml_smpl_conversion.py  # HML263 ↔ SMPL pose conversions
@@ -255,7 +257,7 @@ no sampling) before the goal phase resumes.
 
 | Slot | Base class | Implementations | Config section | Absent means |
 |------|-----------|-----------------|----------------|--------------|
-| goal space | `GoalSpace` (`goal_spaces/base.py`) | `CartesianGoalSpace` — a queue of `GoalRegion`s (`goal_spaces/regions.py`): `PointRegion` (a spine3-relative wrist point, today's default), `BoxRegion`, `SphereRegion` in wrist space, `FeatureRegion` (bounds on the five anatomical features). The stage cost is the squared `distance` to the front region (zero inside), `reached`/`progress` test `distance < threshold`; each region also exposes `marker()` (representative wrist point, `None` for feature regions) and `outline()` polylines for the visualizer. `as_goal_region` wraps raw `[x,y,z]` goals, `goal_point` gives legacy point consumers (`run.py`, cost-gen context, demo runner payload, `EvalMpcConfig`) the marker; the `evaluation/` benchmarks still take point goals only | `cartesian:` | no goal phase (hold after feedback) |
+| goal space | `GoalSpace` (`goal_spaces/base.py`) | `CartesianGoalSpace` — a queue of `GoalRegion`s (`goal_spaces/regions.py`): `PointRegion` (a spine3-relative wrist point, today's default), `BoxRegion`, `ForearmBoxRegion` (both elbow and wrist inside a convex box, with optional simultaneous `elbow` and `wrist` sub-boxes), `SphereRegion` in wrist space, `FeatureRegion` (bounds on the five anatomical features). The stage cost is the squared `distance` to the front region (zero inside), `reached`/`progress` test `distance < threshold`; each region also exposes `marker()` (representative wrist point, `None` for feature regions) and `outline()` polylines for the visualizer. `as_goal_region` wraps raw `[x,y,z]` goals, `goal_point` gives legacy point consumers (`run.py`, cost-gen context, demo runner payload, `EvalMpcConfig`) the marker; the `evaluation/` benchmarks still take point goals only | `cartesian:` | no goal phase (hold after feedback) |
 | action space | `ActionSpace` (`action_spaces/base.py`) | `HumanArmActions` — Gaussian deltas composed on SO(3), clavicle zeroed (a robot holding the forearm cannot actuate the shoulder girdle); `RobotJointActions` — robot joint deltas capped at the execution inf-norm cap, projected back through the rigid `MeasuredGrasp` (`project_forearm_frames`) so every cost still scores the human arm, projection residual hard-gated (`max_grasp_residual` over the leading `grasp_residual_frames`) and soft-penalized | `robot_actions:` | human-arm sampling |
 | feedback method | `FeedbackMethod` (`feedback/base.py`) | `MdmFeedback` — validated MDM trajectory played back one rate-limited frame per step (`max_playback_delta` per joint), with an optional UQ layer (`UqSelector`, `uncertainty/uq_selector.py`): draw N diffusion samples, cluster, pick interactively or headlessly (`auto_cluster` / `cluster_selector`), scale, enqueue the chosen mean. The UQ layer can also **steer** sampling toward the user's cost model before clustering (`feedback.uq.steering`, §14) | `feedback:` (nested `uq:`) | no correction phase |
 | constraints | `FeasibilityConstraint` (`constraints/base.py`) | `RobotIkConstraint` — masks rollouts whose leading frames continuation IK (`track_robot_ik_batch`, never execution's enumerating fallback) cannot place within `max_residual`; also screens feedback playback at push time (drop unreachable frames), step time (hold), and via the closest-approach stall-skip (`playback_stall_steps`) | `constraints:` (named entries, `CONSTRAINT_BUILDERS` registry) | unconstrained |
@@ -503,9 +505,9 @@ When `llm_cost.enabled: true` in the YAML:
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
 | `user`                 | str      | Simulated-user persona name (default `unrestricted`); loaded by `build_run` into `RunSetup.user` for every run |
 | `corrections.*`        | CorrectionConfig | `trigger_threshold` (default 0.02 rad). Restricted users trigger on a new above-threshold episode after returning to comfort; legacy `transfer.trigger_threshold` is accepted as a fallback. |
-| `cartesian.*`          | CartesianConfig | Presence enables the goal space: `goals` (non-empty list; each entry `[x,y,z]` or one of `{box: {low, high}}`, `{sphere: {center, radius}}`, `{features: {<FEATURE_NAME>: [low\|null, high\|null]}}`; parsed by `_parse_goal_region`, plain lists stay lists), `threshold` (slack past the region boundary — metres, radians for `features`; default 0.01) |
+| `cartesian.*`          | CartesianConfig | Presence enables the goal space: `goals` (non-empty list; each entry `[x,y,z]` or one of `{box: {low, high}}`, `{forearm_box: {low, high, elbow?: {low, high}, wrist?: {low, high}}}`, `{sphere: {center, radius}}`, `{features: {<FEATURE_NAME>: [low\|null, high\|null]}}`; parsed by `_parse_goal_region`, plain lists stay lists), `threshold` (slack past the region boundary — metres, radians for `features`; default 0.01) |
 | `costs.*`              | dict     | Named cost terms with their params                   |
-| `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-5.6-luna`; reasoning effort follows the model: `gpt-5.6-luna` → `high`, `gpt-5.6-sol` → `low`; every shipped config uses luna, sol is not used for now), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
+| `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-6-luna`; reasoning effort follows the model: `gpt-6-luna` → `high`, `gpt-5.6-sol` → `low`; every shipped config uses luna, sol is not used for now), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets). Consumed (with `persona_goals`) by the repo-root `evaluation/` benchmarks: `InteractionBenchmark(use_persona_goals=true)` appends them to a persona's goal sequence. Legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
 | `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments. Consumed by the repo-root `evaluation/` benchmarks (`InteractionBenchmark(use_persona_goals=true)` resolves each persona's cartesian + transfer goals into its task's goal sequence); nothing in `src/` applies it. Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
 | `simulated_user.*`     | SimulatedUserConfig | Automated episode settings. `chooser` (`oracle_progress` [default] \| `intent_aligned` \| `progress` \| `random`) selects the candidate-choice model in `simulated_users/chooser.py` — oracle_progress rejects any hidden-bound violation and picks the endpoint nearest the oracle correction's end along its path (ties by alignment); intent-aligned picks the comfortable candidate best aligned with the private `CorrectionIntent`; acceptability = peak playback violation ≤ trigger threshold (any frame past the limit rules the candidate out, the same max-based test the execution trigger uses). The repo-root `evaluation/` episode loop consumes `magnitudes`, `nominal_steps`, and `time_of_day`; `verbalizer`/`seed`/`max_rounds` are superseded there by the benchmark's task fields (verbalizer grid, hydra seed, per-benchmark round cap) and remain unconsumed: `verbalizer` (`vague` \| `everyday` [default] \| `motion_directive` \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20), `time_of_day` (session clock in hours `[0, 24)` seen by time-conditioned personas via `MpcCostContext.time_of_day`; default unset = untimed) |
@@ -721,7 +723,7 @@ Step 3e (optional): Correction-clip dataset over RANDOMLY SAMPLED reaches
         LLM paraphrase augmentation.  Templated lines are true by construction but
         span ~170 phrasings; this keeps them as the ground truth and, once per
         distinct line-set (554 in E500, 1071 in the 1100 set), asks a text-only
-        LLM (`--model gpt-5.6-luna`) for `--n` (12) things a care recipient might say
+        LLM (`--model gpt-6-luna`) for `--n` (12) things a care recipient might say
         to ask for the same change.  Each paraphrase is gated with the builder's
         own `motion_facts.asserted` (no direction claim the sources do not make).
         (Templated builds encode uncaptioned runs since 2026-09-09, so a fresh clip
@@ -1248,6 +1250,16 @@ The hidden bounds are the evaluation ground truth for method-level evaluation
 > all previously used evadable abduction bounds.
 > `HiddenCostTerm.weight` default rose 1.0 → 10.0 so the oracle condition is
 > compliance-first rather than trading small violations for goal progress.
+
+The static `motion_generators/mdm/transfer_{seated,bed}_pose.pt` assets supply the
+seated and supine bodies for `configs/transfer.yaml` and `transfer_bed.yaml`.
+Both use the existing normalized HML263 format, a lowered left arm and a folded
+right arm. The bed pose extends the legs and rotates the body −90° about X.
+The seated pose is reused by five further care configs (first/second sleeve,
+BP/IV access, edema elevation, wheelchair armrest); `wheelchair_armrest.yaml`
+overrides the start with `arm:` so the left arm begins hanging off the side.
+Both are encoded through the official `positions_to_hml263` path; README's
+care-task demo section records construction and run commands.
 
 ## 14. Motion Generator Backends (`motion_generators/`)
 

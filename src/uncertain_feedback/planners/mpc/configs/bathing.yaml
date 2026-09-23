@@ -1,0 +1,20 @@
+# Underarm access: elevate the upper arm at least 75 degrees from the side.
+# Lateral abduction of at least 45 degrees keeps the elbow away from the torso.
+pose: null
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.0025
+
+arm:
+  - [-0.242408, 0.113504, -0.444638]
+  - [0.674113, -0.590372, -0.770453]
+  - [0.014318, -0.357798, 0.301825]
+
+cartesian:
+  goals:
+    - features:
+        shoulder_elevation: [1.308996939, null]
+        shoulder_abduction_adduction: [0.785398163, null]
+  threshold: 0.001

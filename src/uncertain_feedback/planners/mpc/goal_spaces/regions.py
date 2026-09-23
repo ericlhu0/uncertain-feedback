@@ -18,6 +18,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     ArmFeatureContext,
     arm_feature_series,
 )
+from uncertain_feedback.planners.mpc.kinematics import ELBOW_CHAIN_IDX
 
 _CIRCLE_POINTS = 33
 
@@ -100,6 +101,42 @@ class BoxRegion(GoalRegion):
 
 
 @dataclass(frozen=True)
+class ForearmBoxRegion(BoxRegion):
+    """Contain the forearm, optionally restricting either endpoint to a smaller box."""
+
+    wrist: BoxRegion | None = None
+    elbow: BoxRegion | None = None
+
+    def distance(
+        self, wrist_rel: np.ndarray, arm_aa: np.ndarray, context: ArmFeatureContext
+    ) -> np.ndarray:
+        chain = context.fk.fk_batch(arm_aa, context.spine3_pos, context.spine3_aa)
+        elbow_rel = chain[:, ELBOW_CHAIN_IDX] - context.spine3_pos
+        elbow_distance = super().distance(elbow_rel, arm_aa, context)
+        wrist_distance = super().distance(wrist_rel, arm_aa, context)
+        distance = np.hypot(elbow_distance, wrist_distance)
+        if self.wrist is not None:
+            distance = np.hypot(
+                distance, self.wrist.distance(wrist_rel, arm_aa, context)
+            )
+        if self.elbow is not None:
+            distance = np.hypot(
+                distance, self.elbow.distance(elbow_rel, arm_aa, context)
+            )
+        return distance
+
+    def marker(self) -> np.ndarray:
+        return super().marker() if self.wrist is None else self.wrist.marker()
+
+    def outline(self) -> list[np.ndarray]:
+        lines = super().outline()
+        for box in (self.wrist, self.elbow):
+            if box is not None:
+                lines += box.outline()
+        return lines
+
+
+@dataclass(frozen=True)
 class SphereRegion(GoalRegion):
     """A ball of wrist positions around ``center``."""
 
@@ -172,6 +209,7 @@ __all__ = [
     "GoalRegion",
     "PointRegion",
     "BoxRegion",
+    "ForearmBoxRegion",
     "SphereRegion",
     "FeatureRegion",
     "as_goal_region",

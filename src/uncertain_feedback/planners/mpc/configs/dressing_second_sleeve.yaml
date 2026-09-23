@@ -1,0 +1,16 @@
+# Dressing, second sleeve: reach the left hand back into an armhole draped behind the hip.
+# Needs shoulder extension; the wrist may pass either beside or behind the torso.
+# Upright SMPL frame: +x left, +y up, +z forward.
+pose: src/uncertain_feedback/motion_generators/mdm/transfer_seated_pose.pt
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.0025
+
+cartesian:
+  goals:
+    - box:
+        low: [0.10, -0.40, -0.40]
+        high: [0.45, -0.05, -0.15]
+  threshold: 0.001

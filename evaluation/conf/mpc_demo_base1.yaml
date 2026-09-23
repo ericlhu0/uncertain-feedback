@@ -53,7 +53,7 @@ simulated_user:
 
 llm_cost:
   enabled: true
-  model: gpt-5.6-luna
+  model: gpt-6-luna
   strict: false
   artifact_dir: llm_cost_artifacts
   use_images: true

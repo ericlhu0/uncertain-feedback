@@ -1,0 +1,16 @@
+# Seated edema elevation: raise the left hand above heart height, in front or to the side.
+# The upper bound stays below overhead; elbow height is free.
+# Upright SMPL frame: +x left, +y up, +z forward.
+pose: src/uncertain_feedback/motion_generators/mdm/transfer_seated_pose.pt
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.0025
+
+cartesian:
+  goals:
+    - box:
+        low: [-0.05, 0.10, 0.05]
+        high: [0.60, 0.40, 0.55]
+  threshold: 0.001

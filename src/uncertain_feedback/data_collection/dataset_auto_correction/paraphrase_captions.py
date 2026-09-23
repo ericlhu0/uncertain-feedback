@@ -149,7 +149,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", maxsplit=1)[0])
     parser.add_argument("--src", type=Path, required=True, help="built dataset dir")
     parser.add_argument("--out", type=Path, required=True, help="new dataset dir")
-    parser.add_argument("--model", default="gpt-5.6-luna")
+    parser.add_argument("--model", default="gpt-6-luna")
     parser.add_argument("--n", type=int, default=12, help="paraphrases per line-set")
     parser.add_argument("--workers", type=int, default=16)
     args = parser.parse_args()

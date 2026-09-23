@@ -30,6 +30,7 @@ from uncertain_feedback.planners.mpc.goal_spaces import (
     BoxRegion,
     CartesianConfig,
     FeatureRegion,
+    ForearmBoxRegion,
     GoalRegion,
     SphereRegion,
 )
@@ -270,19 +271,40 @@ def _parse_goal_region(value: Any, name: str) -> list[float] | GoalRegion:
     if isinstance(value, list):
         return list(_point(value, name))
     region = _mapping(value, name)
-    if len(region) != 1 or next(iter(region)) not in ("box", "sphere", "features"):
+    if len(region) != 1 or next(iter(region)) not in (
+        "box",
+        "forearm_box",
+        "sphere",
+        "features",
+    ):
         raise ValueError(
             f"{name} must be a 3-number list or a mapping with exactly one of "
-            "'box', 'sphere', 'features'."
+            "'box', 'forearm_box', 'sphere', 'features'."
         )
     kind, params = next(iter(region.items()))
-    if kind == "box":
-        params = _mapping(params, f"{name}.box")
-        low = _point(params.get("low"), f"{name}.box.low")
-        high = _point(params.get("high"), f"{name}.box.high")
+    if kind in ("box", "forearm_box"):
+        params = _mapping(params, f"{name}.{kind}")
+        low = _point(params.get("low"), f"{name}.{kind}.low")
+        high = _point(params.get("high"), f"{name}.{kind}.high")
         if any(lo >= hi for lo, hi in zip(low, high)):
-            raise ValueError(f"{name}.box.low must be below high on every axis.")
-        return BoxRegion(low=low, high=high)
+            raise ValueError(f"{name}.{kind}.low must be below high on every axis.")
+        if kind == "box":
+            return BoxRegion(low=low, high=high)
+        wrist: BoxRegion | None = None
+        if "wrist" in params:
+            wrist_region = _parse_goal_region(
+                {"box": params["wrist"]}, f"{name}.forearm_box.wrist"
+            )
+            assert isinstance(wrist_region, BoxRegion)
+            wrist = wrist_region
+        elbow: BoxRegion | None = None
+        if "elbow" in params:
+            elbow_region = _parse_goal_region(
+                {"box": params["elbow"]}, f"{name}.forearm_box.elbow"
+            )
+            assert isinstance(elbow_region, BoxRegion)
+            elbow = elbow_region
+        return ForearmBoxRegion(low=low, high=high, wrist=wrist, elbow=elbow)
     if kind == "sphere":
         params = _mapping(params, f"{name}.sphere")
         radius = _float(params.get("radius"), f"{name}.sphere.radius")

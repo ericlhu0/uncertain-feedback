@@ -22,10 +22,18 @@ import yaml
 from uncertain_feedback.consts import MDM_START_POSE_PATH
 from uncertain_feedback.motion_generators.steering import SteeringConfig
 from uncertain_feedback.planners.mpc.action_spaces import RobotActionsConfig
+from uncertain_feedback.planners.mpc.arm_features import FEATURE_NAMES
 from uncertain_feedback.planners.mpc.constraints import CONSTRAINT_BUILDERS
 from uncertain_feedback.planners.mpc.costs import available_cost_names
 from uncertain_feedback.planners.mpc.feedback import FeedbackConfig
-from uncertain_feedback.planners.mpc.goal_spaces import CartesianConfig
+from uncertain_feedback.planners.mpc.goal_spaces import (
+    BoxRegion,
+    CartesianConfig,
+    FeatureRegion,
+    ForearmBoxRegion,
+    GoalRegion,
+    SphereRegion,
+)
 from uncertain_feedback.simulated_users.base import HiddenBound
 from uncertain_feedback.uncertainty.uq_selector import UqConfig
 
@@ -252,6 +260,78 @@ def _goal_list(value: Any, name: str) -> list[list[float]]:
     return goals
 
 
+def _point(value: Any, name: str) -> tuple[float, float, float]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError(f"{name} must be a 3-number list.")
+    x, y, z = (_float(v, name) for v in value)
+    return (x, y, z)
+
+
+def _parse_goal_region(value: Any, name: str) -> list[float] | GoalRegion:
+    if isinstance(value, list):
+        return list(_point(value, name))
+    region = _mapping(value, name)
+    if len(region) != 1 or next(iter(region)) not in (
+        "box",
+        "forearm_box",
+        "sphere",
+        "features",
+    ):
+        raise ValueError(
+            f"{name} must be a 3-number list or a mapping with exactly one of "
+            "'box', 'forearm_box', 'sphere', 'features'."
+        )
+    kind, params = next(iter(region.items()))
+    if kind in ("box", "forearm_box"):
+        params = _mapping(params, f"{name}.{kind}")
+        low = _point(params.get("low"), f"{name}.{kind}.low")
+        high = _point(params.get("high"), f"{name}.{kind}.high")
+        if any(lo >= hi for lo, hi in zip(low, high)):
+            raise ValueError(f"{name}.{kind}.low must be below high on every axis.")
+        if kind == "box":
+            return BoxRegion(low=low, high=high)
+        wrist: BoxRegion | None = None
+        if "wrist" in params:
+            wrist_region = _parse_goal_region(
+                {"box": params["wrist"]}, f"{name}.forearm_box.wrist"
+            )
+            assert isinstance(wrist_region, BoxRegion)
+            wrist = wrist_region
+        elbow: BoxRegion | None = None
+        if "elbow" in params:
+            elbow_region = _parse_goal_region(
+                {"box": params["elbow"]}, f"{name}.forearm_box.elbow"
+            )
+            assert isinstance(elbow_region, BoxRegion)
+            elbow = elbow_region
+        return ForearmBoxRegion(low=low, high=high, wrist=wrist, elbow=elbow)
+    if kind == "sphere":
+        params = _mapping(params, f"{name}.sphere")
+        radius = _float(params.get("radius"), f"{name}.sphere.radius")
+        if radius <= 0.0:
+            raise ValueError(f"{name}.sphere.radius must be positive.")
+        return SphereRegion(
+            center=_point(params.get("center"), f"{name}.sphere.center"), radius=radius
+        )
+    bounds: dict[str, tuple[float | None, float | None]] = {}
+    for feature, limits in _mapping(params, f"{name}.features").items():
+        if feature not in FEATURE_NAMES:
+            raise ValueError(
+                f"{name}.features keys must be in {list(FEATURE_NAMES)}; got {feature!r}."
+            )
+        if not isinstance(limits, list) or len(limits) != 2:
+            raise ValueError(f"{name}.features.{feature} must be a [low, high] list.")
+        limit_name = f"{name}.features.{feature}"
+        lower = None if limits[0] is None else _float(limits[0], limit_name)
+        upper = None if limits[1] is None else _float(limits[1], limit_name)
+        if lower is None and upper is None:
+            raise ValueError(f"{limit_name} needs at least one bound.")
+        bounds[feature] = (lower, upper)
+    if not bounds:
+        raise ValueError(f"{name}.features must be non-empty.")
+    return FeatureRegion(bounds=bounds)
+
+
 def _str_list(value: Any, name: str) -> list[str]:
     if not isinstance(value, list):
         raise ValueError(f"{name} must be a list of strings.")
@@ -417,13 +497,19 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     cartesian: CartesianConfig | None = None
     if "cartesian" in data:
         cartesian_data = _mapping(data["cartesian"], "cartesian")
-        goals = _goal_list(cartesian_data.get("goals", []), "cartesian.goals")
+        goals_data = cartesian_data.get("goals", [])
+        if not isinstance(goals_data, list):
+            raise ValueError("cartesian.goals must be a list.")
+        goals = [
+            _parse_goal_region(goal, f"cartesian.goals[{idx}]")
+            for idx, goal in enumerate(goals_data)
+        ]
         if not goals:
             raise ValueError("cartesian.goals must be non-empty.")
         cartesian = CartesianConfig(
             goals=goals,
             threshold=_float(
-                cartesian_data.get("threshold", 0.05), "cartesian.threshold"
+                cartesian_data.get("threshold", 0.01), "cartesian.threshold"
             ),
         )
 

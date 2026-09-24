@@ -1,0 +1,19 @@
+# Assisted chair-to-chair transfer preparation: gather the left forearm over the torso.
+# A central wrist region permits different elbow bends without requiring midline crossing.
+# Upright SMPL frame: +x left, +y up, +z forward.
+pose: src/uncertain_feedback/motion_generators/mdm/transfer_seated_pose.pt
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.0025
+
+cartesian:
+  goals:
+    - forearm_box:
+        low: [-0.20, -0.32, 0.06]
+        high: [0.30, 0.16, 0.18]
+        wrist:
+          low: [-0.18, -0.25, 0.08]
+          high: [0.10, 0.14, 0.18]
+  threshold: 0.001

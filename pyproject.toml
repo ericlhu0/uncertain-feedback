@@ -92,6 +92,9 @@ force-exclude = '''
     motion-diffusion-model
   | sam-3d-body
   | MHR
+  | outputs
+  | multirun
+  | \.claude
 )/
 '''
 
@@ -110,6 +113,9 @@ skip_glob = [
     "*/motion-diffusion-model/*",
     "*/sam-3d-body/*",
     "*/MHR/*",
+    "outputs/*",
+    "multirun/*",
+    ".claude/*",
 ]
 split_on_trailing_comma = true
 
@@ -117,9 +123,18 @@ split_on_trailing_comma = true
 strict_equality = true
 disallow_untyped_calls = true
 warn_unreachable = true
+# Command-line --exclude flags replace this list, so every exclusion lives here
+# and CI runs a bare `mypy .`.
 exclude = [
     "venv/*",
     "build/",
+    "outputs/",
+    "multirun/",
+    ".claude/",
+    "evaluation_analysis/",
+    "src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/",
+    "src/uncertain_feedback/data_collection/sam-3d-body/",
+    "src/uncertain_feedback/data_collection/MHR/",
     "demo_runner_artifacts/",
     "demo_designer_artifacts/",
     "llm_cost_artifacts/",
@@ -147,6 +162,7 @@ module = [
     "tqdm.*",
     "pybullet",
     "pyrender",
+    "imageio_ffmpeg",
     # ZMQ-client dep whose checkout is absent on non-rig hosts.
     "emprise_gen3_controller",
     "emprise_gen3_controller.*",

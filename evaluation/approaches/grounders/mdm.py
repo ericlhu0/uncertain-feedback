@@ -60,8 +60,8 @@ class MdmGrounder(Grounder):
         uq = replace(uq, steering=replace(uq.steering, mode=self.steering.mode))
         self._uq_cfg = uq
         assert rig.gen is not None
-        self._steering_spec = self.steering.spec(
-            rig.gen, user, uq.steering, seed=seed
+        self._steering_spec = (  # pylint: disable=assignment-from-none
+            self.steering.spec(rig.gen, user, uq.steering, seed=seed)
         )
 
     def ground(
@@ -76,6 +76,8 @@ class MdmGrounder(Grounder):
         assert rig.gen is not None and rig.initial_hml_pose is not None
         assert self._uq_cfg is not None
         uq = self._uq_cfg
+        feedback = rig.cfg.feedback
+        assert feedback is not None
         clusterer = make_clusterer(uq.clusterer, uq.n_clusters, fk=rig.fk)
         selector = UqSelector(uq, rig.fk, clusterer=clusterer)
         start_pose = rig.gen.build_pose_from_arm_aa(
@@ -86,7 +88,7 @@ class MdmGrounder(Grounder):
             text,
             start_pose=start_pose,
             current_q=q_feedback,
-            mdm_frames=rig.cfg.feedback.frames if rig.cfg.feedback else None,
+            mdm_frames=feedback.frames,
             default_scale=uq.scale,
             cluster_selector=cluster_selector,
             spine3_pos=rig.spine3_pos,
@@ -95,7 +97,7 @@ class MdmGrounder(Grounder):
             steering=self._steering_spec,
         )
         candidates = result.cluster_means
-        if rig.cfg.feedback.anchor_correction:
+        if feedback.anchor_correction:
             # The same re-anchoring production applies (planners/run.py): drop
             # the echoed prefix frame and start the demonstrated shape at the
             # live configuration, so no candidate carries the frame-0 seam.

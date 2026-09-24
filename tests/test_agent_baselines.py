@@ -207,5 +207,5 @@ def test_agent_waypoint_episode_smoke(tmp_path: Path) -> None:
     )
 
     assert (episode_dir / "episode_summary.json").exists()
-    assert result["summary"]["goal_results"], "episode recorded no goal results"
-    assert result["rows"][0]["n_candidates"] == 4
+    assert result, "episode recorded no interactions"
+    assert len(result[0].rounds[0].grounding.candidates) == 4

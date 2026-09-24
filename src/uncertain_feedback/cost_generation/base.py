@@ -50,9 +50,9 @@ _SYSTEM_PROMPT = (
     "You generate safe, vectorized Python MPC trajectory cost functions. "
     "Return only the requested JSON object."
 )
-_DEFAULT_LLM_MODEL = "gpt-5.6-luna"
+_DEFAULT_LLM_MODEL = "gpt-6-luna"
 # Reasoning effort per model; a model absent here is sent without one.
-_REASONING_EFFORT = {"gpt-5.6-luna": "high", "gpt-5.6-sol": "low"}
+_REASONING_EFFORT = {"gpt-6-luna": "high", "gpt-5.6-sol": "low"}
 
 
 def _make_llm_model(model_name: str) -> Any:

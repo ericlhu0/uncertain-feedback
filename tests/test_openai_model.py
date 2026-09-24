@@ -70,7 +70,7 @@ def test_gpt5_full_output_uses_responses_api_with_max_output_tokens(tmp_path) ->
 def test_responses_api_includes_reasoning_effort() -> None:
     responses = _FakeResponses()
     model = _model(
-        "gpt-5.6-luna",
+        "gpt-6-luna",
         SimpleNamespace(responses=responses),
         reasoning_effort="xhigh",
     )
@@ -99,7 +99,7 @@ def test_responses_api_streams_reasoning_summary(capsys) -> None:
     )
     responses = _FakeResponses(events)
     model = _model(
-        "gpt-5.6-luna",
+        "gpt-6-luna",
         SimpleNamespace(responses=responses),
         reasoning_effort="xhigh",
         stream_reasoning_summary=True,

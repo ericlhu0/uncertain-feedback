@@ -95,6 +95,14 @@ def _stage_costs(mpc: ArmMPC, q_trajs: np.ndarray) -> np.ndarray:
     return mpc._goal_space.stage_cost(mpc._extra_costs)(batch)
 
 
+def _goal_marker(mpc: ArmMPC) -> np.ndarray:
+    goal = mpc.current_cartesian_goal
+    assert goal is not None
+    marker = goal.marker()
+    assert marker is not None
+    return marker
+
+
 def _playback(mpc: ArmMPC) -> MdmFeedback:
     assert mpc._feedback is not None
     return mpc._feedback
@@ -151,17 +159,13 @@ class _FakePositionClusterer(TrajectoryClusterer):
     """Cluster all fake position samples into one group."""
 
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
-        """Unused — this double overrides ``cluster``/``cluster_positions``."""
-        raise AssertionError("fake clusterer does not use the feature template")
+        raise AssertionError("position test should cluster positions")
 
-    def cluster(self, trajectories: np.ndarray) -> np.ndarray:
-        """Unused trajectory clustering path."""
-        _ = trajectories
-        raise AssertionError("position test should call cluster_positions")
+    def _positions_to_features(self, positions: np.ndarray) -> np.ndarray:
+        return positions.reshape(positions.shape[0], -1)
 
-    def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
-        """Assign all position samples to cluster 0."""
-        assert positions.shape[0] == 2
+    def _fit_predict(self, features: np.ndarray) -> np.ndarray:
+        assert features.shape[0] == 2
         return np.zeros(2, dtype=np.intp)
 
 
@@ -169,11 +173,10 @@ class _TwoTrajectoryClusterer(TrajectoryClusterer):
     """Split four fake trajectory samples into two deterministic clusters."""
 
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
-        """Unused — this double overrides ``cluster`` with fixed labels."""
-        raise AssertionError("fake clusterer does not use the feature template")
+        return trajectories.reshape(trajectories.shape[0], -1)
 
-    def cluster(self, trajectories: np.ndarray) -> np.ndarray:
-        assert trajectories.shape[0] == 4
+    def _fit_predict(self, features: np.ndarray) -> np.ndarray:
+        assert features.shape[0] == 4
         return np.array([0, 0, 1, 1], dtype=np.intp)
 
 
@@ -1135,14 +1138,13 @@ def test_cartesian_goal_is_not_relative_to_mdm_endpoint() -> None:
         feedback=FeedbackConfig(),
     )
 
-    target_world_before = mpc._spine3_pos + mpc.current_cartesian_goal  # type: ignore[operator]
+    marker_before = _goal_marker(mpc)
     mdm_endpoint = np.zeros((3, 3), dtype=np.float64)
     mdm_endpoint[0, 1] = 1.0
     mpc.set_mdm_goal(fk.arm_aa_to_q(mdm_endpoint, spine3_aa))
     mpc.push_trajectory(np.stack([np.zeros((3, 3)), mdm_endpoint]))
-    target_world_after = mpc._spine3_pos + mpc.current_cartesian_goal  # type: ignore[operator]
 
-    np.testing.assert_allclose(target_world_after, target_world_before)
+    np.testing.assert_allclose(_goal_marker(mpc), marker_before)
     wrist_rel = fk.fk(np.zeros((3, 3)), spine3_pos, spine3_aa)[-1] - spine3_pos
     expected_cost = ((wrist_rel - cartesian_goal) ** 2).sum()
     np.testing.assert_allclose(_stage_costs(mpc, q_trajs), [expected_cost])
@@ -1253,8 +1255,9 @@ def test_cartesian_mpc_visualizer_hides_joint_target_and_sets_cartesian_target(
         def update_trajectory_preview(self, preview_q):
             self.preview_q = preview_q
 
-        def update_cartesian_target(self, world_pos):
-            self.cartesian_targets.append(np.asarray(world_pos, dtype=np.float64))
+        def update_goal_region(self, marker_world, outlines_world):
+            del outlines_world
+            self.cartesian_targets.append(np.asarray(marker_world, dtype=np.float64))
 
         def update_step(self, q, dist, color=TARGET_COLOR):
             del q, dist
@@ -1516,7 +1519,7 @@ def test_uq_position_path_converts_selected_mean_with_fixed_mpc_base() -> None:
     np.testing.assert_allclose(uq_frames[0], fk.arm_aa_to_q(trajectory[0], spine3_aa))
 
 
-def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
+def test_uq_result_contains_all_cluster_medoid_trajectories() -> None:
     trajectories = np.zeros((4, 3, 3, 3), dtype=np.float64)
     trajectories[0] = 0.0
     trajectories[1] = 0.2
@@ -1539,12 +1542,12 @@ def test_uq_result_contains_all_cluster_mean_trajectories() -> None:
     assert result is not None
     assert result.chosen_label == 1
     assert sorted(result.cluster_means) == [0, 1]
-    np.testing.assert_allclose(result.cluster_means[0], np.full((3, 3, 3), 0.1))
-    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
+    np.testing.assert_allclose(result.cluster_means[0], np.full((3, 3, 3), 0.0))
+    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.0))
     np.testing.assert_allclose(chosen, result.chosen_mean)
 
 
-def test_uq_axis_angle_picker_uses_refined_subset_mean(monkeypatch) -> None:
+def test_uq_axis_angle_picker_uses_refined_subset_medoid(monkeypatch) -> None:
     trajectories = np.zeros((4, 3, 3, 3), dtype=np.float64)
     trajectories[0] = 0.0
     trajectories[1] = 0.2
@@ -1573,18 +1576,21 @@ def test_uq_axis_angle_picker_uses_refined_subset_mean(monkeypatch) -> None:
     assert result.chosen_label == 0
     np.testing.assert_allclose(chosen, np.full((3, 3, 3), 0.2))
     np.testing.assert_allclose(result.cluster_means[0], chosen)
-    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
+    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.0))
 
 
-def test_uq_position_picker_uses_refined_subset_mean(monkeypatch) -> None:
+def test_uq_position_picker_uses_refined_subset_medoid(monkeypatch) -> None:
     class TwoPositionClusterer(TrajectoryClusterer):
         """Clusterer splitting samples into two fixed position groups."""
 
         def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
             raise AssertionError("position path does not use axis-angle features")
 
-        def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
-            assert positions.shape[0] == 4
+        def _positions_to_features(self, positions: np.ndarray) -> np.ndarray:
+            return positions.reshape(positions.shape[0], -1)
+
+        def _fit_predict(self, features: np.ndarray) -> np.ndarray:
+            assert features.shape[0] == 4
             return np.array([0, 0, 1, 1], dtype=np.intp)
 
     class PositionGenerator:
@@ -1627,7 +1633,7 @@ def test_uq_position_picker_uses_refined_subset_mean(monkeypatch) -> None:
     assert result is not None
     np.testing.assert_allclose(chosen, np.full((3, 3, 3), 0.2))
     np.testing.assert_allclose(result.cluster_means[0], chosen)
-    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.1))
+    np.testing.assert_allclose(result.cluster_means[1], np.full((3, 3, 3), 1.0))
 
 
 def test_hidden_joint_limits_accept_canonical_arm_q() -> None:

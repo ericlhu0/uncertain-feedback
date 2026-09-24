@@ -1,0 +1,16 @@
+# Dressing, first sleeve: bring the left hand out to where a caregiver holds the sleeve opening.
+# Only the wrist is constrained, so elbow extension and shoulder abduction can trade off.
+# Upright SMPL frame: +x left, +y up, +z forward.
+pose: src/uncertain_feedback/motion_generators/mdm/transfer_seated_pose.pt
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.0025
+
+cartesian:
+  goals:
+    - box:
+        low: [0.38, -0.30, -0.10]
+        high: [0.70, 0.00, 0.40]
+  threshold: 0.001

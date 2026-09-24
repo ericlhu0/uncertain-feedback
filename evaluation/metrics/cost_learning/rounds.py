@@ -72,4 +72,3 @@ def round_rows(interaction: Interaction) -> list[dict[str, Any]]:
             }
         )
     return rows
-

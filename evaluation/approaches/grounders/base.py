@@ -30,6 +30,14 @@ LANDMARKS = tuple(
 )
 
 
+def required_llm_model(rig: PlanningRig) -> str:
+    """The planner yaml's ``llm_cost.model``, which LLM-backed grounders need."""
+    model = rig.cfg.llm_cost.model
+    if model is None:
+        raise ValueError("LLM grounders need llm_cost.model in the planner yaml.")
+    return model
+
+
 class Grounder(abc.ABC):
     """One grounding mechanism: language to candidate motions to selection."""
 

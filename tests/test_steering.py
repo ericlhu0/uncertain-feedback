@@ -385,13 +385,13 @@ class _SteeringCaptureGenerator:
 
 class _OneClusterer(TrajectoryClusterer):
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:
-        raise AssertionError("unused")
+        raise AssertionError("position path should cluster positions")
 
-    def cluster(self, trajectories: np.ndarray) -> np.ndarray:
-        raise AssertionError("position path should call cluster_positions")
+    def _positions_to_features(self, positions: np.ndarray) -> np.ndarray:
+        return positions.reshape(positions.shape[0], -1)
 
-    def cluster_positions(self, positions: np.ndarray) -> np.ndarray:
-        return np.zeros(positions.shape[0], dtype=np.intp)
+    def _fit_predict(self, features: np.ndarray) -> np.ndarray:
+        return np.zeros(features.shape[0], dtype=np.intp)
 
 
 def test_query_mdm_with_uncertainty_forwards_the_steering_spec() -> None:

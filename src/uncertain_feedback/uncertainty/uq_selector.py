@@ -204,7 +204,6 @@ class UqSelector:
         print(f"[timing] clustering total: {time.perf_counter() - cluster_t0:.3f}s")
         print(f"labels shape: {labels.shape}")
 
-        root_features = self._clusterer.features
         cluster_means: dict[int, np.ndarray] = {}
         for label, medoid in sorted(self._clusterer.medoid_indices(labels).items()):
             if positions is not None:
@@ -236,6 +235,7 @@ class UqSelector:
             )
         else:
             fk = self._fk
+            root_features = self._clusterer.features
             spine_pos = (
                 np.asarray(spine3_pos, dtype=np.float64)
                 if spine3_pos is not None

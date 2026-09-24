@@ -32,6 +32,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedPythonCost,
     build_generated_cost_context,
 )
+from uncertain_feedback.planners.mpc.goal_spaces import goal_point
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 
 if TYPE_CHECKING:
@@ -65,11 +66,12 @@ class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
             max_angle_delta=cfg.max_angle_delta,
             seed=cfg.seed,
             cartesian_goals=tuple(
-                (float(goal[0]), float(goal[1]), float(goal[2]))
+                (float(point[0]), float(point[1]), float(point[2]))
                 for goal in (cfg.cartesian.goals if cfg.cartesian is not None else ())
+                if (point := goal_point(goal)) is not None
             ),
             cartesian_threshold=(
-                cfg.cartesian.threshold if cfg.cartesian is not None else 0.05
+                cfg.cartesian.threshold if cfg.cartesian is not None else 0.01
             ),
             has_constraints=bool(cfg.constraints),
         )

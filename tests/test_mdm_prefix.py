@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
-torch = pytest.importorskip("torch")
-
-from uncertain_feedback.motion_generators.mdm.mdm_api import (  # noqa: E402  pylint: disable=wrong-import-position
+from uncertain_feedback.motion_generators.mdm.mdm_api import (
     _MAX_FRAMES,
     N_PREFIX_FRAMES,
     _resolve_total_frames,
@@ -27,7 +26,7 @@ _N_FRAMES = 12
 _N_SAMPLES = 3
 
 
-def _prefix(k: int) -> "torch.Tensor":
+def _prefix(k: int) -> torch.Tensor:
     """(k, 263) prefix whose frame i is filled with the value i + 1."""
     return torch.arange(1, k + 1, dtype=torch.float32).unsqueeze(-1).repeat(1, 263)
 

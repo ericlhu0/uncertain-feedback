@@ -3,13 +3,22 @@
 ## Getting Started
 Clone https://github.com/GuyTevet/motion-diffusion-model as `src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model` and download the [required weights](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#mdm-is-now-40x-faster--04-secsample), [data](https://github.com/GuyTevet/motion-diffusion-model?tab=readme-ov-file#2-get-data) and [SMPL model](https://github.com/GuyTevet/motion-diffusion-model/blob/main/prepare/download_smpl_files.sh)
 
-On hosts with shared storage, `motion-diffusion-model/save` is a **symlink** to
-`consts.DATA_DIR / "mdm_save"` (`/share/bhattacharjee/eric_data/mdm_save` on
-`bhattacharjee-compute-02`) so every checkpoint — the stock
-`humanml_enc_512_50steps/` and all fine-tunes — lives on NFS rather than in the
-submodule. Every `./save/...` path below resolves through it unchanged; a
-fine-tune writes ~6 GB there, so check `df` before starting one, and never
-delete an existing run directory under it.
+`motion-diffusion-model/save` is a **symlink** to `consts.DATA_DIR / "mdm_save"`
+so every checkpoint — the stock `humanml_enc_512_50steps/` and all fine-tunes —
+lives outside the submodule. Every `./save/...` path below resolves through it
+unchanged; a fine-tune writes ~6 GB there, so check `df` before starting one,
+and never delete an existing run directory under it.
+
+`consts.DATA_DIR` is host-specific and both it and the symlink must be repointed
+when the repo moves to a new machine:
+
+- `bhattacharjee-compute-02` (NFS): `/share/bhattacharjee/eric_data`
+- current workstation: `<repo parent>/data`, i.e. `DATA_DIR = PROJECT_ROOT.parent.parent.parent / "data"`
+
+```
+ln -sfn "$(uv run python -c 'from uncertain_feedback import consts; print(consts.DATA_DIR / "mdm_save")')" \
+  src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/save
+```
 
 ### Kinova Gen3 URDF
 
@@ -649,7 +658,7 @@ fine-tune on it isolates language coverage. Completions cache in `<out>/paraphra
 uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/paraphrase_captions.py \
     --src src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_elbow500_templated \
     --out src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_elbow500_paraphrased \
-    --n 12   # --model gpt-5.6-luna, --workers 16 by default; ~1 min per 500 line-sets
+    --n 12   # --model gpt-6-luna, --workers 16 by default; ~1 min per 500 line-sets
 ```
 `correction_elbow500_paraphrased` (2026-09-09): 554 line-sets drafted, 16214 of 17988
 paraphrases kept (90%), **3250 unique lines** against the templated set's 157, on the same
@@ -770,9 +779,20 @@ arc progress, alignment and acceptable rate; lower for violation. Analysis scrip
 | `elbow500_templated_lr1e5_12k_local` (control) | 1499 | 157 | 0.322 ± 0.111 | — | 0.220 ± 0.048 | — | 0.009 | 0.83 | 0.737 |
 | `elbow500_paraphrased_lr1e5_12k` | 1499 | 3250 | 0.455 ± 0.090 | +0.13 ± 0.09 | 0.280 ± 0.051 | +0.06 ± 0.06 | 0.009 | 0.76 | 0.723 |
 | `elbow500_paraphrased_lr1e5_48k` (4x steps) | 1499 | 3310 | 0.434 ± 0.104 | +0.11 ± 0.15 | 0.333 ± 0.052 | +0.11 ± 0.07 | 0.011 | 0.76 | 0.716 |
-| **`auto1100_paraphrased_lr1e5_26k` (DEPLOYED 2026-09-09)** | 3299 | 5257 | 0.511 ± 0.068 | +0.19 ± 0.12 | **0.390 ± 0.047** | **+0.17 ± 0.06** | **0.007** | **0.84** | **0.765** |
+| `auto1100_paraphrased_lr1e5_26k` (deployed 2026-09-09 to 2026-09-16) | 3299 | 5257 | 0.511 ± 0.068 | +0.19 ± 0.12 | 0.390 ± 0.047 | +0.17 ± 0.06 | **0.007** | **0.84** | **0.765** |
+| **`auto1100_vlm_lr1e5_26k/model000765000.pt` (15k steps; DEPLOYED 2026-09-16)** | 3300 | 2729 | 0.609 ± 0.066 | +0.10 ± 0.09 | **0.432 ± 0.041** | +0.04 ± 0.06 | 0.011 | 0.74 | 0.737 |
 | `elbow1000_paraphrased_lr1e5_24000` | 2995 | 4241 | **0.619 ± 0.072** | **+0.30 ± 0.10** | 0.285 ± 0.041 | +0.06 ± 0.06 | 0.012 | 0.78 | 0.702 |
 | `elbow2000_paraphrased_lr1e5_48000` | 5994 | 5374 | 0.589 ± 0.085 | +0.27 ± 0.10 | 0.320 ± 0.048 | +0.10 ± 0.07 | 0.022 | 0.63 | 0.657 |
+
+**Pure-VLM control (2026-09-15).** The same 1100 clips recaptioned by `autolabel.py --n_captions 5`
+(stock prompt, no fact filter, no augmentation; clip-set copies `clips_*_vlm`, dataset
+`correction_auto1100_vlm`, same fine-tune recipe, checkpoints every 5000 steps evaluated on the same
+80 cases in `outputs/vlm_dataset_20260915/grounding_auto1100_vlm*`). Alignment peaks at 15k steps
+(0.43) and then oscillates (0.28 / 0.33 / 0.35 at 20k / 25k / 26.5k); "hand down" utterances and
+upper bounds on abduction, elevation and elbow flexion are where it trails the paraphrased text, and
+acceptable rate never reaches the paraphrased run's 0.84. The 15k checkpoint was deployed 2026-09-16 as the
+first checkpoint to match the paraphrased run on alignment; the paraphrased-vs-VLM caption question is
+one seed each and not settled.
 
 Reading: (1) **paraphrasing the templated text helps on identical motions** — every
 `*_paraphrased` row beats the templated control on arc progress and alignment, and the 1100-set
@@ -1150,7 +1170,7 @@ presence of top-level YAML sections, one per module slot:
 
 | Section | Module | Absent means |
 |---|---|---|
-| `cartesian:` | Cartesian wrist-goal space (`goals`, `threshold`) | no goal phase (hold after feedback) |
+| `cartesian:` | goal space: a queue of goal regions (`goals`, `threshold`). Each entry is a spine3-relative wrist point `[x, y, z]` or a region mapping — `{box: {low, high}}`, `{forearm_box: {low, high, elbow: {low, high}, wrist: {low, high}}}` (both endpoints in the outer box; endpoint boxes optional), `{sphere: {center, radius}}` or `{features: {<feature>: [low, high]}}` over the five anatomical features (radians, `null` for one-sided). The goal cost is the squared distance to the region, zero inside, so inside a region only the comfort costs decide where the arm settles. `threshold` pads the region boundary in its own units (metres, or radians for `features`; default 0.01 — the region itself carries the tolerance, so the pad is only numerical slack) | no goal phase (hold after feedback) |
 | `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`). `clusterer` defaults to `agglo_end_pose` and is resolved by `run.py`, the demo runner, and the evaluation approaches alike — runs from before that wiring used `XyzPositionClusterer` (KMeans) regardless of the key | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
@@ -1934,9 +1954,109 @@ feedback:
 
 cartesian:
   goals:
-    - [0.3, 0.5, 0.0]
-  threshold: 0.05
+    - [0.3, 0.5, 0.0]                                   # a wrist point
+    - box: {low: [0.2, 0.4, -0.1], high: [0.4, 0.6, 0.1]}
+    - sphere: {center: [0.3, 0.5, 0.0], radius: 0.08}
+    - features: {elbow_flexion: [1.0, 1.6], shoulder_abduction_adduction: [null, 0.5]}
+  threshold: 0.01
 ```
+
+Goals are worked through in order; a region counts as reached as soon as the
+terminal state is inside it (plus `threshold`). `configs/plain_box.yaml` is the
+plain goal-seeking baseline with a box goal:
+```
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/plain_box.yaml --save box.mp4
+```
+
+### Care-task goal-region demos
+
+These left-arm simulation presets start with the arm lowered and bent (the
+armrest preset starts it hanging). Bathing uses an upright body; the other
+presets use the seated body, except the supine bed transfer. Loading these poses requires the configured MDM assets, but none
+of these presets samples language corrections or calls an LLM:
+
+```bash
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/bathing.yaml --save outputs/bathing.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/transfer.yaml --save outputs/transfer.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/transfer_bed.yaml --save outputs/transfer_bed.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/dressing_first_sleeve.yaml --save outputs/dressing_first_sleeve.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/dressing_second_sleeve.yaml --save outputs/dressing_second_sleeve.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/bp_access.yaml --save outputs/bp_access.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/edema_elevation.yaml --save outputs/edema_elevation.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/wheelchair_armrest.yaml --save outputs/wheelchair_armrest.mp4
+```
+
+- **Bathing:** upper-arm elevation ≥75° from straight down and lateral abduction
+  ≥45°, opening access under the arm. Both bounds must hold together.
+- **Assisted chair-to-chair preparation** (`transfer.yaml`): seated body, with
+  the forearm gathered over the abdomen or chest. A broad outer box keeps the
+  forearm near the torso, and a central wrist box excludes an arm left out to
+  the side. The wrist may remain on the near side of the midline. There is no
+  elbow-specific box or required elbow angle, leaving room for different
+  shoulder mobility and elbow flexion limits. Depth is kept shallow: the
+  forearm must lie 0.06–0.18 m in front of spine3, with the wrist at
+  0.08–0.18 m. These are world-Z bounds in the seated preset.
+- **Assisted bed-to-chair preparation** (`transfer_bed.yaml`): the same broad
+  arm-gathering region rotated for a supine body with extended legs; the
+  corresponding shallow depth bounds are along world Y. This
+  represents preparing the arm before an assisted/hoist transfer.
+
+These transfer goals describe a set of useful arm placements, rather than one
+folded pose. Persona comfort costs can choose a placement within that set.
+The goals do not override a persona's limits or guarantee feasibility for every
+possible limitation. The bathing preset retains its task-specific access bounds;
+it is not expected to accommodate limits below its required elevation.
+
+These demonstrate **left-arm preparation**, not completion of a whole-body
+transfer: the right arm starts folded and remains fixed, as does the body.
+Support surfaces, caregiver, and hoist are not simulated. The chair scenario assumes assistance rather than
+an independent transfer that uses the arm to push off.
+
+Five further presets reuse the seated body. Each goal names where the arm must
+be for a caregiver to perform one step, and leaves the rest of the posture to
+the persona's comfort costs:
+
+- **First sleeve** (`dressing_first_sleeve.yaml`): the wrist reaches out to the
+  left, 0.38–0.70 m from spine3 and between waist and chest height, where a
+  caregiver holds the sleeve opening. Only the wrist is constrained.
+- **Second sleeve** (`dressing_second_sleeve.yaml`): the wrist goes back and
+  down, at least 0.15 m behind spine3 and between hip and lower-chest height,
+  into an armhole draped behind the hip. This one requires shoulder extension.
+- **Blood pressure / IV access** (`bp_access.yaml`): both elbow and wrist sit in
+  a heart-height band (−0.08 to 0.06 m in Y), lateral of the shoulder, so the
+  forearm rests on a table in front or an arm board to the side.
+- **Edema elevation** (`edema_elevation.yaml`): the wrist is raised 0.10–0.40 m
+  above spine3, in front or to the side (above heart height, below overhead).
+  Elbow height is free.
+- **Wheelchair armrest** (`wheelchair_armrest.yaml`): both elbow and wrist in
+  the armrest's height band (−0.22 to −0.08 m in Y) beside the thigh. The YAML
+  `arm:` starts the arm hanging off the side of the chair, with ~34° of elbow
+  flexion so the start already respects the elbow-contracture personas.
+
+These are positioning proxies: tables, armrests, pillows and garments are
+neither simulated nor drawn.
+
+`forearm_box` contains both elbow and wrist. Optional `elbow: {low, high}` and
+`wrist: {low, high}` boxes add simultaneous endpoint requirements, drawn as
+smaller boxes. These are not sequential waypoints. The cost sums squared
+distances to every required box; the star marks the wrist target box center.
+Bounds are in metres relative to spine3, along world axes. For the seated body,
++x is left, +y is up, and +z is forward; for the supine body, +y is above the bed
+and +z is toward the feet. Exact bounds live in the YAML files. All presets use
+`threshold: 0.001` as numerical slack (radians for bathing, metres for transfer).
+
+The static `transfer_seated_pose.pt` and `transfer_bed_pose.pt` assets use the
+existing normalized HML263 representation. They derive from `mdm_sit_pose.pt`:
+place the left arm in the lowered start used by the original demo, and place the
+right elbow/wrist at spine3-relative [−0.16, −0.10, 0.08] and [0.04, −0.13, 0.21]
+metres, respectively, so that arm is already folded. For the bed pose, replace
+the eight leg joints with SMPL T-pose offsets about the pelvis and rotate the
+whole skeleton −90° about world X. Each pose is encoded from two identical
+frames with `data_collection.common.hml263.positions_to_hml263`, using the
+loaded MDM dataset's normalization statistics; the first frame is stored.
+
+The browser Demo Runner's saved-goal editor currently supports point goals only;
+run these region presets through `planners/run.py`.
 
 `feedback.uq.clusterer` selects the clustering method (used by the demo runner;
 the MPC planner keeps its injected clusterer):
@@ -2242,9 +2362,9 @@ trajectory all see the anchored version.
 `llm_cost.backend` selects how the cost is generated:
 
 Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
-`gpt-5.6-luna` with `high` reasoning effort. Reasoning effort follows the model
-(`gpt-5.6-luna` → `high`, `gpt-5.6-sol` → `low`); any other model is sent without
-one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-5.6-luna`;
+`gpt-6-luna` with `high` reasoning effort. Reasoning effort follows the model
+(`gpt-6-luna` → `high`, `gpt-5.6-sol` → `low`); any other model is sent without
+one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-6-luna`;
 `gpt-5.6-sol` is not used for now.
 
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast

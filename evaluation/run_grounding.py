@@ -35,7 +35,11 @@ import pandas as pd
 from evaluation.approaches.grounders.base import Grounder
 from evaluation.approaches.grounders.llm_trajectory import LlmTrajectoryGrounder
 from evaluation.approaches.grounders.mdm import MdmGrounder
-from evaluation.benchmarks.oracle_viz import OracleCase, build_sampled_case, case_summary
+from evaluation.benchmarks.oracle_viz import (
+    OracleCase,
+    build_sampled_case,
+    case_summary,
+)
 from evaluation.metrics.grounding.score import candidate_row, case_row
 from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
     ClipSource,
@@ -170,7 +174,9 @@ def main() -> None:
             rng=rng,
         )
         chosen = scale_trajectory(menu[choice.label], choice.magnitude)
-        chosen_scores = candidate_row(case.user, case.oracle_correction, chosen, context)
+        chosen_scores = candidate_row(
+            case.user, case.oracle_correction, chosen, context
+        )
         nominal_scores = candidate_row(
             case.user, case.oracle_correction, case.nominal_continuation, context
         )
@@ -205,8 +211,12 @@ def main() -> None:
         index=list(_METRICS),
     )
     summary.loc["diversity", args.grounder] = cases["diversity"].mean()
-    summary.loc["position_diversity", args.grounder] = cases["position_diversity"].mean()
-    summary.loc["acceptable_rate", args.grounder] = 1 - cases["no_acceptable_cluster"].mean()
+    summary.loc["position_diversity", args.grounder] = cases[
+        "position_diversity"
+    ].mean()
+    summary.loc["acceptable_rate", args.grounder] = (
+        1 - cases["no_acceptable_cluster"].mean()
+    )
     summary.to_csv(out_dir / "summary.csv")
     print(f"{_LOG} {len(rows)} cases\n{summary.to_string()}")
 

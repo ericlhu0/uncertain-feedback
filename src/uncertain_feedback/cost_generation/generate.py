@@ -37,6 +37,7 @@ from uncertain_feedback.planners.mpc.costs import (
     MpcCostContext,
     build_generated_cost_context,
 )
+from uncertain_feedback.planners.mpc.goal_spaces import goal_point
 from uncertain_feedback.planners.mpc.rollout import (
     assemble_full_correction_traj,
     make_cost_eval_rollout,
@@ -172,12 +173,12 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         )
     )
     goal_pos = (
-        np.asarray(cfg_backend.cartesian.goals[0], dtype=np.float64)
+        goal_point(cfg_backend.cartesian.goals[0])
         if cfg_backend.cartesian is not None
         else None
     )
     cartesian_threshold = (
-        cfg_backend.cartesian.threshold if cfg_backend.cartesian is not None else 0.05
+        cfg_backend.cartesian.threshold if cfg_backend.cartesian is not None else 0.01
     )
     if language_only:
         correction_q = np.asarray(q_history[-(window + 1) :], dtype=np.float64)
@@ -237,6 +238,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
             f"rendering cost prompt images to {cost_dir / 'images'}", prefix=log_prefix
         )
         if language_only:
+            assert reference_q is not None
             rendered = render_prompt_images(
                 generated_context,
                 cost_dir / "images",

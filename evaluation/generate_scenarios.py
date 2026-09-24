@@ -13,6 +13,7 @@ from evaluation.benchmarks.informative_scenarios import (
 
 
 def main() -> None:
+    """Generate scenarios from the command line."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--geometry-dir", type=Path)
     parser.add_argument(

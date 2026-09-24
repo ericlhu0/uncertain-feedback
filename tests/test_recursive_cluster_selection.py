@@ -11,9 +11,11 @@ import pytest
 from uncertain_feedback.cost_generation.generate import _rejected_candidate_trajs
 from uncertain_feedback.demo_runner import session as demo_session
 from uncertain_feedback.demo_runner.session import Session
+from uncertain_feedback.planners.mpc import FeedbackConfig
 from uncertain_feedback.planners.mpc.costs import MpcCostContext
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 from uncertain_feedback.simulated_users import SimulatedUser
+from uncertain_feedback.uncertainty import UqConfig
 from uncertain_feedback.uncertainty.cluster_picker import (
     _LevelPickResult,
     _navigate_cluster_levels,
@@ -150,6 +152,9 @@ def _demo_session(tmp_path) -> Session:
     user = SimulatedUser("test", "", "", bounds=())
     fk = SmplLeftArmFK()
     rig = SimpleNamespace(
+        cfg=SimpleNamespace(
+            feedback=FeedbackConfig(anchor_correction=False, uq=UqConfig())
+        ),
         gen=_FakeGenerator(),
         fk=fk,
         context=MpcCostContext(

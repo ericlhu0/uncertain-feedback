@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.benchmarks.sampled_bounds import sample_bound
-
 from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
     arm_positions,
     sample_arm_q,
@@ -32,6 +31,8 @@ from uncertain_feedback.simulated_users.personas import UNRESTRICTED
 
 @dataclass(frozen=True)
 class ScenarioCriteria:
+    """Thresholds a sampled scenario must clear to count as informative."""
+
     window: int = 40
     min_history: int = 8
     min_nominal_violation: float = 0.15
@@ -103,7 +104,7 @@ def generate_scenarios(
                 continue
             goal_cfg = cfg_with_goal(cfg, goal)
 
-            def rollout(
+            def rollout(  # pylint: disable=cell-var-from-loop
                 start: np.ndarray, extra: CompositeTrajectoryCost
             ) -> np.ndarray:
                 return rollout_to_goal(
@@ -120,7 +121,7 @@ def generate_scenarios(
 
             naive = rollout(q0, base)
             if sampled_bounds:
-                user = sample_bound(
+                sampled = sample_bound(
                     rng,
                     naive,
                     q_goal,
@@ -131,9 +132,10 @@ def generate_scenarios(
                     criteria.window,
                     criteria.min_nominal_violation,
                 )
-                if user is None:
+                if sampled is None:
                     row["rejected"] = "no_separating_bound"
                     continue
+                user = sampled
                 row["user"] = asdict(user)
             # Joint-box costs already occur in the shared base stack.
             costs = CompositeTrajectoryCost(
@@ -146,8 +148,9 @@ def generate_scenarios(
             )
             violations = compute_violations(user, context, naive)
             crossing = np.flatnonzero(violations > 1e-8)
-            if not goal_reach(context, cfg, naive, goal)["reached"] or not len(
-                crossing
+            if (
+                not goal_reach(context, cfg, naive, goal)["reached"]
+                or not crossing.size
             ):
                 row["rejected"] = "no_reached_violating_reach"
                 continue
@@ -245,6 +248,7 @@ def render_scenarios(out_dir: Path) -> None:
     import subprocess
 
     import imageio_ffmpeg
+
     from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
     from uncertain_feedback.utils.mesh_video import (
         MeshLayer,

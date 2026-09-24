@@ -1,0 +1,18 @@
+steps: 100
+horizon: 10
+n_mpc_samples: 512
+max_angle_delta: 0.0025
+
+cartesian:
+  goals:
+    - box:
+        low: [-0.2, 0.0, -0.15]
+        high: [-0.1, 0.1, -0.05]
+  threshold: 0.01
+
+costs:
+  elbow_height:
+    min: -0.25
+    max: 0.45
+    weight: 100.0
+    progress_weight: 100.0

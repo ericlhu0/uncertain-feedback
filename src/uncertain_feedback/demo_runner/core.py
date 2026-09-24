@@ -40,6 +40,7 @@ from uncertain_feedback.planners.mpc.costs import (
     MpcCostContext,
     build_extra_costs,
 )
+from uncertain_feedback.planners.mpc.goal_spaces import goal_point
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_INDICES,
     SMPL_BONE_PAIRS_22,
@@ -465,8 +466,10 @@ class DemoRig:
             "feature_names": list(FEATURE_NAMES),
             "start_arm_aa": self.default_arm_aa.tolist(),
             "default_goal": (
-                list(self.cfg.cartesian.goals[0])
+                default_goal.tolist()
                 if self.cfg.cartesian is not None
+                and (default_goal := goal_point(self.cfg.cartesian.goals[0]))
+                is not None
                 else [0.4, 0.3, 0.1]
             ),
             "default_prompts": _DEFAULT_PROMPTS,

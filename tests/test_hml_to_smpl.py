@@ -245,14 +245,12 @@ class TestSmplBodyPoseToArmAa:
         )
 
 
-def _tpose_base_frame(
-    fk: SmplLeftArmFK,
-) -> np.ndarray:  # pylint: disable=redefined-outer-name
+def _tpose_base_frame(arm_fk: SmplLeftArmFK) -> np.ndarray:
     """Encode the T-pose as a (263,) HML263 frame under identity normalization."""
     # pylint: disable=import-outside-toplevel
     from uncertain_feedback.data_collection.common.hml263 import positions_to_hml263
 
-    frames = np.repeat(fk.tpose_all_joints[None], 2, axis=0)
+    frames = np.repeat(arm_fk.tpose_all_joints[None], 2, axis=0)
     return positions_to_hml263(frames, np.zeros(263), np.ones(263))[0].astype(
         np.float64
     )

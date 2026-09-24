@@ -22,6 +22,7 @@ from evaluation.approaches.grounders.base import (
     LANDMARKS,
     ClusterSelector,
     Grounder,
+    required_llm_model,
 )
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.arm_features import (
@@ -229,6 +230,9 @@ class LlmTrajectoryGrounder(Grounder):
         self.n_frames = n_frames
         self.model = model
         self.context_level = context_level
+        self._history: list[str] = []
+        self._llm: Any = None
+        self._round = 0
         # Load the motion generator anyway (unused for grounding) so the rig
         # geometry (decoded pose spine3/body) matches the system arms exactly.
         if use_generator_rig:
@@ -242,8 +246,8 @@ class LlmTrajectoryGrounder(Grounder):
         episode_dir: Path,
     ) -> None:
         super().reset(rig, user, seed, episode_dir)
-        self._history: list[str] = []
-        self._llm: Any = None
+        self._history = []
+        self._llm = None
         self._round = 0
 
     @property
@@ -278,7 +282,7 @@ class LlmTrajectoryGrounder(Grounder):
             )
 
             self._llm = OpenAIModel(
-                model=self.model or self.rig.cfg.llm_cost.model,
+                model=self.model or required_llm_model(self.rig),
                 system_prompt=_SYSTEM_PROMPT.format(
                     n=self.n_interpretations, payload=self._payload_contract()
                 ),

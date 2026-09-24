@@ -72,7 +72,7 @@ def build_rig(
         fk = SmplLeftArmFK()
         fk.collar_aa = np.asarray(collar_aa, dtype=np.float64)
         if cfg.arm is not None:
-            arm_aa = cfg.arm
+            arm_aa = np.asarray(cfg.arm, dtype=np.float64)
         q0 = fk.arm_aa_to_q(np.asarray(arm_aa, dtype=np.float64), spine3_aa)
     else:
         if cfg.arm is None:

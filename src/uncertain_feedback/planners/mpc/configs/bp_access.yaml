@@ -1,0 +1,16 @@
+# Blood pressure cuff / IV access: rest the left forearm out to the side at heart height.
+# Both elbow and wrist sit in the height band; lateral reach and elbow bend are free.
+# Upright SMPL frame: +x left, +y up, +z forward.
+pose: src/uncertain_feedback/motion_generators/mdm/transfer_seated_pose.pt
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.0025
+
+cartesian:
+  goals:
+    - forearm_box:
+        low: [0.18, -0.08, -0.15]
+        high: [0.70, 0.06, 0.45]
+  threshold: 0.001

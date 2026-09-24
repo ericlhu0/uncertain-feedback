@@ -7,11 +7,11 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.approaches.cost_gen import CostGen, NoCostGen
+from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.grounders.mdm import MdmGrounder
 from evaluation.approaches.grounders.nominal import NominalGrounder
 from evaluation.approaches.steering import NoSteering, Steering
-from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs
@@ -56,6 +56,7 @@ class Approach:
 
     @property
     def requires_generator(self) -> bool:
+        """Whether the rig must load the motion generator for this approach."""
         return self.grounder.requires_generator
 
     def reset(

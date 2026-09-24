@@ -10,12 +10,10 @@ jobs:
       - name: Run black to test code linting
         uses: psf/black@stable
         with:
-          options: "--check --verbose --extend-exclude src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model"
+          options: "--check --verbose"
           jupyter: true
       - name: Run isort to organize imports
         uses: isort/isort-action@master
-        with:
-          configuration: "--skip-glob=src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/*"
   linting:
     runs-on: ubuntu-latest
     strategy:
@@ -34,7 +32,7 @@ jobs:
       run: uv sync --all-extras --dev
     - name: Lint
       run: |
-        uv run pylint --rcfile=.pylintrc src/uncertain_feedback tests
+        uv run pylint --rcfile=.pylintrc src/uncertain_feedback evaluation tests
   static-type-checking:
     runs-on: ubuntu-latest
     strategy:
@@ -53,7 +51,7 @@ jobs:
       run: uv sync --all-extras --dev
     - name: Mypy
       run: |
-        uv run mypy . --exclude src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model --exclude src/uncertain_feedback/data_collection/sam-3d-body --exclude src/uncertain_feedback/data_collection/MHR
+        uv run mypy .
   unit-tests:
     runs-on: ubuntu-latest
     strategy:

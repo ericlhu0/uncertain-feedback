@@ -218,6 +218,7 @@ def build(
     caption_style: str = "adverb",
     retime_style: str = "default",
 ) -> None:
+    """Write the retimed, captioned variants of every cached segment to *output_dir*."""
     retime = _RETIME_STYLES[retime_style]
     (output_dir / "new_joint_vecs").mkdir(parents=True, exist_ok=True)
     (output_dir / "texts").mkdir(parents=True, exist_ok=True)
@@ -298,6 +299,7 @@ def build(
 
 
 def main() -> None:
+    """Build the speed dataset from the command line."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache_dir", default=str(VIDEO_DATA_DIR / "mdm_cache"))
     parser.add_argument(

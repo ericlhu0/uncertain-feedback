@@ -44,8 +44,8 @@ PARAPHRASE_PROMPT = (
     "Write exactly {n} different things you might actually say to the caregiver "
     "to ask for that change, one per line and nothing else - no numbering, "
     "bullets or quotes. Vary them widely: some name the body part and direction "
-    "plainly, some describe the outcome or feeling loosely (\"that's too high\", "
-    "\"not so far out\"), some are complaints, some polite requests, some terse, "
+    'plainly, some describe the outcome or feeling loosely ("that\'s too high", '
+    '"not so far out"), some are complaints, some polite requests, some terse, '
     "some combine two of the changes, some mention only the biggest change; use "
     "both 'my' and 'your' phrasings. Never ask for a direction the descriptions "
     "do not state, and never mention the robot's arm or the word 'trajectory'."
@@ -81,7 +81,7 @@ def paraphrase_line_set(model: OpenAIModel, sources: list[str], n: int) -> list[
     for attempt in range(3):
         try:
             return draft_lines(model.get_full_output(prompt), n)
-        except Exception as exc:  # noqa: BLE001 - one empty completion must not sink the run
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             print(f"{_LOG} attempt {attempt + 1} failed: {exc}", flush=True)
     return []
 
@@ -93,13 +93,17 @@ def paraphrase_dataset(
     out.mkdir(parents=True, exist_ok=True)
     cache_path = out / "paraphrases.json"
     cache: dict[str, list[str]] = (
-        json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+        json.loads(cache_path.read_text(encoding="utf-8"))
+        if cache_path.exists()
+        else {}
     )
     files = sorted((src / "texts").glob("*.txt"))
     per_file = {f: source_lines(f) for f in files}
     line_sets = {"\n".join(sorted(v)): v for v in per_file.values()}
     todo = [k for k in line_sets if k not in cache]
-    print(f"{_LOG} {len(files)} motions, {len(line_sets)} line-sets, {len(todo)} to draft")
+    print(
+        f"{_LOG} {len(files)} motions, {len(line_sets)} line-sets, {len(todo)} to draft"
+    )
     model = OpenAIModel(
         model=model_name,
         system_prompt="You answer with short spoken sentences, one per line, and nothing else.",
@@ -141,10 +145,11 @@ def paraphrase_dataset(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    """Paraphrase a built dataset's captions from the command line."""
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", maxsplit=1)[0])
     parser.add_argument("--src", type=Path, required=True, help="built dataset dir")
     parser.add_argument("--out", type=Path, required=True, help="new dataset dir")
-    parser.add_argument("--model", default="gpt-5.6-luna")
+    parser.add_argument("--model", default="gpt-6-luna")
     parser.add_argument("--n", type=int, default=12, help="paraphrases per line-set")
     parser.add_argument("--workers", type=int, default=16)
     args = parser.parse_args()

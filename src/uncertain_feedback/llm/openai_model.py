@@ -106,7 +106,7 @@ class OpenAIModel(BaseModel):
 
     def _chat_token_limit_name(self) -> str:
         """Return the Chat Completions token-limit parameter for this model."""
-        if self._is_gpt5_family():
+        if self._is_reasoning_family():
             return "max_completion_tokens"
         return "max_tokens"
 
@@ -115,10 +115,10 @@ class OpenAIModel(BaseModel):
             return True
         if self.api_mode == "chat":
             return False
-        return self._is_gpt5_family()
+        return self._is_reasoning_family()
 
-    def _is_gpt5_family(self) -> bool:
-        return self.model.startswith("gpt-5")
+    def _is_reasoning_family(self) -> bool:
+        return self.model.startswith(("gpt-5", "gpt-6"))
 
     def get_full_output(
         self,

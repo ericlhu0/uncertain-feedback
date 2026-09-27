@@ -14,8 +14,9 @@ indices so each (approach, task) pair is its own job):
     uv run python evaluation/run_experiment.py -m hydra/launcher=joblib \\
         hydra.launcher.n_jobs=8 approach=... tasks=0,1,2,3 benchmark=procedural ...
 
-``load_generator=true`` gives every arm the pose file's body and start pose
-(without it, generator-free arms fall back to the config's ``arm:`` T-pose rig).
+Every arm plans on the person the config describes (its ``pose:`` body with the
+``arm:`` start). ``load_generator`` only decides whether the motion generator is
+loaded (default: only for approaches that need it).
 
 Each task's episode lands in ``task_NN_<persona>_<verbalizer>/`` under the hydra
 run dir with its ``interactions.pkl``; ``goals.csv`` at the run root is the goal
@@ -38,7 +39,9 @@ from evaluation.benchmarks.base import Benchmark
 from evaluation.benchmarks.episode import run_episode
 from evaluation.benchmarks.structs import Interaction
 from evaluation.metrics.cost_learning.success import goal_table
-from uncertain_feedback.planners.rig import build_rig
+from uncertain_feedback.motion_generators import make_motion_generator
+from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import get_persona
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -79,18 +82,21 @@ def _run(cfg: DictConfig) -> None:
         if cfg.load_generator is None
         else bool(cfg.load_generator)
     )
-    rig = build_rig(mpc_config, seed=seed, load_generator=load_generator)
+    run_cfg = replace(load_mpc_config(mpc_config), seed=seed)
+    human = Human(pose=run_cfg.pose, arm=run_cfg.arm)
+    gen = (
+        make_motion_generator(run_cfg.motion_generator, None, seed=seed)
+        if load_generator
+        else None
+    )
     if cfg.sim_chooser is not None:
-        rig = replace(
-            rig,
-            cfg=replace(
-                rig.cfg,
-                simulated_user=replace(
-                    rig.cfg.simulated_user, chooser=str(cfg.sim_chooser)
-                ),
+        run_cfg = replace(
+            run_cfg,
+            simulated_user=replace(
+                run_cfg.simulated_user, chooser=str(cfg.sim_chooser)
             ),
         )
-    tasks = benchmark.generate_tasks(seed, rig.cfg)
+    tasks = benchmark.generate_tasks(seed, run_cfg)
     if cfg.max_tasks is not None:
         tasks = tasks[: int(cfg.max_tasks)]
     task_ids = list(range(len(tasks)))
@@ -110,8 +116,10 @@ def _run(cfg: DictConfig) -> None:
         task = tasks[task_id]
         user = task.user if task.user is not None else get_persona(task.persona)
         episode_dir = out_dir / f"task_{task_id:02d}_{task.persona}_{task.verbalizer}"
-        approach.reset(rig, user, task.seed, episode_dir)
-        interactions.extend(run_episode(rig, user, task, approach, episode_dir))
+        approach.reset(run_cfg, human, gen, user, task.seed, episode_dir)
+        interactions.extend(
+            run_episode(run_cfg, human, user, task, approach, episode_dir)
+        )
         goals = goal_table(interactions)
         goals.to_csv(out_dir / "goals.csv", index=False)
     print(goals.to_string(index=False))

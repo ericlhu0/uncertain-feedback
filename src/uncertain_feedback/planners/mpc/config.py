@@ -13,10 +13,11 @@ The parsed section dataclasses are passed straight into ``ArmMPC``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from uncertain_feedback.consts import MDM_START_POSE_PATH
@@ -660,3 +661,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         corrections=CorrectionConfig(trigger_threshold=trigger_threshold),
         simulated_user=simulated_user,
     )
+
+
+def cfg_with_goal(cfg: MpcRunConfig, goal: np.ndarray) -> MpcRunConfig:
+    """The run config with its Cartesian goal queue replaced by ``goal``."""
+    assert cfg.cartesian is not None
+    return replace(cfg, cartesian=replace(cfg.cartesian, goals=[goal]))

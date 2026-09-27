@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from uncertain_feedback.planners.mpc.arm_features import (
     arm_feature_series,
@@ -82,7 +83,9 @@ class Human:
     _hml_pose: np.ndarray | None
     _history: np.ndarray
 
-    def __init__(self, pose: Path | None = None, arm: np.ndarray | None = None) -> None:
+    def __init__(
+        self, pose: Path | None = None, arm: npt.ArrayLike | None = None
+    ) -> None:
         hml_pose: np.ndarray | None = None
         if pose is None:
             fk = SmplLeftArmFK()
@@ -176,6 +179,20 @@ class Human:
     def reset_human_with_q(self, q: np.ndarray) -> Human:
         """The same body with a fresh history that starts at ``q``."""
         return self._with_history(np.asarray(q, dtype=np.float64))
+
+    def measured(
+        self,
+        fk: SmplLeftArmFK,
+        spine3_pos: np.ndarray,
+        spine3_aa: np.ndarray,
+        posture: np.ndarray,
+        q: np.ndarray,
+    ) -> Human:
+        """This person as an env measured them: its kinematics, anchor, body and arm.
+
+        The pose file's ``hml_pose`` carries over; the history starts at ``q``.
+        """
+        return _rebuild(fk, spine3_pos, spine3_aa, posture, self._hml_pose, q)
 
     def fk_positions_from_q(self, q: np.ndarray) -> np.ndarray:
         """``(..., 7)`` arm states to ``(..., 5, 3)`` world arm-chain positions."""

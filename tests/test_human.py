@@ -15,7 +15,6 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_feature_series,
     arm_q_from_features,
 )
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_INDICES,
@@ -112,9 +111,6 @@ def test_human_cannot_be_mutated() -> None:
 def test_geometry_matches_the_kinematics_helpers() -> None:
     human = Human(arm=_ARM)
     q = _arm_states()
-    context = MpcCostContext(
-        fk=human.fk, spine3_pos=human.spine3_pos, spine3_aa=human.spine3_aa
-    )
 
     positions = human.fk_positions_from_q(q)
     expected = human.fk.fk_batch(
@@ -133,12 +129,12 @@ def test_geometry_matches_the_kinematics_helpers() -> None:
     )
 
     features = human.features_from_q(q)
-    for name, values in arm_feature_series(q, context).items():
+    for name, values in arm_feature_series(q, human).items():
         np.testing.assert_allclose(features[name], values)
     rows = np.stack(list(features.values()), axis=-1)
     np.testing.assert_allclose(
         human.q_from_features(rows),
-        arm_q_from_features(rows, human.q[Q_CLAVICLE], context),
+        arm_q_from_features(rows, human.q[Q_CLAVICLE], human),
     )
 
     target = human.wrist_from_q(q[1])

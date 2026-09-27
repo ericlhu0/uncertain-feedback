@@ -37,12 +37,13 @@ from uncertain_feedback.data_collection.dataset_auto_correction.motion_facts imp
     motion_facts,
 )
 from uncertain_feedback.planners.mpc.arm_features import arm_aa_from_state
+from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    MpcCostContext,
+    base_extra_costs,
 )
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import goal_reach, rollout_to_goal
-from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs, cfg_with_goal
 from uncertain_feedback.simulated_users import (
     ATTRIBUTED_FEATURES,
     HiddenCostTerm,
@@ -96,37 +97,33 @@ def build_sampled_case(
     cfg = source.cfg
     rng = np.random.default_rng([cfg.seed, index])
     goal, naive = source.sample_scenario(rng, f"case {index}")
-    sampled = sample_violating_bound(rng, naive, source.context, cfg, source.threshold)
+    sampled = sample_violating_bound(rng, naive, source.human, cfg, source.threshold)
     window = int(rng.integers(cfg.correction_frames[0], cfg.correction_frames[1] + 1))
 
     oracle_costs = CompositeTrajectoryCost(
         [
             *source.base.terms(),
-            HiddenCostTerm(user=sampled.user, context=source.context),
+            HiddenCostTerm(user=sampled.user, human=source.human),
         ]
     )
     start = sampled.crossing_step - 1
     q_feedback = np.asarray(naive[start], dtype=np.float64)
     continuation = rollout_to_goal(
         cfg_with_goal(source.run_cfg, goal),
-        q_feedback,
+        source.human.reset_human_with_q(q_feedback),
         goal,
-        source.context,
         oracle_costs,
-        source.body_pos,
-        source.context.spine3_pos,
-        source.context.spine3_aa,
         steps=oracle_steps,
         progress_label=f"case {index} continuation",
         log_prefix=_LOG,
-    )
+    ).history
     reach = goal_reach(
-        source.context, cfg_with_goal(source.run_cfg, goal), continuation, goal
+        source.human, cfg_with_goal(source.run_cfg, goal), continuation, goal
     )
     oracle = np.asarray(continuation[: window + 1], dtype=np.float64)
     nominal = np.asarray(naive[start : start + window + 1], dtype=np.float64)
     # motion_facts measures from frame n_prefix - 1, so 1 means the whole window.
-    facts = motion_facts(oracle, source.context, 1)
+    facts = motion_facts(oracle, source.human, 1)
     return OracleCase(
         label=f"case_{index:03d}",
         user=sampled.user,
@@ -156,7 +153,11 @@ def build_sampled_case(
 
 
 def build_persona_case(
-    rig: PlanningRig, user: SimulatedUser, goal: np.ndarray, seed: int = 0
+    cfg: MpcRunConfig,
+    human: Human,
+    user: SimulatedUser,
+    goal: np.ndarray,
+    seed: int = 0,
 ) -> OracleCase | None:
     """Replay one persona episode's first feedback round without any grounder.
 
@@ -164,40 +165,31 @@ def build_persona_case(
     where the grounder is called. Returns ``None`` when the nominal rollout
     never violates the persona's fixed bounds, so there is no correction.
     """
-    cfg = rig.cfg
     goal = np.asarray(goal, dtype=np.float64)
     goal_cfg = cfg_with_goal(cfg, goal)
-    base = base_extra_costs(rig, user)
+    base = base_extra_costs(cfg.costs, human, user)
     oracle_costs = CompositeTrajectoryCost(
-        [*base.terms(), HiddenCostTerm(user=user, context=rig.context)]
+        [*base.terms(), HiddenCostTerm(user=user, human=human)]
     )
 
     oracle_path = rollout_to_goal(
         goal_cfg,
-        rig.q0,
+        human,
         goal,
-        rig.context,
         oracle_costs,
-        rig.body_pos,
-        rig.spine3_pos,
-        rig.spine3_aa,
         progress_label=f"{user.name} oracle",
         log_prefix=_LOG,
-    )
+    ).history
     nominal_rollout = rollout_to_goal(
         goal_cfg,
-        rig.q0,
+        human,
         goal,
-        rig.context,
         base,
-        rig.body_pos,
-        rig.spine3_pos,
-        rig.spine3_aa,
         progress_label=f"{user.name} nominal",
         log_prefix=_LOG,
-    )
+    ).history
     trigger = first_violation_step(
-        user, rig.context, nominal_rollout, cfg.corrections.trigger_threshold
+        user, human, nominal_rollout, cfg.corrections.trigger_threshold
     )
     if trigger is None:
         return None
@@ -205,18 +197,14 @@ def build_persona_case(
     q_feedback = np.asarray(nominal_rollout[trigger], dtype=np.float64)
     nominal_plan = rollout_to_goal(
         goal_cfg,
-        q_feedback,
+        human.reset_human_with_q(q_feedback),
         goal,
-        rig.context,
         base,
-        rig.body_pos,
-        rig.spine3_pos,
-        rig.spine3_aa,
         steps=cfg.simulated_user.nominal_steps,
         stop_at_goal=False,
         log_prefix=_LOG,
-    )
-    intent = attribute_correction(oracle_path, nominal_plan, q_feedback, rig.context)
+    ).history
+    intent = attribute_correction(oracle_path, nominal_plan, q_feedback, human)
     window = oracle_path[intent.join_index : intent.join_index + len(nominal_plan)]
     utterance = verbalize_everyday(intent, np.random.default_rng(seed))
     return OracleCase(
@@ -251,26 +239,21 @@ def case_summary(case: OracleCase) -> dict[str, Any]:
     }
 
 
-def render_case(
-    case: OracleCase,
-    context: MpcCostContext,
-    body_pos: np.ndarray | None,
-    out_dir: Path,
-) -> None:
+def render_case(case: OracleCase, human: Human, out_dir: Path) -> None:
     """Write the overlay still plus oracle and nominal playback videos."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    viz = ArmVisualizer(fk=context.fk)
-    oracle_aa = arm_aa_from_state(case.oracle_correction, context)
-    nominal_aa = arm_aa_from_state(case.nominal_continuation, context)
+    viz = ArmVisualizer(fk=human.fk)
+    oracle_aa = arm_aa_from_state(case.oracle_correction, human)
+    nominal_aa = arm_aa_from_state(case.nominal_continuation, human)
 
     viz.render_oracle_overlay(
         out_dir / f"{case.label}_overlay.png",
         oracle_traj=oracle_aa,
         nominal_traj=nominal_aa,
-        current_q=arm_aa_from_state(case.q_feedback, context),
-        spine3_pos=context.spine3_pos,
-        spine3_aa=context.spine3_aa,
-        body_pos=body_pos,
+        current_q=arm_aa_from_state(case.q_feedback, human),
+        spine3_pos=human.spine3_pos,
+        spine3_aa=human.spine3_aa,
+        body_pos=human.posture,
         goal_pos=case.goal,
         title="\n".join(textwrap.wrap(f"{case.label} — {case.utterance}", width=110)),
     )
@@ -279,7 +262,7 @@ def render_case(
     # bound that actually fired.
     render_hidden_bounds(
         case.user,
-        context,
+        human,
         {"nominal": nominal_aa, "oracle": oracle_aa},
         out_dir / f"{case.label}_bound.png",
     )
@@ -290,9 +273,9 @@ def render_case(
         viz.render_rollout_video(
             traj,
             out_dir / f"{case.label}_{name}.mp4",
-            spine3_pos=context.spine3_pos,
-            spine3_aa=context.spine3_aa,
-            body_pos=body_pos,
+            spine3_pos=human.spine3_pos,
+            spine3_aa=human.spine3_aa,
+            body_pos=human.posture,
             cartesian_goal=case.goal,
             frame_colors=[color] * len(traj),
             fps=12,

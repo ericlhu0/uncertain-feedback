@@ -54,6 +54,9 @@ from uncertain_feedback.data_collection.common.dataset import (
     write_text_file,
 )
 from uncertain_feedback.data_collection.common.hml263 import load_hml_stats
+from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
+    clip_source_from_dir,
+)
 from uncertain_feedback.data_collection.dataset_auto_correction.motion_facts import (
     MotionFacts,
     asserted,
@@ -68,6 +71,7 @@ from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
     smpl_arm_aa_seq_to_hml263_frames,
 )
 from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
 from uncertain_feedback.simulated_users.personas import DEFAULT_ARM_JOINT_LIMITS
 
@@ -91,15 +95,6 @@ def run_captions(run: dict[str, Any]) -> list[str]:
     """
     raw: list[str] = run.get("captions", [run.get("caption", "")])
     return [c.strip() for c in raw if c.strip()]
-
-
-@dataclass(frozen=True)
-class _GeometryContext:
-    """The FK state :func:`arm_feature_series` needs, read off ``geometry.npz``."""
-
-    fk: SmplLeftArmFK
-    spine3_pos: np.ndarray
-    spine3_aa: np.ndarray
 
 
 def consistent_captions(captions: list[str], facts: MotionFacts) -> list[str]:
@@ -163,7 +158,7 @@ class _Clip:
     captions: list[str]
     feature: str
     base_pose: np.ndarray
-    context: _GeometryContext
+    human: Human
     n_prefix: int
 
 
@@ -179,7 +174,7 @@ def clean_captions(clips: list[_Clip]) -> dict[str, list[str]]:
     vertical: dict[str, int] = {}
     fallbacks: list[str] = []
     for entry in clips:
-        facts = motion_facts(entry.clip, entry.context, entry.n_prefix)
+        facts = motion_facts(entry.clip, entry.human, entry.n_prefix)
         vertical[entry.label] = facts.signs()["wrist_dy"]
         kept[entry.label] = consistent_captions(entry.captions, facts)
         if all(caption_conflicts(c, facts) for c in entry.captions):
@@ -239,24 +234,24 @@ def transplant_is_valid(
     clip: np.ndarray,
     moved: np.ndarray,
     feature: str,
-    context: _GeometryContext,
+    human: Human,
     n_prefix: int,
 ) -> bool:
     """Whether a transplanted clip is anatomically and behaviourally usable."""
-    arm_aa = q_to_arm_aa(moved, context.fk.elbow_hinge_axis)
+    arm_aa = q_to_arm_aa(moved, human.fk.elbow_hinge_axis)
     if any(
         float(limit.violation(arm_aa).max()) > 0.0 for limit in DEFAULT_ARM_JOINT_LIMITS
     ):
         return False
-    before = arm_feature_series(clip, context)[feature]
-    after = arm_feature_series(moved, context)[feature]
+    before = arm_feature_series(clip, human)[feature]
+    after = arm_feature_series(moved, human)[feature]
     excursion = abs(float(before[-1] - before[n_prefix - 1]))
     moved_excursion = abs(float(after[-1] - after[n_prefix - 1]))
     return moved_excursion <= max(_AMPLIFICATION_FLOOR, _MAX_AMPLIFICATION * excursion)
 
 
 def transplant_captions(
-    captions: list[str], moved: np.ndarray, context: _GeometryContext, n_prefix: int
+    captions: list[str], moved: np.ndarray, human: Human, n_prefix: int
 ) -> tuple[list[str], bool]:
     """*captions* re-filtered against a transplanted copy's own measured motion.
 
@@ -267,7 +262,7 @@ def transplant_captions(
     surviving lines false of the copy. Returns the kept lines and whether every
     line contradicted, so the fallback's rate can be reported.
     """
-    facts = motion_facts(moved, context, n_prefix)
+    facts = motion_facts(moved, human, n_prefix)
     return consistent_captions(captions, facts), all(
         caption_conflicts(caption, facts) for caption in captions
     )
@@ -337,13 +332,9 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     clips: list[_Clip] = []
     for clips_dir in clips_dirs:
         manifest = json.loads((clips_dir / "manifest.json").read_text(encoding="utf-8"))
-        base_pose = np.load(clips_dir / manifest["base_pose_file"])  # (263,)
-        geo = np.load(clips_dir / manifest["geometry_file"])
-        geo_fk = SmplLeftArmFK()
-        geo_fk.collar_aa = geo["collar_aa"]
-        context = _GeometryContext(
-            fk=geo_fk, spine3_pos=geo["spine3_pos"], spine3_aa=geo["spine3_aa"]
-        )
+        human = clip_source_from_dir(clips_dir).human
+        base_pose = human.hml_pose  # (263,)
+        assert base_pose is not None, "clip sets need a planner config with a pose"
         for run in manifest["runs"]:
             captions = run_captions(run)
             if not captions and not templated:
@@ -362,7 +353,7 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
                     captions=captions,
                     feature=run["feature"],
                     base_pose=base_pose,
-                    context=context,
+                    human=human,
                     n_prefix=manifest["n_prefix_frames"],
                 )
             )
@@ -373,7 +364,7 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     def generated(clip: np.ndarray, entry: _Clip) -> list[str]:
         """*clip*'s own templated lines, gated and recorded for the report."""
         nonlocal n_templated_dropped
-        facts = motion_facts(clip, entry.context, entry.n_prefix)
+        facts = motion_facts(clip, entry.human, entry.n_prefix)
         lines = templated_captions(facts)
         kept = consistent_captions(lines, facts)
         n_templated_dropped += len(lines) - len(kept)
@@ -397,14 +388,14 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
                 start = int(rng.integers(0, len(entry.naive)))
                 moved = transplant_clip(entry.clip, entry.naive, start, entry.n_prefix)
                 if transplant_is_valid(
-                    entry.clip, moved, entry.feature, entry.context, entry.n_prefix
+                    entry.clip, moved, entry.feature, entry.human, entry.n_prefix
                 ):
                     moved_captions = captions
                     if templated:
                         moved_captions = generated(moved, entry)
                     elif consistent:
                         moved_captions, fell_back = transplant_captions(
-                            captions, moved, entry.context, entry.n_prefix
+                            captions, moved, entry.human, entry.n_prefix
                         )
                         n_transplants += 1
                         n_transplant_dropped += len(captions) - len(moved_captions)

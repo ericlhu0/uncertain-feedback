@@ -7,8 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import (
     CorrectionIntent,
     assert_axis_conventions,
@@ -17,10 +16,9 @@ from uncertain_feedback.simulated_users import (
 )
 
 
-@pytest.fixture(name="context")
-def _context() -> MpcCostContext:
-    fk = SmplLeftArmFK()
-    return MpcCostContext(fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3))
+@pytest.fixture(name="human")
+def _human() -> Human:
+    return Human()
 
 
 def _shoulder_z_traj(angles: list[float]) -> np.ndarray:
@@ -29,11 +27,11 @@ def _shoulder_z_traj(angles: list[float]) -> np.ndarray:
     return q
 
 
-def test_axis_conventions(context: MpcCostContext) -> None:
-    assert_axis_conventions(context.fk)
+def test_axis_conventions(human: Human) -> None:
+    assert_axis_conventions(human.fk)
 
 
-def test_attribution_finds_join_and_dominant_feature(context: MpcCostContext) -> None:
+def test_attribution_finds_join_and_dominant_feature(human: Human) -> None:
     # Oracle lowers the arm (shoulder z-rotation 0 -> -0.6); the robot's
     # nominal plan holds it raised (+0.3), so nominal - oracle elevation is
     # positive and the nominal wrist sits above the oracle wrist.
@@ -41,7 +39,7 @@ def test_attribution_finds_join_and_dominant_feature(context: MpcCostContext) ->
     nominal = _shoulder_z_traj([0.3] * 10)
     q_trigger = oracle[7]
 
-    intent = attribute_correction(oracle, nominal, q_trigger, context)
+    intent = attribute_correction(oracle, nominal, q_trigger, human)
     assert intent.join_index == 7
     deltas = intent.feature_deltas
     assert deltas["shoulder_elevation"] > 0.0
@@ -52,13 +50,13 @@ def test_attribution_finds_join_and_dominant_feature(context: MpcCostContext) ->
     assert has_feedback_content(intent)
 
 
-def test_min_join_is_respected(context: MpcCostContext) -> None:
+def test_min_join_is_respected(human: Human) -> None:
     oracle = _shoulder_z_traj(list(np.linspace(0.0, -0.6, 21)))
     nominal = _shoulder_z_traj([0.3] * 10)
     q_trigger = oracle[3]
 
-    free = attribute_correction(oracle, nominal, q_trigger, context, min_join=0)
-    forced = attribute_correction(oracle, nominal, q_trigger, context, min_join=10)
+    free = attribute_correction(oracle, nominal, q_trigger, human, min_join=0)
+    forced = attribute_correction(oracle, nominal, q_trigger, human, min_join=10)
     assert free.join_index == 3
     assert forced.join_index == 10
 

@@ -22,7 +22,7 @@ def menu_rows(probe: MenuProbe) -> list[dict[str, Any]]:
             "learned_terms": probe.learned_terms,
             "label": label,
             "chosen": label == probe.chosen_label,
-            "violation": correction_violation(probe.user, candidate, probe.context),
+            "violation": correction_violation(probe.user, candidate, probe.human),
         }
         for label, candidate in probe.candidates.items()
     ]

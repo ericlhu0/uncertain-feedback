@@ -25,13 +25,15 @@ from evaluation.approaches.grounders.base import (
     required_llm_model,
 )
 from evaluation.metrics.grounding.structs import GroundingResult
+from uncertain_feedback.motion_generators.base import MotionGenerator
+from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import extract_json_object
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     ELBOW_CHAIN_IDX,
     WRIST_CHAIN_IDX,
     q_to_arm_aa,
 )
-from uncertain_feedback.planners.rig import PlanningRig
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
@@ -77,15 +79,14 @@ class BridgePotentialFieldGrounder(Grounder):
     def ground(
         self,
         text: str,
-        q_feedback: np.ndarray,
+        human: Human,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
     ) -> GroundingResult:
-        del text, q_feedback
-        rig = self.rig
-        nominal_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
-        arm_pos = rig.fk.fk_batch(nominal_aa, rig.spine3_pos, rig.spine3_aa)
-        body = rig.body_pos if rig.body_pos is not None else rig.fk.tpose_all_joints
+        del text
+        nominal_aa = human.arm_aa_from_q(nominal_plan)
+        arm_pos = human.fk.fk_batch(nominal_aa, human.spine3_pos, human.spine3_aa)
+        body = human.posture
         ramp = np.linspace(0.0, 1.0, nominal_aa.shape[0])[:, None]
         candidates: dict[int, np.ndarray] = {0: nominal_aa}
         label = 1
@@ -97,8 +98,8 @@ class BridgePotentialFieldGrounder(Grounder):
                     positions[:, chain_index] += ramp * field(
                         arm_pos[:, chain_index], landmark
                     )
-                candidates[label] = rig.fk.arm_aa_from_positions_batch(
-                    positions, rig.spine3_aa
+                candidates[label] = human.arm_aa_from_q(
+                    human.ik_q_from_positions(positions)
                 )
                 label += 1
         chosen_label, magnitude = cluster_selector(candidates)
@@ -151,12 +152,13 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
 
     def reset(
         self,
-        rig: PlanningRig,
+        cfg: MpcRunConfig,
+        gen: MotionGenerator | None,
         user: SimulatedUser,
         seed: int,
         episode_dir: Path,
     ) -> None:
-        super().reset(rig, user, seed, episode_dir)
+        super().reset(cfg, gen, user, seed, episode_dir)
         self._history = []
         self._llm = None
 
@@ -167,7 +169,7 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
             )
 
             self._llm = OpenAIModel(
-                model=required_llm_model(self.rig),
+                model=required_llm_model(self.cfg),
                 system_prompt=_INTERPRETER_SYSTEM_PROMPT,
                 temperature=0.0,
                 reasoning_effort="low",
@@ -197,15 +199,13 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
     def ground(
         self,
         text: str,
-        q_feedback: np.ndarray,
+        human: Human,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
     ) -> GroundingResult:
-        del q_feedback
-        rig = self.rig
-        nominal_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
-        arm_pos = rig.fk.fk_batch(nominal_aa, rig.spine3_pos, rig.spine3_aa)
-        body = rig.body_pos if rig.body_pos is not None else rig.fk.tpose_all_joints
+        nominal_aa = human.arm_aa_from_q(nominal_plan)
+        arm_pos = human.fk.fk_batch(nominal_aa, human.spine3_pos, human.spine3_aa)
+        body = human.posture
         landmarks = {
             name: np.asarray(body[i], dtype=np.float64) for name, i in LANDMARKS
         }
@@ -235,7 +235,7 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
                     positions[:, chain_index] += ramp * self._cap(
                         factor * field(arm_pos[:, chain_index], landmark)
                     )
-            candidates[1] = rig.fk.arm_aa_from_positions_batch(positions, rig.spine3_aa)
+            candidates[1] = human.arm_aa_from_q(human.ik_q_from_positions(positions))
             chosen = 1
         _, magnitude = cluster_selector({chosen: candidates[chosen]})
         correction = scale_trajectory(candidates[chosen], magnitude)

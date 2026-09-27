@@ -9,16 +9,13 @@ from typing import Callable, Sequence
 import numpy as np
 
 from uncertain_feedback.planners.mpc.action_spaces.base import RolloutBatch, StageCost
-from uncertain_feedback.planners.mpc.costs.base import (
-    CompositeTrajectoryCost,
-    MpcCostContext,
-)
+from uncertain_feedback.planners.mpc.costs.base import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.goal_spaces.base import GoalSpace
 from uncertain_feedback.planners.mpc.goal_spaces.regions import (
     GoalRegion,
     as_goal_region,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
+from uncertain_feedback.planners.mpc.human import Human
 
 
 @dataclass(frozen=True)
@@ -46,16 +43,14 @@ class CartesianGoalSpace(GoalSpace):
         self,
         goals: Sequence[Sequence[float] | np.ndarray | GoalRegion],
         threshold: float,
-        fk: SmplLeftArmFK,
-        spine3_pos: np.ndarray,
-        spine3_aa: np.ndarray,
+        human: Human,
     ) -> None:
         self._goals: deque[GoalRegion] = deque(as_goal_region(g) for g in goals)
         self._threshold = threshold
-        self._fk = fk
-        self._spine3_pos = spine3_pos
-        self._spine3_aa = spine3_aa
-        self._context = MpcCostContext(fk, spine3_pos, spine3_aa)
+        self._human = human
+        self._fk = human.fk
+        self._spine3_pos = human.spine3_pos
+        self._spine3_aa = human.spine3_aa
 
     @property
     def has_goals(self) -> bool:
@@ -71,10 +66,9 @@ class CartesianGoalSpace(GoalSpace):
         self._goals.append(as_goal_region(goal))
 
     def _distance(self, q: np.ndarray, region: GoalRegion) -> float:
-        arm_aa = q_to_arm_aa(q, self._fk.elbow_hinge_axis)
-        arm_pos = self._fk.fk(arm_aa, self._spine3_pos, self._spine3_aa)
-        wrist_rel = arm_pos[-1] - self._spine3_pos
-        return float(region.distance(wrist_rel[None], arm_aa[None], self._context)[0])
+        arm_aa = self._human.arm_aa_from_q(q)
+        wrist_rel = self._human.wrist_from_q(q)
+        return float(region.distance(wrist_rel[None], arm_aa[None], self._human)[0])
 
     def reached(self, q: np.ndarray) -> bool:
         """Whether ``q`` has reached the final goal region.
@@ -125,7 +119,7 @@ class CartesianGoalSpace(GoalSpace):
                     terminal_aa, self._spine3_pos, self._spine3_aa
                 )
                 wrist_rel = positions[:, -1] - self._spine3_pos
-            dist = target.distance(wrist_rel, terminal_aa, self._context)
+            dist = target.distance(wrist_rel, terminal_aa, self._human)
             return dist**2 + extra_costs(batch.aa_trajs)
 
         return cost

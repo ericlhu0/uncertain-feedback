@@ -20,7 +20,7 @@ from uncertain_feedback.data_collection.dataset_auto_correction.captioning impor
     draft_lines,
 )
 from uncertain_feedback.planners.mpc.arm_features import arm_aa_from_state
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users.attribution import (
     CorrectionIntent,
     has_feedback_content,
@@ -43,7 +43,7 @@ class ClipCaptionVerbalizer:
         intent: CorrectionIntent,
         q_trigger: np.ndarray,
         oracle_path: np.ndarray,
-        context: MpcCostContext,
+        human: Human,
         episode_key: str,
         round_index: int,
         window: int = 20,
@@ -62,19 +62,19 @@ class ClipCaptionVerbalizer:
         end = min(start + window, oracle_path.shape[0] - 1)
         window_aa = np.stack(
             [
-                arm_aa_from_state(q_trigger, context),
+                arm_aa_from_state(q_trigger, human),
                 *(
-                    arm_aa_from_state(state, context)
+                    arm_aa_from_state(state, human)
                     for state in oracle_path[start : end + 1]
                 ),
             ]
         )
         image_path = self._cache_dir / f"{episode_key}_round{round_index}_window.png"
-        ArmVisualizer(context.fk).render_correction_summary(
+        ArmVisualizer(human.fk).render_correction_summary(
             image_path,
             arm_traj=window_aa,
-            spine3_pos=context.spine3_pos,
-            spine3_aa=context.spine3_aa,
+            spine3_pos=human.spine3_pos,
+            spine3_aa=human.spine3_aa,
             mesh=self._mesh,
         )
         text = self._model.get_full_output(DRAFT_PROMPT, image_input=[str(image_path)])

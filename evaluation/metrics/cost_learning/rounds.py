@@ -14,15 +14,15 @@ def round_rows(interaction: Interaction) -> list[dict[str, Any]]:
     """One flat record per feedback round; the unit the grounding analysis aggregates."""
     task = interaction.task
     user = interaction.user
-    context = interaction.context
+    human = interaction.human
     rows: list[dict[str, Any]] = []
     for rnd in interaction.rounds:
         grounding = rnd.grounding
         choice = rnd.choice
         hidden_scores = oracle_cluster_scores(
-            user, context, grounding.candidates, grounding.magnitude
+            user, human, grounding.candidates, grounding.magnitude
         )
-        continuation_metrics = violation_metrics(user, context, rnd.continuation)
+        continuation_metrics = violation_metrics(user, human, rnd.continuation)
         n_acceptable = sum(1 for ok in choice.acceptable.values() if ok)
         rows.append(
             {

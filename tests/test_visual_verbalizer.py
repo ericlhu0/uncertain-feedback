@@ -11,8 +11,7 @@ import numpy as np
 import pytest
 
 from uncertain_feedback.llm.openai_model import OpenAIModel
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import ATTRIBUTED_FEATURES, CorrectionIntent
 from uncertain_feedback.simulated_users.visual import PROMPT, VisualVerbalizer
 
@@ -31,10 +30,9 @@ class _StubModel:
         return "please lower my arm a little"
 
 
-@pytest.fixture(name="context")
-def _context() -> MpcCostContext:
-    fk = SmplLeftArmFK()
-    return MpcCostContext(fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3))
+@pytest.fixture(name="human")
+def _human() -> Human:
+    return Human()
 
 
 def _intent(elevation_delta: float) -> CorrectionIntent:
@@ -64,23 +62,23 @@ def test_prompt_contains_no_joint_nomenclature() -> None:
         assert word not in lowered
 
 
-def test_termination_gate_short_circuits(context: MpcCostContext, tmp_path) -> None:
+def test_termination_gate_short_circuits(human: Human, tmp_path) -> None:
     stub = _StubModel()
     verbalizer = VisualVerbalizer(cast(OpenAIModel, stub), tmp_path)
     result = verbalizer.verbalize(
-        _intent(0.05), np.zeros(7), np.zeros((5, 7)), context, "ep", 0
+        _intent(0.05), np.zeros(7), np.zeros((5, 7)), human, "ep", 0
     )
     assert result is None
     assert not stub.calls
     assert not list(Path(tmp_path).glob("*"))
 
 
-def test_cache_round_trip(context: MpcCostContext, tmp_path) -> None:
+def test_cache_round_trip(human: Human, tmp_path) -> None:
     stub = _StubModel()
     verbalizer = VisualVerbalizer(cast(OpenAIModel, stub), tmp_path)
     oracle = np.zeros((5, 7), dtype=np.float64)
     first = verbalizer.verbalize(
-        _intent(0.4), np.zeros(7), oracle, context, "ep", 1, window=2
+        _intent(0.4), np.zeros(7), oracle, human, "ep", 1, window=2
     )
     assert first is not None
     assert first.text == "please lower my arm a little"
@@ -92,7 +90,7 @@ def test_cache_round_trip(context: MpcCostContext, tmp_path) -> None:
     assert (tmp_path / "ep_round1.txt").exists()
 
     second = verbalizer.verbalize(
-        _intent(0.4), np.zeros(7), oracle, context, "ep", 1, window=2
+        _intent(0.4), np.zeros(7), oracle, human, "ep", 1, window=2
     )
     assert second is not None
     assert second.text == first.text

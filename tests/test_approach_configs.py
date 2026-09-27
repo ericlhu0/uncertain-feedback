@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,8 @@ from evaluation.approaches import (
 )
 from evaluation.benchmarks.base import InteractionBenchmark
 from evaluation.benchmarks.episode import run_episode
-from uncertain_feedback.planners.rig import build_rig
+from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import get_persona
 
 _APPROACH_DIR = Path(__file__).resolve().parents[1] / "evaluation" / "conf" / "approach"
@@ -90,7 +92,8 @@ def test_nominal_grounder_rejects_chosen_source() -> None:
 
 
 def test_nominal_grounder_episode_smoke(tmp_path: Path) -> None:
-    rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
+    cfg = replace(load_mpc_config(_SMOKE_MPC), seed=0)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
     user = get_persona("elbow_contracture")
     bench = InteractionBenchmark(
         name="smoke",
@@ -99,12 +102,12 @@ def test_nominal_grounder_episode_smoke(tmp_path: Path) -> None:
         goals=[[-0.18, 0.40, 0.34]],
         max_rounds=1,
     )
-    task = bench.generate_tasks(0, rig.cfg)[0]
+    task = bench.generate_tasks(0, cfg)[0]
     approach = Approach(
         name="cost_only", grounder=NominalGrounder(), cost_gen=NoCostGen()
     )
-    approach.reset(rig, user, task.seed, tmp_path / "episode")
-    result = run_episode(rig, user, task, approach, tmp_path / "episode")
+    approach.reset(cfg, human, None, user, task.seed, tmp_path / "episode")
+    result = run_episode(cfg, human, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
     assert result, "episode recorded no interactions"
     assert all(

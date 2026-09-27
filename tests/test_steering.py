@@ -25,6 +25,7 @@ from uncertain_feedback.motion_generators.steering import (
 )
 from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig
 from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users.base import (
     CoupledBound,
     FeatureCondition,
@@ -360,27 +361,20 @@ class _SteeringCaptureGenerator:
     def __init__(self) -> None:
         self.received_steering: SteeringSpec | None = None
 
-    def generate_left_arm_position_samples(
+    def generate_positions(
         self,
         text: str,
-        start_pose: np.ndarray | None = None,
+        human: Human,
+        *,
+        prefix: bool,
         num_samples: int = 1,
         num_frames: int | None = None,
         frozen_body: bool = False,
-        *,
         steering: SteeringSpec | None = None,
     ) -> np.ndarray:
-        _ = text, start_pose, num_frames, frozen_body
+        _ = text, prefix, num_frames, frozen_body
         self.received_steering = steering
-        return np.zeros((num_samples, 3, 22, 3))
-
-    def smpl_positions_to_left_arm_trajectory(
-        self,
-        positions: np.ndarray,
-        spine3_aa: np.ndarray | None = None,
-    ) -> np.ndarray:
-        _ = positions, spine3_aa
-        return np.zeros((3, 3, 3))
+        return np.broadcast_to(human.posture, (num_samples, 3, 22, 3)).copy()
 
 
 class _OneClusterer(TrajectoryClusterer):
@@ -397,20 +391,21 @@ class _OneClusterer(TrajectoryClusterer):
 def test_query_mdm_with_uncertainty_forwards_the_steering_spec() -> None:
     gen = _SteeringCaptureGenerator()
     mpc = ArmMPC(
+        Human(),
         feedback=FeedbackConfig(uq=UqConfig(diffusion_samples=2)),
         clusterer=_OneClusterer(n_clusters=1),
     )
     spec = SteeringSpec(cost=lambda x0: x0, config=SteeringConfig(mode="resample"))
 
     mpc.query_mdm_with_uncertainty(
-        cast(Any, gen), "raise my left arm", start_pose=np.zeros(263), auto_cluster=0
+        cast(Any, gen), "raise my left arm", prefix=False, auto_cluster=0
     )
     assert gen.received_steering is None
 
     mpc.query_mdm_with_uncertainty(
         cast(Any, gen),
         "raise my left arm",
-        start_pose=np.zeros(263),
+        prefix=False,
         auto_cluster=0,
         steering=spec,
     )

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +32,8 @@ from evaluation.benchmarks.oracle_viz import (
 from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
     clip_source_from_dir,
 )
-from uncertain_feedback.planners.rig import build_rig
+from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import PERSONAS, get_persona
 
 
@@ -40,28 +42,27 @@ def _sampled(args: argparse.Namespace) -> list[dict[str, object]]:
     summaries = []
     for index in range(args.first_case, args.first_case + args.n_cases):
         case = build_sampled_case(source, index, oracle_steps=args.oracle_steps)
-        render_case(case, source.context, source.body_pos, args.out_dir)
+        render_case(case, source.human, args.out_dir)
         summaries.append(case_summary(case))
     return summaries
 
 
 def _persona(args: argparse.Namespace) -> list[dict[str, object]]:
-    rig = build_rig(
-        args.mpc_config, seed=args.seed, load_generator=not args.no_generator
-    )
+    cfg = replace(load_mpc_config(args.mpc_config), seed=args.seed)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
     names = args.personas or [
         name
         for name, user in PERSONAS.items()
-        if user.bounds and name in rig.cfg.persona_goals
+        if user.bounds and name in cfg.persona_goals
     ]
     summaries = []
     for name in names:
-        goal = np.asarray(rig.cfg.persona_goals[name].cartesian[0], dtype=np.float64)
-        case = build_persona_case(rig, get_persona(name), goal, seed=args.seed)
+        goal = np.asarray(cfg.persona_goals[name].cartesian[0], dtype=np.float64)
+        case = build_persona_case(cfg, human, get_persona(name), goal, seed=args.seed)
         if case is None:
             print(f"[oracle-viz] {name}: nominal plan never violates; no correction.")
             continue
-        render_case(case, rig.context, rig.body_pos, args.out_dir)
+        render_case(case, human, args.out_dir)
         summaries.append(case_summary(case))
     return summaries
 
@@ -89,7 +90,6 @@ def main() -> None:
     parser.add_argument("--mpc-config", type=Path, default=None)
     parser.add_argument("--personas", nargs="+", default=None)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--no-generator", action="store_true")
     args = parser.parse_args()
 
     if (args.clips_dir is None) == (args.mpc_config is None):

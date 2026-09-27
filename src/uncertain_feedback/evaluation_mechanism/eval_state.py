@@ -8,8 +8,8 @@ generator pickles it next to the task;
 ``evaluation_mechanism/render_cost_comparison.py`` loads it to render the
 rollout-vs-correction overlay codex inspects each turn.
 
-``SmplLeftArmFK`` (carried via :class:`MpcCostContext`) and the comfort cost terms
-are plain numpy / dataclasses, so the pickle round-trips. The full run config is
+The :class:`~uncertain_feedback.planners.mpc.human.Human` (with its
+``SmplLeftArmFK``) and the comfort cost terms pickle, so the state round-trips. The full run config is
 reduced to :class:`EvalMpcConfig` before serialization so persona metadata and
 other non-operational settings never enter the agent workspace.
 """
@@ -23,17 +23,14 @@ from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
-from uncertain_feedback.planners.mpc.costs.base import (
-    CompositeTrajectoryCost,
-    MpcCostContext,
-)
+from uncertain_feedback.planners.mpc.costs.base import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedCostContext,
     GeneratedPythonCost,
     build_generated_cost_context,
 )
 from uncertain_feedback.planners.mpc.goal_spaces import goal_point
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.mpc.human import Human
 
 if TYPE_CHECKING:
     from uncertain_feedback.planners.mpc.config import MpcRunConfig
@@ -79,18 +76,17 @@ class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
 
 @dataclass
 class EvalState:
-    """Everything needed to roll out and score a candidate cost off-process."""
+    """Everything needed to roll out and score a candidate cost off-process.
+
+    ``human`` is the person at the correction: its history is the executed
+    motion and its ``q`` the configuration the candidate rollouts start from.
+    """
 
     cfg: MpcRunConfig | EvalMpcConfig
-    current_q: np.ndarray
+    human: Human
     correction_traj: np.ndarray
-    q_history: list[np.ndarray]
     window: int
-    cost_context: MpcCostContext
     base_extra_costs: CompositeTrajectoryCost
-    body_pos: np.ndarray | None
-    spine3_pos: np.ndarray | None
-    spine3_aa: np.ndarray | None
     reference_traj: np.ndarray | None = None
     full_correction_traj: np.ndarray | None = None
     cartesian_goal: np.ndarray | None = None
@@ -118,12 +114,9 @@ class EvalState:
     def make_generated_context(self) -> GeneratedCostContext:
         """Rebuild the runtime context passed to generated cost code."""
         return build_generated_cost_context(
-            self.cost_context,
-            self.current_q,
+            self.human,
             self.correction_traj,
-            self.q_history,
             window=self.window,
-            body_pos=self.body_pos,
             reference_traj=self.reference_traj,
             full_correction_traj=self.full_correction_traj,
             cartesian_goal=self.cartesian_goal,
@@ -154,35 +147,25 @@ class EvalState:
                 [*self.base_extra_costs.terms(), cost]
             )
             planner = ArmMPC(
+                self.human.reset_human_with_q(self.human.q),
                 horizon=cfg.horizon,
                 n_mpc_samples=cfg.n_mpc_samples,
                 max_angle_delta=cfg.max_angle_delta,
                 visualize=False,
-                fk=self.cost_context.fk,
-                spine3_pos=self.spine3_pos,
-                spine3_aa=self.spine3_aa,
-                body_pos=self.body_pos,
                 extra_costs=extra_costs,
                 seed=cfg.seed,
-                initial_q=self.current_q,
                 cartesian=CartesianConfig(
                     goals=[list(goal) for goal in cfg.cartesian_goals],
                     threshold=cfg.cartesian_threshold,
                 ),
             )
-            q = np.asarray(self.current_q, dtype=np.float64).copy()
-            q_history = [q.copy()]
             for _ in range(max(1, cfg.steps)):
                 try:
-                    q = planner.step(q)
+                    moved = planner.step()
                 except RuntimeError:
                     break
-                q_history.append(q.copy())
-                if planner.goal_reached(q):
+                if planner.goal_reached(moved.q):
                     break
-            return q_to_arm_aa(
-                np.asarray(q_history, dtype=np.float64),
-                self.cost_context.fk.elbow_hinge_axis,
-            )
+            return planner.human.arm_aa_from_q(planner.human.history)
 
         return rollout

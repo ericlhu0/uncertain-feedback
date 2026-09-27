@@ -11,11 +11,11 @@ from uncertain_feedback.cost_generation import (
     CostRound,
     generate_cost_for_cluster,
 )
+from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
 )
-from uncertain_feedback.planners.rig import PlanningRig, cfg_with_goal
 
 COST_GEN_SOURCES = ("chosen", "nominal")
 
@@ -32,17 +32,17 @@ class CostGen(abc.ABC):
         if source not in COST_GEN_SOURCES:
             raise ValueError(f"source must be one of {COST_GEN_SOURCES}.")
         self.source = source
-        self._rig: PlanningRig | None = None
+        self._cfg: MpcRunConfig | None = None
         self._base = CompositeTrajectoryCost()
         self._episode_dir = Path(".")
         self._generated: list[GeneratedPythonCost] = []
         self._cost_rounds: list[CostRound] = []
 
     def reset(
-        self, rig: PlanningRig, base: CompositeTrajectoryCost, episode_dir: Path
+        self, cfg: MpcRunConfig, base: CompositeTrajectoryCost, episode_dir: Path
     ) -> None:
         """Bind the episode and drop all learned state."""
-        self._rig = rig
+        self._cfg = cfg
         self._base = base
         self._episode_dir = episode_dir
         self._generated = []
@@ -58,8 +58,8 @@ class CostGen(abc.ABC):
 
     def generate(self, ctx: RoundContext) -> CostGenerationResult:
         """Generate immediate evidence without changing accumulated costs."""
-        rig = self._rig
-        assert rig is not None, "reset() must run before use"
+        cfg = self._cfg
+        assert cfg is not None, "reset() must run before use"
         language_only = self.source == "nominal"
         if language_only:
             if ctx.nominal_plan is None:
@@ -69,17 +69,12 @@ class CostGen(abc.ABC):
             cluster_traj = ctx.grounding.correction_traj
         generation = generate_cost_for_cluster(
             mpc=None,
-            cfg=cfg_with_goal(rig.cfg, ctx.goal),
+            cfg=cfg_with_goal(cfg, ctx.goal),
             instruction=ctx.utterance_text,
             cluster_traj=cluster_traj,
-            current_q=ctx.q_feedback,
-            q_history=ctx.q_history,
-            context=rig.context,
+            human=ctx.human,
             base_extra_costs=self._base,
             cost_dir=ctx.round_dir / "cost_generation",
-            body_pos=rig.body_pos,
-            spine3_pos=rig.spine3_pos,
-            spine3_aa=rig.spine3_aa,
             candidate_trajs=None if language_only else ctx.grounding.candidates,
             highlight_label=None if language_only else ctx.grounding.chosen_label,
             undesirable_labels=frozenset() if language_only else ctx.rejected_labels,
@@ -104,7 +99,7 @@ class CostGen(abc.ABC):
                 index=len(self._cost_rounds),
                 goal=(float(ctx.goal[0]), float(ctx.goal[1]), float(ctx.goal[2])),
                 feedback_text=ctx.utterance_text,
-                trigger_step=len(ctx.q_history) - 1,
+                trigger_step=len(ctx.human.history) - 1,
                 round_dir=ctx.round_dir.resolve(),
                 state_path=state_path.resolve(),
                 cost_code=generated.code,

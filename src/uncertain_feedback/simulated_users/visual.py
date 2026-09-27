@@ -16,7 +16,7 @@ import numpy as np
 
 from uncertain_feedback.llm.openai_model import OpenAIModel
 from uncertain_feedback.planners.mpc.arm_features import arm_aa_from_state
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users.attribution import (
     CorrectionIntent,
     has_feedback_content,
@@ -37,18 +37,18 @@ def render_pose_image(
     path: Path,
     pose_aa: np.ndarray,
     current_aa: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
 ) -> None:
     """Render one arm pose (blue) against the current pose (orange) for :data:`PROMPT`."""
     # Duplicate the single frame so the pose lands on the dark, legible end
     # of the overlay's light-to-dark frame gradient.
-    ArmVisualizer(context.fk).render_cluster_contrast_overlay(
+    ArmVisualizer(human.fk).render_cluster_contrast_overlay(
         path,
         mdm_trajs={0: np.stack([pose_aa, pose_aa])},
         highlight_label=0,
         current_q=current_aa,
-        spine3_pos=context.spine3_pos,
-        spine3_aa=context.spine3_aa,
+        spine3_pos=human.spine3_pos,
+        spine3_aa=human.spine3_aa,
         include_others=False,
         include_reference=False,
     )
@@ -66,7 +66,7 @@ class VisualVerbalizer:
         intent: CorrectionIntent,
         q_trigger: np.ndarray,
         oracle_path: np.ndarray,
-        context: MpcCostContext,
+        human: Human,
         episode_key: str,
         round_index: int,
         window: int = 20,
@@ -80,12 +80,12 @@ class VisualVerbalizer:
             return Utterance(cache_path.read_text(encoding="utf-8").strip(), "visual")
 
         target_index = min(intent.join_index + window, oracle_path.shape[0] - 1)
-        trigger_aa = arm_aa_from_state(q_trigger, context)
-        target_aa = arm_aa_from_state(oracle_path[target_index], context)
+        trigger_aa = arm_aa_from_state(q_trigger, human)
+        target_aa = arm_aa_from_state(oracle_path[target_index], human)
         now_path = self._cache_dir / f"{episode_key}_round{round_index}_now.png"
         desired_path = self._cache_dir / f"{episode_key}_round{round_index}_desired.png"
-        render_pose_image(now_path, trigger_aa, trigger_aa, context)
-        render_pose_image(desired_path, target_aa, trigger_aa, context)
+        render_pose_image(now_path, trigger_aa, trigger_aa, human)
+        render_pose_image(desired_path, target_aa, trigger_aa, human)
 
         text = self._model.get_full_output(
             PROMPT, image_input=[str(now_path), str(desired_path)]

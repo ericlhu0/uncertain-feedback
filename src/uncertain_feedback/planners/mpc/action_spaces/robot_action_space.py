@@ -27,11 +27,11 @@ from uncertain_feedback.planners.mpc.action_spaces.base import (
     RolloutBatch,
     StageCost,
 )
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_DIM,
     Q_ELBOW,
     Q_SHOULDER,
-    SmplLeftArmFK,
     project_forearm_frames,
 )
 
@@ -65,19 +65,17 @@ class RobotJointActions(ActionSpace):
     def __init__(
         self,
         cfg: RobotActionsConfig,
-        fk: SmplLeftArmFK,
+        human: Human,
         rng: np.random.Generator | None,
         n_samples: int,
         horizon: int,
-        spine3_pos: np.ndarray,
-        spine3_aa: np.ndarray,
     ) -> None:
-        self._fk = fk
+        self._fk = human.fk
         self._rng = rng
         self._n_samples = n_samples
         self._horizon = horizon
-        self._spine3_pos = spine3_pos
-        self._spine3_aa = spine3_aa
+        self._spine3_pos = human.spine3_pos
+        self._spine3_aa = human.spine3_aa
         self._max_joint_delta = float(cfg.max_joint_delta)
         # Std well below the inf-norm cap keeps mean+noise inside it for most
         # samples; at std == cap nearly every sample saturates and the uniform

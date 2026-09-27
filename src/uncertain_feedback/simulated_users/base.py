@@ -28,9 +28,9 @@ from uncertain_feedback.planners.mpc.arm_features import (
 )
 from uncertain_feedback.planners.mpc.costs.base import (
     JointLimitCost,
-    MpcCostContext,
     TrajectoryCost,
 )
+from uncertain_feedback.planners.mpc.human import Human
 
 BOUND_TYPES = ("upper_bound", "lower_bound", "avoid_band")
 
@@ -39,16 +39,14 @@ VELOCITY_FEATURE_NAMES = tuple(f"{name}_velocity" for name in FEATURE_NAMES)
 SIM_FEATURE_NAMES = (*FEATURE_NAMES, *VELOCITY_FEATURE_NAMES)
 
 
-def feature_series(
-    context: MpcCostContext, trajectory: np.ndarray
-) -> dict[str, np.ndarray]:
+def feature_series(human: Human, trajectory: np.ndarray) -> dict[str, np.ndarray]:
     """Return anatomical features plus their velocities.
 
     Velocities are central finite differences along the trajectory's time
     axis in rad/s at the repo-wide 20 fps frame convention (zero for
     single-frame inputs).
     """
-    features = dict(arm_feature_series(trajectory, context))
+    features = dict(arm_feature_series(trajectory, human))
     for name in FEATURE_NAMES:
         values = features[name]
         if values.ndim == 0 or values.shape[-1] < 2:
@@ -235,31 +233,31 @@ class SimulatedUser:
 
 
 def compute_violations(
-    user: SimulatedUser, context: MpcCostContext, trajectory: np.ndarray
+    user: SimulatedUser, human: Human, trajectory: np.ndarray
 ) -> np.ndarray:
     """Return the hidden-cost violation series for q or axis-angle states."""
     return user.violation_series(
-        feature_series(context, trajectory)
-    ) + user.limit_violation_series(arm_aa_from_state(trajectory, context))
+        feature_series(human, trajectory)
+    ) + user.limit_violation_series(arm_aa_from_state(trajectory, human))
 
 
 def first_violation_step(
     user: SimulatedUser,
-    context: MpcCostContext,
+    human: Human,
     trajectory: np.ndarray,
     threshold: float = 0.02,
 ) -> int | None:
     """Return the first frame whose violation exceeds ``threshold`` radians."""
-    violations = compute_violations(user, context, trajectory)
+    violations = compute_violations(user, human, trajectory)
     indices = np.nonzero(violations > threshold)[0]
     return int(indices[0]) if indices.size > 0 else None
 
 
 def violation_metrics(
-    user: SimulatedUser, context: MpcCostContext, trajectory: np.ndarray
+    user: SimulatedUser, human: Human, trajectory: np.ndarray
 ) -> dict[str, float]:
     """Return summary violation statistics for a ``(T, 3, 3)`` trajectory."""
-    violations = compute_violations(user, context, trajectory)
+    violations = compute_violations(user, human, trajectory)
     return {
         "mean_violation": float(np.mean(violations)),
         "max_violation": float(np.max(violations)),
@@ -269,12 +267,12 @@ def violation_metrics(
 
 def choose_cluster(
     user: SimulatedUser,
-    context: MpcCostContext,
+    human: Human,
     cluster_means: dict[int, np.ndarray],
 ) -> int:
     """Return the cluster label whose mean trajectory the user finds most comfortable."""
     scores = {
-        label: float(np.mean(compute_violations(user, context, traj)))
+        label: float(np.mean(compute_violations(user, human, traj)))
         for label, traj in cluster_means.items()
     }
     return min(sorted(scores), key=lambda label: scores[label])
@@ -289,13 +287,13 @@ class HiddenCostTerm(TrajectoryCost):
     """
 
     user: SimulatedUser
-    context: MpcCostContext
+    human: Human
     weight: float = 10.0
 
     def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
         q_trajs = np.asarray(q_trajs, dtype=np.float64)
         future = q_trajs[:, 1:] if q_trajs.shape[1] > 1 else q_trajs
         violations = self.user.violation_series(
-            feature_series(self.context, future)
-        ) + self.user.limit_violation_series(arm_aa_from_state(future, self.context))
+            feature_series(self.human, future)
+        ) + self.user.limit_violation_series(arm_aa_from_state(future, self.human))
         return self.weight * np.mean(violations**2, axis=1)

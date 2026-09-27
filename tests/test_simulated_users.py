@@ -6,8 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import MOTION_FPS, feature_series
 from uncertain_feedback.simulated_users.personas import (
     BICEPS_LONG_HEAD_CONTRACTURE,
@@ -126,21 +125,18 @@ def test_spastic_elbow_tolerates_fast_extension_only_when_flexed() -> None:
 
 
 def test_feature_series_adds_velocities() -> None:
-    fk = SmplLeftArmFK()
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
+    human = Human()
     q = np.zeros((5, 7), dtype=np.float64)
     q[:, 6] = np.linspace(0.2, 1.0, 5)
 
-    features = feature_series(context, q)
+    features = feature_series(human, q)
 
     np.testing.assert_allclose(
         features["elbow_flexion_velocity"],
         np.gradient(features["elbow_flexion"]) * MOTION_FPS,
     )
     assert np.all(features["elbow_flexion_velocity"] > 0.0)
-    assert np.all(feature_series(context, q[:1])["elbow_flexion_velocity"] == 0.0)
+    assert np.all(feature_series(human, q[:1])["elbow_flexion_velocity"] == 0.0)
 
 
 def test_limit_cost_penalizes_out_of_box_rollouts() -> None:
@@ -164,10 +160,7 @@ def test_intent_aligned_chooser_picks_comfortable_aligned_candidate() -> None:
     from uncertain_feedback.simulated_users.chooser import choose_correction
     from uncertain_feedback.simulated_users.personas import ADHESIVE_CAPSULITIS
 
-    fk = SmplLeftArmFK()
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
+    human = Human()
     intent = CorrectionIntent(
         join_index=0,
         feature_deltas={
@@ -193,7 +186,7 @@ def test_intent_aligned_chooser_picks_comfortable_aligned_candidate() -> None:
 
     choice = choose_correction(
         ADHESIVE_CAPSULITIS,
-        context,
+        human,
         candidates,
         oracle,
         mode="intent_aligned",
@@ -207,7 +200,7 @@ def test_intent_aligned_chooser_picks_comfortable_aligned_candidate() -> None:
     for _ in range(5):
         random_choice = choose_correction(
             ADHESIVE_CAPSULITIS,
-            context,
+            human,
             candidates,
             oracle,
             mode="random",

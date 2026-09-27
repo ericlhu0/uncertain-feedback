@@ -34,10 +34,10 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedCostContext,
     GeneratedPythonCost,
-    MpcCostContext,
     build_generated_cost_context,
 )
 from uncertain_feedback.planners.mpc.goal_spaces import goal_point
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import (
     assemble_full_correction_traj,
     make_cost_eval_rollout,
@@ -122,14 +122,9 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     cfg: MpcRunConfig,
     instruction: str,
     cluster_traj: np.ndarray,
-    current_q: np.ndarray,
-    q_history: list[np.ndarray],
-    context: MpcCostContext,
+    human: Human,
     base_extra_costs: CompositeTrajectoryCost,
     cost_dir: Path,
-    body_pos: np.ndarray | None,
-    spine3_pos: np.ndarray | None,
-    spine3_aa: np.ndarray | None,
     *,
     backend: str | None = None,
     candidate_trajs: dict[int, np.ndarray] | None = None,
@@ -145,6 +140,8 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
 ) -> CostGenerationResult:
     """Build one prompt context and generate one cost for one cluster/backend.
 
+    ``human`` is the person at the correction: its history is the executed
+    motion and its ``q`` the configuration the correction starts from.
     ``language_only`` means no correction was chosen and ``cluster_traj`` is the
     INTERRUPTED plan: it becomes the reference the prompts frame as what the
     person corrected away from, the recent comfortable history stands in the
@@ -159,19 +156,11 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     window = cfg.preference_window if history_window is None else history_window
     phase_t0 = time.perf_counter()
     _log("phase C building cost-generation context", prefix=log_prefix)
-    reference_q = (
-        canonical_arm_q(cluster_traj, context)
-        if language_only
-        else rollout_reference_trajectory(
-            cfg_backend,
-            current_q,
-            context,
-            base_extra_costs,
-            body_pos,
-            spine3_pos,
-            spine3_aa,
-        )
-    )
+    if language_only:
+        reference_q: np.ndarray | None = canonical_arm_q(cluster_traj, human)
+    else:
+        reference = rollout_reference_trajectory(cfg_backend, human, base_extra_costs)
+        reference_q = None if reference is None else reference.history
     goal_pos = (
         goal_point(cfg_backend.cartesian.goals[0])
         if cfg_backend.cartesian is not None
@@ -181,19 +170,12 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         cfg_backend.cartesian.threshold if cfg_backend.cartesian is not None else 0.01
     )
     if language_only:
-        correction_q = np.asarray(q_history[-(window + 1) :], dtype=np.float64)
+        correction_q = human.history[-(window + 1) :]
         full_correction_q = None
     else:
-        correction_q = canonical_arm_q(cluster_traj, context)
+        correction_q = canonical_arm_q(cluster_traj, human)
         full_correction_q = assemble_full_correction_traj(
-            cfg_backend,
-            q_history,
-            correction_q,
-            context,
-            base_extra_costs,
-            body_pos,
-            spine3_pos,
-            spine3_aa,
+            cfg_backend, human, correction_q, base_extra_costs
         )
     rejected_trajs: tuple[np.ndarray, ...] = ()
     prompt_candidate_trajs = candidate_trajs
@@ -214,12 +196,9 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
             if label == selected_label or label in undesirable_labels
         }
     generated_context = build_generated_cost_context(
-        context,
-        current_q,
+        human,
         correction_q,
-        q_history,
         window=window,
-        body_pos=body_pos,
         reference_traj=reference_q,
         full_correction_traj=full_correction_q,
         cartesian_goal=goal_pos,
@@ -264,15 +243,10 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
 
     eval_state = EvalState(
         cfg=cfg_backend,
-        current_q=current_q,
+        human=human,
         correction_traj=correction_q,
-        q_history=q_history,
         window=window,
-        cost_context=context,
         base_extra_costs=base_extra_costs,
-        body_pos=body_pos,
-        spine3_pos=spine3_pos,
-        spine3_aa=spine3_aa,
         reference_traj=reference_q,
         full_correction_traj=full_correction_q,
         cartesian_goal=goal_pos,
@@ -288,15 +262,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         images=images,
         mpc=mpc,
         llm_model_factory=llm_model_factory,
-        rollout_fn=make_cost_eval_rollout(
-            cfg_backend,
-            current_q,
-            context,
-            base_extra_costs,
-            body_pos,
-            spine3_pos,
-            spine3_aa,
-        ),
+        rollout_fn=make_cost_eval_rollout(cfg_backend, human, base_extra_costs),
         eval_state=eval_state,
         save_candidate_videos=save_candidate_videos,
         corpus_dir=corpus_dir,

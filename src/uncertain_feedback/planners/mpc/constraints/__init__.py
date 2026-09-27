@@ -4,7 +4,7 @@ Mirrors the ``COST_BUILDERS`` pattern: the YAML ``constraints:`` section maps
 constraint names to parameter mappings; :data:`CONSTRAINT_BUILDERS` maps each
 name to its ``(config dataclass, constraint class)`` pair. The config is
 parsed at load time and the constraint is built by the planner, which supplies
-the runtime objects (env, fk, spine3 frame).
+the runtime objects (env, human).
 """
 
 from typing import Callable

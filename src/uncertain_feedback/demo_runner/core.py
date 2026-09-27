@@ -2,8 +2,8 @@
 
 One :class:`DemoRig` per server process holds everything that outlives an
 individual session: the loaded config, the persona library (with CRUD), the
-motion generator, the initial pose / body / spine, forward kinematics, the mesh
-cache, and the shared :class:`MpcCostContext`. A
+motion generator, the :class:`~uncertain_feedback.planners.mpc.human.Human`
+every trajectory starts from, and the mesh cache. A
 :class:`~uncertain_feedback.demo_runner.session.Session` is spawned from the
 rig; it owns one simulated user plus the context accumulated while correcting
 them (trajectory corpus, correction rounds, unified cost) and
@@ -37,15 +37,13 @@ from uncertain_feedback.planners.mpc.config import (
 )
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    MpcCostContext,
     build_extra_costs,
 )
 from uncertain_feedback.planners.mpc.goal_spaces import goal_point
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_INDICES,
     SMPL_BONE_PAIRS_22,
-    SmplLeftArmFK,
-    q_to_arm_aa,
 )
 from uncertain_feedback.simulated_users.base import (
     JOINT_SLOTS,
@@ -199,23 +197,10 @@ class DemoRig:
         )
         if self.cfg.pose is None:
             raise ValueError("demo_runner requires a config with a pose file.")
-        self.initial_hml_pose = self.gen.load_pose(self.cfg.pose)
-        arm_aa, body_pos, spine3_aa, collar_aa = self.gen.decode_pose(
-            self.initial_hml_pose
-        )
-        self.default_arm_aa = np.asarray(arm_aa, dtype=np.float64)
-        self.body_pos = np.asarray(body_pos, dtype=np.float64)
-        self.spine3_pos = np.asarray(body_pos[9], dtype=np.float64)
-        self.spine3_aa = np.asarray(spine3_aa, dtype=np.float64)
-        self.fk = SmplLeftArmFK()
-        self.fk.collar_aa = np.asarray(collar_aa, dtype=np.float64)
-        self.default_q = self.fk.arm_aa_to_q(self.default_arm_aa, self.spine3_aa)
-        self.meshes = SmplMeshCache(self.body_pos)
-        self.context = MpcCostContext(
-            fk=self.fk,
-            spine3_pos=self.spine3_pos,
-            spine3_aa=self.spine3_aa,
-        )
+        # The person every trajectory starts from: the config's pose file and
+        # `arm:`; saved start poses replace only the arm.
+        self.human = Human(pose=self.cfg.pose, arm=self.cfg.arm)
+        self.meshes = SmplMeshCache(self.human.posture)
 
         self.session: "Session | None" = None
 
@@ -268,7 +253,7 @@ class DemoRig:
             for limit, choice in zip(user.joint_limits, choices):
                 corner_poses[index, JOINT_SLOTS[limit.joint]] = choice
         poses = np.concatenate((sampled, corner_poses), axis=0)
-        features = arm_feature_series(poses, self.context)
+        features = arm_feature_series(poses, self.human)
         return {
             name: [
                 float(np.min(values) - 0.02 * (np.max(values) - np.min(values))),
@@ -365,33 +350,29 @@ class DemoRig:
         )
 
     def _extra_costs(self, user: SimulatedUser) -> CompositeTrajectoryCost:
-        extra = build_extra_costs(self.cfg.costs, self.context)
+        extra = build_extra_costs(self.cfg.costs, self.human)
         if user.joint_limits:
             extra = CompositeTrajectoryCost([*extra.terms(), user.limit_cost()])
         return extra
 
     def _manual_planner(
         self,
-        start_q: np.ndarray,
+        human: Human,
         goal: np.ndarray,
         extra_costs: CompositeTrajectoryCost,
     ) -> ArmMPC:
         env = make_env(self.cfg.env, **self.cfg.env_params)
-        env.set_pose_context(self.fk, self.spine3_pos, self.spine3_aa, self.body_pos)
+        env.set_pose_context(human.fk, human.spine3_pos, human.spine3_aa, human.posture)
         assert self.cfg.cartesian is not None
         return ArmMPC(
+            human,
             horizon=self.cfg.horizon,
             n_mpc_samples=self.cfg.n_mpc_samples,
             max_angle_delta=self.cfg.max_angle_delta,
             visualize=False,
-            fk=self.fk,
-            spine3_pos=self.spine3_pos,
-            spine3_aa=self.spine3_aa,
-            body_pos=self.body_pos,
             extra_costs=extra_costs,
             seed=self.cfg.seed,
             env=env,
-            initial_q=start_q,
             cartesian=replace(self.cfg.cartesian, goals=[list(goal.copy())]),
             feedback=self.cfg.feedback,
         )
@@ -415,13 +396,10 @@ class DemoRig:
         ``pin_mesh`` keeps the mesh alive for the trajectory's whole life.
         """
         traj = np.asarray(traj, dtype=np.float64)
-        arm_aa = (
-            q_to_arm_aa(traj, self.fk.elbow_hinge_axis)
-            if traj.shape[-1:] == (7,)
-            else traj
-        )
-        arm_pos = self.fk.fk_batch(arm_aa, self.spine3_pos, self.spine3_aa)
-        feats = arm_feature_series(traj, self.context)
+        human = self.human
+        arm_aa = human.arm_aa_from_q(traj) if traj.shape[-1:] == (7,) else traj
+        arm_pos = human.fk.fk_batch(arm_aa, human.spine3_pos, human.spine3_aa)
+        feats = arm_feature_series(traj, human)
         return {
             "n_frames": int(traj.shape[0]),
             "arm_positions": arm_pos.tolist(),
@@ -434,12 +412,13 @@ class DemoRig:
 
     def preview_pose(self, arm_aa: list[list[float]]) -> dict[str, Any]:
         """Forward-kinematics preview of an arm pose: joints, mesh, and wrist offset."""
+        human = self.human
         q = np.asarray(arm_aa, dtype=np.float64)
-        arm_pos = self.fk.fk(q, self.spine3_pos, self.spine3_aa)
+        arm_pos = human.fk.fk(q, human.spine3_pos, human.spine3_aa)
         return {
             "arm_positions": arm_pos.tolist(),
             "mesh_vertices": self.meshes.preview(arm_pos).tolist(),
-            "wrist_rel": (arm_pos[-1] - self.spine3_pos).tolist(),
+            "wrist_rel": (arm_pos[-1] - human.spine3_pos).tolist(),
         }
 
     def mesh_vertices(self, mesh_id: str, frame: int | None = None) -> np.ndarray:
@@ -463,7 +442,7 @@ class DemoRig:
         return {
             "personas": self.personas_payload(),
             "feature_names": list(FEATURE_NAMES),
-            "start_arm_aa": self.default_arm_aa.tolist(),
+            "start_arm_aa": self.human.arm_aa_from_q(self.human.q).tolist(),
             "default_goal": (
                 default_goal.tolist()
                 if self.cfg.cartesian is not None
@@ -477,8 +456,8 @@ class DemoRig:
                 for name, goals in self.cfg.persona_goals.items()
             },
             "trajectory_configs": self.trajectory_configs_payload(),
-            "body_pos": self.body_pos.tolist(),
-            "spine3_pos": self.spine3_pos.tolist(),
+            "body_pos": self.human.posture.tolist(),
+            "spine3_pos": self.human.spine3_pos.tolist(),
             "bone_pairs": [
                 [int(p), int(c)]
                 for p, c in SMPL_BONE_PAIRS_22
@@ -486,7 +465,7 @@ class DemoRig:
             ],
             "smpl_faces": self.meshes.faces.tolist(),
             "smpl_reference_vertices": self.meshes.preview(
-                self.fk.fk(self.default_arm_aa, self.spine3_pos, self.spine3_aa)
+                self.human.fk_positions_from_q(self.human.q)
             ).tolist(),
             "arm_chain_indices": list(LEFT_ARM_CHAIN_INDICES),
             "uq": {
@@ -521,7 +500,7 @@ class DemoRig:
             user=user,
             dir=session_dir,
             corpus=TrajectoryCorpus.create(
-                session_dir / "trajectory_corpus", self.context
+                session_dir / "trajectory_corpus", self.human
             ),
         )
         session._save()  # pylint: disable=not-callable

@@ -24,9 +24,9 @@ recent *corrected* history is still the arm's real recent history.
 
 Only trajectories are written, never rendered video — video dominated the output
 size (3.5 MB of a 3.9 MB 32-clip set). ``label.py`` previews a run
-in the browser from the run's ``naive.npy`` plus its ``continuation.npy``, and
-``geometry.npz`` carries the generator-decoded body so that preview needs neither
-the MDM environment nor a GPU.
+in the browser from the run's ``naive.npy`` plus its ``continuation.npy``, on the
+person the manifest's planner config describes, so preview needs neither the
+MDM environment nor a GPU.
 
 Stage (b) — this folder's :mod:`build_dataset` — turns the hand-labeled manifest
 into a HumanML3D-format finetune dataset.
@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import csv
 import json
-import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -44,25 +43,22 @@ from typing import Any
 
 import numpy as np
 
+from uncertain_feedback.motion_generators.mdm.mdm_api import N_PREFIX_FRAMES
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
     arm_feature_series,
-    arm_q_from_features,
 )
-from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
+from uncertain_feedback.planners.mpc.config import (
+    MpcRunConfig,
+    cfg_with_goal,
+    load_mpc_config,
+)
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    MpcCostContext,
-    build_extra_costs,
+    base_extra_costs,
 )
-from uncertain_feedback.planners.mpc.kinematics import (
-    Q_CLAVICLE,
-    WRIST_CHAIN_IDX,
-    SmplLeftArmFK,
-    q_to_arm_aa,
-)
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import goal_reach, rollout_to_goal
-from uncertain_feedback.planners.rig import base_extra_costs, build_rig, cfg_with_goal
 from uncertain_feedback.simulated_users import (
     HiddenBound,
     HiddenCostTerm,
@@ -146,13 +142,11 @@ class SampledBound:
     trigger_step: int
 
 
-def sample_arm_q(
-    rng: np.random.Generator, clavicle: np.ndarray, context: MpcCostContext
-) -> np.ndarray:
+def sample_arm_q(rng: np.random.Generator, human: Human) -> np.ndarray:
     """Draw one anatomically valid arm state from :data:`START_FEATURE_RANGES`.
 
-    The features are drawn independently and inverted by
-    :func:`arm_q_from_features`, which resolves the over-determined
+    The arm keeps ``human``'s current clavicle. The features are drawn
+    independently and inverted by :meth:`Human.q_from_features`, which resolves the over-determined
     flexion/abduction/elevation triple rather than honouring all three — so the
     realized features differ from the drawn ones. The draw is for coverage, not
     for hitting a target pose. Draws landing outside
@@ -163,8 +157,8 @@ def sample_arm_q(
         features = np.array(
             [rng.uniform(low, high) for low, high in START_FEATURE_RANGES]
         )
-        q = arm_q_from_features(features[None], clavicle, context)[0]
-        arm_aa = q_to_arm_aa(q, context.fk.elbow_hinge_axis)
+        q = human.q_from_features(features[None])[0]
+        arm_aa = human.arm_aa_from_q(q)
         if all(
             float(limit.violation(arm_aa).max()) <= 0.0
             for limit in DEFAULT_ARM_JOINT_LIMITS
@@ -174,20 +168,6 @@ def sample_arm_q(
         f"No arm configuration stayed inside the joint box within "
         f"{_MAX_SAMPLE_ATTEMPTS} draws — narrow START_FEATURE_RANGES."
     )
-
-
-def wrist_goal(q: np.ndarray, context: MpcCostContext) -> np.ndarray:
-    """The spine3-relative wrist position of an arm state.
-
-    Cartesian goals are spine3-relative everywhere in the planner, so an arm
-    configuration becomes a goal by measuring where it puts the wrist.
-    """
-    arm_pos = context.fk.fk(
-        q_to_arm_aa(q, context.fk.elbow_hinge_axis),
-        context.spine3_pos,
-        context.spine3_aa,
-    )
-    return np.asarray(arm_pos[WRIST_CHAIN_IDX] - context.spine3_pos, dtype=np.float64)
 
 
 def synthetic_user(feature: str, bound_type: str, value: float) -> SimulatedUser:
@@ -216,7 +196,7 @@ def synthetic_user(feature: str, bound_type: str, value: float) -> SimulatedUser
 def sample_violating_bound(
     rng: np.random.Generator,
     naive_q: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
     cfg: CorrectionClipConfig,
     threshold: float,
 ) -> SampledBound:
@@ -236,7 +216,7 @@ def sample_violating_bound(
     bounds whose violation never reaches ``threshold``. Samples triggering
     outside ``cfg.trigger_window`` are rejected too.
     """
-    feats = arm_feature_series(naive_q, context)
+    feats = arm_feature_series(naive_q, human)
     low, high = cfg.trigger_window
     high = min(high, len(naive_q) - 1)
     if low >= high:
@@ -262,7 +242,7 @@ def sample_violating_bound(
             value = float(rng.uniform(series[step], ceiling))
             peak_violation = value - float(series.min())
         user = synthetic_user(feature, bound_type, value)
-        trigger = first_violation_step(user, context, naive_q, threshold)
+        trigger = first_violation_step(user, human, naive_q, threshold)
         if trigger is not None and low <= trigger <= high:
             return SampledBound(
                 user=user,
@@ -324,9 +304,9 @@ def motion_frames(
     return np.concatenate([approach, continuation_q[1:]]), len(approach) - 1
 
 
-def write_feature_csv(path: Path, q: np.ndarray, context: MpcCostContext) -> None:
+def write_feature_csv(path: Path, q: np.ndarray, human: Human) -> None:
     """Write the per-frame anatomical features of an arm trajectory."""
-    feats = arm_feature_series(q, context)
+    feats = arm_feature_series(q, human)
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(["frame", *FEATURE_NAMES])
@@ -351,32 +331,24 @@ def clip_bounds(anchor: int, window: int, n_frames: int) -> tuple[int, int]:
     )
 
 
-def arm_positions(
-    q: np.ndarray, fk: SmplLeftArmFK, spine3_pos: np.ndarray, spine3_aa: np.ndarray
-) -> np.ndarray:
-    """``(T, 5, 3)`` world positions of the arm chain over a q trajectory."""
-    return fk.fk_batch(q_to_arm_aa(q, fk.elbow_hinge_axis), spine3_pos, spine3_aa)
-
-
 @dataclass(frozen=True)
 class ClipSource:
     """Everything needed to sample and correct one more run.
 
-    Holds only the immutable per-set context — the body, the cost stack and the
-    planner config; the scenario itself is drawn per run — so runs can be
+    Holds only the immutable per-set context — the person, the cost stack and
+    the planner config; the scenario itself is drawn per run — so runs can be
     produced one at a time and out of order, which is how the labeling UI
-    generates the next one while the previous is being captioned.
-    :func:`clip_source_from_dir` rebuilds this from the artifacts on disk without
-    touching MDM, so on-demand generation needs neither the generator nor a GPU.
+    generates the next one while the previous is being captioned. The person is
+    the planner config's (its pose file and ``arm:``), and every sampled arm
+    keeps its clavicle. Nothing here loads the motion generator, so on-demand
+    generation needs neither MDM nor a GPU.
     """
 
     out_dir: Path
     cfg: CorrectionClipConfig
     run_cfg: MpcRunConfig
-    context: MpcCostContext
+    human: Human
     base: CompositeTrajectoryCost
-    clavicle: np.ndarray
-    body_pos: np.ndarray
     n_prefix: int
     threshold: float
 
@@ -393,29 +365,24 @@ class ClipSource:
         trigger. Returns the goal and the naive rollout, whose first frame is the
         sampled start arm.
         """
+        human = self.human
         for _ in range(_MAX_SCENARIO_ATTEMPTS):
-            q0 = sample_arm_q(rng, self.clavicle, self.context)
-            goal = wrist_goal(
-                sample_arm_q(rng, self.clavicle, self.context), self.context
-            )
+            q0 = sample_arm_q(rng, human)
+            goal = human.wrist_from_q(sample_arm_q(rng, human))
             if (
-                float(np.linalg.norm(goal - wrist_goal(q0, self.context)))
+                float(np.linalg.norm(goal - human.wrist_from_q(q0)))
                 < self.cfg.min_goal_distance
             ):
                 continue
             naive = rollout_to_goal(
                 cfg_with_goal(self.run_cfg, goal),
-                q0,
+                human.reset_human_with_q(q0),
                 goal,
-                self.context,
                 self.base,
-                self.body_pos,
-                self.context.spine3_pos,
-                self.context.spine3_aa,
                 progress_label=f"{label} naive",
                 log_prefix=_LOG,
-            )
-            reached = goal_reach(self.context, self.run_cfg, naive, goal)["reached"]
+            ).history
+            reached = goal_reach(human, self.run_cfg, naive, goal)["reached"]
             if reached and len(naive) - 1 > self.cfg.trigger_window[0]:
                 return goal, naive
         raise RuntimeError(
@@ -435,7 +402,7 @@ class ClipSource:
         rng = np.random.default_rng([self.cfg.seed, index])
         goal, naive = self.sample_scenario(rng, f"run {index}")
         sampled = sample_violating_bound(
-            rng, naive, self.context, self.cfg, self.threshold
+            rng, naive, self.human, self.cfg, self.threshold
         )
         window = int(
             rng.integers(
@@ -445,22 +412,18 @@ class ClipSource:
         oracle_costs = CompositeTrajectoryCost(
             [
                 *self.base.terms(),
-                HiddenCostTerm(user=sampled.user, context=self.context),
+                HiddenCostTerm(user=sampled.user, human=self.human),
             ]
         )
         goal_cfg = cfg_with_goal(self.run_cfg, goal)
         continuation = rollout_to_goal(
             goal_cfg,
-            naive[sampled.trigger_step],
+            self.human.reset_human_with_q(naive[sampled.trigger_step]),
             goal,
-            self.context,
             oracle_costs,
-            self.body_pos,
-            self.context.spine3_pos,
-            self.context.spine3_aa,
             progress_label=f"run {index} continuation",
             log_prefix=_LOG,
-        )
+        ).history
         run_id = f"run_{index:03d}"
         run_dir = self.out_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -479,9 +442,7 @@ class ClipSource:
             "crossing_step": sampled.crossing_step,
             "trigger_step": sampled.trigger_step,
             "continuation_frames": int(len(continuation)),
-            "continuation_reach": goal_reach(
-                self.context, goal_cfg, continuation, goal
-            ),
+            "continuation_reach": goal_reach(self.human, goal_cfg, continuation, goal),
             "clip_file": f"{run_id}/clip.npy",
             "naive_file": f"{run_id}/naive.npy",
             "continuation_file": f"{run_id}/continuation.npy",
@@ -511,7 +472,7 @@ class ClipSource:
         clip, pad_frames = assemble_clip(motion, anchor, window, self.n_prefix)
         run_dir = self.out_dir / row["run_id"]
         np.save(run_dir / "clip.npy", clip)
-        write_feature_csv(run_dir / "clip_features.csv", clip, self.context)
+        write_feature_csv(run_dir / "clip_features.csv", clip, self.human)
         user = synthetic_user(row["feature"], row["bound_type"], row["bound_value"])
         return {
             "clip_anchor": anchor,
@@ -522,7 +483,7 @@ class ClipSource:
             # conditioning, and at the default anchor it is the naive frames that
             # violated the bound in the first place.
             "window_violation": violation_metrics(
-                user, self.context, clip[self.n_prefix :]
+                user, self.human, clip[self.n_prefix :]
             ),
         }
 
@@ -531,9 +492,8 @@ def new_session_dir(base_dir: Path) -> Path:
     """Fork a fresh labeling session off the clip set in ``base_dir``.
 
     Every labeling session gets its own directory, runs and manifest, so starting
-    one can never overwrite an earlier session's captions. The base artifacts are
-    copied rather than referenced, leaving each session self-contained: stage (b)
-    reads a session exactly like it reads a clip set.
+    one can never overwrite an earlier session's captions. Stage (b) reads a
+    session exactly like it reads a clip set.
 
     The seed is the session's own timestamp. Runs are seeded on ``(seed, index)``,
     so two sessions off the same base would otherwise sample the same scenarios
@@ -543,8 +503,6 @@ def new_session_dir(base_dir: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = base_dir / f"session_{stamp}"
     session_dir.mkdir(parents=True)
-    for key in ("base_pose_file", "geometry_file"):
-        shutil.copy(base_dir / manifest[key], session_dir / manifest[key])
     seed = int(stamp.replace("_", ""))
     manifest["seed"] = seed
     manifest["base_dir"] = str(base_dir)
@@ -560,15 +518,9 @@ def new_session_dir(base_dir: Path) -> Path:
 def clip_source_from_dir(out_dir: Path) -> ClipSource:
     """Rebuild a :class:`ClipSource` from an existing clip set, without MDM.
 
-    The base artifacts stage (a) writes — ``geometry.npz`` for the
-    generator-decoded body and the manifest's ``clavicle`` for the one arm slot
-    the planner never actuates — are exactly what sampling and rolling a scenario
-    needs, so nothing here loads the motion generator.
+    The person comes from the planner config the manifest records.
     """
     manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
-    geo = np.load(out_dir / manifest["geometry_file"])
-    fk = SmplLeftArmFK()
-    fk.collar_aa = geo["collar_aa"]
     stored = manifest["clip_config"]
     cfg = CorrectionClipConfig(
         config_path=Path(stored["config_path"]),
@@ -586,24 +538,13 @@ def clip_source_from_dir(out_dir: Path) -> ClipSource:
         min_goal_distance=stored["min_goal_distance"],
     )
     run_cfg = load_mpc_config(cfg.config_path)
-    context = MpcCostContext(
-        fk=fk,
-        spine3_pos=geo["spine3_pos"],
-        spine3_aa=geo["spine3_aa"],
-    )
+    human = Human(pose=run_cfg.pose, arm=run_cfg.arm)
     return ClipSource(
         out_dir=out_dir,
         cfg=cfg,
         run_cfg=replace(run_cfg, max_angle_delta=cfg.max_angle_delta, seed=cfg.seed),
-        context=context,
-        base=CompositeTrajectoryCost(
-            [
-                *build_extra_costs(run_cfg.costs, context).terms(),
-                UNRESTRICTED.limit_cost(),
-            ]
-        ),
-        clavicle=np.asarray(manifest["clavicle"], dtype=np.float64),
-        body_pos=geo["body_pos"],
+        human=human,
+        base=base_extra_costs(run_cfg.costs, human, UNRESTRICTED),
         n_prefix=manifest["n_prefix_frames"],
         threshold=manifest["trigger_threshold"],
     )
@@ -612,9 +553,8 @@ def clip_source_from_dir(out_dir: Path) -> ClipSource:
 def generate_correction_clips(cfg: CorrectionClipConfig) -> Path:
     """Write the base artifacts plus ``cfg.n_runs`` corrected branches.
 
-    ``n_runs=0`` writes only the base artifacts — the body geometry, the base
-    pose and an empty manifest — which is all the labeling UI needs to generate
-    runs on demand.
+    ``n_runs=0`` writes only an empty manifest, which is all the labeling UI
+    needs to generate runs on demand.
 
     Refuses to write into a directory that already holds a clip set: the manifest
     is rewritten wholesale, so doing so would blank its captions and orphan the
@@ -625,43 +565,25 @@ def generate_correction_clips(cfg: CorrectionClipConfig) -> Path:
             f"{cfg.out_dir} already holds a clip set. Generating into it would "
             "blank its captions and its labeling sessions — pass a new --out_dir."
         )
-    rig = build_rig(cfg.config_path, seed=cfg.seed, load_generator=True)
-    assert rig.gen is not None
-    assert rig.initial_hml_pose is not None
-    assert rig.body_pos is not None
-    assert rig.cfg.cartesian is not None
-    n_prefix = rig.gen.prefix_frames
-    threshold = rig.cfg.corrections.trigger_threshold
-    # The one arm slot the planner never actuates, so every sampled scenario
-    # keeps the start pose's clavicle.
-    clavicle = np.asarray(rig.q0[Q_CLAVICLE], dtype=np.float64)
-    run_cfg = replace(rig.cfg, max_angle_delta=cfg.max_angle_delta, seed=cfg.seed)
+    loaded = load_mpc_config(cfg.config_path)
+    assert loaded.cartesian is not None
+    human = Human(pose=loaded.pose, arm=loaded.arm)
+    n_prefix = N_PREFIX_FRAMES
+    threshold = loaded.corrections.trigger_threshold
+    run_cfg = replace(loaded, max_angle_delta=cfg.max_angle_delta, seed=cfg.seed)
     # UNRESTRICTED is `bounds=()`: it carries the anatomical joint box into the
     # cost stack and nothing else. No persona's comfort bounds enter this
     # pipeline — every bound is sampled per run off the naive rollout this base
     # cost produces.
-    base = base_extra_costs(rig, UNRESTRICTED)
+    base = base_extra_costs(run_cfg.costs, human, UNRESTRICTED)
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    np.save(cfg.out_dir / "base_pose.npy", rig.initial_hml_pose)
-    # The body geometry the generator decoded, so previewing a clip set needs
-    # neither the MDM environment nor a GPU.
-    np.savez(
-        cfg.out_dir / "geometry.npz",
-        body_pos=rig.body_pos,
-        spine3_pos=rig.spine3_pos,
-        spine3_aa=rig.spine3_aa,
-        collar_aa=rig.fk.collar_aa,
-    )
-
     source = ClipSource(
         out_dir=cfg.out_dir,
         cfg=cfg,
         run_cfg=run_cfg,
-        context=rig.context,
+        human=human,
         base=base,
-        clavicle=clavicle,
-        body_pos=rig.body_pos,
         n_prefix=n_prefix,
         threshold=threshold,
     )
@@ -670,11 +592,8 @@ def generate_correction_clips(cfg: CorrectionClipConfig) -> Path:
     manifest = {
         "config_path": str(cfg.config_path),
         "seed": cfg.seed,
-        "clavicle": clavicle.tolist(),
         "n_prefix_frames": n_prefix,
         "trigger_threshold": threshold,
-        "base_pose_file": "base_pose.npy",
-        "geometry_file": "geometry.npz",
         # Sampling knobs, so clip_source_from_dir can keep generating runs that
         # match the ones already in this set.
         "clip_config": {

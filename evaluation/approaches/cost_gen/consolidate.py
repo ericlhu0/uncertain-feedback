@@ -10,11 +10,11 @@ from uncertain_feedback.cost_generation import (
     CombineCostGenerator,
     CostGenerationResult,
 )
+from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
 )
-from uncertain_feedback.planners.rig import PlanningRig
 
 
 class ConsolidateCostGen(CostGen):
@@ -25,9 +25,9 @@ class ConsolidateCostGen(CostGen):
         self._unified: GeneratedPythonCost | None = None
 
     def reset(
-        self, rig: PlanningRig, base: CompositeTrajectoryCost, episode_dir: Path
+        self, cfg: MpcRunConfig, base: CompositeTrajectoryCost, episode_dir: Path
     ) -> None:
-        super().reset(rig, base, episode_dir)
+        super().reset(cfg, base, episode_dir)
         self._unified = None
 
     def learned_terms(self) -> list[GeneratedPythonCost]:
@@ -62,8 +62,8 @@ class ConsolidateCostGen(CostGen):
     def _combine(
         self, ctx: RoundContext, generation: CostGenerationResult
     ) -> GeneratedPythonCost | None:
-        assert self._rig is not None
-        cfg = self._rig.cfg
+        cfg = self._cfg
+        assert cfg is not None
         combinator = CombineCostGenerator(
             context=generation.generated_context,
             instruction=ctx.utterance_text,

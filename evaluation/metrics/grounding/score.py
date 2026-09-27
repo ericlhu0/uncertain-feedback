@@ -12,7 +12,7 @@ from evaluation.metrics.grounding.expressivity import (
 )
 from evaluation.metrics.grounding.progress import correction_progress
 from evaluation.metrics.grounding.violation import correction_violation
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import SimulatedUser
 
 
@@ -20,12 +20,12 @@ def candidate_row(
     user: SimulatedUser,
     oracle_correction: np.ndarray,
     candidate: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
 ) -> dict[str, Any]:
     """Violation and progress of one trajectory against the case's oracle."""
-    progress = correction_progress(oracle_correction, candidate, context)
+    progress = correction_progress(oracle_correction, candidate, human)
     return {
-        "violation": correction_violation(user, candidate, context),
+        "violation": correction_violation(user, candidate, human),
         "arc_progress": progress.arc_progress,
         "alignment": progress.alignment,
         "oracle_path_length": progress.oracle_path_length,
@@ -34,12 +34,10 @@ def candidate_row(
     }
 
 
-def case_row(
-    candidates: dict[int, np.ndarray], context: MpcCostContext
-) -> dict[str, Any]:
+def case_row(candidates: dict[int, np.ndarray], human: Human) -> dict[str, Any]:
     """Spread of the case's candidate menu."""
-    diversity = candidate_diversity(candidates, context)
-    position = candidate_position_diversity(candidates, context)
+    diversity = candidate_diversity(candidates, human)
+    position = candidate_position_diversity(candidates, human)
     return {
         "n_candidates": len(candidates),
         "diversity": diversity.diversity,

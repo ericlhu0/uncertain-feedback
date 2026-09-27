@@ -15,10 +15,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_q_from_features,
 )
 from uncertain_feedback.planners.mpc.config import load_mpc_config
-from uncertain_feedback.planners.mpc.costs import (
-    CompositeTrajectoryCost,
-    MpcCostContext,
-)
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.goal_spaces import (
     BoxRegion,
     FeatureRegion,
@@ -28,16 +25,8 @@ from uncertain_feedback.planners.mpc.goal_spaces import (
     as_goal_region,
     goal_point,
 )
-from uncertain_feedback.planners.mpc.kinematics import Q_DIM, SmplLeftArmFK, q_to_arm_aa
-
-
-def _context(fk: SmplLeftArmFK) -> MpcCostContext:
-    return MpcCostContext(fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3))
-
-
-def _wrist_rel(fk: SmplLeftArmFK, q: np.ndarray) -> np.ndarray:
-    aa = q_to_arm_aa(q, fk.elbow_hinge_axis)
-    return fk.fk(aa, fk.tpose_spine3_pos, np.zeros(3))[-1] - fk.tpose_spine3_pos
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import Q_DIM, q_to_arm_aa
 
 
 def _stage_costs(mpc: ArmMPC, q_trajs: np.ndarray) -> np.ndarray:
@@ -53,7 +42,7 @@ def _stage_costs(mpc: ArmMPC, q_trajs: np.ndarray) -> np.ndarray:
 def test_box_distance_is_zero_inside_and_euclidean_outside() -> None:
     box = BoxRegion(low=(0.0, 0.0, 0.0), high=(1.0, 1.0, 1.0))
     wrist = np.array([[0.5, 0.5, 0.5], [1.3, 0.5, 0.5], [1.3, -0.4, 0.5]])
-    dist = box.distance(wrist, np.zeros((3, 3, 3)), _context(SmplLeftArmFK()))
+    dist = box.distance(wrist, np.zeros((3, 3, 3)), Human())
     np.testing.assert_allclose(dist, [0.0, 0.3, 0.5])
     np.testing.assert_allclose(box.marker(), [0.5, 0.5, 0.5])
     assert len(box.outline()) == 12
@@ -62,33 +51,32 @@ def test_box_distance_is_zero_inside_and_euclidean_outside() -> None:
 def test_sphere_with_zero_radius_matches_point() -> None:
     center = (0.1, 0.2, 0.3)
     wrist = np.array([[0.1, 0.2, 0.3], [0.1, 0.2, 0.8]])
-    context = _context(SmplLeftArmFK())
+    human = Human()
     sphere = SphereRegion(center=center, radius=0.0)
     point = PointRegion(point=center)
     aa = np.zeros((2, 3, 3))
-    np.testing.assert_allclose(sphere.distance(wrist, aa, context), [0.0, 0.5])
+    np.testing.assert_allclose(sphere.distance(wrist, aa, human), [0.0, 0.5])
     np.testing.assert_allclose(
-        sphere.distance(wrist, aa, context), point.distance(wrist, aa, context)
+        sphere.distance(wrist, aa, human), point.distance(wrist, aa, human)
     )
     np.testing.assert_allclose(
-        SphereRegion(center=center, radius=0.2).distance(wrist, aa, context),
+        SphereRegion(center=center, radius=0.2).distance(wrist, aa, human),
         [0.0, 0.3],
     )
 
 
 def test_feature_region_hinges_on_arm_features() -> None:
-    fk = SmplLeftArmFK()
-    context = _context(fk)
+    human = Human()
     features = np.array([[1.2, 0.2, 0.3, 0.9, 0.0]])
-    q = arm_q_from_features(features, np.zeros(3), context)
-    aa = q_to_arm_aa(q, fk.elbow_hinge_axis)
-    measured = arm_feature_series(aa, context)["elbow_flexion"][0]
+    q = arm_q_from_features(features, np.zeros(3), human)
+    aa = human.arm_aa_from_q(q)
+    measured = arm_feature_series(aa, human)["elbow_flexion"][0]
 
     inside = FeatureRegion(bounds={"elbow_flexion": (1.0, 1.5)})
     below = FeatureRegion(bounds={"elbow_flexion": (measured + 0.2, None)})
     wrist = np.zeros((1, 3))
-    np.testing.assert_allclose(inside.distance(wrist, aa, context), [0.0])
-    np.testing.assert_allclose(below.distance(wrist, aa, context), [0.2], atol=1e-9)
+    np.testing.assert_allclose(inside.distance(wrist, aa, human), [0.0])
+    np.testing.assert_allclose(below.distance(wrist, aa, human), [0.2], atol=1e-9)
     assert inside.marker() is None
     assert not inside.outline()
 
@@ -178,17 +166,15 @@ cartesian:
 
 
 def test_box_goal_inside_costs_only_extra_terms() -> None:
-    fk = SmplLeftArmFK()
-    q0 = np.zeros(Q_DIM)
-    wrist0 = _wrist_rel(fk, q0)
+    human = Human()
+    wrist0 = human.wrist_from_q(human.q)
     box = BoxRegion(low=tuple(wrist0 - 0.1), high=tuple(wrist0 + 0.1))
 
     def constant_cost(q_trajs: np.ndarray) -> np.ndarray:
         return np.full(q_trajs.shape[0], 3.0)
 
     mpc = ArmMPC(
-        fk=fk,
-        initial_q=q0,
+        human,
         cartesian=CartesianConfig(goals=[box]),
         extra_costs=CompositeTrajectoryCost([constant_cost]),
     )
@@ -197,20 +183,16 @@ def test_box_goal_inside_costs_only_extra_terms() -> None:
 
 
 def test_box_goal_reached_and_queue_advances() -> None:
-    fk = SmplLeftArmFK()
-    q0 = np.zeros(Q_DIM)
-    wrist0 = _wrist_rel(fk, q0)
+    human = Human()
+    q0 = human.q
+    wrist0 = human.wrist_from_q(q0)
     enclosing = BoxRegion(low=tuple(wrist0 - 0.1), high=tuple(wrist0 + 0.1))
     far = BoxRegion(low=tuple(wrist0 + 0.5), high=tuple(wrist0 + 0.6))
 
-    assert ArmMPC(
-        fk=fk, initial_q=q0, cartesian=CartesianConfig(goals=[enclosing])
-    ).goal_reached(q0)
-    assert not ArmMPC(
-        fk=fk, initial_q=q0, cartesian=CartesianConfig(goals=[far])
-    ).goal_reached(q0)
+    assert ArmMPC(human, cartesian=CartesianConfig(goals=[enclosing])).goal_reached(q0)
+    assert not ArmMPC(human, cartesian=CartesianConfig(goals=[far])).goal_reached(q0)
 
-    mpc = ArmMPC(fk=fk, initial_q=q0, cartesian=CartesianConfig(goals=[enclosing, far]))
+    mpc = ArmMPC(human, cartesian=CartesianConfig(goals=[enclosing, far]))
     assert not mpc.goal_reached(q0)
     popped: list[bool] = []
     assert mpc._goal_space is not None
@@ -222,20 +204,19 @@ def test_box_goal_reached_and_queue_advances() -> None:
 
 
 def test_forearm_box_rejects_wrist_only_success() -> None:
-    fk = SmplLeftArmFK()
-    context = _context(fk)
-    aa = q_to_arm_aa(np.zeros((1, Q_DIM)), fk.elbow_hinge_axis)
-    chain = fk.fk_batch(aa, context.spine3_pos, context.spine3_aa)[0]
-    elbow, wrist = chain[-2:] - context.spine3_pos
+    human = Human()
+    q = np.zeros((1, Q_DIM))
+    aa = human.arm_aa_from_q(q)
+    elbow, wrist = human.fk_positions_from_q(q)[0, -2:] - human.spine3_pos
     region = ForearmBoxRegion(tuple(wrist - 0.01), tuple(wrist + 0.01))
     expected = np.linalg.norm(np.maximum(np.abs(elbow - wrist) - 0.01, 0.0))
     assert expected > 0.1
-    np.testing.assert_allclose(region.distance(wrist[None], aa, context), [expected])
+    np.testing.assert_allclose(region.distance(wrist[None], aa, human), [expected])
     enclosing = ForearmBoxRegion(
         tuple(np.minimum(elbow, wrist) - 0.01),
         tuple(np.maximum(elbow, wrist) + 0.01),
     )
-    np.testing.assert_allclose(enclosing.distance(wrist[None], aa, context), [0.0])
+    np.testing.assert_allclose(enclosing.distance(wrist[None], aa, human), [0.0])
     assert len(enclosing.outline()) == 12
 
 
@@ -262,17 +243,16 @@ def test_care_demo_configs_use_regions() -> None:
 
 
 def test_forearm_endpoint_boxes_are_simultaneous() -> None:
-    fk = SmplLeftArmFK()
-    context = _context(fk)
-    aa = q_to_arm_aa(np.zeros((1, Q_DIM)), fk.elbow_hinge_axis)
-    chain = fk.fk_batch(aa, context.spine3_pos, context.spine3_aa)[0]
-    elbow, wrist = chain[-2:] - context.spine3_pos
+    human = Human()
+    q = np.zeros((1, Q_DIM))
+    aa = human.arm_aa_from_q(q)
+    elbow, wrist = human.fk_positions_from_q(q)[0, -2:] - human.spine3_pos
     low = tuple(np.minimum(elbow, wrist) - 0.5)
     high = tuple(np.maximum(elbow, wrist) + 0.5)
     elbow_box = BoxRegion(tuple(elbow - 0.01), tuple(elbow + 0.01))
     wrist_box = BoxRegion(tuple(wrist - 0.01), tuple(wrist + 0.01))
     inside = ForearmBoxRegion(low, high, wrist=wrist_box, elbow=elbow_box)
-    np.testing.assert_allclose(inside.distance(wrist[None], aa, context), [0.0])
+    np.testing.assert_allclose(inside.distance(wrist[None], aa, human), [0.0])
     shifted = np.array([0.1, 0.0, 0.0])
     outside = ForearmBoxRegion(
         low,
@@ -281,7 +261,7 @@ def test_forearm_endpoint_boxes_are_simultaneous() -> None:
         elbow=BoxRegion(tuple(elbow - 0.01 + shifted), tuple(elbow + 0.01 + shifted)),
     )
     np.testing.assert_allclose(
-        outside.distance(wrist[None], aa, context), [np.hypot(0.09, 0.09)]
+        outside.distance(wrist[None], aa, human), [np.hypot(0.09, 0.09)]
     )
     np.testing.assert_allclose(inside.marker(), wrist)
     assert len(inside.outline()) == 36

@@ -27,7 +27,7 @@ from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
 )
 from uncertain_feedback.llm.openai_model import OpenAIModel
 from uncertain_feedback.planners.mpc.arm_features import arm_aa_from_state
-from uncertain_feedback.planners.mpc.costs import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.utils.plot import ArmVisualizer
 from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 
@@ -81,7 +81,7 @@ def caption_model(model: str) -> OpenAIModel:
 
 
 def render_window(
-    clips_dir: Path, row: dict[str, Any], context: MpcCostContext, mesh: SmplMeshCache
+    clips_dir: Path, row: dict[str, Any], human: Human, mesh: SmplMeshCache
 ) -> Path:
     """Render the run's *currently cut* window as the one image the VLM is shown.
 
@@ -95,14 +95,14 @@ def render_window(
     anchor = row["clip_anchor"]
     end = min(anchor + row["correction_frames"], len(motion) - 1)
     window_aa = np.stack(
-        [arm_aa_from_state(state, context) for state in motion[anchor : end + 1]]
+        [arm_aa_from_state(state, human) for state in motion[anchor : end + 1]]
     )
     image_path = clips_dir / row["run_id"] / "suggest.png"
-    ArmVisualizer(context.fk).render_correction_summary(
+    ArmVisualizer(human.fk).render_correction_summary(
         image_path,
         arm_traj=window_aa,
-        spine3_pos=context.spine3_pos,
-        spine3_aa=context.spine3_aa,
+        spine3_pos=human.spine3_pos,
+        spine3_aa=human.spine3_aa,
         mesh=mesh,
     )
     return image_path
@@ -111,7 +111,7 @@ def render_window(
 def draft_captions(
     clips_dir: Path,
     row: dict[str, Any],
-    context: MpcCostContext,
+    human: Human,
     mesh: SmplMeshCache,
     model: OpenAIModel,
     prompt: str,
@@ -120,7 +120,7 @@ def draft_captions(
     """Ask the VLM for ``n_drafts`` captions of one run's window, in one completion."""
     if n_drafts > 1:
         prompt = f"{prompt}\n\n{DRAFT_N_INSTRUCTION.format(n=n_drafts)}"
-    image_path = render_window(clips_dir, row, context, mesh)
+    image_path = render_window(clips_dir, row, human, mesh)
     text = model.get_full_output(prompt, image_input=[str(image_path)])
     return draft_lines(text, n_drafts)
 
@@ -139,14 +139,14 @@ def autolabel_clip_set(clips_dir: Path, n_captions: int, prompt: str) -> None:
     model_name = source.run_cfg.llm_cost.model
     if model_name is None:
         raise ValueError("Auto-labeling needs llm_cost.model in the planner YAML.")
-    mesh = SmplMeshCache(np.load(clips_dir / manifest["geometry_file"])["body_pos"])
+    mesh = SmplMeshCache(source.human.posture)
     model = caption_model(model_name)
     manifest["caption_prompt"] = prompt
     for row in manifest["runs"]:
         if row.get("captions"):
             continue
         row["captions"] = draft_captions(
-            clips_dir, row, source.context, mesh, model, prompt, n_captions
+            clips_dir, row, source.human, mesh, model, prompt, n_captions
         )
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         print(f"{_LOG} {row['run_id']}: {row['captions']}", flush=True)

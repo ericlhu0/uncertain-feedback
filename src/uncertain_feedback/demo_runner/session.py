@@ -54,9 +54,10 @@ from uncertain_feedback.planners.mpc.costs import (
     generated_cost_feature_dependencies,
     replace_generated_costs,
 )
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
+    LEFT_ARM_CHAIN_INDICES,
     anchor_q_trajectory,
-    q_to_arm_aa,
 )
 from uncertain_feedback.planners.mpc.rollout import (
     assemble_full_correction_traj,
@@ -95,7 +96,7 @@ def _uq_cfg(rig: DemoRig) -> UqConfig:
 def _arm_aa(rig: DemoRig, state: np.ndarray) -> np.ndarray:
     state = np.asarray(state, dtype=np.float64)
     if state.shape[-1:] == (7,):
-        return q_to_arm_aa(state, rig.fk.elbow_hinge_axis)
+        return rig.human.arm_aa_from_q(state)
     return state
 
 
@@ -261,26 +262,24 @@ class Trajectory:
     and dies with the object.
     """
 
+    # The planner owns the live person; its history is the executed motion.
     mpc: ArmMPC
     trigger: CorrectionTrigger
-    q: np.ndarray
-    executed: list[np.ndarray]
     artifact_dir: Path
-    start_q: np.ndarray
+    start: Human
     goal: np.ndarray
     scale: float
-    step: int = 0
+    advanced: bool = False
     paused: bool = False
     complete: bool = False
     reached_goal: bool = False
     error: str | None = None
     logged_frames: int = 0
-    base_traj: np.ndarray | None = None
     trigger_step: int | None = None
     trigger_reason: TriggerReason | None = None
     trigger_violation: float | None = None
-    q_feedback: np.ndarray | None = None
-    q_history: list[np.ndarray] = field(default_factory=list)
+    # The person at the pause: the executed motion up to the feedback frame.
+    feedback: Human | None = None
     oracle_traj: np.ndarray | None = None
     oracle_source: str | None = None
     oracle_package: dict[str, Any] | None = None
@@ -321,6 +320,21 @@ class Trajectory:
         """Whether the trajectory is paused for feedback or has finished."""
         return self.paused or self.complete
 
+    @property
+    def human(self) -> Human:
+        """The person now: the planner's, with the executed motion as history."""
+        return self.mpc.human
+
+    @property
+    def step(self) -> int:
+        """Index of the current executed frame."""
+        return len(self.mpc.human.history) - 1
+
+    @property
+    def corrected(self) -> Human:
+        """The person a correction starts from: at the pause, else at the start."""
+        return self.feedback if self.feedback is not None else self.start
+
     def advance(self, session: "Session", max_steps: int | None = None) -> None:
         """Step the planner to the next pause and log the executed segment."""
         rig = session.rig
@@ -336,7 +350,7 @@ class Trajectory:
             if self.trigger.automatic:
                 violation = float(
                     compute_violations(
-                        user, rig.context, _arm_aa(rig, self.q[np.newaxis])
+                        user, rig.human, _arm_aa(rig, self.human.q[np.newaxis])
                     )[0]
                 )
             reason = self.trigger.evaluate(self.step, violation)
@@ -345,41 +359,37 @@ class Trajectory:
                 self.trigger_step = self.step
                 self.trigger_reason = reason
                 self.trigger_violation = violation
-                self.q_feedback = self.q.copy()
-                self.q_history = [q.copy() for q in self.executed]
+                self.feedback = self.human
                 _log(
                     f"trajectory paused at frame {self.step}: "
                     f"{reason} (violation={violation})"
                 )
                 break
             try:
-                self.q = self.mpc.step(self.q)
+                moved = self.mpc.step()
             except RuntimeError as exc:
                 self.error = str(exc)
                 self.complete = True
                 break
-            self.executed.append(self.q.copy())
-            self.step += 1
-            if self.mpc.mdm_tracking_complete and self.mpc.goal_reached(self.q):
+            if self.mpc.mdm_tracking_complete and self.mpc.goal_reached(moved.q):
                 self.reached_goal = True
                 self.complete = True
                 break
         if self.step >= rig.cfg.steps:
             self.complete = True
-        self.base_traj = np.asarray(self.executed, dtype=np.float64)
-        np.save(self.artifact_dir / "executed_trajectory.npy", self.base_traj)
+        self.advanced = True
+        np.save(self.artifact_dir / "executed_trajectory.npy", self.human.history)
         if self.complete:
             self.trigger_step = None
             self.trigger_reason = None
             self.trigger_violation = None
-            self.q_feedback = None
-            self.q_history = [q.copy() for q in self.executed]
+            self.feedback = None
             _log(
                 f"multi-turn trajectory complete: steps={self.step} "
                 f"reached_goal={self.reached_goal}"
             )
         if self.trigger.automatic and self.stopped():
-            segment = self.base_traj[self.logged_frames :]
+            segment = self.human.history[self.logged_frames :]
             if segment.shape[0]:
                 discomfort = self.paused and self.trigger_reason == "discomfort"
                 session.corpus.log(
@@ -395,7 +405,7 @@ class Trajectory:
                     trigger_violation=self.trigger_violation if discomfort else None,
                     feedback_text=user.feedback_text if discomfort else None,
                 )
-                self.logged_frames = len(self.executed)
+                self.logged_frames = len(self.human.history)
 
 
 class Session:
@@ -523,7 +533,7 @@ class Session:
             user=rig.get_persona(persona_name),
             dir=session_dir,
             corpus=TrajectoryCorpus.create(
-                session_dir / "trajectory_corpus", rig.context
+                session_dir / "trajectory_corpus", rig.human
             ),
             started=data.get("started"),
         )
@@ -564,38 +574,32 @@ class Session:
         """Adopt an edited persona and re-evaluate the active trigger."""
         self.user = user
         traj = self.trajectory
-        if traj is None or traj.base_traj is None:
+        if traj is None or not traj.advanced:
             return {"retriggered": False, "trigger_step": None}
-        if traj.paused and traj.q_feedback is not None:
+        if traj.paused and traj.feedback is not None:
             traj.trigger_violation = float(
                 compute_violations(
                     user,
-                    self.rig.context,
-                    _arm_aa(self.rig, traj.q_feedback[np.newaxis]),
+                    self.rig.human,
+                    _arm_aa(self.rig, traj.feedback.q[np.newaxis]),
                 )[0]
             )
             return {"retriggered": True, "trigger_step": traj.trigger_step}
-        self._set_trigger(traj.base_traj)
+        self._set_trigger()
         return {"retriggered": True, "trigger_step": traj.trigger_step}
 
-    def _set_trigger(self, traj_arr: np.ndarray) -> None:
+    def _set_trigger(self) -> None:
         traj = self.trajectory
         assert traj is not None
         traj.trigger_step = first_violation_step(
             self.user,
-            self.rig.context,
-            _arm_aa(self.rig, traj_arr),
+            self.rig.human,
+            _arm_aa(self.rig, traj.human.history),
             self.rig.cfg.corrections.trigger_threshold,
         )
-        if traj.trigger_step is not None:
-            traj.q_feedback = traj_arr[traj.trigger_step]
-            traj.q_history = [
-                np.asarray(q, dtype=np.float64)
-                for q in traj_arr[: traj.trigger_step + 1]
-            ]
-        else:
-            traj.q_feedback = None
-            traj.q_history = []
+        traj.feedback = (
+            None if traj.trigger_step is None else traj.human.rewind(traj.trigger_step)
+        )
 
     # --- trajectory lifetime ----------------------------------------------
 
@@ -614,24 +618,23 @@ class Session:
     ) -> Trajectory:
         """Start one trajectory with the session costs installed from frame 0."""
         rig = self.rig
-        start_arm_aa = np.asarray(arm_aa, dtype=np.float64)
-        start_q = rig.fk.arm_aa_to_q(start_arm_aa, rig.spine3_aa)
+        start = rig.human.reset_human_with_q(
+            rig.human.q_from_arm_aa(np.asarray(arm_aa, dtype=np.float64))
+        )
         goal_arr = np.asarray(goal, dtype=np.float64)
         artifact_dir = self.dir / f"{time.strftime('%Y%m%d_%H%M%S')}_trajectory"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         extra = self._active_costs()
         self._release_pinned_meshes()
         self.trajectory = Trajectory(
-            mpc=rig._manual_planner(start_q, goal_arr, extra),
+            mpc=rig._manual_planner(start, goal_arr, extra),
             trigger=CorrectionTrigger(
                 threshold=rig.cfg.corrections.trigger_threshold,
                 text_time=None,
                 automatic=bool(self.user.bounds and self.user.feedback_text),
             ),
-            q=start_q.copy(),
-            executed=[start_q.copy()],
             artifact_dir=artifact_dir,
-            start_q=start_q,
+            start=start,
             goal=goal_arr,
             scale=_uq_cfg(rig).scale,
         )
@@ -672,7 +675,7 @@ class Session:
         """
         traj = self.trajectory
         rig = self.rig
-        if traj is None or traj.base_traj is None:
+        if traj is None or not traj.advanced:
             raise ValueError("Start a trajectory first.")
         target = traj.step if step is None else int(step)
         if not 0 <= target <= traj.step:
@@ -689,11 +692,10 @@ class Session:
         traj.trigger_reason = "operator"
         traj.trigger_violation = float(
             compute_violations(
-                self.user, rig.context, _arm_aa(rig, traj.q[np.newaxis])
+                self.user, rig.human, _arm_aa(rig, traj.human.q[np.newaxis])
             )[0]
         )
-        traj.q_feedback = traj.q.copy()
-        traj.q_history = [q.copy() for q in traj.executed]
+        traj.feedback = traj.human
         traj.clear_pending_feedback()
         _log(f"correction requested at frame {traj.step}")
         return self._record("trajectory", self._trajectory_payload())
@@ -708,14 +710,11 @@ class Session:
         """
         traj = self.trajectory
         assert traj is not None and traj.goal is not None
-        traj.executed = [q.copy() for q in traj.executed[: step + 1]]
-        traj.q = traj.executed[-1].copy()
-        traj.step = step
+        rewound = traj.human.rewind(step)
         traj.error = None
-        traj.logged_frames = min(traj.logged_frames, len(traj.executed))
-        traj.base_traj = np.asarray(traj.executed, dtype=np.float64)
-        np.save(traj.artifact_dir / "executed_trajectory.npy", traj.base_traj)
-        traj.mpc = self.rig._manual_planner(traj.q, traj.goal, self._active_costs())
+        traj.logged_frames = min(traj.logged_frames, len(rewound.history))
+        np.save(traj.artifact_dir / "executed_trajectory.npy", rewound.history)
+        traj.mpc = self.rig._manual_planner(rewound, traj.goal, self._active_costs())
         _log(f"rewound the trajectory to frame {step}")
 
     def exit_trajectory(self) -> dict[str, Any]:
@@ -736,19 +735,17 @@ class Session:
         rig = self.rig
         if traj is None or traj.goal is None:
             raise ValueError("Start a trajectory first.")
-        if from_trigger and traj.q_feedback is None:
+        if from_trigger and traj.feedback is None:
             raise ValueError("The trajectory is not paused at an MDM trigger point.")
         cfg_goal = rig._cfg_with_goal(traj.goal)
         oracle_costs = CompositeTrajectoryCost(
             [
                 *rig._extra_costs(self.user).terms(),
-                HiddenCostTerm(self.user, rig.context),
+                HiddenCostTerm(self.user, rig.human),
             ]
         )
         start = (
-            traj.q_feedback
-            if from_trigger and traj.q_feedback is not None
-            else traj.start_q
+            traj.feedback if from_trigger and traj.feedback is not None else traj.start
         )
         source = "trigger" if from_trigger else "initial"
         _log(f"oracle rollout: starting from the {source} pose")
@@ -756,17 +753,13 @@ class Session:
             cfg_goal,
             start,
             traj.goal,
-            rig.context,
             oracle_costs,
-            rig.body_pos,
-            rig.spine3_pos,
-            rig.spine3_aa,
             progress_label="oracle",
             log_prefix=_LOG_PREFIX,
-        )
-        if from_trigger and traj.q_history:
+        ).history
+        if from_trigger and traj.feedback is not None:
             trajectory = np.concatenate(
-                [np.asarray(traj.q_history[:-1]), trajectory], axis=0
+                [traj.feedback.history[:-1], trajectory], axis=0
             )
         traj.oracle_traj = trajectory
         traj.oracle_source = source
@@ -789,10 +782,10 @@ class Session:
         return {
             "trajectory": traj.oracle_package,
             "metrics": violation_metrics(
-                self.user, rig.context, _arm_aa(rig, traj.oracle_traj)
+                self.user, rig.human, _arm_aa(rig, traj.oracle_traj)
             ),
             "goal_reach": goal_reach(
-                rig.context,
+                rig.human,
                 rig._cfg_with_goal(traj.goal),
                 traj.oracle_traj,
                 traj.goal,
@@ -813,16 +806,12 @@ class Session:
         _log("clean baseline: rolling out with box limits, no feedback")
         traj.clean_traj = rollout_to_goal(
             rig._cfg_with_goal(traj.goal),
-            traj.start_q,
+            traj.start,
             traj.goal,
-            rig.context,
             rig._extra_costs(self.user),
-            rig.body_pos,
-            rig.spine3_pos,
-            rig.spine3_aa,
             progress_label="clean-base",
             log_prefix=_LOG_PREFIX,
-        )
+        ).history
         traj.clean_package = self._pin_package(traj.clean_traj, traj.clean_package)
 
     def _pin_package(
@@ -876,22 +865,18 @@ class Session:
         """Sample MDM corrections for ``prompt``, cluster them, and scale each cluster mean."""
         traj = self.trajectory
         rig = self.rig
-        if traj is None or traj.base_traj is None:
+        if traj is None or not traj.advanced:
             raise ValueError("Start a trajectory first.")
-        q_start = traj.q_feedback if traj.q_feedback is not None else traj.start_q
-        start_pose = rig.gen.build_pose_from_arm_aa(
-            rig.initial_hml_pose, _arm_aa(rig, q_start)
-        )
         spec = self._steering_spec(steering_mode)
-        steer_kwargs: dict[str, Any] = {} if spec is None else {"steering": spec}
         t0 = time.perf_counter()
         _log(f"MDM generation: {n_samples} samples for {prompt!r}")
-        traj.samples = rig.gen.generate_left_arm_position_samples(
+        traj.samples = rig.gen.generate_positions(
             prompt,
-            start_pose=start_pose,
+            traj.corrected,
+            prefix=False,
             num_samples=n_samples,
             num_frames=_feedback_cfg(rig).frames,
-            **steer_kwargs,
+            steering=spec,
         )
         _log(f"MDM generation done in {time.perf_counter() - t0:.1f}s")
         if spec is not None:
@@ -929,7 +914,7 @@ class Session:
             labels = np.arange(sample_indices.size, dtype=np.intp)
             medoid_indices = {int(i): int(i) for i in labels}
         else:
-            c = make_clusterer(clusterer, n_clusters, fk=rig.fk)
+            c = make_clusterer(clusterer, n_clusters, fk=rig.human.fk)
             labels = np.asarray(
                 c.cluster_positions(traj.samples[sample_indices]), dtype=np.intp
             )
@@ -976,12 +961,8 @@ class Session:
         level_samples = traj.samples[level.sample_indices]
         traj.labels = level.labels
         traj.cluster_means = {
-            label: canonical_arm_q(
-                rig.gen.smpl_positions_to_left_arm_trajectory(
-                    level_samples[level.medoid_indices[label]],
-                    spine3_aa=rig.spine3_aa,
-                ),
-                rig.context,
+            label: rig.human.ik_q_from_positions(
+                level_samples[level.medoid_indices[label]][:, LEFT_ARM_CHAIN_INDICES]
             )
             for label in sorted(int(v) for v in np.unique(level.labels))
         }
@@ -990,7 +971,7 @@ class Session:
             # sees these means: previews, oracle scores, the Magnitude slider and
             # the trajectory that finally gets pushed all inherit the fix.
             traj.cluster_means = {
-                label: anchor_q_trajectory(mean, traj.q)
+                label: anchor_q_trajectory(mean, traj.human.q)
                 for label, mean in traj.cluster_means.items()
             }
         traj.chosen_label = level.selected_label
@@ -998,17 +979,14 @@ class Session:
         traj.scale = scale
         traj.cluster_corrections = {}
         traj.cluster_fulls = {}
-        oracle = oracle_cluster_scores(user, rig.context, traj.cluster_means, scale)
+        oracle = oracle_cluster_scores(user, rig.human, traj.cluster_means, scale)
+        history = (
+            traj.feedback.history if traj.feedback is not None else np.empty((0, 7))
+        )
         clusters = []
         for label, mean in traj.cluster_means.items():
             scaled = scale_trajectory(mean, scale)
-            full = (
-                np.concatenate(
-                    [np.asarray(traj.q_history, dtype=np.float64), scaled], axis=0
-                )
-                if traj.q_history
-                else scaled
-            )
+            full = np.concatenate([history, scaled], axis=0)
             traj.cluster_corrections[label] = scaled
             traj.cluster_fulls[label] = full
             count = int(np.sum(level.labels == label))
@@ -1021,15 +999,13 @@ class Session:
                     "correction": rig.package_trajectory(scaled, user),
                     "full": rig.package_trajectory(full, user),
                     "full_segments": {
-                        "history": len(traj.q_history),
+                        "history": len(history),
                         "correction": int(scaled.shape[0]),
                     },
                     "full_metrics": violation_metrics(
-                        user, rig.context, _arm_aa(rig, full)
+                        user, rig.human, _arm_aa(rig, full)
                     ),
-                    "full_goal_reach": goal_reach(
-                        rig.context, cfg_goal, full, traj.goal
-                    ),
+                    "full_goal_reach": goal_reach(rig.human, cfg_goal, full, traj.goal),
                 }
             )
         if traj.chosen_label is not None:
@@ -1106,7 +1082,7 @@ class Session:
             labels = np.arange(selected_indices.size, dtype=np.intp)
             medoid_indices = {int(label): int(label) for label in labels}
         else:
-            c = make_clusterer(clusterer, n_clusters, fk=rig.fk)
+            c = make_clusterer(clusterer, n_clusters, fk=rig.human.fk)
             labels = np.asarray(
                 c.cluster_positions(traj.samples[selected_indices]), dtype=np.intp
             )
@@ -1146,11 +1122,11 @@ class Session:
                 "active_features": list(active_features),
             }
         frames = [
-            canonical_arm_q(np.asarray(f, dtype=np.float64), self.rig.context).reshape(
+            canonical_arm_q(np.asarray(f, dtype=np.float64), self.rig.human).reshape(
                 -1, 7
             )
             for f in [
-                traj.base_traj,
+                traj.human.history,
                 *traj.cluster_fulls.values(),
                 *traj.cluster_corrections.values(),
             ]
@@ -1164,7 +1140,7 @@ class Session:
         poses = stacked.reshape(-1, 7)  # pylint: disable=too-many-function-args
         if poses.shape[0] > 1500:
             poses = poses[rng.choice(poses.shape[0], 1500, replace=False)]
-        feats = arm_feature_series(poses, self.rig.context)
+        feats = arm_feature_series(poses, self.rig.human)
         batch = np.repeat(poses[:, None, :], 2, axis=1)
         try:
             penalty = np.asarray(cost(batch), dtype=np.float64)
@@ -1194,7 +1170,6 @@ class Session:
         user = self.user
         cfg_goal = rig._cfg_with_goal(traj.goal)
         extra = rig._extra_costs(user)
-        cost_q_start = traj.q_feedback if traj.q_feedback is not None else traj.start_q
         cost_dir = self.dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{backend}"
         instruction = traj.prompt or user.feedback_text
         result = generate_cost_for_cluster(
@@ -1202,15 +1177,10 @@ class Session:
             cfg=cfg_goal,
             instruction=instruction,
             cluster_traj=traj.scaled_correction,
-            current_q=cost_q_start,
-            q_history=traj.q_history,
-            context=rig.context,
+            human=traj.corrected,
             base_extra_costs=extra,
             cost_dir=cost_dir,
             corpus_dir=self.corpus.dir,
-            body_pos=rig.body_pos,
-            spine3_pos=rig.spine3_pos,
-            spine3_aa=rig.spine3_aa,
             candidate_trajs=traj.cluster_corrections,
             highlight_label=traj.chosen_label,
             undesirable_labels=frozenset(
@@ -1233,14 +1203,7 @@ class Session:
         t0 = time.perf_counter()
         _log("assembling the chosen corrected path with the generated cost")
         rollout = assemble_full_correction_traj(
-            cfg_goal,
-            traj.q_history,
-            traj.scaled_correction,
-            rig.context,
-            cost_set,
-            rig.body_pos,
-            rig.spine3_pos,
-            rig.spine3_aa,
+            cfg_goal, traj.corrected, traj.scaled_correction, cost_set
         )
         _log(
             "generated-cost corrected path assembled in "
@@ -1250,30 +1213,26 @@ class Session:
         _log("rolling out the generated cost from the initial pose")
         start_rollout = rollout_to_goal(
             cfg_goal,
-            traj.start_q,
+            traj.start,
             traj.goal,
-            rig.context,
             cost_set,
-            rig.body_pos,
-            rig.spine3_pos,
-            rig.spine3_aa,
             progress_label="generated-from-start",
             log_prefix=_LOG_PREFIX,
-        )
+        ).history
         _log(
             "generated-cost rollout from the initial pose done in "
             f"{time.perf_counter() - t0:.1f}s"
         )
         payload = {
             "trajectory": rig.package_trajectory(rollout, user),
-            "metrics": violation_metrics(user, rig.context, _arm_aa(rig, rollout)),
-            "goal_reach": goal_reach(rig.context, cfg_goal, rollout, traj.goal),
+            "metrics": violation_metrics(user, rig.human, _arm_aa(rig, rollout)),
+            "goal_reach": goal_reach(rig.human, cfg_goal, rollout, traj.goal),
             "start_trajectory": rig.package_trajectory(start_rollout, user),
             "start_metrics": violation_metrics(
-                user, rig.context, _arm_aa(rig, start_rollout)
+                user, rig.human, _arm_aa(rig, start_rollout)
             ),
             "start_goal_reach": goal_reach(
-                rig.context, cfg_goal, start_rollout, traj.goal
+                rig.human, cfg_goal, start_rollout, traj.goal
             ),
             "cost_field": self.generated_cost_field(cost),
             "generated_bounds": _generated_bounds_from_artifacts(cost_dir),
@@ -1506,21 +1465,17 @@ class Session:
         _log("rolling out the unified cost from the initial pose")
         rollout = rollout_to_goal(
             cfg_goal,
-            traj.start_q,
+            traj.start,
             traj.goal,
-            rig.context,
             installed,
-            rig.body_pos,
-            rig.spine3_pos,
-            rig.spine3_aa,
             progress_label="unified-from-start",
             log_prefix=_LOG_PREFIX,
-        )
+        ).history
         _log(f"unified-cost rollout done in {time.perf_counter() - t0:.1f}s")
         payload.update(
             trajectory=rig.package_trajectory(rollout, self.user),
-            metrics=violation_metrics(self.user, rig.context, _arm_aa(rig, rollout)),
-            goal_reach=goal_reach(rig.context, cfg_goal, rollout, traj.goal),
+            metrics=violation_metrics(self.user, rig.human, _arm_aa(rig, rollout)),
+            goal_reach=goal_reach(rig.human, cfg_goal, rollout, traj.goal),
         )
         return payload
 
@@ -1554,7 +1509,7 @@ class Session:
         rig = self.rig
         if traj is None or traj.goal is None:
             raise ValueError("Start a trajectory first.")
-        trajectory = np.asarray(traj.executed, dtype=np.float64)
+        trajectory = traj.human.history
         trigger = (
             None
             if not traj.paused
@@ -1571,10 +1526,10 @@ class Session:
             "oracle": None if traj.oracle_traj is None else self._oracle_payload(),
             "clean_base": traj.clean_package,
             "metrics": violation_metrics(
-                self.user, rig.context, _arm_aa(rig, trajectory)
+                self.user, rig.human, _arm_aa(rig, trajectory)
             ),
             "goal_reach": goal_reach(
-                rig.context, rig._cfg_with_goal(traj.goal), trajectory, traj.goal
+                rig.human, rig._cfg_with_goal(traj.goal), trajectory, traj.goal
             ),
             "status": (
                 "complete" if traj.complete else "paused" if traj.paused else "running"

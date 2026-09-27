@@ -29,12 +29,8 @@ from uncertain_feedback.planners.mpc import (
 )
 from uncertain_feedback.planners.mpc.constraints import RobotIkConstraint
 from uncertain_feedback.planners.mpc.feedback import MdmFeedback
-from uncertain_feedback.planners.mpc.kinematics import (
-    Q_DIM,
-    SmplLeftArmFK,
-    _compose_q,
-    q_to_arm_aa,
-)
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import Q_DIM, SmplLeftArmFK, _compose_q
 
 _PANDA_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=np.float64)
 
@@ -156,10 +152,11 @@ class _KinematicGraspEnv(ExecutionEnv):
         raise NotImplementedError
 
 
-def _make_env_and_start(fk: SmplLeftArmFK) -> tuple[_KinematicGraspEnv, np.ndarray]:
+def _make_env_and_start() -> tuple[_KinematicGraspEnv, Human]:
     q0 = np.zeros(Q_DIM)
     q0[6] = -0.8
-    return _KinematicGraspEnv(fk, q0), q0
+    human = Human().reset_human_with_q(q0)
+    return _KinematicGraspEnv(human.fk, q0), human
 
 
 def _gate(mpc: ArmMPC) -> RobotIkConstraint:
@@ -174,54 +171,46 @@ def _playback(mpc: ArmMPC) -> MdmFeedback:
 
 
 def test_ik_gated_planner_reaches_cartesian_goal() -> None:
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    spine3 = fk.tpose_spine3_pos
-    goal = (wrist0 - spine3) + np.array([0.0, 0.08, -0.05])
+    env, human = _make_env_and_start()
+    wrist0 = human.wrist_from_q(human.q)
+    goal = wrist0 + np.array([0.0, 0.08, -0.05])
 
     mpc = ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=128,
         max_angle_delta=0.02,
-        fk=fk,
         seed=0,
         env=env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         constraints={"robot_ik": RobotIkConfig()},
     )
-    dist0 = float(np.linalg.norm((wrist0 - spine3) - goal))
-    q = q0
+    dist0 = float(np.linalg.norm(wrist0 - goal))
     for _ in range(60):
-        q = mpc.step(q)
+        q = mpc.step().q
         if mpc.goal_reached(q):
             break
-    wrist = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), None, None)[4]
-    dist = float(np.linalg.norm((wrist - spine3) - goal))
+    dist = float(np.linalg.norm(human.wrist_from_q(mpc.human.q) - goal))
     assert dist < 0.05 < dist0
 
 
 def test_ik_gated_solve_keeps_first_steps_reachable() -> None:
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    env, human = _make_env_and_start()
+    goal = human.wrist_from_q(human.q) + np.array([0.0, 0.08, -0.05])
     mpc = ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=64,
         max_angle_delta=0.02,
-        fk=fk,
         seed=0,
         env=env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         constraints={"robot_ik": RobotIkConfig()},
     )
     gate = _gate(mpc)
-    _first, plan = mpc.solve(q0)
+    _first, plan = mpc.solve(human.q)
     best_traj = np.empty((1, plan.shape[0] + 1, Q_DIM))
-    best_traj[0, 0] = np.asarray(q0, dtype=np.float64)
+    best_traj[0, 0] = human.q
     for t in range(plan.shape[0]):
         best_traj[0, t + 1] = _compose_q(best_traj[0, t], plan[t])
     residual = float(gate._grasp_ik_residuals(best_traj)[0])
@@ -234,27 +223,22 @@ def test_ik_gated_solve_keeps_first_steps_reachable() -> None:
 
 def test_ik_gated_pinned_robot_rejects_all_motion() -> None:
     """With the robot pinned, the explicit hold is the only feasible sample."""
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
+    env, human = _make_env_and_start()
     env._lower = env._robot_q.copy()
     env._upper = env._robot_q.copy()
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    goal = human.wrist_from_q(human.q) + np.array([0.0, 0.08, -0.05])
     mpc = ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=64,
         max_angle_delta=0.02,
-        fk=fk,
         seed=0,
         env=env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         constraints={"robot_ik": RobotIkConfig()},
     )
     gate = _gate(mpc)
-    batch = mpc._human_actions.rollouts(
-        env, np.asarray(q0, dtype=np.float64), np.zeros((mpc._horizon, Q_DIM))
-    )
+    batch = mpc._human_actions.rollouts(env, human.q, np.zeros((mpc._horizon, Q_DIM)))
     assert batch.q_trajs is not None
     residuals = gate._grasp_ik_residuals(batch.q_trajs)
     assert residuals[0] <= gate._max_residual
@@ -263,20 +247,19 @@ def test_ik_gated_pinned_robot_rejects_all_motion() -> None:
     costs = mpc._constrained(mpc._goal_space.stage_cost(mpc._extra_costs))(batch)
     assert np.isfinite(costs[0])
     assert np.all(np.isinf(costs[1:]))
-    q = mpc.step(q0)
-    np.testing.assert_allclose(q, q0, atol=1e-12)
+    np.testing.assert_allclose(mpc.step().q, human.q, atol=1e-12)
 
 
-def _preview_env_for(fk: SmplLeftArmFK, env: _KinematicGraspEnv, q0: np.ndarray):
+def _preview_env_for(human: Human, env: _KinematicGraspEnv):
     from uncertain_feedback.envs.robot_preview import RobotPlanPreviewEnv
 
     return RobotPlanPreviewEnv(
-        fk=fk,
+        fk=human.fk,
         chain=env.robot_fk(),
-        grasp=env.current_grasp(q0),
+        grasp=env.current_grasp(human.q),
         robot_q=env.current_robot_q(),
         joint_limits=env.robot_joint_limits(),
-        q_ref=q0,
+        q_ref=human.q,
         spine3_pos=None,
         spine3_aa=None,
         ik_env=env,
@@ -293,42 +276,43 @@ def test_preview_stand_in_gates_a_human_action_rollout() -> None:
     pinned, nothing but the hold is reachable: the gated rollout must stand
     still where the ungated one drives the gripper off the forearm.
     """
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
+    env, human = _make_env_and_start()
     env._lower = env._robot_q.copy()
     env._upper = env._robot_q.copy()
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    goal = human.wrist_from_q(human.q) + np.array([0.0, 0.08, -0.05])
     kwargs: dict[str, Any] = {
         "horizon": 5,
         "n_mpc_samples": 64,
         "max_angle_delta": 0.02,
-        "fk": fk,
         "seed": 0,
-        "initial_q": q0,
         "cartesian": CartesianConfig(goals=[goal]),
     }
 
-    gated_env = _preview_env_for(fk, env, q0)
-    gated = ArmMPC(**kwargs, env=gated_env, constraints={"robot_ik": RobotIkConfig()})
-    q = q0
+    gated_env = _preview_env_for(human, env)
+    gated = ArmMPC(
+        human, **kwargs, env=gated_env, constraints={"robot_ik": RobotIkConfig()}
+    )
     for _ in range(10):
-        q = gated.step(q)
-    np.testing.assert_allclose(q, q0, atol=1e-12)
+        gated.step()
+    np.testing.assert_allclose(gated.human.q, human.q, atol=1e-12)
     assert len(gated_env.robot_trajectory) == 11
 
-    ungated_env = _preview_env_for(fk, env, q0)
-    ungated = ArmMPC(**kwargs, env=ungated_env)
-    q_ungated = q0
+    ungated_env = _preview_env_for(human, env)
+    ungated = ArmMPC(human, **kwargs, env=ungated_env)
     for _ in range(10):
-        q_ungated = ungated.step(q_ungated)
+        ungated.step()
 
     def grasp_gap(preview_env, q_frame: np.ndarray) -> float:
         target_pos, _ = preview_env._gripper_pose(q_frame)
         ee_pos, _ = preview_env.robot_fk().ee_pose(preview_env.current_robot_q())
         return float(np.linalg.norm(target_pos - ee_pos))
 
-    assert grasp_gap(gated_env, q) < 1e-9 < 0.01 < grasp_gap(ungated_env, q_ungated)
+    assert (
+        grasp_gap(gated_env, gated.human.q)
+        < 1e-9
+        < 0.01
+        < grasp_gap(ungated_env, ungated.human.q)
+    )
 
 
 def test_preview_rollout_selection_prefers_constraints_then_robot() -> None:
@@ -436,20 +420,18 @@ def test_ik_gated_yaml_config_loads() -> None:
 
 
 def _make_mdm_gated(
-    fk: SmplLeftArmFK,
+    human: Human,
     env: _KinematicGraspEnv,
-    q0: np.ndarray,
     goal: np.ndarray,
     playback_stall_steps: int = 40,
 ) -> ArmMPC:
     return ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=128,
         max_angle_delta=0.02,
-        fk=fk,
         seed=0,
         env=env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         feedback=FeedbackConfig(max_playback_delta=0.1),
         constraints={
@@ -459,51 +441,46 @@ def _make_mdm_gated(
 
 
 def test_ik_gated_mdm_planner_tracks_playback_then_reaches_goal() -> None:
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    spine3 = fk.tpose_spine3_pos
-    goal = (wrist0 - spine3) + np.array([0.0, 0.06, -0.04])
-    mpc = _make_mdm_gated(fk, env, q0, goal)
+    env, human = _make_env_and_start()
+    q0 = human.q
+    goal = human.wrist_from_q(q0) + np.array([0.0, 0.06, -0.04])
+    mpc = _make_mdm_gated(human, env, goal)
 
     frames = np.tile(q0, (8, 1))
     frames[:, 6] = q0[6] + np.linspace(0.0, -0.3, 8)
-    mpc.push_trajectory(frames, current_q=q0)
+    mpc.push_trajectory(frames, screen=True)
     assert _playback(mpc).in_playback()
     frames_kept = _playback(mpc)._frames
     assert (
         frames_kept is not None and len(frames_kept) == 8
     )  # nothing dropped: all reachable
 
-    q = q0
     for _ in range(80):
-        q = mpc.step(q)
+        mpc.step()
         if mpc.mdm_ready_to_terminate:
             break
     assert mpc.mdm_ready_to_terminate
-    assert abs(float(q[6]) - float(frames[-1, 6])) < 0.15
+    assert abs(float(mpc.human.q[6]) - float(frames[-1, 6])) < 0.15
 
     for _ in range(100):
-        q = mpc.step(q)
+        q = mpc.step().q
         if mpc.goal_reached(q):
             break
-    wrist = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), None, None)[4]
-    assert float(np.linalg.norm((wrist - spine3) - goal)) < 0.05
+    assert float(np.linalg.norm(human.wrist_from_q(mpc.human.q) - goal)) < 0.05
 
 
 def test_push_screen_drops_unreachable_frames(capsys) -> None:
     """With the robot pinned, only the frame it already sits at survives."""
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
+    env, human = _make_env_and_start()
     env._lower = env._robot_q.copy()
     env._upper = env._robot_q.copy()
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
-    mpc = _make_mdm_gated(fk, env, q0, goal)
+    q0 = human.q
+    goal = human.wrist_from_q(q0) + np.array([0.0, 0.08, -0.05])
+    mpc = _make_mdm_gated(human, env, goal)
 
     frames = np.tile(q0, (2, 1))
     frames[1, 6] = q0[6] - 0.4
-    mpc.push_trajectory(frames, current_q=q0)
+    mpc.push_trajectory(frames, screen=True)
 
     out = capsys.readouterr().out
     assert "[push] dropped 1/2" in out
@@ -518,18 +495,17 @@ def test_push_screen_drops_unreachable_frames(capsys) -> None:
 
 
 def test_push_screen_all_unreachable_queues_nothing(capsys) -> None:
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
+    env, human = _make_env_and_start()
     env._lower = env._robot_q.copy()
     env._upper = env._robot_q.copy()
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
-    mpc = _make_mdm_gated(fk, env, q0, goal)
+    q0 = human.q
+    goal = human.wrist_from_q(q0) + np.array([0.0, 0.08, -0.05])
+    mpc = _make_mdm_gated(human, env, goal)
 
     frames = np.tile(q0, (2, 1))
     frames[0, 6] = q0[6] - 0.4
     frames[1, 6] = q0[6] - 0.5
-    mpc.push_trajectory(frames, current_q=q0)
+    mpc.push_trajectory(frames, screen=True)
 
     assert "nothing queued" in capsys.readouterr().out
     assert not _playback(mpc).in_playback()
@@ -538,17 +514,16 @@ def test_push_screen_all_unreachable_queues_nothing(capsys) -> None:
 def test_ik_gated_playback_pinned_robot_holds_then_skips(capsys) -> None:
     """The guard holds every step and the stall-skip still finishes playback.
 
-    Pushed without ``current_q`` so the push screen is bypassed — this is the
+    Pushed without ``screen`` so the push screen is bypassed — this is the
     runtime path an unreachable frame takes when it slips past the screen
     (the screen walks the planned path; the live one can differ).
     """
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
+    env, human = _make_env_and_start()
     env._lower = env._robot_q.copy()
     env._upper = env._robot_q.copy()
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
-    mpc = _make_mdm_gated(fk, env, q0, goal, playback_stall_steps=3)
+    q0 = human.q
+    goal = human.wrist_from_q(q0) + np.array([0.0, 0.08, -0.05])
+    mpc = _make_mdm_gated(human, env, goal, playback_stall_steps=3)
 
     frames = np.tile(q0, (2, 1))
     frames[0, 6] = q0[6] - 0.4
@@ -556,10 +531,8 @@ def test_ik_gated_playback_pinned_robot_holds_then_skips(capsys) -> None:
     mpc.push_trajectory(frames)
     assert _playback(mpc).in_playback()
 
-    q = q0
     for _ in range(20):
-        q = mpc.step(q)
-        np.testing.assert_allclose(q, q0, atol=1e-9)
+        np.testing.assert_allclose(mpc.step().q, q0, atol=1e-9)
         if mpc.mdm_ready_to_terminate:
             break
     assert mpc.mdm_ready_to_terminate
@@ -568,20 +541,18 @@ def test_ik_gated_playback_pinned_robot_holds_then_skips(capsys) -> None:
 
 
 def test_stall_state_resets_on_new_trajectory() -> None:
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
+    env, human = _make_env_and_start()
     env._lower = env._robot_q.copy()
     env._upper = env._robot_q.copy()
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
-    mpc = _make_mdm_gated(fk, env, q0, goal, playback_stall_steps=10)
+    q0 = human.q
+    goal = human.wrist_from_q(q0) + np.array([0.0, 0.08, -0.05])
+    mpc = _make_mdm_gated(human, env, goal, playback_stall_steps=10)
 
     frames = np.tile(q0, (1, 1))
     frames[0, 6] = q0[6] - 0.4
     mpc.push_trajectory(frames)
-    q = q0
     for _ in range(3):
-        q = mpc.step(q)
+        mpc.step()
     assert _playback(mpc)._stall_count > 0
 
     mpc.push_trajectory(frames)

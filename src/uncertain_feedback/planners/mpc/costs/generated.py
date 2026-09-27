@@ -27,9 +27,9 @@ from uncertain_feedback.planners.mpc.arm_features import (
 )
 from uncertain_feedback.planners.mpc.costs.base import (
     CompositeTrajectoryCost,
-    MpcCostContext,
     TrajectoryCost,
 )
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_NAMES,
     SmplLeftArmFK,
@@ -316,41 +316,35 @@ def compile_generated_cost(code: str) -> FunctionType:
 
 
 def build_generated_cost_context(
-    mpc_context: MpcCostContext,
-    current_q: np.ndarray,
+    human: Human,
     mdm_traj: np.ndarray,
-    q_history: list[np.ndarray],
     window: int,
-    body_pos: np.ndarray | None = None,
     reference_traj: np.ndarray | None = None,
     full_correction_traj: np.ndarray | None = None,
     cartesian_goal: np.ndarray | None = None,
     cartesian_threshold: float | None = None,
     rejected_trajs: tuple[np.ndarray, ...] | None = None,
 ) -> GeneratedCostContext:
-    """Build a q-native runtime context passed to generated Python costs."""
-    recent_q = (
-        np.stack([canonical_arm_q(q, mpc_context) for q in q_history[-window:]], axis=0)
-        if q_history
-        else np.empty((0, 7), dtype=np.float64)
-    )
+    """Build the q-native runtime context generated Python costs see.
+
+    The person's kinematics, current arm state and last ``window`` executed
+    frames come from ``human``.
+    """
     return GeneratedCostContext(
-        fk=mpc_context.fk,
-        spine3_pos=np.asarray(mpc_context.spine3_pos, dtype=np.float64),
-        spine3_aa=np.asarray(mpc_context.spine3_aa, dtype=np.float64),
-        current_q=canonical_arm_q(current_q, mpc_context),
-        mdm_traj=canonical_arm_q(mdm_traj, mpc_context),
-        recent_q=recent_q,
-        body_pos=(
-            np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None
-        ),
+        fk=human.fk,
+        spine3_pos=human.spine3_pos,
+        spine3_aa=human.spine3_aa,
+        current_q=human.q,
+        mdm_traj=canonical_arm_q(mdm_traj, human),
+        recent_q=human.history[-window:],
+        body_pos=human.posture,
         reference_traj=(
-            canonical_arm_q(reference_traj, mpc_context)
+            canonical_arm_q(reference_traj, human)
             if reference_traj is not None
             else None
         ),
         full_correction_traj=(
-            canonical_arm_q(full_correction_traj, mpc_context)
+            canonical_arm_q(full_correction_traj, human)
             if full_correction_traj is not None
             else None
         ),
@@ -361,6 +355,6 @@ def build_generated_cost_context(
         ),
         cartesian_threshold=cartesian_threshold,
         rejected_trajs=tuple(
-            canonical_arm_q(traj, mpc_context) for traj in (rejected_trajs or ())
+            canonical_arm_q(traj, human) for traj in (rejected_trajs or ())
         ),
     )

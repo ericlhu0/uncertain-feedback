@@ -17,7 +17,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users.base import (
     Bound,
     CoupledBound,
@@ -123,7 +123,7 @@ def _draw_series(
 
 def render_hidden_bounds(
     user: SimulatedUser,
-    context: MpcCostContext,
+    human: Human,
     trajectories: dict[str, np.ndarray],
     path: Path,
 ) -> Path:
@@ -134,7 +134,7 @@ def render_hidden_bounds(
     are circles, end frames squares.
     """
     features_by_traj = {
-        name: feature_series(context, traj) for name, traj in trajectories.items()
+        name: feature_series(human, traj) for name, traj in trajectories.items()
     }
     n = len(user.bounds)
     fig, axes = plt.subplots(1, n, figsize=(6.0 * n, 5.0), squeeze=False)

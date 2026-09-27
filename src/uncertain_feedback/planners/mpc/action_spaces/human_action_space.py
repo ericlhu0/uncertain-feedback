@@ -10,10 +10,10 @@ from uncertain_feedback.planners.mpc.action_spaces.base import (
     RolloutBatch,
     StageCost,
 )
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_CLAVICLE,
     Q_DIM,
-    SmplLeftArmFK,
     _compose_q,
     q_to_arm_aa,
 )
@@ -29,14 +29,14 @@ class HumanArmActions(ActionSpace):
 
     def __init__(
         self,
-        fk: SmplLeftArmFK,
+        human: Human,
         rng: np.random.Generator | None,
         n_samples: int,
         horizon: int,
         max_angle_delta: float,
         zero_first_sample: bool = False,
     ) -> None:
-        self._fk = fk
+        self._fk = human.fk
         self._rng = rng
         self._n_samples = n_samples
         self._horizon = horizon

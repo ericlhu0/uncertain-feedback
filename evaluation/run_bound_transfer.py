@@ -16,6 +16,7 @@ candidate; pool runs with ``analyze_results.py``.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import hydra
@@ -28,7 +29,9 @@ from evaluation.benchmarks.base import Benchmark
 from evaluation.benchmarks.structs import MenuProbe
 from evaluation.benchmarks.transfer import run_transfer
 from evaluation.metrics.cost_learning.menu import menu_rows
-from uncertain_feedback.planners.rig import build_rig
+from uncertain_feedback.motion_generators import make_motion_generator
+from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import get_persona
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -58,8 +61,14 @@ def _run(cfg: DictConfig) -> None:
         if cfg.load_generator is None
         else bool(cfg.load_generator)
     )
-    rig = build_rig(mpc_config, seed=seed, load_generator=load_generator)
-    tasks = benchmark.generate_tasks(seed, rig.cfg)
+    run_cfg = replace(load_mpc_config(mpc_config), seed=seed)
+    human = Human(pose=run_cfg.pose, arm=run_cfg.arm)
+    gen = (
+        make_motion_generator(run_cfg.motion_generator, None, seed=seed)
+        if load_generator
+        else None
+    )
+    tasks = benchmark.generate_tasks(seed, run_cfg)
     if cfg.max_tasks is not None:
         tasks = tasks[: int(cfg.max_tasks)]
 
@@ -67,8 +76,8 @@ def _run(cfg: DictConfig) -> None:
     for task_id, task in enumerate(tasks):
         user = task.user if task.user is not None else get_persona(task.persona)
         episode_dir = out_dir / f"task_{task_id:02d}_{task.persona}_{task.verbalizer}"
-        approach.reset(rig, user, task.seed, episode_dir)
-        probes.extend(run_transfer(rig, user, task, approach, episode_dir))
+        approach.reset(run_cfg, human, gen, user, task.seed, episode_dir)
+        probes.extend(run_transfer(run_cfg, human, user, task, approach, episode_dir))
         menu = pd.DataFrame([row for probe in probes for row in menu_rows(probe)])
         menu.to_csv(out_dir / "menu.csv", index=False)
     if probes:

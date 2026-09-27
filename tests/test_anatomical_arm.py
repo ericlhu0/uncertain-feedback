@@ -20,7 +20,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_feature_series,
     arm_q_from_features,
 )
-from uncertain_feedback.planners.mpc.costs import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_CLAVICLE,
     Q_DIM,
@@ -166,14 +166,11 @@ def test_q_roundtrip_is_exact_for_hinge_constrained_states() -> None:
 
 
 def test_all_arm_features_match_for_q_and_decoded_boundary_states() -> None:
-    fk = SmplLeftArmFK()
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
+    human = Human()
     q = np.random.default_rng(5).uniform(-0.6, 0.6, size=(20, Q_DIM))
 
-    q_features = arm_feature_series(q, context)
-    boundary_features = arm_feature_series(q_to_arm_aa(q, fk.elbow_hinge_axis), context)
+    q_features = arm_feature_series(q, human)
+    boundary_features = arm_feature_series(human.arm_aa_from_q(q), human)
 
     assert q_features.keys() == boundary_features.keys()
     for name in q_features:
@@ -184,8 +181,8 @@ def test_arm_q_from_features_inverts_arm_feature_series() -> None:
     """The anatomical inverse pins the swing-twist order and the hinge orientation."""
     fk = SmplLeftArmFK()
     fk.collar_aa = np.array([0.1, -0.2, 0.05])
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
+    human = Human().measured(
+        fk, fk.tpose_spine3_pos, np.zeros(3), fk.tpose_all_joints, np.zeros(Q_DIM)
     )
     rng = np.random.default_rng(8)
     clavicle = rng.uniform(-0.3, 0.3, 3)
@@ -195,23 +192,17 @@ def test_arm_q_from_features_inverts_arm_feature_series() -> None:
     # Elbow flexion folds through arccos below the T-pose bend, so it inverts
     # only on the flexed branch.
     q[:, 6] = rng.uniform(0.0, 1.6, 200)
-    features = arm_feature_series(q, context)
+    features = arm_feature_series(q, human)
 
     recovered = arm_q_from_features(
-        np.stack([features[name] for name in FEATURE_NAMES], axis=-1), clavicle, context
+        np.stack([features[name] for name in FEATURE_NAMES], axis=-1), clavicle, human
     )
 
-    for name, value in arm_feature_series(recovered, context).items():
+    for name, value in arm_feature_series(recovered, human).items():
         np.testing.assert_allclose(value, features[name], atol=1e-9)
-    positions = [
-        fk.fk_batch(
-            q_to_arm_aa(states, fk.elbow_hinge_axis),
-            context.spine3_pos,
-            context.spine3_aa,
-        )
-        for states in (q, recovered)
-    ]
-    np.testing.assert_allclose(positions[1], positions[0], atol=1e-9)
+    np.testing.assert_allclose(
+        human.fk_positions_from_q(recovered), human.fk_positions_from_q(q), atol=1e-9
+    )
 
 
 def test_torch_position_features_match_arm_feature_series() -> None:
@@ -229,14 +220,9 @@ def test_torch_position_features_match_arm_feature_series() -> None:
         shoulder_abduction,
     )
 
-    fk = SmplLeftArmFK()
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
+    human = Human()
     q = np.random.default_rng(11).uniform(-0.6, 0.6, size=(24, Q_DIM))
-    positions = fk.fk_batch(
-        q_to_arm_aa(q, fk.elbow_hinge_axis), context.spine3_pos, context.spine3_aa
-    )  # (N, 5, 3)
+    positions = human.fk_positions_from_q(q)  # (N, 5, 3)
 
     shoulder, elbow, wrist = (
         torch.tensor(positions[:, idx], dtype=torch.float64) for idx in (2, 3, 4)
@@ -244,7 +230,7 @@ def test_torch_position_features_match_arm_feature_series() -> None:
     flexion, elevation = flexion_elevation(shoulder, elbow, wrist)
     abduction = shoulder_abduction(shoulder, elbow)
 
-    expected = arm_feature_series(q, context)
+    expected = arm_feature_series(q, human)
     np.testing.assert_allclose(flexion.numpy(), expected["elbow_flexion"], atol=1e-6)
     np.testing.assert_allclose(
         elevation.numpy(), expected["shoulder_elevation"], atol=1e-6
@@ -310,48 +296,42 @@ def test_scale_arm_lengths_sets_measured_segments() -> None:
 
 def test_mpc_actions_never_move_the_clavicle() -> None:
     """The robot holds the forearm, so plans may not use the clavicle DOFs."""
-    fk = SmplLeftArmFK()
     target = np.array([0.1, -0.2, 0.1, 0.2, 0.1, -0.1, 0.4])
     q0 = np.array([0.05, -0.1, 0.2, 0.0, 0.0, 0.0, 0.0])
-    wrist_rel = (
-        fk.fk(q_to_arm_aa(target, fk.elbow_hinge_axis))[-1] - fk.tpose_spine3_pos
-    )
+    human = Human().reset_human_with_q(q0)
     mpc = ArmMPC(
+        human,
         horizon=3,
         n_mpc_samples=32,
-        fk=fk,
         seed=7,
-        initial_q=q0,
-        cartesian=CartesianConfig(goals=[wrist_rel]),
+        cartesian=CartesianConfig(goals=[human.wrist_from_q(target)]),
     )
 
     _, plan = mpc.solve(q0)
-    next_q = mpc.step(q0)
+    next_q = mpc.step().q
 
     assert np.all(plan[:, Q_CLAVICLE] == 0.0)
     np.testing.assert_allclose(next_q[Q_CLAVICLE], q0[Q_CLAVICLE], atol=1e-12)
 
 
 def test_seeded_mpc_step_keeps_scalar_elbow_representation() -> None:
-    fk = SmplLeftArmFK()
+    human = Human()
     target = np.array([0.1, -0.2, 0.1, 0.2, 0.1, -0.1, 0.4])
-    wrist_rel = (
-        fk.fk(q_to_arm_aa(target, fk.elbow_hinge_axis))[-1] - fk.tpose_spine3_pos
-    )
     mpc = ArmMPC(
+        human,
         horizon=2,
         n_mpc_samples=16,
-        fk=fk,
         seed=4,
-        initial_q=np.zeros(Q_DIM),
-        cartesian=CartesianConfig(goals=[wrist_rel]),
+        cartesian=CartesianConfig(goals=[human.wrist_from_q(target)]),
     )
 
-    next_q = mpc.step(np.zeros(Q_DIM))
-    arm_aa = q_to_arm_aa(next_q, fk.elbow_hinge_axis)
+    next_q = mpc.step().q
+    arm_aa = human.arm_aa_from_q(next_q)
 
     assert next_q.shape == (Q_DIM,)
-    np.testing.assert_allclose(arm_aa[2], next_q[6] * fk.elbow_hinge_axis, atol=1e-12)
+    np.testing.assert_allclose(
+        arm_aa[2], next_q[6] * human.fk.elbow_hinge_axis, atol=1e-12
+    )
 
 
 def _canonical_q(fk: SmplLeftArmFK, q, spine3_pos, spine3_aa) -> np.ndarray:

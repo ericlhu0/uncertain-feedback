@@ -203,8 +203,8 @@ Stage (a) **refuses to write into a directory that already holds a clip set** �
 `manifest.json` wholesale, so doing so would blank that set's captions and orphan the
 labeling sessions underneath it. Pass a new `--out_dir` instead.
 
-Only this step needs the GPU/MDM env — it loads the generator once for the body
-geometry and caches it to `geometry.npz`. Knobs:
+Nothing here loads MDM: the body is the config's pose file, decoded with the
+HumanML3D normalization statistics alone (`Human(pose=…)`). Knobs:
 `--seed`, `--trigger_window LOW HIGH` (the range the bound's crossing step is drawn from,
 and the accepted range for the naive rollout's first violation), `--correction_frames LOW
 HIGH` (corrected frames kept per clip, before the prefix), `--min_goal_distance` and
@@ -214,8 +214,9 @@ The config still supplies everything except the reach: `evaluation/conf/mpc_demo
 gives the body `pose:`, the MPC settings, `cartesian.threshold`,
 `corrections.trigger_threshold` and `llm_cost.model` (the labeling UI's Draft caption
 button). Its `cartesian.goals` is **not** read any more, and of its `arm:` only the clavicle
-rotation survives — the one slot the planner never actuates, recorded in the manifest as
-`clavicle` and inherited by every sampled start.
+rotation survives — the one slot the planner never actuates, inherited by every sampled
+start. The manifest records the config path, and every later stage rebuilds the person
+from it.
 
 `--min_goal_distance` (default 0.25 m) is the floor on how far a sampled goal must sit from
 the sampled start wrist. It scales with `--max_angle_delta` the way `--trigger_window` does:
@@ -276,12 +277,13 @@ uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/lab
 # then: ssh -L 6768:localhost:6768 user@host  →  http://localhost:6768
 ```
 Clip sets generated before scenarios became per-run can no longer be labeled or forked (they
-carry one set-level naive rollout and no `clavicle`); only stage (b) still reads both
-layouts. Label a fresh set instead.
+carry one set-level naive rollout); only stage (b) still reads both layouts. Label a fresh
+set instead. The `geometry.npz`, `base_pose.npy` and manifest `clavicle` older sets carry
+are no longer read.
 **Every launch labels into its own session directory.** `--clips_dir` defaults to
 `data/dataset_auto_correction/clips`, so labeling normally needs no flags at all. The UI
-forks `<clips_dir>/session_<timestamp>/` off the clip set — the base artifacts copied
-in, an empty manifest, and the timestamp as the session's seed — and writes its runs and
+forks `<clips_dir>/session_<timestamp>/` off the clip set — an empty manifest, and the
+timestamp as the session's seed — and writes its runs and
 captions there, so it never touches the set it came from or an earlier session. Runs are
 seeded on `(seed, index)`, so the fresh seed is what keeps two sessions off the same sampled
 bounds. A session directory is self-contained: stage (b) reads it exactly like a clip set,
@@ -415,12 +417,12 @@ very end holds the anchor back rather than padding, so a dragged clip is always 
 (`pad_frames` 0).
 
 Stage (a) writes **no video** — rendering was 3.5 MB of a 3.9 MB 32-clip set, against 436 KB
-without it. The viewer reads only `manifest.json`, `geometry.npz` and the per-run
-`naive.npy` / `clip.npy` / `continuation.npy`, reconstructing each preview through
-`motion_frames` at ~9–40 KB of JSON per
+without it. The viewer reads only `manifest.json` (and the planner config it names, for
+the person) and the per-run `naive.npy` / `clip.npy` / `continuation.npy`, reconstructing
+each preview through `motion_frames` at ~9–40 KB of JSON per
 run, so it needs neither the MDM environment nor a GPU — including for the corrections it
-plans on demand, since `clip_source_from_dir` rebuilds the rollout context from
-`geometry.npz` (the generator-decoded body) plus the manifest's `clavicle`. A
+plans on demand, since `clip_source_from_dir` rebuilds the rollout context from the
+config's `Human`. A
 bootstrapped set is 24 KB and each run adds ~25–40 KB (clip, features, and the full naive
 and continuation rollouts the preview's context phase needs). Runs whose continuation never reached
 the goal are marked in the header; blank runs are skipped by stage (b).
@@ -1464,7 +1466,7 @@ optional YAML key `env`:
   there, while the bolted-down robot stays put. The config's start pose supplies
   the torso's shape and orientation only — its position is discarded. Cartesian
   goals are spine3-relative, so they follow the person, and the anchor is frozen
-  for the run, which is what `MpcCostContext` requires. A run must therefore read
+  for the run, which is what the planner's `Human` requires. A run must therefore read
   the anchor back from `env.pose_context()` after `initial_q` (`planners/run.py`
   does); planning against the config's `spine3_pos` would put the goals on a
   torso that is not where the person is.
@@ -2317,10 +2319,8 @@ radians; `elbow_flexion_angle` uses the scalar anatomical elbow hinge angle,
 and `shoulder_abduction_angle` uses the upper-arm angle away from torso-down in
 the spine3 frame.
 
-`--arm` can override the starting arm state with a `.npy` file. The preferred
-shape is `(3, 3)` for `[left_shoulder, left_elbow, left_wrist]`. Legacy `(4, 3)`
-files are accepted; the first row fixes the left collar and the remaining rows
-control shoulder, elbow, and wrist. This input is converted once to the internal
+`--arm` can override the starting arm state with a `(3, 3)` `.npy` file for
+`[left_shoulder, left_elbow, left_wrist]`. This input is converted once to the internal
 7-DOF planner state; arbitrary off-hinge elbow rotation is anatomically decoded
 into shoulder rotation plus a scalar elbow-flexion angle while preserving arm
 joint positions.
@@ -2334,7 +2334,7 @@ frame as frame 1, so any pull the model has toward its training prior's start po
 lands as a one-frame teleport between them — measured at 0.114 m on the deployed
 `correction_demo1` checkpoint, against a ~0.005 m normal step. `anchor_correction`
 (default **true**) drops frame 0 and shifts the rest so the correction begins at the
-arm's current configuration (`SmplLeftArmFK.anchor_arm_trajectory`, applied in
+arm's current configuration (`anchor_q_trajectory`, applied in
 planner `q` space so the elbow hinge stays parameterised). Per-frame displacements —
 the demonstrated shape — are untouched; the seam cannot exist, since frame 0 *is*
 the current configuration. The trajectory is one frame shorter. Set it false to
@@ -2527,9 +2527,9 @@ trigger pose; `Approach.begin_goal` hands it the goal's oracle path), `mdm_langu
 MDM-grounded cluster the persona picks, `nominal_language` nothing (the nominal plan is
 "executed"), and `oracle_no_learning` is the floor: the oracle correction each round, no
 cost learning. `benchmark/cost_learning.yaml` is the six personas with curated goals in
-`mdm_llm_transfer.yaml`, everyday feedback, one goal each, five rounds. `load_generator=true`
-loads MDM for every arm so all four share the pose file's body and start pose; without it a
-generator-free arm needs an `arm:` pose in the config and runs on the T-pose rig. Feedback
+`mdm_llm_transfer.yaml`, everyday feedback, one goal each, five rounds. Every arm plans on
+the person the config describes (`Human(pose=cfg.pose, arm=cfg.arm)`); `load_generator=true`
+only loads MDM for arms that do not ground with it. Feedback
 rounds are anchored on the last frame before the trigger with no violation (as
 `build_sampled_case` does), since the simulated user rejects any candidate whose frames
 violate and every candidate starts at the feedback pose. The verbalizer's feature dead band
@@ -2556,8 +2556,8 @@ the set, `recommended_only: true` keeps only the cases the audit's `visual_revie
 recommended. Pair it with `evaluation/conf/mpc_procedural.yaml`, which is the transfer
 config's feedback/uq/llm_cost stack at the sampler's pacing (`max_angle_delta` 0.0025,
 `simulated_user.nominal_steps` 40 = the 40-frame correction window the cases were selected
-on); the pose file's body is the geometry the scenarios were generated with, so
-`load_generator=true` reproduces each case's stored trigger.
+on); every arm plans on the pose file's body, the one the scenarios were generated with, so
+each case's stored trigger is reproduced.
 
 ```bash
 uv run python evaluation/run_experiment.py -m seed=0 \
@@ -2715,9 +2715,7 @@ uv run python evaluation/visualize_oracle.py \
 ```
 
 `--personas` restricts the set (default: every bounded persona with
-`persona_goals` in the config, first cartesian goal only). `--no-generator`
-skips the MDM load and needs a config with `arm:` angles, at the cost of the sit
-pose's body geometry. A persona whose nominal rollout never violates its bounds
+`persona_goals` in the config, first cartesian goal only). A persona whose nominal rollout never violates its bounds
 produces no correction and is skipped with a log line.
 
 ## Demo runner web tool
@@ -3044,14 +3042,12 @@ under `outputs/grounding_component_20260905/` and `outputs/recipe_20260906/`.
 Select reaches for fixed personas before evaluating any learned method:
 
 ```bash
-uv run python evaluation/generate_scenarios.py \
-  --geometry-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips \
-  --out-dir outputs/informative_scenarios_s17
+uv run python evaluation/generate_scenarios.py --out-dir outputs/informative_scenarios_s17
 ```
 
-The cached `geometry.npz` and manifest supply the body and clavicle; `--mpc-config`
-(default `evaluation/conf/mpc_demo_low1.yaml`) supplies planning settings, without
-loading MDM. The sampler uses 0.0025 action spread and a 600-step rollout budget.
+`--mpc-config` (default `evaluation/conf/mpc_demo_low1.yaml`) supplies the person — its
+`pose:` body and `arm:`, whose clavicle every sampled start keeps — and the planning
+settings, without loading MDM. Render-only reads the config back from `selection.json`. The sampler uses 0.0025 action spread and a 600-step rollout budget.
 `--personas NAME ...`, `--seed` (17), and `--max-attempts` (300 per persona) control
 sampling. The output directory must be new. `--no-render` selects only;
 `--render-only --out-dir <existing directory>` renders saved cases.
@@ -3082,7 +3078,6 @@ criteria and SMPL review:
 
 ```bash
 uv run python evaluation/generate_scenarios.py \
-  --geometry-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips \
   --sampled-bounds 4 --seed 23 --out-dir outputs/procedural_bounds_s23
 ```
 

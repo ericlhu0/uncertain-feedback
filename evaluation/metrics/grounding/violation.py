@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import SimulatedUser, feature_series
 
 
 def correction_violation(
     user: SimulatedUser,
     generated_correction: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
 ) -> float:
     """Mean per-frame hidden-bound violation over a correction, in radians.
 
@@ -31,5 +31,5 @@ def correction_violation(
     axis-angles ``(T, 3, 3)``. ``0`` means every frame of the correction stayed
     inside every one of the persona's hidden bounds.
     """
-    violations = user.violation_series(feature_series(context, generated_correction))
+    violations = user.violation_series(feature_series(human, generated_correction))
     return float(np.mean(violations))

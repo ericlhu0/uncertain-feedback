@@ -9,7 +9,7 @@ import numpy as np
 
 from evaluation.approaches.cost_gen.structs import LearnOutcome
 from evaluation.metrics.grounding.structs import GroundingResult
-from uncertain_feedback.planners.mpc.costs import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import (
     ChoiceResult,
     CorrectionIntent,
@@ -74,7 +74,7 @@ class FeedbackRound:
 class Interaction:
     """One goal attempt by one approach for one persona: what every metric reads.
 
-    ``user`` and ``context`` are carried so metrics can score any trajectory
+    ``user`` and ``human`` are carried so metrics can score any trajectory
     here against the persona's hidden bounds. ``executed`` is every frame the
     arm moved through for this goal, starting at the goal's start pose.
     ``result`` is ``no_violation`` (no feedback needed), ``ok`` (resolved after
@@ -84,7 +84,7 @@ class Interaction:
     task: InteractionTask
     approach: str
     user: SimulatedUser
-    context: MpcCostContext
+    human: Human
     goal_index: int
     goal: np.ndarray
     oracle_path: np.ndarray
@@ -118,7 +118,7 @@ class MenuProbe:
     task: InteractionTask
     approach: str
     user: SimulatedUser
-    context: MpcCostContext
+    human: Human
     goal_index: int
     goal: np.ndarray
     utterance: Utterance

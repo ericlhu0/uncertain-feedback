@@ -72,6 +72,7 @@ uncertain-feedback/
 │   │       ├── config.py             # YAML → MpcRunConfig dataclass
 │   │       ├── kinematics.py         # SmplLeftArmFK, SMPL topology constants (SMPL_JOINT_NAMES_22 canonical joint-name table, SHOULDER/ELBOW/WRIST_CHAIN_IDX positions within the left-arm chain); `anchor_arm_trajectory` re-anchors a generated correction onto the current q (drops the pinned frame 0, shifts the rest in q space) to kill the frame-0 seam
 │   │       ├── arm_features.py        # Canonical q conversion + shared anatomical arm features (+ `arm_q_from_features` inverse)
+│   │       ├── human.py               # `Human`: the person the robot moves — immutable body (fitted `SmplLeftArmFK`, spine3 frame, decoded `posture`, the pose's `hml_pose`) plus executed arm `history` (`q` = last frame). `Human(pose=, arm=)` decodes a pose file without MDM (`decode_hml_pose`); `step(frames)` / `rewind(frame)` / `reset_human_with_q(q)` return new Humans; properties return copies of byte-backed arrays. Geometry takes an explicit q: `fk_positions_from_q` ↔ `ik_q_from_positions` (arm-chain positions, bone directions only), `wrist_from_q` ↔ `q_from_wrist`, `features_from_q` ↔ `q_from_features`, `arm_aa_from_q` ↔ `q_from_arm_aa`. Not yet wired into the planner
 │   │       ├── costs/                # Planner cost package (public surface: mpc.costs)
 │   │       │   ├── __init__.py       # Re-exports the planner-side cost API
 │   │       │   ├── base.py           # Cost terms + registry + preference learning
@@ -141,7 +142,7 @@ uncertain-feedback/
 │   │       ├── transfer_bed_pose.pt    # Supine transfer start; extended legs and same arm setup (normalized HML263)
 │   │       ├── mdm_api.py            # MdmMotionGenerator: text → arm trajectory
 │   │       ├── torch_features.py     # Differentiable arm features + hidden-bound cost read off x̂0 (the steering signal; imports torch at module scope, so consumers import it lazily)
-│   │       ├── hml_smpl_conversion.py  # HML263 ↔ SMPL pose conversions
+│   │       ├── hml_smpl_conversion.py  # HML263 ↔ SMPL pose conversions; `load_hml_pose` / `decode_hml_pose` decode a pose file with only the HumanML3D Mean/Std (`HML_STATS_DIR`), bit-identical to `MdmMotionGenerator.decode_pose` without loading the model
 │   │       ├── mdm_parser_util.py    # CLI arg parser helpers for MDM scripts
 │   │       ├── sample_leftarm.py     # Standalone left-arm generation script; `--n_prefix N` (default 1) sets the pinned prefix and `--raw_weights` forces non-EMA weights (`--use_ema` is a `model` group flag restored from the checkpoint's args.json, so it cannot be turned off otherwise)
 │   │       ├── train_leftarm.py      # Fine-tuning script for left arm

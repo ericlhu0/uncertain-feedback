@@ -392,18 +392,23 @@ class SmplLeftArmFK:
     Subsequent FK calls are pure numpy/scipy operations.
 
     The collar rotation is stored as :attr:`collar_aa` (default: zeros for
-    T-pose) and is applied automatically by all FK methods.  Set it once after
-    loading the initial body pose:
+    T-pose) and is applied automatically by all FK methods.  Pass the one
+    decoded with the initial body pose:
 
-        fk = SmplLeftArmFK()
-        fk.collar_aa = fixed_collar_aa  # from decode_pose()
+        fk = SmplLeftArmFK(collar_aa=fixed_collar_aa)  # from decode_pose()
 
     Args:
         smpl_pkl_path: Path to ``SMPL_NEUTRAL.pkl``.  Defaults to the copy
                        inside the MDM submodule.
+        collar_aa:     ``(3,)`` fixed left-collar axis-angle.
     """
 
-    def __init__(self, smpl_pkl_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        smpl_pkl_path: str | Path | None = None,
+        *,
+        collar_aa: np.ndarray | None = None,
+    ) -> None:
         pkl_path = (
             Path(smpl_pkl_path) if smpl_pkl_path is not None else _SMPL_PKL_DEFAULT
         )
@@ -413,7 +418,11 @@ class SmplLeftArmFK:
         self._hinge_axis = _canonical_hinge_axis(
             self._bone_offsets[2], self._bone_offsets[3]
         )
-        self.collar_aa: np.ndarray = np.zeros(3, dtype=np.float64)
+        self.collar_aa: np.ndarray = (
+            np.zeros(3, dtype=np.float64)
+            if collar_aa is None
+            else np.asarray(collar_aa, dtype=np.float64).copy()
+        )
 
     # ------------------------------------------------------------------
     # Loading

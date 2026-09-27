@@ -102,6 +102,11 @@ from uncertain_feedback.planners.mpc.kinematics import (  # pylint: disable=wron
 COLLAR_BODY_POSE_INDEX: int = 12
 ARM_BODY_POSE_INDICES: list[int] = [15, 17, 19]
 
+# HumanML3D normalization statistics every pose file and checkpoint shares.
+HML_STATS_DIR = (
+    Path(__file__).resolve().parent / "motion-diffusion-model" / "dataset" / "HumanML3D"
+)
+
 
 # ---------------------------------------------------------------------------
 # SMPL → HML: patch arm axis-angles into a normalized HML263 frame
@@ -477,6 +482,48 @@ def hml263_to_smpl_body_pose(
     return np.stack(
         [positions_to_smpl_body_pose(frame, tpose_22) for frame in positions]
     )  # (n_frames, 21, 3)
+
+
+def load_hml_pose(path: Path) -> np.ndarray:
+    """Load a saved ``.pt`` pose file as its ``(263,)`` normalized HML263 vector."""
+    import torch  # pylint: disable=import-outside-toplevel
+
+    return (
+        torch.load(Path(path), map_location="cpu", weights_only=True).squeeze().numpy()
+    )
+
+
+def decode_hml_pose(
+    pose: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Decode a ``(263,)`` normalized HML263 pose without loading the MDM model.
+
+    Same arithmetic as ``MdmMotionGenerator.decode_pose``, which loads the model
+    only for the dataset's ``inv_transform`` (``x * std + mean``); here the
+    statistics come straight from :data:`HML_STATS_DIR`.
+
+    Returns:
+        ``(arm_aa (3, 3), body_positions (22, 3), spine3_aa (3,), collar_aa (3,))``.
+        ``body_positions`` is rebuilt by FK on the SMPL-neutral skeleton around
+        the T-pose pelvis, not taken from ``recover_from_ric``.
+    """
+    import torch  # pylint: disable=import-outside-toplevel
+
+    # pylint: disable-next=import-outside-toplevel
+    from uncertain_feedback.data_collection.common.hml263 import load_hml_stats
+
+    mean, std = load_hml_stats(HML_STATS_DIR)
+    hml = torch.tensor(pose, dtype=torch.float32).reshape(1, 1, 1, 263)
+    unnorm = (hml * torch.from_numpy(std) + torch.from_numpy(mean)).float()
+    positions = _import_recover_from_ric()(unnorm, 22)[0, 0].numpy().astype(np.float64)
+    tpose_22 = SmplLeftArmFK().tpose_all_joints
+    body_pose = positions_to_smpl_body_pose(positions[0], tpose_22)
+    return (
+        smpl_body_pose_to_arm_aa(body_pose),
+        smpl_body_pose_to_positions(body_pose, tpose_22),
+        smpl_body_pose_to_spine3_aa(body_pose),
+        smpl_body_pose_to_collar_aa(body_pose),
+    )
 
 
 def hml263_batch_to_smpl_body_pose(

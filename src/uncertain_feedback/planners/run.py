@@ -32,9 +32,7 @@ from uncertain_feedback.cost_generation import (
     CombineCostGenerator,
     CostRound,
     artifact_run_dir,
-    build_motion_summaries,
-    create_cost_generator,
-    render_prompt_images,
+    generate_cost_for_correction,
 )
 from uncertain_feedback.envs import make_env
 from uncertain_feedback.envs.base import ExecutionEnv
@@ -57,7 +55,6 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
     LearnablePreferenceCost,
     build_extra_costs,
-    build_generated_cost_context,
     replace_cost_in_composite,
     replace_generated_costs,
     update_preference_cost,
@@ -69,7 +66,6 @@ from uncertain_feedback.planners.mpc.kinematics import (
     anchor_q_trajectory,
 )
 from uncertain_feedback.planners.mpc.rollout import (
-    assemble_full_correction_traj,
     rollout_reference_trajectory,
     run_planning_loop,
 )
@@ -800,85 +796,38 @@ def run_repeated_correction_session(
         generated: GeneratedPythonCost | None = None
         cost_round: CostRound | None = None
         if cfg.llm_cost.enabled:
-            candidate_trajs: dict[int, np.ndarray] | None = None
-            highlight_label: int | None = None
-            rejected_trajs: tuple[np.ndarray, ...] = ()
-            uqr = getattr(mpc, "last_uq_result", None)
-            if uqr is not None:
-                candidate_trajs = {
-                    uqr.chosen_label: uqr.cluster_means[uqr.chosen_label]
-                }
-                highlight_label = uqr.chosen_label
-            reference_q = old_suffix
-            if reference_q is None:
-                reference = rollout_reference_trajectory(
-                    cfg, human, configured_base_costs
-                )
-                reference_q = None if reference is None else reference.history
-            goal_pos = (
-                goal_point(cfg.cartesian.goals[0])
-                if cfg.cartesian is not None
-                else None
-            )
-            cartesian_threshold = (
-                cfg.cartesian.threshold if cfg.cartesian is not None else 0.01
-            )
-            full_correction_q = assemble_full_correction_traj(
-                cfg, human, llm_traj, configured_base_costs
-            )
-            context = build_generated_cost_context(
-                human,
-                llm_traj,
-                window=cfg.preference_window,
-                reference_traj=reference_q,
-                full_correction_traj=full_correction_q,
-                cartesian_goal=goal_pos,
-                cartesian_threshold=cartesian_threshold,
-                rejected_trajs=rejected_trajs,
-            )
-            summaries = build_motion_summaries(context, cartesian_goal=goal_pos)
-            images: dict[str, Path] = {}
-            if cfg.llm_cost.use_images:
-                images = render_prompt_images(
-                    context,
-                    round_dir / "images",
-                    candidate_trajs,
-                    highlight_label,
-                    reference_traj=reference_q,
-                    goal_pos=goal_pos,
-                )
-            eval_state = EvalState(
+            result = generate_cost_for_correction(
+                mpc=None,
                 cfg=cfg,
-                human=human,
+                instruction=feedback_text,
                 correction_traj=llm_traj,
-                window=cfg.preference_window,
+                human=human,
                 base_extra_costs=configured_base_costs,
-                reference_traj=reference_q,
-                full_correction_traj=full_correction_q,
-                cartesian_goal=goal_pos,
-                cartesian_threshold=cartesian_threshold,
-                rejected_trajs=rejected_trajs,
+                cost_dir=round_dir / "cost_generation",
+                reference_traj=old_suffix,
+                candidate_trajs=(
+                    None
+                    if uq_result is None
+                    else {
+                        uq_result.chosen_label: uq_result.cluster_means[
+                            uq_result.chosen_label
+                        ]
+                    }
+                ),
+                highlight_label=None if uq_result is None else uq_result.chosen_label,
+                install=False,
+                log_prefix="[llm-cost]",
             )
             state_path = round_dir / "state.pkl"
-            eval_state.save(state_path)
-            generator = create_cost_generator(
-                cfg.llm_cost,
-                context,
-                feedback_text,
-                summaries=summaries,
-                run_dir=round_dir / "cost_generation",
-                images=images,
-                mpc=None,
-                rollout_fn=eval_state.make_rollout_fn(),
-                eval_state=eval_state,
-            )
-            generated = generator.generate(install=False)
+            result.eval_state.save(state_path)
+            generated = result.generated_cost
             if generated is not None:
                 mpc.set_extra_costs(
                     _append_extra_cost(
                         mpc._extra_costs, generated  # pylint: disable=protected-access
                     )
                 )
+                goal_pos = result.eval_state.cartesian_goal
                 goal = (
                     (float(goal_pos[0]), float(goal_pos[1]), float(goal_pos[2]))
                     if goal_pos is not None
@@ -893,14 +842,22 @@ def run_repeated_correction_session(
                     state_path=state_path.resolve(),
                     cost_code=generated.code,
                     params=generated.params,
-                    summaries=summaries,
-                    image_paths=tuple(path.resolve() for path in images.values()),
+                    summaries=result.summaries,
+                    image_paths=tuple(
+                        path.resolve() for path in result.images.values()
+                    ),
                     trajectory_index=trajectory_index,
                     trigger_reason=reason,
                     trigger_violation=violation,
                 )
                 runtime_rounds.append(
-                    (cost_round, eval_state, context, summaries, images)
+                    (
+                        cost_round,
+                        result.eval_state,
+                        result.generated_context,
+                        result.summaries,
+                        result.images,
+                    )
                 )
                 print(f"[llm-cost] stacked correction cost {round_index}")
         _restore_interactive_backend()

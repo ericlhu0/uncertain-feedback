@@ -1,10 +1,10 @@
 """The cost-generation stage: correction context in, generated cost out.
 
-:func:`generate_cost_for_cluster` is the whole stage in one call — roll the
+:func:`generate_cost_for_correction` is the whole stage in one call — roll the
 pre-correction reference, assemble the full corrected path, build the prompt
 summaries and images, bundle the picklable :class:`EvalState`, then run whichever
-backend the config selects. Callers (the fixed-pipeline orchestrator, the demo
-runner, and later the per-stage CLIs) do not touch the backends directly.
+backend the config selects. Callers (``planners/run.py``, the demo runner and the
+evaluation approaches) do not touch the backends directly.
 """
 
 from __future__ import annotations
@@ -117,15 +117,16 @@ def _rejected_candidate_trajs(
     )
 
 
-def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-locals
+def generate_cost_for_correction(  # pylint: disable=too-many-arguments,too-many-locals
     mpc: ArmMPC | None,
     cfg: MpcRunConfig,
     instruction: str,
-    cluster_traj: np.ndarray,
+    correction_traj: np.ndarray,
     human: Human,
     base_extra_costs: CompositeTrajectoryCost,
     cost_dir: Path,
     *,
+    reference_traj: np.ndarray | None = None,
     backend: str | None = None,
     candidate_trajs: dict[int, np.ndarray] | None = None,
     highlight_label: int | None = None,
@@ -138,11 +139,15 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     language_only: bool = False,
     log_prefix: str = "[experiment]",
 ) -> CostGenerationResult:
-    """Build one prompt context and generate one cost for one cluster/backend.
+    """Build one prompt context and generate one cost for one correction/backend.
 
     ``human`` is the person at the correction: its history is the executed
     motion and its ``q`` the configuration the correction starts from.
-    ``language_only`` means no correction was chosen and ``cluster_traj`` is the
+    ``reference_traj`` is the plan the person corrected away from; by default it
+    is the comfort-only plan rolled from ``human`` (``run.py`` passes the
+    remainder of a correction the new one interrupted). ``candidate_trajs`` are
+    the other MDM clusters, of which ``undesirable_labels`` are shown as negatives.
+    ``language_only`` means no correction was chosen and ``correction_traj`` is the
     INTERRUPTED plan: it becomes the reference the prompts frame as what the
     person corrected away from, the recent comfortable history stands in the
     correction slot, and the ranking check therefore requires the interrupted
@@ -157,7 +162,9 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
     phase_t0 = time.perf_counter()
     _log("phase C building cost-generation context", prefix=log_prefix)
     if language_only:
-        reference_q: np.ndarray | None = canonical_arm_q(cluster_traj, human)
+        reference_q: np.ndarray | None = canonical_arm_q(correction_traj, human)
+    elif reference_traj is not None:
+        reference_q = canonical_arm_q(reference_traj, human)
     else:
         reference = rollout_reference_trajectory(cfg_backend, human, base_extra_costs)
         reference_q = None if reference is None else reference.history
@@ -173,7 +180,7 @@ def generate_cost_for_cluster(  # pylint: disable=too-many-arguments,too-many-lo
         correction_q = human.history[-(window + 1) :]
         full_correction_q = None
     else:
-        correction_q = canonical_arm_q(cluster_traj, human)
+        correction_q = canonical_arm_q(correction_traj, human)
         full_correction_q = assemble_full_correction_traj(
             cfg_backend, human, correction_q, base_extra_costs
         )

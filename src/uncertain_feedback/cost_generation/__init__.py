@@ -1,6 +1,6 @@
 """The cost-generation stage: a user correction becomes an executable MPC cost.
 
-- ``generate`` — the stage entry point (:func:`generate_cost_for_cluster`).
+- ``generate`` — the stage entry point (:func:`generate_cost_for_correction`).
 - ``base`` — the shared :class:`CostGenerator` and the backend selector.
 - ``llm_costs`` / ``turns_costs`` / ``agent_costs`` — the three backends.
 - ``combine_costs`` — unify several rounds' costs into one replacement cost.
@@ -25,7 +25,7 @@ from uncertain_feedback.cost_generation.combine_costs import (
 from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
 from uncertain_feedback.cost_generation.generate import (
     CostGenerationResult,
-    generate_cost_for_cluster,
+    generate_cost_for_correction,
 )
 from uncertain_feedback.cost_generation.llm_costs import LlmCostGenerator
 from uncertain_feedback.cost_generation.summaries import (
@@ -48,7 +48,7 @@ __all__ = [
     "build_motion_summaries",
     "build_rollout_joint_comparison",
     "create_cost_generator",
-    "generate_cost_for_cluster",
+    "generate_cost_for_correction",
     "parse_goal_conflict",
     "render_prompt_images",
 ]

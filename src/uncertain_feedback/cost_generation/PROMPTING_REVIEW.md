@@ -387,5 +387,5 @@ The stale `defaults to "default"` docstring comment is also now fixed (reads `"1
 | `summaries.py` | summaries JSON, `render_prompt_images` |
 | `../evaluation_mechanism/eval_state.py` | `EvalState` — picklable rollout state for the off-process agent |
 | `utils/plot.py` | `render_cluster_contrast_overlay`, `render_cost_feedback_overlay`, `render_joint_angle_comparison` |
-| `generate.py` (`generate_cost_for_cluster`) | wiring: builds context/summaries/images, selects backend |
+| `generate.py` (`generate_cost_for_correction`) | wiring: builds context/summaries/images, selects backend |
 | `planners/mpc/config.py` (`LlmCostConfig`) | config knobs & defaults |

@@ -15,8 +15,7 @@ indices so each (approach, task) pair is its own job):
         hydra.launcher.n_jobs=8 approach=... tasks=0,1,2,3 benchmark=procedural ...
 
 Every arm plans on the person the config describes (its ``pose:`` body with the
-``arm:`` start). ``load_generator`` only decides whether the motion generator is
-loaded (default: only for approaches that need it).
+``arm:`` start); the motion generator is loaded only for approaches that need it.
 
 Each task's episode lands in ``task_NN_<persona>_<verbalizer>/`` under the hydra
 run dir with its ``interactions.pkl``; ``goals.csv`` at the run root is the goal
@@ -77,16 +76,11 @@ def _run(cfg: DictConfig) -> None:
         mpc_config,
     )
 
-    load_generator = (
-        approach.requires_generator
-        if cfg.load_generator is None
-        else bool(cfg.load_generator)
-    )
     run_cfg = replace(load_mpc_config(mpc_config), seed=seed)
     human = Human(pose=run_cfg.pose, arm=run_cfg.arm)
     gen = (
         make_motion_generator(run_cfg.motion_generator, None, seed=seed)
-        if load_generator
+        if approach.requires_generator
         else None
     )
     if cfg.sim_chooser is not None:

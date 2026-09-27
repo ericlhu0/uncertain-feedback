@@ -178,8 +178,8 @@ def shoulder_abduction_angles(
     trajectory: np.ndarray,
     context: ArmFeatureContext,
 ) -> np.ndarray:
-    """Return the unsigned upper-arm angle from the torso-down direction."""
-    return arm_feature_series(trajectory, context)["shoulder_elevation"]
+    """Return the signed sideways upper-arm angle (``shoulder_abduction_adduction``)."""
+    return arm_feature_series(trajectory, context)["shoulder_abduction_adduction"]
 
 
 def resample_equidistant(traj: np.ndarray, n: int) -> np.ndarray:

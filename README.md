@@ -2312,8 +2312,9 @@ costs:
 When MDM is enabled, set `preference_learning: false` to keep the configured
 preference bounds fixed after generated trajectories. Angle costs are in
 radians; `elbow_flexion_angle` uses the scalar anatomical elbow hinge angle,
-and `shoulder_abduction_angle` uses the upper-arm angle away from torso-down in
-the spine3 frame.
+and `shoulder_abduction_angle` uses the signed sideways upper-arm angle (the
+`shoulder_abduction_adduction` feature: positive out to the side, negative across the
+body).
 
 `--arm` can override the starting arm state with a `(3, 3)` `.npy` file for
 `[left_shoulder, left_elbow, left_wrist]`. This input is converted once to the internal
@@ -2525,8 +2526,7 @@ MDM-grounded cluster the persona picks, `nominal_language` nothing (the nominal 
 cost learning. `benchmark/cost_learning.yaml` is the six personas with curated goals in
 `mdm_llm_transfer.yaml`, everyday feedback, one goal each, five rounds. Every arm plans on
 the person the config describes (`Human(pose=cfg.pose, arm=cfg.arm)`), and MDM is loaded
-only for the arms that ground with it (`load_generator=true` would also load it for the
-others, which never use it). Feedback
+only for the arms that ground with it. Feedback
 rounds are anchored on the last frame before the trigger with no violation (as
 `build_sampled_case` does), since the simulated user rejects any candidate whose frames
 violate and every candidate starts at the feedback pose. The verbalizer's feature dead band

@@ -330,12 +330,12 @@ def test_demo_runner_threads_scaled_clusters_to_cost_generation(
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
     captured: dict[str, object] = {}
 
-    def fake_generate_cost_for_cluster(**kwargs):
+    def fake_generate_cost_for_correction(**kwargs):
         captured.update(kwargs)
         return SimpleNamespace(generated_cost=None)
 
     monkeypatch.setattr(
-        demo_session, "generate_cost_for_cluster", fake_generate_cost_for_cluster
+        demo_session, "generate_cost_for_correction", fake_generate_cost_for_correction
     )
     session = _demo_session(tmp_path)
     session.corpus = SimpleNamespace(dir=tmp_path)  # type: ignore[assignment]
@@ -358,4 +358,4 @@ def test_demo_runner_threads_scaled_clusters_to_cost_generation(
         assert not np.array_equal(
             candidate_trajs[label], session.trajectory.cluster_means[label]  # type: ignore[union-attr]
         )
-    np.testing.assert_allclose(captured["cluster_traj"], candidate_trajs[0])  # type: ignore[call-overload]
+    np.testing.assert_allclose(captured["correction_traj"], candidate_trajs[0])  # type: ignore[call-overload]

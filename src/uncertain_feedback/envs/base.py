@@ -81,7 +81,9 @@ class ExecutionEnv(ABC):
         """Realize one commanded ``(7,)`` arm configuration.
 
         Blocks until the step has been executed and returns the ``(7,)``
-        configuration actually achieved.
+        configuration actually achieved. Envs that stream commands to real
+        hardware may instead return the latest measurement, taken before the
+        command was sent (see :meth:`RealEnv.execute`).
         """
 
     def hold(self, q: np.ndarray) -> np.ndarray:
@@ -186,7 +188,8 @@ class ExecutionEnv(ABC):
         """Realize one commanded ``(7,)`` robot joint configuration.
 
         Blocks until the step has been executed and returns the ``(7,)``
-        *human* arm configuration actually achieved.
+        *human* arm configuration actually achieved, with the same exception for
+        streaming hardware envs as :meth:`execute`.
         """
         raise NotImplementedError(f"{type(self).__name__} has no robot")
 

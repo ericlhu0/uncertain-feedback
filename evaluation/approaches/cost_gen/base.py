@@ -9,7 +9,7 @@ from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from uncertain_feedback.cost_generation import (
     CostGenerationResult,
     CostRound,
-    generate_cost_for_cluster,
+    generate_cost_for_correction,
 )
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
 from uncertain_feedback.planners.mpc.costs import (
@@ -64,14 +64,14 @@ class CostGen(abc.ABC):
         if language_only:
             if ctx.nominal_plan is None:
                 raise ValueError("source='nominal' requires RoundContext.nominal_plan.")
-            cluster_traj = ctx.nominal_plan
+            correction_traj = ctx.nominal_plan
         else:
-            cluster_traj = ctx.grounding.correction_traj
-        generation = generate_cost_for_cluster(
+            correction_traj = ctx.grounding.correction_traj
+        generation = generate_cost_for_correction(
             mpc=None,
             cfg=cfg_with_goal(cfg, ctx.goal),
             instruction=ctx.utterance_text,
-            cluster_traj=cluster_traj,
+            correction_traj=correction_traj,
             human=ctx.human,
             base_extra_costs=self._base,
             cost_dir=ctx.round_dir / "cost_generation",

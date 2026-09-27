@@ -29,7 +29,7 @@ from uncertain_feedback.cost_generation import (
     CombineCostGenerator,
     CostGenerationResult,
     CostRound,
-    generate_cost_for_cluster,
+    generate_cost_for_correction,
 )
 from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
 from uncertain_feedback.demo_runner.core import _LOG_PREFIX, _log, persona_to_json
@@ -1194,11 +1194,11 @@ class Session:
         extra = rig._extra_costs(user)
         cost_dir = self.dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{backend}"
         instruction = traj.prompt or user.feedback_text
-        result = generate_cost_for_cluster(
+        result = generate_cost_for_correction(
             mpc=None,
             cfg=cfg_goal,
             instruction=instruction,
-            cluster_traj=traj.scaled_correction,
+            correction_traj=traj.scaled_correction,
             human=traj.corrected,
             base_extra_costs=extra,
             cost_dir=cost_dir,

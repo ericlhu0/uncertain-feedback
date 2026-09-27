@@ -56,16 +56,11 @@ def _run(cfg: DictConfig) -> None:
     if not mpc_config.is_absolute():
         mpc_config = _REPO_ROOT / mpc_config
     seed = int(cfg.seed)
-    load_generator = (
-        approach.requires_generator
-        if cfg.load_generator is None
-        else bool(cfg.load_generator)
-    )
     run_cfg = replace(load_mpc_config(mpc_config), seed=seed)
     human = Human(pose=run_cfg.pose, arm=run_cfg.arm)
     gen = (
         make_motion_generator(run_cfg.motion_generator, None, seed=seed)
-        if load_generator
+        if approach.requires_generator
         else None
     )
     tasks = benchmark.generate_tasks(seed, run_cfg)

@@ -431,12 +431,12 @@ def compute_shoulder_abduction_angles(
     trajectory: np.ndarray,
     human: Human,
 ) -> np.ndarray:
-    """Return unsigned upper-arm abduction angles in the spine3 frame.
+    """Return signed upper-arm abduction angles in the spine3 frame.
 
-    The angle is measured between the shoulder-to-elbow direction and the
-    torso-down direction. Larger values mean the upper arm is farther away
-    from the torso. The direction is the composed collar∘shoulder∘elbow joint
-    rotation applied to the T-pose bone axis (the spine3 rotation cancels).
+    The ``shoulder_abduction_adduction`` feature: the arcsine of the upper arm's
+    sideways component, positive out to the side (about pi/2 in the T-pose) and
+    negative across the body. Forward flexion leaves it unchanged, and above
+    shoulder height it falls again.
     """
     return shoulder_abduction_angles(trajectory, human)
 

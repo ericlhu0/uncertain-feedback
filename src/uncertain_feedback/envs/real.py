@@ -398,6 +398,15 @@ class RealEnv(ExecutionEnv):
         return not answer.strip().lower().startswith("n")
 
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
+        """Measure the arm and grasp, send ``q_cmd``, and return the measurement.
+
+        The returned ``q`` is read *before* the command goes out, so it is the
+        result of the previous command: the arm command is a non-blocking stream,
+        and measuring first keeps the arm and robot readings the grasp is
+        re-measured from simultaneous. The planner's history therefore lags the
+        commands by one step (at most ``max_angle_delta`` per joint), and its
+        first recorded step repeats the start pose.
+        """
         q = np.asarray(q_cmd, dtype=np.float64)
         self._ensure_backend()
         q_meas = self._read_back_q()
@@ -519,7 +528,8 @@ class RealEnv(ExecutionEnv):
         The delta cap is scaled uniformly rather than clipped per joint, so a
         saturating joint slows the whole motion instead of bending its
         direction; the sampler's action scale should sit well below the cap,
-        which is only the hardware backstop here.
+        which is only the hardware backstop here. Like :meth:`execute`, it returns
+        the human arm measured before the target is sent.
         """
         self._ensure_backend()
         q_meas = self._read_back_q()

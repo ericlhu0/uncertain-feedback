@@ -20,6 +20,7 @@ from uncertain_feedback.simulated_users.base import (
     choose_cluster,
     compute_violations,
     feature_series,
+    feedback_anchor,
     first_violation_step,
     violation_metrics,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "choose_correction",
     "compute_violations",
     "feature_series",
+    "feedback_anchor",
     "first_violation_step",
     "oracle_cluster_scores",
     "violation_metrics",

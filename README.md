@@ -2694,7 +2694,8 @@ with that seed — verified against `manifest.json`'s recorded `motion_facts`.
 `--first-case` shifts the range for held-out cases.
 
 Per case this writes `case_NNN_overlay.png` (3-view overlay: oracle correction in
-green, nominal continuation in red, shared trigger pose in orange, goal star),
+green, nominal continuation in red, shared feedback pose (the last comfortable
+frame before the trigger) in orange, goal star),
 `case_NNN_bound.png` (the bounded feature over time with the forbidden region
 shaded and both futures traced through it — the only legible view when the bound
 is on a rotation), `case_NNN_oracle.mp4` / `case_NNN_nominal.mp4`, and one
@@ -2819,7 +2820,11 @@ Stages (each stage's controls unlock once the previous one ran):
    then `POST /api/live_trajectory/step`), follows the newest frame in the body
    views and scrubber, and stops requesting steps as soon as the selected
    persona crosses its discomfort threshold and the trajectory pauses (or it
-   completes). `text_time` is ignored. An
+   completes). Every pause, automatic or requested, gives feedback from the last
+   comfortable frame at or before it (`feedback_anchor`, as the evaluation
+   benchmarks do): that frame is the trigger pose, MDM generates from it, and
+   applying a correction rewinds the trajectory to it, while *Ignore comfort
+   violation* resumes from where the trajectory stopped. `text_time` is ignored. An
    oracle-cost rollout from the configured initial pose is generated and
    displayed when the page loads, and starting an edited scenario regenerates
    it for that pose and goal. While the trajectory is paused, *Oracle from MDM trigger*

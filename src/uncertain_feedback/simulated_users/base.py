@@ -231,6 +231,21 @@ def first_violation_step(
     return int(indices[0]) if indices.size > 0 else None
 
 
+def feedback_anchor(
+    user: SimulatedUser, human: Human, trajectory: np.ndarray, step: int
+) -> int:
+    """The last frame at or before ``step`` with no violation, else ``step`` itself.
+
+    Feedback is given there rather than at a violating trigger: a correction
+    anchored on a frame already past the bound can never be acceptable to the
+    simulated user, whose test is the peak violation over every frame it
+    contains (see ``build_sampled_case``).
+    """
+    violations = compute_violations(user, human, trajectory[: step + 1])
+    clean = np.nonzero(violations <= 0)[0]
+    return int(clean[-1]) if clean.size > 0 else step
+
+
 def violation_metrics(
     user: SimulatedUser, human: Human, trajectory: np.ndarray
 ) -> dict[str, float]:

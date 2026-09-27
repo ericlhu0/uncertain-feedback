@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.approaches.base import Approach
-from evaluation.benchmarks.episode import feedback_anchor, run_episode
+from evaluation.benchmarks.episode import run_episode
 from evaluation.benchmarks.structs import InteractionTask, MenuProbe
 from evaluation.benchmarks.verbalize import bind_verbalizer
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
@@ -24,6 +24,7 @@ from uncertain_feedback.simulated_users import (
     SimulatedUser,
     attribute_correction,
     choose_correction,
+    feedback_anchor,
     first_violation_step,
 )
 

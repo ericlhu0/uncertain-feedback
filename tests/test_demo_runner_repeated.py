@@ -19,6 +19,7 @@ from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
 from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
+from uncertain_feedback.simulated_users import base as simulated_users_base
 
 
 class FakeCost:
@@ -206,6 +207,79 @@ def test_trajectory_pauses_and_logs_discomfort_segment(monkeypatch, tmp_path) ->
         "traj_file": "traj_000.npy",
         "features_file": "traj_000_features.csv",
     }
+
+
+def _violations_by_frame(monkeypatch, values: dict[int, float]) -> None:
+    """Violation of each frame keyed by its step (FakePlanner adds 1 per step)."""
+
+    def violations(_user, _human, q):
+        steps = np.asarray(q).reshape(len(q), -1)[:, 0]
+        return np.array([values.get(int(step), 0.0) for step in steps])
+
+    monkeypatch.setattr(demo_session, "_arm_aa", lambda _rig, q: q)
+    monkeypatch.setattr(demo_session, "compute_violations", violations)
+    monkeypatch.setattr(simulated_users_base, "compute_violations", violations)
+
+
+def test_pause_gives_feedback_from_the_last_comfortable_frame(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    # Frame 2 is under the trigger threshold but not comfortable.
+    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+
+    trajectory = session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    payload = session._trajectory_payload()
+
+    assert payload["step"] == 3
+    assert payload["trigger"] == {"step": 1, "reason": "discomfort", "violation": 0.03}
+    assert trajectory.feedback is not None
+    np.testing.assert_array_equal(
+        trajectory.feedback.history, trajectory.human.history[:2]
+    )
+
+
+def test_ignoring_a_backed_up_pause_resumes_from_the_live_frame(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+
+    payload = session.ignore_comfort_violation()
+
+    assert payload["status"] == "complete"
+    history = session.trajectory.human.history  # type: ignore[union-attr]
+    np.testing.assert_array_equal(history[:, 0], np.arange(7.0))
+
+
+def test_applying_a_backed_up_correction_rewinds_to_the_feedback_frame(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    trajectory = session.trajectory
+    assert trajectory is not None
+    paused_planner = trajectory.mpc
+    correction = np.stack([np.full((3, 3), 0.5), np.ones((3, 3))])
+    trajectory.scaled_correction = correction
+    trajectory._last_cost = FakeCost()  # type: ignore[assignment]
+
+    def fake_commit(self):
+        self._round_costs.append(self.trajectory._last_cost)
+        self.round_records.append({"index": 0})
+        return {"rounds": self.round_records, "unified": None}
+
+    session.commit_round = MethodType(fake_commit, session)  # type: ignore[method-assign]
+
+    payload = session.apply_round_and_continue()
+
+    assert trajectory.mpc is not paused_planner
+    np.testing.assert_array_equal(trajectory.mpc.pushed, correction)  # type: ignore[attr-defined]
+    # Re-planned from frame 1, then paused at the same place again.
+    np.testing.assert_array_equal(trajectory.human.history[:, 0], np.arange(4.0))
+    assert payload["trigger"]["step"] == 1
 
 
 def test_trajectory_can_advance_one_live_frame_at_a_time(monkeypatch, tmp_path) -> None:

@@ -69,6 +69,7 @@ from uncertain_feedback.simulated_users.base import (
     HiddenCostTerm,
     SimulatedUser,
     compute_violations,
+    feedback_anchor,
     first_violation_step,
     violation_metrics,
 )
@@ -335,6 +336,15 @@ class Trajectory:
         """The person a correction starts from: at the pause, else at the start."""
         return self.feedback if self.feedback is not None else self.start
 
+    def set_feedback_frame(self, user: SimulatedUser, body: Human, step: int) -> None:
+        """Give feedback from the last comfortable frame at or before ``step``.
+
+        The live trajectory stays at ``step``, so resuming without feedback
+        carries on from there; applying a correction rewinds to this frame.
+        """
+        self.trigger_step = feedback_anchor(user, body, self.human.history, step)
+        self.feedback = self.human.rewind(self.trigger_step)
+
     def advance(self, session: "Session", max_steps: int | None = None) -> None:
         """Step the planner to the next pause and log the executed segment."""
         rig = session.rig
@@ -356,13 +366,12 @@ class Trajectory:
             reason = self.trigger.evaluate(self.step, violation)
             if reason is not None:
                 self.paused = True
-                self.trigger_step = self.step
                 self.trigger_reason = reason
                 self.trigger_violation = violation
-                self.feedback = self.human
+                self.set_feedback_frame(user, rig.human, self.step)
                 _log(
-                    f"trajectory paused at frame {self.step}: "
-                    f"{reason} (violation={violation})"
+                    f"trajectory paused at frame {self.step}: {reason} "
+                    f"(violation={violation}); feedback from frame {self.trigger_step}"
                 )
                 break
             try:
@@ -581,9 +590,13 @@ class Session:
                 compute_violations(
                     user,
                     self.rig.human,
-                    _arm_aa(self.rig, traj.feedback.q[np.newaxis]),
+                    _arm_aa(self.rig, traj.human.q[np.newaxis]),
                 )[0]
             )
+            feedback_step = traj.trigger_step
+            traj.set_feedback_frame(user, self.rig.human, traj.step)
+            if traj.trigger_step != feedback_step:
+                traj.clear_pending_feedback()
             return {"retriggered": True, "trigger_step": traj.trigger_step}
         self._set_trigger()
         return {"retriggered": True, "trigger_step": traj.trigger_step}
@@ -591,15 +604,17 @@ class Session:
     def _set_trigger(self) -> None:
         traj = self.trajectory
         assert traj is not None
-        traj.trigger_step = first_violation_step(
+        detected = first_violation_step(
             self.user,
             self.rig.human,
             _arm_aa(self.rig, traj.human.history),
             self.rig.cfg.corrections.trigger_threshold,
         )
-        traj.feedback = (
-            None if traj.trigger_step is None else traj.human.rewind(traj.trigger_step)
-        )
+        if detected is None:
+            traj.trigger_step = None
+            traj.feedback = None
+        else:
+            traj.set_feedback_frame(self.user, self.rig.human, detected)
 
     # --- trajectory lifetime ----------------------------------------------
 
@@ -671,7 +686,8 @@ class Session:
         frame the simulated user is perfectly comfortable in. ``step`` defaults
         to the frame the rollout is on; an earlier one rewinds to it, which is
         what makes a correction retroactive: applying it re-rolls the rest of the
-        trajectory from that frame instead of from the end.
+        trajectory from that frame instead of from the end. As with every pause,
+        feedback is given from the last comfortable frame at or before ``step``.
         """
         traj = self.trajectory
         rig = self.rig
@@ -688,16 +704,18 @@ class Session:
         traj.complete = False
         traj.reached_goal = False
         traj.trigger.note_operator_pause()
-        traj.trigger_step = traj.step
         traj.trigger_reason = "operator"
         traj.trigger_violation = float(
             compute_violations(
                 self.user, rig.human, _arm_aa(rig, traj.human.q[np.newaxis])
             )[0]
         )
-        traj.feedback = traj.human
+        traj.set_feedback_frame(self.user, rig.human, traj.step)
         traj.clear_pending_feedback()
-        _log(f"correction requested at frame {traj.step}")
+        _log(
+            f"correction requested at frame {traj.step}; "
+            f"feedback from frame {traj.trigger_step}"
+        )
         return self._record("trajectory", self._trajectory_payload())
 
     def _rewind_to(self, step: int) -> None:
@@ -971,7 +989,7 @@ class Session:
             # sees these means: previews, oracle scores, the Magnitude slider and
             # the trajectory that finally gets pushed all inherit the fix.
             traj.cluster_means = {
-                label: anchor_q_trajectory(mean, traj.human.q)
+                label: anchor_q_trajectory(mean, traj.corrected.q)
                 for label, mean in traj.cluster_means.items()
             }
         traj.chosen_label = level.selected_label
@@ -1352,6 +1370,9 @@ class Session:
             raise ValueError("Generate a cost for the selected cluster first.")
         correction = traj.scaled_correction.copy()
         self.commit_round()
+        assert traj.trigger_step is not None
+        if traj.step > traj.trigger_step:
+            self._rewind_to(traj.trigger_step)
         cutoff = max(1, round(len(correction) * _feedback_cfg(rig).trajectory_fraction))
         correction = correction[:cutoff]
         traj.mpc.set_mdm_goal(correction[-1])

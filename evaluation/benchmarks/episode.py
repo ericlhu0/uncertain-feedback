@@ -31,7 +31,7 @@ from uncertain_feedback.simulated_users import (
     SimulatedUser,
     attribute_correction,
     choose_correction,
-    compute_violations,
+    feedback_anchor,
     first_violation_step,
     violation_metrics,
 )
@@ -42,19 +42,6 @@ _LOG = "[evaluation]"
 def _write_json(path: Path, payload: Any) -> None:
     with open(path, "w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2, sort_keys=True, default=str)
-
-
-def feedback_anchor(
-    user: SimulatedUser, human: Human, trajectory: np.ndarray, trigger: int
-) -> int:
-    """The last frame before ``trigger`` with no violation, else ``trigger`` itself.
-
-    A correction anchored on a frame already past the bound can never be
-    acceptable to the simulated user, whose test is the peak violation over
-    every frame it contains (see ``build_sampled_case``).
-    """
-    clean = np.nonzero(compute_violations(user, human, trajectory[:trigger]) <= 0)[0]
-    return int(clean[-1]) if clean.size > 0 else trigger
 
 
 def _save_round_trajectories(

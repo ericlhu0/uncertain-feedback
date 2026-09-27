@@ -1,8 +1,8 @@
 """Render the oracle correction a grounder is scored against.
 
-Two case sources, both ending in the same contrast at the trigger step — what
-the robot would have kept doing, against what the hidden bound says it should
-do instead:
+Two case sources, both ending in the same contrast at the feedback frame (the
+last comfortable one before the trigger) — what the robot would have kept doing,
+against what the hidden bound says it should do instead:
 
 ``sampled``
     The scenario generator in
@@ -49,6 +49,7 @@ from uncertain_feedback.simulated_users import (
     HiddenCostTerm,
     SimulatedUser,
     attribute_correction,
+    feedback_anchor,
     first_violation_step,
     render_hidden_bounds,
     verbalize_everyday,
@@ -194,7 +195,8 @@ def build_persona_case(
     if trigger is None:
         return None
 
-    q_feedback = np.asarray(nominal_rollout[trigger], dtype=np.float64)
+    feedback_step = feedback_anchor(user, human, nominal_rollout, trigger)
+    q_feedback = np.asarray(nominal_rollout[feedback_step], dtype=np.float64)
     nominal_plan = rollout_to_goal(
         goal_cfg,
         human.reset_human_with_q(q_feedback),
@@ -217,6 +219,7 @@ def build_persona_case(
         nominal_continuation=np.asarray(nominal_plan, dtype=np.float64),
         utterance="" if utterance is None else utterance.text,
         detail={
+            "feedback_step": feedback_step,
             "join_index": int(intent.join_index),
             "feature_deltas_rad": {
                 name: round(float(intent.feature_deltas[name]), 4)

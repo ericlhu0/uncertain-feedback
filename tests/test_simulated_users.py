@@ -7,6 +7,12 @@ from __future__ import annotations
 import numpy as np
 
 from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.simulated_users import (
+    HiddenBound,
+    SimulatedUser,
+    feature_series,
+    feedback_anchor,
+)
 from uncertain_feedback.simulated_users.personas import (
     BICEPS_LONG_HEAD_CONTRACTURE,
     BRACHIAL_PLEXUS_MECHANOSENSITIVITY,
@@ -107,6 +113,25 @@ def test_neural_mechanosensitivity_requires_flexion_during_abduction() -> None:
     assert violations[0] == 0.0
     assert violations[1] > 0.0
     assert violations[2] == 0.0
+
+
+def test_feedback_anchor_backs_up_to_the_last_comfortable_frame() -> None:
+    human = Human()
+    q = np.zeros((7, 7), dtype=np.float64)
+    q[:, 6] = np.linspace(0.2, 1.4, 7)
+    flexion = feature_series(human, q)["elbow_flexion"]
+    assert np.all(np.diff(flexion) > 0.0)
+
+    def user(high: float) -> SimulatedUser:
+        bound = HiddenBound("elbow_flexion", "upper_bound", high=high)
+        return SimulatedUser(
+            name="t", description="", feedback_text="", bounds=(bound,)
+        )
+
+    past_frame_3 = user(float(flexion[3:5].mean()))
+    assert feedback_anchor(past_frame_3, human, q, 5) == 3
+    assert feedback_anchor(past_frame_3, human, q, 2) == 2  # already comfortable
+    assert feedback_anchor(user(float(flexion[0]) - 0.1), human, q, 5) == 5
 
 
 def test_limit_cost_penalizes_out_of_box_rollouts() -> None:

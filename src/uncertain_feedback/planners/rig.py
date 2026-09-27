@@ -88,7 +88,6 @@ def build_rig(
         fk=fk,
         spine3_pos=spine3_pos,
         spine3_aa=spine3_aa,
-        time_of_day=cfg.simulated_user.time_of_day,
     )
     return PlanningRig(
         cfg=cfg,

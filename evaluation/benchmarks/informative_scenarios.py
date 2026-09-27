@@ -63,7 +63,6 @@ def generate_scenarios(
         fk=fk,
         spine3_pos=geo["spine3_pos"],
         spine3_aa=geo["spine3_aa"],
-        time_of_day=cfg.simulated_user.time_of_day,
     )
     body = geo["body_pos"]
     np.savez(out_dir / "geometry.npz", **{key: geo[key] for key in geo.files})

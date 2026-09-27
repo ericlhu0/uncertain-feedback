@@ -59,9 +59,6 @@ cartesian:
 preference_learning: false
 preference_alpha: 0
 
-simulated_user:
-  time_of_day: 9.0
-
 llm_cost:
   enabled: false
   artifact_dir: outputs/low2_across_demo

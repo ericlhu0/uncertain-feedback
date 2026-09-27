@@ -25,16 +25,11 @@ class TrajectoryCost(Protocol):
 
 @dataclass(frozen=True)
 class MpcCostContext:
-    """Shared FK context needed by Cartesian feature costs.
-
-    ``time_of_day`` is the session clock in hours ``[0, 24)`` for
-    time-conditioned preferences; ``None`` for untimed sessions.
-    """
+    """Shared FK context needed by Cartesian feature costs."""
 
     fk: SmplLeftArmFK
     spine3_pos: np.ndarray
     spine3_aa: np.ndarray
-    time_of_day: float | None = None
 
 
 @runtime_checkable

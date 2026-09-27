@@ -11,8 +11,8 @@ generator — it is the ground truth the generated cost is evaluated against.
 Restrictions are expressed over the five anatomical joint features the cost
 generator uses (see ``GeneratedCostContext``), so a hidden bound and a generated
 bound are directly comparable. Simulated-user bounds may additionally reference
-each feature's velocity (``<feature>_velocity``, rad/s) and the session clock
-(``time_of_day``, hours), which exist only on the scoring side.
+each feature's velocity (``<feature>_velocity``, rad/s), which exists only on the
+scoring side.
 """
 
 from __future__ import annotations
@@ -36,19 +36,17 @@ BOUND_TYPES = ("upper_bound", "lower_bound", "avoid_band")
 
 MOTION_FPS = 20.0
 VELOCITY_FEATURE_NAMES = tuple(f"{name}_velocity" for name in FEATURE_NAMES)
-TIME_OF_DAY_FEATURE = "time_of_day"
-SIM_FEATURE_NAMES = (*FEATURE_NAMES, *VELOCITY_FEATURE_NAMES, TIME_OF_DAY_FEATURE)
+SIM_FEATURE_NAMES = (*FEATURE_NAMES, *VELOCITY_FEATURE_NAMES)
 
 
 def feature_series(
     context: MpcCostContext, trajectory: np.ndarray
 ) -> dict[str, np.ndarray]:
-    """Return anatomical features plus velocities and the session clock.
+    """Return anatomical features plus their velocities.
 
     Velocities are central finite differences along the trajectory's time
     axis in rad/s at the repo-wide 20 fps frame convention (zero for
-    single-frame inputs). ``time_of_day`` (hours) is a constant series,
-    present only when the context carries a session clock.
+    single-frame inputs).
     """
     features = dict(arm_feature_series(trajectory, context))
     for name in FEATURE_NAMES:
@@ -58,10 +56,6 @@ def feature_series(
         else:
             velocity = np.gradient(values, axis=-1) * MOTION_FPS
         features[f"{name}_velocity"] = velocity
-    if context.time_of_day is not None:
-        features[TIME_OF_DAY_FEATURE] = np.full_like(
-            features[FEATURE_NAMES[0]], context.time_of_day
-        )
     return features
 
 

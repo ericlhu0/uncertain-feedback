@@ -590,7 +590,6 @@ def clip_source_from_dir(out_dir: Path) -> ClipSource:
         fk=fk,
         spine3_pos=geo["spine3_pos"],
         spine3_aa=geo["spine3_aa"],
-        time_of_day=run_cfg.simulated_user.time_of_day,
     )
     return ClipSource(
         out_dir=out_dir,

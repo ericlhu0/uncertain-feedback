@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from uncertain_feedback.simulated_users.base import (
     CoupledBound,
-    FeatureCondition,
     HiddenBound,
     JointBoxLimit,
     SimulatedUser,
@@ -223,26 +222,6 @@ CROSS_BODY_PAIN = SimulatedUser(
     joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
-MORNING_SHOULDER_STIFFNESS = SimulatedUser(
-    name="morning_shoulder_stiffness",
-    description=(
-        "Inflammatory (rheumatoid-type) morning stiffness: shoulder elevation "
-        "is sharply limited until the joint loosens up over the morning; "
-        "comfortable elevation is ~63 deg before 11:00 and unrestricted "
-        "afterwards. Requires a session clock (MpcCostContext.time_of_day)."
-    ),
-    feedback_text="my shoulder is always stiff this early, keep my arm low for now",
-    bounds=(
-        HiddenBound(
-            feature="shoulder_elevation",
-            bound_type="upper_bound",
-            high=1.1,
-            condition=FeatureCondition(feature="time_of_day", low=0.0, high=11.0),
-        ),
-    ),
-    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
-)
-
 SPASTIC_ELBOW_FLEXORS = SimulatedUser(
     name="spastic_elbow_flexors",
     description=(
@@ -279,7 +258,6 @@ PERSONAS: dict[str, SimulatedUser] = {
         BICEPS_LONG_HEAD_CONTRACTURE,
         BRACHIAL_PLEXUS_MECHANOSENSITIVITY,
         CROSS_BODY_PAIN,
-        MORNING_SHOULDER_STIFFNESS,
         SPASTIC_ELBOW_FLEXORS,
     )
 }

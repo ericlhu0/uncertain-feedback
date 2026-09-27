@@ -1,7 +1,7 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-09-23
-**Branch:** goal-regions
+**Last updated:** 2026-09-26
+**Branch:** human-class
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
 
@@ -510,7 +510,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `llm_cost.*`           | LlmCostConfig | `enabled`, `model` (default `gpt-6-luna`; reasoning effort follows the model: `gpt-6-luna` → `high`, `gpt-5.6-sol` → `low`; every shipped config uses luna, sol is not used for now), `strict`, `artifact_dir`, `use_images`, `backend`, `max_turns`, `codex_cmd` |
 | `transfer.*`           | TransferConfig | `goals` (held-out spine3-relative wrist targets). Consumed (with `persona_goals`) by the repo-root `evaluation/` benchmarks: `InteractionBenchmark(use_persona_goals=true)` appends them to a persona's goal sequence. Legacy configs may still provide `trigger_threshold` as a fallback for `corrections.trigger_threshold` |
 | `persona_goals.*`      | dict[str, PersonaGoals] | Per-persona override of `cartesian`/`transfer` goals for simulated-user experiments. Consumed by the repo-root `evaluation/` benchmarks (`InteractionBenchmark(use_persona_goals=true)` resolves each persona's cartesian + transfer goals into its task's goal sequence); nothing in `src/` applies it. Each restriction needs its own goal geometry to make the default plan visibly require a correction. |
-| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings. `chooser` (`oracle_progress` [default] \| `intent_aligned` \| `progress` \| `random`) selects the candidate-choice model in `simulated_users/chooser.py` — oracle_progress rejects any hidden-bound violation and picks the endpoint nearest the oracle correction's end along its path (ties by alignment); intent-aligned picks the comfortable candidate best aligned with the private `CorrectionIntent`; acceptability = peak playback violation ≤ trigger threshold (any frame past the limit rules the candidate out, the same max-based test the execution trigger uses). The repo-root `evaluation/` episode loop consumes `magnitudes`, `nominal_steps`, and `time_of_day`; `verbalizer`/`seed`/`max_rounds` are superseded there by the benchmark's task fields (verbalizer grid, hydra seed, per-benchmark round cap) and remain unconsumed: `verbalizer` (`vague` \| `everyday` [default] \| `motion_directive` \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20), `time_of_day` (session clock in hours `[0, 24)` seen by time-conditioned personas via `MpcCostContext.time_of_day`; default unset = untimed) |
+| `simulated_user.*`     | SimulatedUserConfig | Automated episode settings. `chooser` (`oracle_progress` [default] \| `intent_aligned` \| `progress` \| `random`) selects the candidate-choice model in `simulated_users/chooser.py` — oracle_progress rejects any hidden-bound violation and picks the endpoint nearest the oracle correction's end along its path (ties by alignment); intent-aligned picks the comfortable candidate best aligned with the private `CorrectionIntent`; acceptability = peak playback violation ≤ trigger threshold (any frame past the limit rules the candidate out, the same max-based test the execution trigger uses). The repo-root `evaluation/` episode loop consumes `magnitudes` and `nominal_steps`; `verbalizer`/`seed`/`max_rounds` are superseded there by the benchmark's task fields (verbalizer grid, hydra seed, per-benchmark round cap) and remain unconsumed: `verbalizer` (`vague` \| `everyday` [default] \| `motion_directive` \| `joint_resolved` \| `visual`), `seed` (everyday sampling rng), `max_rounds` (default 3; capped episodes log as failures), `magnitudes` (chooser grid, default `[0.5, 0.75, 1.0, 1.25, 1.5]`), `nominal_steps` (base-MPC continuation length for attribution, default 20) |
 
 ---
 
@@ -1107,16 +1107,14 @@ The hidden bounds are the evaluation ground truth for method-level evaluation
 - Bounds reference the five anatomical joint features plus scoring-side
   extensions computed by `simulated_users.base.feature_series`: per-feature
   velocities (`<feature>_velocity`, rad/s via `np.gradient` at the repo-wide
-  20 fps `MOTION_FPS`) and the session clock (`time_of_day`, hours, present
-  only when `MpcCostContext.time_of_day` is set). `SIM_FEATURE_NAMES` is the
-  full allowed set; the extensions exist only on the scoring side (the cost
-  generator still sees position features only). New personas:
-  `morning_shoulder_stiffness` (time-gated elevation cap before 11:00) and
-  `spastic_elbow_flexors` (velocity-dependent catch: tolerable elbow extension
-  speed shrinks as the elbow approaches full extension).
+  20 fps `MOTION_FPS`). `SIM_FEATURE_NAMES` is the full allowed set; the
+  velocities exist only on the scoring side (the cost generator still sees
+  position features only). `spastic_elbow_flexors` uses them (velocity-dependent
+  catch: tolerable elbow extension speed shrinks as the elbow approaches full
+  extension).
 - `HiddenBound` — one restriction over a shared joint feature (radians):
   `upper_bound` / `lower_bound` / `avoid_band` (painful range), optionally gated
-  by a `FeatureCondition` on another feature (including `time_of_day`).
+  by a `FeatureCondition` on another feature.
 - `CoupledBound` — **pose-dependent limit**: the threshold on one feature moves
   linearly with another (`threshold = intercept + slope * cond_value`), e.g.
   stroke flexor synergy (required elbow bend grows with shoulder elevation).

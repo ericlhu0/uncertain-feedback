@@ -215,7 +215,6 @@ class DemoRig:
             fk=self.fk,
             spine3_pos=self.spine3_pos,
             spine3_aa=self.spine3_aa,
-            time_of_day=self.cfg.simulated_user.time_of_day,
         )
 
         self.session: "Session | None" = None

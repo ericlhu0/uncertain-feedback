@@ -19,7 +19,6 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
 from uncertain_feedback.simulated_users.base import (
-    TIME_OF_DAY_FEATURE,
     Bound,
     CoupledBound,
     HiddenBound,
@@ -32,8 +31,6 @@ _GRID_N = 200
 
 
 def _feature_unit(name: str) -> str:
-    if name == TIME_OF_DAY_FEATURE:
-        return "h"
     if name.endswith("_velocity"):
         return "rad/s"
     return "rad"

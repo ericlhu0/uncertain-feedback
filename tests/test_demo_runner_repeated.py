@@ -77,7 +77,7 @@ def test_mdm_locked_seed_resets_before_each_generation() -> None:
     assert calls == [7, 7]
 
 
-def test_cluster_activation_canonicalizes_mdm_axis_angles_before_history_concat(
+def test_cluster_activation_converts_mdm_positions_before_history_concat(
     monkeypatch, tmp_path
 ) -> None:
     session, _ = make_session(monkeypatch, tmp_path)
@@ -104,10 +104,11 @@ def test_cluster_activation_canonicalizes_mdm_axis_angles_before_history_concat(
     session._activate_cluster_level()
 
     # anchor_correction drops the generator's pinned frame 0, so only one free
-    # frame of a 2-frame sample reaches the history concat.
+    # frame of a 2-frame sample reaches the history concat, where it replaces
+    # the feedback frame it starts at.
     assert trajectory.cluster_means[0].shape == (1, 7)
     assert trajectory.cluster_corrections[0].shape == (1, 7)
-    assert trajectory.cluster_fulls[0].shape == (3, 7)
+    assert trajectory.cluster_fulls[0].shape == (2, 7)
 
 
 def make_session(monkeypatch, tmp_path) -> tuple[Session, SimulatedUser]:

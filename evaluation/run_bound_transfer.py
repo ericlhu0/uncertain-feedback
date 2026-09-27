@@ -2,7 +2,7 @@
 
     uv run python evaluation/run_bound_transfer.py -m seed=0 \\
         approach=mdm_language,full \\
-        benchmark=bound_transfer load_generator=true \\
+        benchmark=bound_transfer \\
         mpc_config=src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \\
         hydra.sweep.dir=outputs/bound_transfer/seed0
 

@@ -2502,7 +2502,7 @@ grounding and violation plots.
 ```bash
 uv run python evaluation/run_experiment.py -m seed=0 \
     approach=oracle_no_learning,oracle_language,nominal_language,mdm_language \
-    benchmark=cost_learning load_generator=true \
+    benchmark=cost_learning \
     mpc_config=src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
     hydra.sweep.dir=outputs/cost_learning/seed0
 uv run python evaluation/analyze_results.py outputs/cost_learning --out outputs/cost_learning/analysis
@@ -2524,8 +2524,9 @@ MDM-grounded cluster the persona picks, `nominal_language` nothing (the nominal 
 "executed"), and `oracle_no_learning` is the floor: the oracle correction each round, no
 cost learning. `benchmark/cost_learning.yaml` is the six personas with curated goals in
 `mdm_llm_transfer.yaml`, everyday feedback, one goal each, five rounds. Every arm plans on
-the person the config describes (`Human(pose=cfg.pose, arm=cfg.arm)`); `load_generator=true`
-only loads MDM for arms that do not ground with it. Feedback
+the person the config describes (`Human(pose=cfg.pose, arm=cfg.arm)`), and MDM is loaded
+only for the arms that ground with it (`load_generator=true` would also load it for the
+others, which never use it). Feedback
 rounds are anchored on the last frame before the trigger with no violation (as
 `build_sampled_case` does), since the simulated user rejects any candidate whose frames
 violate and every candidate starts at the feedback pose. The verbalizer's feature dead band
@@ -2558,7 +2559,7 @@ each case's stored trigger is reproduced.
 ```bash
 uv run python evaluation/run_experiment.py -m seed=0 \
     approach=oracle_no_learning,oracle_language,nominal_language,mdm_language \
-    benchmark=procedural load_generator=true \
+    benchmark=procedural \
     mpc_config=evaluation/conf/mpc_procedural.yaml \
     hydra.sweep.dir=outputs/cost_learning/procedural_s23_seed0
 uv run python evaluation/analyze_results.py outputs/cost_learning/procedural_s23_seed0 \
@@ -2575,7 +2576,7 @@ under its roots, so a partially finished sweep is scorable at any time.
 uv run python evaluation/run_experiment.py -m hydra/launcher=joblib hydra.launcher.n_jobs=6 \
     seed=24 approach=oracle_no_learning,oracle_language,nominal_language,mdm_language \
     tasks=0,1,2,3,4,5,6,7 benchmark=procedural benchmark.scenario_dir=outputs/procedural_bounds_s24 \
-    load_generator=true mpc_config=evaluation/conf/mpc_procedural.yaml \
+    mpc_config=evaluation/conf/mpc_procedural.yaml \
     hydra.sweep.dir=outputs/cost_learning/procedural_batches/s24
 ```
 
@@ -2598,7 +2599,7 @@ transfer goals in `mdm_llm_transfer.yaml`, everyday feedback, five rounds on the
 ```bash
 uv run python evaluation/run_bound_transfer.py -m seed=0 \
     approach=no_learning,no_learning_cg \
-    benchmark=bound_transfer load_generator=true \
+    benchmark=bound_transfer \
     mpc_config=src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
     hydra.sweep.dir=outputs/bound_transfer/seed0
 uv run python evaluation/analyze_results.py outputs/bound_transfer/seed0 \

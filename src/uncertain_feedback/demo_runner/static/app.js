@@ -915,7 +915,8 @@ function renderTrajectorySession(data) {
     const violation = data.trigger.violation === null
       ? "n/a"
       : data.trigger.violation.toFixed(3);
-    out.textContent = `Paused at frame ${data.trigger.step}/${data.step_limit} · ` +
+    out.textContent = `Paused at frame ${data.step}/${data.step_limit} · ` +
+      `feedback from frame ${data.trigger.step} · ` +
       `${data.trigger.reason} · violation ${violation} · ` +
       `feedback turn ${data.rounds.length + 1}`;
   } else {

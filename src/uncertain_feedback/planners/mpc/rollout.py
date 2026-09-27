@@ -159,13 +159,13 @@ def assemble_full_correction_traj(
     correction itself, and a comfort-only goal-seeking continuation rolled from the
     correction's endpoint (so the arm still reaches the goal afterwards). The
     continuation is empty for planners without a Cartesian goal, leaving just
-    history + correction. The duplicated seam frame at the correction endpoint is
-    dropped.
+    history + correction. The correction starts at ``human.q`` and the
+    continuation at the correction's endpoint, so each seam frame appears once.
     """
     correction_traj = np.asarray(correction_traj, dtype=np.float64)
     if correction_traj.shape[-2:] == (3, 3):
         correction_traj = human.q_from_arm_aa(correction_traj)
-    segments = [human.history, correction_traj]
+    segments = [human.history[:-1], correction_traj]
     post = rollout_reference_trajectory(
         cfg, human.reset_human_with_q(correction_traj[-1]), base_extra_costs
     )

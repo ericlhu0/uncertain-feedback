@@ -6,7 +6,7 @@ Single run:
 Sweep (hydra multirun):
     uv run python evaluation/run_experiment.py -m seed=0,1,2 \\
         approach=oracle_language,nominal_language,mdm_language,oracle_no_learning \\
-        benchmark=cost_learning load_generator=true \\
+        benchmark=cost_learning \\
         mpc_config=src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml
 
 Parallel sweep (one process per episode; ``tasks`` picks the benchmark's task

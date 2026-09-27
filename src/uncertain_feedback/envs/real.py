@@ -354,8 +354,6 @@ class RealEnv(ExecutionEnv):
         if not self._preview_plan:
             return True
         self._ensure_backend()
-        if self._registration is None:
-            self._register()
         if not self._live_view:
             print(
                 "[real] plan preview skipped: needs live_view for a window to "
@@ -402,8 +400,6 @@ class RealEnv(ExecutionEnv):
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
         q = np.asarray(q_cmd, dtype=np.float64)
         self._ensure_backend()
-        if self._registration is None:
-            self._register()
         q_meas = self._read_back_q()
         if self._grasp is None:
             self._establish_grasp(q_meas)
@@ -419,8 +415,6 @@ class RealEnv(ExecutionEnv):
         return self.execute(q)
 
     def robot_fk(self) -> RobotChainFK:
-        if self._registration is None:
-            self._register()
         if self._robot_chain is None:
             self._robot_chain = RobotChainFK.from_pybullet(
                 self._robot, self._ee_index, self._cid
@@ -511,8 +505,6 @@ class RealEnv(ExecutionEnv):
     def current_grasp(self, q: np.ndarray) -> MeasuredGrasp:
         """This step's measured grasp; establishes it on the first call."""
         self._ensure_backend()
-        if self._registration is None:
-            self._register()
         q = np.asarray(q, dtype=np.float64)
         if self._grasp is None:
             self._establish_grasp(q)
@@ -530,8 +522,6 @@ class RealEnv(ExecutionEnv):
         which is only the hardware backstop here.
         """
         self._ensure_backend()
-        if self._registration is None:
-            self._register()
         q_meas = self._read_back_q()
         if self._grasp is None:
             self._establish_grasp(q_meas)
@@ -667,8 +657,7 @@ class RealEnv(ExecutionEnv):
 
         Runs from :meth:`measure` before planning, because the robot base
         pose comes from mocap and the planner's start configuration is the
-        measured one. Falls back to the first :meth:`execute` for callers that
-        plan without asking for a start configuration.
+        measured one. Every other entry point requires it to have run.
         """
         assert self._fk is not None
         wanted = [

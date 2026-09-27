@@ -998,8 +998,12 @@ class Session:
         traj.cluster_corrections = {}
         traj.cluster_fulls = {}
         oracle = oracle_cluster_scores(user, rig.human, traj.cluster_means, scale)
+        # Each correction starts at the feedback pose, so its first frame
+        # replaces the history's last.
         history = (
-            traj.feedback.history if traj.feedback is not None else np.empty((0, 7))
+            traj.feedback.history[:-1]
+            if traj.feedback is not None
+            else np.empty((0, 7))
         )
         clusters = []
         for label, mean in traj.cluster_means.items():

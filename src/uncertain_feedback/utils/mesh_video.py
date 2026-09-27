@@ -19,7 +19,6 @@ import numpy as np
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 from uncertain_feedback import consts  # noqa: E402
-from uncertain_feedback.motion_generators import make_motion_generator  # noqa: E402
 from uncertain_feedback.planners.mpc.human import Human  # noqa: E402
 from uncertain_feedback.planners.mpc.kinematics import (  # noqa: E402
     SmplLeftArmFK,

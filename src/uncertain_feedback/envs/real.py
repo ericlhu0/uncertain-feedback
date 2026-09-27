@@ -7,14 +7,14 @@ here the human arm state is *measured* — OptiTrack rigid bodies on the collar,
 shoulder, elbow, and wrist are streamed in over NatNet and converted to the
 planner's ``(7,)`` configuration — so the MPC closes the loop on the actual
 person. That includes the configuration the run *starts* from
-(:meth:`RealEnv.initial_q`), so the person does not have to match the config's
+(:meth:`RealEnv.measure`), so the person does not have to match the config's
 start pose. A right-collar body (read at calibration only) makes the
 registration yaw — the person's facing — measurable rather than assumed, and
 the left collar fixes *where* the person is: the torso anchor is the measured
 collar, not the config pose's, so the scene tracks a person who sits somewhere
 different between runs (see :mod:`uncertain_feedback.mocap.registration`). The
-run must therefore read the anchor back through :meth:`ExecutionEnv.pose_context`
-after :meth:`initial_q`, since every Cartesian goal is relative to it.
+run must therefore plan on the Human :meth:`RealEnv.measure` returns, since
+every Cartesian goal is relative to its anchor.
 
 The grasp is *measured*, not assumed — and re-measured every step. The operator
 establishes it before the run (gripper closed on the forearm), and from then on
@@ -79,6 +79,7 @@ from uncertain_feedback.mocap.natnet import (
     require_fresh,
 )
 from uncertain_feedback.mocap.registration import ArmRegistration, arm_keypoints
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 
@@ -265,6 +266,7 @@ class RealEnv(ExecutionEnv):
         self._goal_mesh: HumanMeshBody | None = None
         self._goal_q: np.ndarray | None = None
         self._registration: ArmRegistration | None = None
+        self._human: Human | None = None
         self._robot: int = -1
         self._movable_joints: list[int] = []
         self._continuous_joints: np.ndarray = np.zeros(0, dtype=bool)
@@ -280,20 +282,27 @@ class RealEnv(ExecutionEnv):
         self._measured: list[np.ndarray] = []
         self._robot_chain: RobotChainFK | None = None
 
-    def initial_q(self, q_nominal: np.ndarray) -> np.ndarray:
-        """Register against the person and report their *measured* arm config.
+    def measure(self, human: Human) -> Human:
+        """Register against the person and return them as *measured*.
 
         Talks to mocap only — the grasp is measured on the first :meth:`execute`,
         once the planner (which may load a diffusion model) is built and about to
         command something.
 
-        ``q_nominal`` is ignored: the registration yaw comes from the measured
-        collar-to-collar axis (see :meth:`ArmRegistration.calibrate`), so every
-        slot of the returned configuration — clavicle included — is the
-        person's.
+        The returned Human has the person's segment lengths, the torso anchor on
+        their measured collar, and their measured arm configuration. ``human.q``
+        is ignored: the registration yaw comes from the measured collar-to-collar
+        axis (see :meth:`ArmRegistration.calibrate`), so every slot of the start
+        configuration — clavicle included — is the person's.
         """
+        super().measure(human)
         self._register()
-        return self._last_q.copy()
+        assert self._spine3_pos is not None and self._spine3_aa is not None
+        assert self._fk is not None and self._body_pos is not None
+        self._human = human.measured(
+            self._fk, self._spine3_pos, self._spine3_aa, self._body_pos, self._last_q
+        )
+        return self._human
 
     def show_goal(self, q_goal: np.ndarray) -> None:
         """Draw the goal configuration as a translucent green ghost body.
@@ -549,11 +558,9 @@ class RealEnv(ExecutionEnv):
             KinematicEnv,
         )
 
-        assert self._fk is not None
+        assert self._human is not None
         render_env = KinematicEnv()
-        render_env.set_pose_context(
-            self._fk, self._spine3_pos, self._spine3_aa, self._body_pos
-        )
+        render_env.measure(self._human)
         render_env.execute(self._measured[-1])
         return render_env.visualize(path)
 
@@ -658,7 +665,7 @@ class RealEnv(ExecutionEnv):
     def _register(self) -> None:
         """Solve the mocap registration, build the scene, and measure the arm.
 
-        Runs from :meth:`initial_q` before planning, because the robot base
+        Runs from :meth:`measure` before planning, because the robot base
         pose comes from mocap and the planner's start configuration is the
         measured one. Falls back to the first :meth:`execute` for callers that
         plan without asking for a start configuration.
@@ -678,13 +685,13 @@ class RealEnv(ExecutionEnv):
         keypoints = self._arm_keypoints(bodies)
         assert keypoints is not None
         # Calibrate the skeleton to the person before anything reads lengths
-        # off it: the fk is the same instance the planner and the grasp FK use,
-        # so scaling it here puts the whole run — measured q, Cartesian costs,
-        # forearm frame — on the person's segment lengths instead of SMPL
+        # off it: the planner is built on the Human `measure` returns, which
+        # carries this fk, so the whole run — measured q, Cartesian costs,
+        # forearm frame — is on the person's segment lengths instead of SMPL
         # neutral's. The lengths are marker distances from this one frame;
         # segments are rigid, so there is nothing to track live.
         collar, shoulder, elbow, wrist = keypoints
-        self._fk.scale_arm_lengths(
+        self._fk = self._fk.scaled(
             float(np.linalg.norm(shoulder - collar)),
             float(np.linalg.norm(elbow - shoulder)),
             float(np.linalg.norm(wrist - elbow)),
@@ -700,7 +707,7 @@ class RealEnv(ExecutionEnv):
         )
         # The registration puts the person on their measured collar, so the
         # config's torso anchor is superseded. Everything downstream — the
-        # grasp FK, the live mesh, and (through `pose_context`) the planner's
+        # grasp FK, the live mesh, and (through `measure`) the planner's
         # spine3-relative goals — has to use the measured one.
         self._spine3_pos = self._registration.spine3_smpl
         self._body_pos = (

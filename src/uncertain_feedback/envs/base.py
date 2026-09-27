@@ -18,6 +18,7 @@ import numpy as np
 if TYPE_CHECKING:
     from uncertain_feedback.envs.grasp import MeasuredGrasp
     from uncertain_feedback.envs.robot_fk import RobotChainFK
+    from uncertain_feedback.planners.mpc.human import Human
     from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
 
 
@@ -30,49 +31,26 @@ class ExecutionEnv(ABC):
         self._spine3_aa: np.ndarray | None = None
         self._body_pos: np.ndarray | None = None
 
-    def set_pose_context(
-        self,
-        fk: SmplLeftArmFK,
-        spine3_pos: np.ndarray | None,
-        spine3_aa: np.ndarray | None,
-        body_pos: np.ndarray | None = None,
-    ) -> None:
-        """Attach the run's kinematics so the env matches the planner's FK.
+    def measure(self, human: Human) -> Human:
+        """Attach the run's person and return them as this env finds them.
 
-        ``body_pos`` is the ``(22, 3)`` decoded initial body pose; envs that
-        render the whole body use it, defaulting to the SMPL T-pose.
+        Called once before planning; the planner is built on the returned
+        Human. Default: the person as configured. Envs that *measure* the
+        person override this to report their segment lengths, where they sit
+        and where their arm really is, so the planner starts from the truth
+        rather than from what the config assumed — and every Cartesian goal is
+        relative to the torso anchor they report.
         """
-        self._fk = fk
-        self._spine3_pos = spine3_pos
-        self._spine3_aa = spine3_aa
-        self._body_pos = body_pos
-
-    def pose_context(
-        self,
-    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
-        """The ``(spine3_pos, spine3_aa, body_pos)`` the run should plan against.
-
-        Read *after* :meth:`initial_q`. Default: whatever
-        :meth:`set_pose_context` was given. Envs that measure the person place
-        the torso where they measured it, so the anchor they end up with is not
-        the one the config assumed — and every Cartesian goal is relative to it.
-        """
-        return self._spine3_pos, self._spine3_aa, self._body_pos
-
-    def initial_q(self, q_nominal: np.ndarray) -> np.ndarray:
-        """Return the ``(7,)`` configuration the arm actually starts in.
-
-        Called once before planning, after :meth:`set_pose_context`. Default:
-        the nominal configuration from the run config. Envs that *measure* the
-        person override this to report where the arm really is, so the planner
-        starts from the truth rather than from what the config assumed.
-        """
-        return q_nominal
+        self._fk = human.fk
+        self._spine3_pos = human.spine3_pos
+        self._spine3_aa = human.spine3_aa
+        self._body_pos = human.posture
+        return human
 
     def show_goal(self, q_goal: np.ndarray) -> None:
         """Display the ``(7,)`` configuration the run drives toward.
 
-        Called once the goal is known, which is after :meth:`initial_q` — a
+        Called once the goal is known, which is after :meth:`measure` — a
         measured torso anchor moves every spine3-relative goal with it. Default:
         envs with nothing to draw ignore it.
         """
@@ -84,7 +62,7 @@ class ExecutionEnv(ABC):
         """Show the planned trajectory before executing any of it.
 
         Called once after :meth:`show_goal`. ``plan(on_step)`` rolls the same
-        planner and costs forward from :meth:`initial_q` offline, calling
+        planner and costs forward from the measured start offline, calling
         ``on_step(q, robot_q)`` after each planned step — the ``(7,)`` human
         configuration and, for robot-action planners, the planned ``(7,)``
         robot joints (``None`` otherwise) — so the env can draw the rollout
@@ -217,13 +195,13 @@ class ExecutionEnv(ABC):
         """Render the last executed configuration as an ``(H, W, 3)`` image.
 
         Saves the image to ``path`` when given. Requires
-        :meth:`set_pose_context` and at least one :meth:`execute`/:meth:`hold`.
+        :meth:`measure` and at least one :meth:`execute`/:meth:`hold`.
         """
 
     @abstractmethod
     def save_video(self, path: str | Path, fps: int = 20) -> None:
         """Write a video of every configuration executed or held so far.
 
-        Requires :meth:`set_pose_context` and at least one
+        Requires :meth:`measure` and at least one
         :meth:`execute`/:meth:`hold`.
         """

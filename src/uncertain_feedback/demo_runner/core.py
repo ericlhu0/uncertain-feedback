@@ -362,10 +362,9 @@ class DemoRig:
         extra_costs: CompositeTrajectoryCost,
     ) -> ArmMPC:
         env = make_env(self.cfg.env, **self.cfg.env_params)
-        env.set_pose_context(human.fk, human.spine3_pos, human.spine3_aa, human.posture)
         assert self.cfg.cartesian is not None
         return ArmMPC(
-            human,
+            env.measure(human),
             horizon=self.cfg.horizon,
             n_mpc_samples=self.cfg.n_mpc_samples,
             max_angle_delta=self.cfg.max_angle_delta,

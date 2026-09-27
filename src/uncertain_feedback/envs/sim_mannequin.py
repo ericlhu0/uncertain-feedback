@@ -34,7 +34,8 @@ from uncertain_feedback.envs.grasp import (
     grasp_pose_fk,
 )
 from uncertain_feedback.envs.robot_fk import RobotChainFK
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
 
 _PANDA_URDF = Path(__file__).parent / "assets" / "panda" / "panda.urdf"
 _HUMAN_ASSETS = Path(__file__).parent / "assets" / "human"
@@ -227,15 +228,10 @@ class SimMannequinEnv(ExecutionEnv):
         self._attached = False
         self._robot_chain: RobotChainFK | None = None
 
-    def set_pose_context(
-        self,
-        fk: SmplLeftArmFK,
-        spine3_pos: np.ndarray | None,
-        spine3_aa: np.ndarray | None,
-        body_pos: np.ndarray | None = None,
-    ) -> None:
-        super().set_pose_context(fk, spine3_pos, spine3_aa, body_pos)
+    def measure(self, human: Human) -> Human:
+        human = super().measure(human)
         self._build_scene()
+        return human
 
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
         q = np.asarray(q_cmd, dtype=np.float64)
@@ -252,7 +248,7 @@ class SimMannequinEnv(ExecutionEnv):
         return self.execute(q)
 
     def robot_fk(self) -> RobotChainFK:
-        assert self._robot != -1, "scene not built; set_pose_context first"
+        assert self._robot != -1, "scene not built; measure first"
         if self._robot_chain is None:
             self._robot_chain = RobotChainFK.from_pybullet(
                 self._robot, self._ee_index, self._cid

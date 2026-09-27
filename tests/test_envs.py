@@ -19,6 +19,7 @@ from uncertain_feedback.envs.grasp import (
 from uncertain_feedback.envs.kinematic import KinematicEnv
 from uncertain_feedback.envs.sim_mannequin import SimMannequinEnv, _mannequin_joints
 from uncertain_feedback.envs.sim_robot_visual import _SMPL_TO_PB, SimRobotVisualEnv
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_DIM,
     SmplLeftArmFK,
@@ -181,10 +182,11 @@ def test_left_arm_faces_cover_what_the_arm_pose_moves() -> None:
 
 
 def test_sim_env_execute_passthrough_and_reaches_grasp() -> None:
-    fk = SmplLeftArmFK()
+    human = Human()
+    fk = human.fk
     env = make_env("sim_robot_visual")
     assert isinstance(env, SimRobotVisualEnv)
-    env.set_pose_context(fk, None, None)
+    env.measure(human)
 
     q = np.zeros(Q_DIM)
     achieved = env.execute(q)
@@ -203,35 +205,18 @@ def test_sim_env_execute_passthrough_and_reaches_grasp() -> None:
     assert float(np.linalg.norm(ee_pos - target)) < 5e-2
 
 
-def test_initial_q_defaults_to_nominal() -> None:
-    """Envs that cannot measure the person plan from the config's start pose."""
-    q_nominal = np.arange(Q_DIM, dtype=np.float64)
-    for name in ENV_BUILDERS:
-        if name == "real":
-            continue  # needs a live mocap stream; measured start covered in test_mocap
-        np.testing.assert_array_equal(make_env(name).initial_q(q_nominal), q_nominal)
-
-
-def test_pose_context_round_trips_for_unmeasured_envs() -> None:
-    """Only envs that measure the person revise the anchor the run plans against.
-
-    `run.py` reads this back after `initial_q` for every env, so the default has
-    to hand back exactly what the config supplied.
-    """
-    spine3_pos = np.array([0.1, -0.2, 0.3])
-    spine3_aa = np.array([0.0, 0.4, 0.0])
-    body_pos = np.zeros((22, 3))
+def test_measure_returns_the_configured_person_for_unmeasured_envs() -> None:
+    """Only envs that measure the person revise who the run plans on."""
+    human = Human().reset_human_with_q(np.arange(Q_DIM, dtype=np.float64))
     for name in ENV_BUILDERS:
         if name == "real":
             continue  # measures the person; covered in test_mocap
-        env = make_env(name)
-        env.set_pose_context(SmplLeftArmFK(), spine3_pos, spine3_aa, body_pos)
-        assert env.pose_context() == (spine3_pos, spine3_aa, body_pos)
+        assert make_env(name).measure(human) is human
 
 
 def test_sim_env_visualize_and_save_video(tmp_path) -> None:
     env = make_env("sim_robot_visual")
-    env.set_pose_context(SmplLeftArmFK(), None, None)
+    env.measure(Human())
     q = np.zeros(Q_DIM)
     for _ in range(3):
         q = env.execute(q + 0.05)
@@ -271,10 +256,11 @@ def test_sim_mannequin_env_params() -> None:
 
 
 def test_sim_mannequin_joint_limit_padding() -> None:
-    fk = SmplLeftArmFK()
+    human = Human()
+    fk = human.fk
     env = make_env("sim_mannequin", robot_joint_limit_padding=0.3)
     assert isinstance(env, SimMannequinEnv)
-    env.set_pose_context(fk, None, None)
+    env.measure(human)
 
     for j, (low, high) in zip(
         env._movable_joints, zip(env._joint_lower, env._joint_upper)
@@ -318,10 +304,11 @@ def test_mannequin_joint_mapping_round_trip() -> None:
 
 
 def test_sim_mannequin_execute_tracks_command() -> None:
-    fk = SmplLeftArmFK()
+    human = Human()
+    fk = human.fk
     env = make_env("sim_mannequin")
     assert isinstance(env, SimMannequinEnv)
-    env.set_pose_context(fk, None, None)
+    env.measure(human)
 
     q_cmd = fk.arm_aa_to_q(_BENT_ARM_AA)
     achieved = env.execute(q_cmd)
@@ -338,10 +325,11 @@ def test_sim_mannequin_execute_tracks_command() -> None:
 
 
 def test_sim_mannequin_readback_roundtrip_is_stable() -> None:
-    fk = SmplLeftArmFK()
+    human = Human()
+    fk = human.fk
     env = make_env("sim_mannequin")
     assert isinstance(env, SimMannequinEnv)
-    env.set_pose_context(fk, None, None)
+    env.measure(human)
 
     q = env.execute(fk.arm_aa_to_q(_BENT_ARM_AA))
     start = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis))[-1]
@@ -352,10 +340,11 @@ def test_sim_mannequin_readback_roundtrip_is_stable() -> None:
 
 
 def test_sim_mannequin_hold_stable_with_vertical_forearm() -> None:
-    fk = SmplLeftArmFK()
+    human = Human()
+    fk = human.fk
     env = make_env("sim_mannequin")
     assert isinstance(env, SimMannequinEnv)
-    env.set_pose_context(fk, None, None)
+    env.measure(human)
 
     q_cmd = np.zeros(Q_DIM)
     q_cmd[6] = 1.5708
@@ -377,10 +366,11 @@ def test_sim_mannequin_hold_stable_with_vertical_forearm() -> None:
 
 
 def test_sim_mannequin_robot_action_interface() -> None:
-    fk = SmplLeftArmFK()
+    human = Human()
+    fk = human.fk
     env = make_env("sim_mannequin")
     assert isinstance(env, SimMannequinEnv)
-    env.set_pose_context(fk, None, None)
+    env.measure(human)
     q0 = fk.arm_aa_to_q(_BENT_ARM_AA)
 
     with pytest.raises(RuntimeError):
@@ -408,9 +398,10 @@ def test_sim_mannequin_robot_action_interface() -> None:
 
 
 def test_sim_mannequin_visualize_and_save_video(tmp_path) -> None:
-    fk = SmplLeftArmFK()
+    human = Human()
+    fk = human.fk
     env = make_env("sim_mannequin")
-    env.set_pose_context(fk, None, None)
+    env.measure(human)
     q = fk.arm_aa_to_q(_BENT_ARM_AA)
     for _ in range(3):
         q = env.execute(q)
@@ -427,7 +418,7 @@ def test_sim_mannequin_visualize_and_save_video(tmp_path) -> None:
 def test_kinematic_env_visualize_and_save_video(tmp_path) -> None:
     env = make_env("kinematic")
     assert isinstance(env, KinematicEnv)
-    env.set_pose_context(SmplLeftArmFK(), None, None)
+    env.measure(Human())
     q = np.zeros(Q_DIM)
     for _ in range(3):
         q = env.execute(q + 0.05)

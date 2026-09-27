@@ -179,8 +179,7 @@ def test_all_arm_features_match_for_q_and_decoded_boundary_states() -> None:
 
 def test_arm_q_from_features_inverts_arm_feature_series() -> None:
     """The anatomical inverse pins the swing-twist order and the hinge orientation."""
-    fk = SmplLeftArmFK()
-    fk.collar_aa = np.array([0.1, -0.2, 0.05])
+    fk = SmplLeftArmFK(collar_aa=np.array([0.1, -0.2, 0.05]))
     human = Human().measured(
         fk, fk.tpose_spine3_pos, np.zeros(3), fk.tpose_all_joints, np.zeros(Q_DIM)
     )
@@ -266,12 +265,11 @@ def test_rate_limited_q_step_reaches_target() -> None:
     np.testing.assert_allclose(current, target, atol=1e-9)
 
 
-def test_scale_arm_lengths_sets_measured_segments() -> None:
-    fk = SmplLeftArmFK()
+def test_scaled_sets_measured_segments() -> None:
     reference = SmplLeftArmFK()
     lengths = np.array([0.19, 0.33, 0.27])
 
-    fk.scale_arm_lengths(*lengths)
+    fk = reference.scaled(*lengths)
 
     q = np.random.default_rng(6).uniform(-0.6, 0.6, size=Q_DIM)
     segments = np.diff(fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis))[1:], axis=0)
@@ -287,11 +285,11 @@ def test_scale_arm_lengths_sets_measured_segments() -> None:
     np.testing.assert_allclose(
         fk.elbow_hinge_axis, reference.elbow_hinge_axis, atol=1e-12
     )
-    # Lengths are absolute, so re-applying is a no-op.
+    # Lengths are absolute, so re-applying is a no-op, and the original is untouched.
     tpose = fk.tpose_joints
-    fk.scale_arm_lengths(*lengths)
-    np.testing.assert_allclose(fk.tpose_joints, tpose, atol=1e-15)
+    np.testing.assert_allclose(fk.scaled(*lengths).tpose_joints, tpose, atol=1e-15)
     np.testing.assert_allclose(fk.tpose_all_joints[[13, 16, 18, 20]], tpose[1:])
+    np.testing.assert_array_equal(reference.tpose_joints, SmplLeftArmFK().tpose_joints)
 
 
 def test_mpc_actions_never_move_the_clavicle() -> None:

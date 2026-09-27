@@ -29,11 +29,7 @@ from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import extract_json_object
 from uncertain_feedback.planners.mpc.human import Human
-from uncertain_feedback.planners.mpc.kinematics import (
-    ELBOW_CHAIN_IDX,
-    WRIST_CHAIN_IDX,
-    q_to_arm_aa,
-)
+from uncertain_feedback.planners.mpc.kinematics import ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 

@@ -11,6 +11,7 @@ Joint chain:
 
 from __future__ import annotations
 
+import copy
 import pickle
 from pathlib import Path
 
@@ -391,11 +392,11 @@ class SmplLeftArmFK:
     Loads T-pose data from the SMPL neutral PKL file once at construction time.
     Subsequent FK calls are pure numpy/scipy operations.
 
-    The collar rotation is stored as :attr:`collar_aa` (default: zeros for
-    T-pose) and is applied automatically by all FK methods.  Pass the one
-    decoded with the initial body pose:
+    Immutable. The collar rotation :attr:`collar_aa` (default: zeros for
+    T-pose) is fixed at construction and applied automatically by all FK
+    methods.  Pass the one decoded with the initial body pose:
 
-        fk = SmplLeftArmFK(collar_aa=fixed_collar_aa)  # from decode_pose()
+        fk = SmplLeftArmFK(collar_aa=fixed_collar_aa)  # from decode_hml_pose()
 
     Args:
         smpl_pkl_path: Path to ``SMPL_NEUTRAL.pkl``.  Defaults to the copy
@@ -418,7 +419,7 @@ class SmplLeftArmFK:
         self._hinge_axis = _canonical_hinge_axis(
             self._bone_offsets[2], self._bone_offsets[3]
         )
-        self.collar_aa: np.ndarray = (
+        self._collar_aa: np.ndarray = (
             np.zeros(3, dtype=np.float64)
             if collar_aa is None
             else np.asarray(collar_aa, dtype=np.float64).copy()
@@ -484,26 +485,36 @@ class SmplLeftArmFK:
         """Canonical elbow-flexion axis in the shoulder-local frame."""
         return self._hinge_axis.copy()
 
-    def scale_arm_lengths(
+    @property
+    def collar_aa(self) -> np.ndarray:
+        """``(3,)`` fixed left-collar axis-angle."""
+        return self._collar_aa.copy()
+
+    def scaled(
         self, clavicle: float, upper_arm: float, forearm: float
-    ) -> None:
-        """Rescale the arm bones to measured segment lengths (metres).
+    ) -> SmplLeftArmFK:
+        """This skeleton with the arm bones at measured segment lengths (metres).
 
         Bone directions are unchanged (so the elbow hinge axis and all joint
         angles keep their meaning); only the lengths move, and the T-pose joint
-        positions are recomputed to stay consistent. Idempotent — lengths are
-        absolute, not relative scales. Used by envs that measure the person, so
-        the whole run plans on their proportions instead of SMPL neutral's.
+        positions are recomputed to stay consistent. Lengths are absolute, not
+        relative scales. Used by envs that measure the person, so the whole run
+        plans on their proportions instead of SMPL neutral's.
         """
+        bone_offsets = self._bone_offsets.copy()
         for i, length in zip((1, 2, 3), (clavicle, upper_arm, forearm)):
-            self._bone_offsets[i] *= length / float(
-                np.linalg.norm(self._bone_offsets[i])
-            )
-        self._tpose_joints[1:] = self._tpose_joints[0] + np.cumsum(
-            self._bone_offsets, axis=0
+            bone_offsets[i] *= length / float(np.linalg.norm(bone_offsets[i]))
+        tpose_joints = self._tpose_joints.copy()
+        tpose_joints[1:] = tpose_joints[0] + np.cumsum(bone_offsets, axis=0)
+        tpose_22 = self._tpose_22.copy()
+        tpose_22[LEFT_ARM_CHAIN_INDICES] = tpose_joints
+        fk = copy.copy(self)
+        fk._bone_offsets, fk._tpose_joints, fk._tpose_22 = (
+            bone_offsets,
+            tpose_joints,
+            tpose_22,
         )
-        for local_i, global_i in enumerate(LEFT_ARM_CHAIN_INDICES):
-            self._tpose_22[global_i] = self._tpose_joints[local_i]
+        return fk
 
     # ------------------------------------------------------------------
     # FK — arm only
@@ -579,7 +590,7 @@ class SmplLeftArmFK:
             else np.zeros(3)
         )
         # Build full 4-joint array: [collar, shoulder, elbow, wrist]
-        full_aa = np.concatenate([self.collar_aa[None], arm_aa], axis=0)
+        full_aa = np.concatenate([self._collar_aa[None], arm_aa], axis=0)
 
         rotations: list[Rotation] = []
         t_rot = Rotation.from_rotvec(spine3_aa)
@@ -652,7 +663,7 @@ class SmplLeftArmFK:
         )
 
         parent_world_rot = Rotation.from_rotvec(spine3_aa) * Rotation.from_rotvec(
-            self.collar_aa
+            self._collar_aa
         )
         controlled = np.zeros((3, 3), dtype=np.float64)
 
@@ -743,27 +754,6 @@ class SmplLeftArmFK:
         flat = arm_aa.reshape((-1, _N_JOINTS, 3))
         out = np.stack([self.arm_aa_to_q(frame, spine3_aa) for frame in flat], axis=0)
         return out.reshape((*leading, Q_DIM))
-
-    def anchor_arm_trajectory(
-        self,
-        arm_aa: np.ndarray,
-        current_q: np.ndarray,
-        spine3_aa: np.ndarray | None = None,
-    ) -> np.ndarray:
-        """Re-anchor a generated correction onto the arm's current configuration.
-
-        A generator's frame 0 is the last *pinned* prefix frame and frame 1 is the
-        first frame it was free to choose, so whatever pull the model has toward
-        its training prior's start shows up as a one-frame teleport between the
-        two. Dropping frame 0 and shifting the rest to begin at ``current_q``
-        keeps every per-frame displacement — the demonstrated shape — and removes
-        that seam by construction.
-
-        The shift is applied in planner ``q`` space, where an additive offset
-        respects the elbow-hinge parameterisation that raw axis-angles do not.
-        """
-        q = self.arm_aa_to_q_batch(np.asarray(arm_aa, dtype=np.float64), spine3_aa)
-        return q_to_arm_aa(anchor_q_trajectory(q, current_q), self.elbow_hinge_axis)
 
     # ------------------------------------------------------------------
     # FK — full body

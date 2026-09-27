@@ -18,13 +18,14 @@ collar and the robot base at the measured base. The startup pose supplies the
 torso's shape and orientation, not its position — a person who sits somewhere
 else next run moves with their markers instead of the robot moving around a
 pinned torso. The anchor this yields is frozen for the run (see
-:attr:`ArmRegistration.spine3_smpl`), which is what :class:`MpcCostContext`
-requires; Cartesian goals are spine3-relative, so they follow the person.
+:attr:`ArmRegistration.spine3_smpl`), which is what the run's
+:class:`~uncertain_feedback.planners.mpc.human.Human` requires; Cartesian goals
+are spine3-relative, so they follow the person.
 
 Within a run only bone *directions* come from mocap. They are re-anchored at
 the frozen collar and rescaled to the FK skeleton's bone lengths — which
 :class:`~uncertain_feedback.envs.real.RealEnv` has already calibrated to the
-person's measured segments (:meth:`SmplLeftArmFK.scale_arm_lengths`) before
+person's measured segments (:meth:`SmplLeftArmFK.scaled`) before
 registering. Rescaling is required for correctness, not cosmetics — the
 returned ``q`` is consumed through that FK, so it must be a valid arm
 configuration for it whatever noise the per-frame marker distances carry.

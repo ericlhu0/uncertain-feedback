@@ -1466,10 +1466,10 @@ optional YAML key `env`:
   there, while the bolted-down robot stays put. The config's start pose supplies
   the torso's shape and orientation only — its position is discarded. Cartesian
   goals are spine3-relative, so they follow the person, and the anchor is frozen
-  for the run, which is what the planner's `Human` requires. A run must therefore read
-  the anchor back from `env.pose_context()` after `initial_q` (`planners/run.py`
-  does); planning against the config's `spine3_pos` would put the goals on a
-  torso that is not where the person is.
+  for the run, which is what the planner's `Human` requires. A run must therefore
+  plan on the `Human` that `env.measure(human)` returns (`planners/run.py` does);
+  planning against the config's `spine3_pos` would put the goals on a torso that
+  is not where the person is.
 
   Within a run, only bone *directions* come from mocap: they are re-anchored at
   the frozen collar and rescaled to SMPL bone lengths, so mid-run torso
@@ -1477,7 +1477,7 @@ optional YAML key `env`:
   solved once, so a person who rotates in their seat drifts out of registration
   silently.
 
-  **The run starts from the measured arm configuration.** `RealEnv.initial_q`
+  **The run starts from the measured arm configuration.** `RealEnv.measure`
   registers against the person before planning and hands the planner the pose
   they are actually in — it prints
   `[real] waiting for mocap rigid bodies [...]` first, so a run stalled on

@@ -391,15 +391,11 @@ def build_run(
         gen = factory(args.model_path)
 
     env = make_env(cfg.env, **cfg.env_params)
-    env.set_pose_context(human.fk, human.spine3_pos, human.spine3_aa, human.posture)
     # Envs that measure the person (env: real) report where the arm actually
-    # is, rescale the shared fk to their segment lengths, and place the person
-    # where they measured them, which moves the torso anchor off the config's.
-    # Goals and costs are spine3-relative, so plan against what the env reports.
-    q0 = env.initial_q(human.q)
-    spine3_pos, spine3_aa, body_pos = env.pose_context()
-    assert spine3_pos is not None and spine3_aa is not None and body_pos is not None
-    human = human.measured(human.fk, spine3_pos, spine3_aa, body_pos, q0)
+    # is, their segment lengths, and where they sit, which moves the torso
+    # anchor off the config's. Goals and costs are spine3-relative, so plan
+    # against the person the env reports.
+    human = env.measure(human)
 
     user = get_persona(cfg.user)
     extra_costs = build_extra_costs(cfg.costs, human)
@@ -416,7 +412,9 @@ def build_run(
         )
 
     if cfg.cartesian is not None:
-        print(f"Initial wrist position (spine3-relative): {human.wrist_from_q(q0)}")
+        print(
+            f"Initial wrist position (spine3-relative): {human.wrist_from_q(human.q)}"
+        )
 
     mpc = ArmMPC(
         human,

@@ -222,29 +222,6 @@ CROSS_BODY_PAIN = SimulatedUser(
     joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
-SPASTIC_ELBOW_FLEXORS = SimulatedUser(
-    name="spastic_elbow_flexors",
-    description=(
-        "Velocity-dependent elbow flexor spasticity (the Modified Ashworth "
-        "catch): fast stretch of the flexors triggers resistance, and the "
-        "tolerable extension speed shrinks as the elbow approaches full "
-        "extension; slow movement through the same range is comfortable. "
-        "Allowed extension speed is ~0.3 rad/s near full extension, growing "
-        "by 0.6 rad/s per radian of elbow flexion."
-    ),
-    feedback_text="slow down, my elbow catches when you straighten it that fast",
-    bounds=(
-        CoupledBound(
-            feature="elbow_flexion_velocity",
-            bound_type="lower_bound",
-            cond_feature="elbow_flexion",
-            intercept=-0.3,
-            slope=-0.6,
-        ),
-    ),
-    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
-)
-
 PERSONAS: dict[str, SimulatedUser] = {
     user.name: user
     for user in (
@@ -258,7 +235,6 @@ PERSONAS: dict[str, SimulatedUser] = {
         BICEPS_LONG_HEAD_CONTRACTURE,
         BRACHIAL_PLEXUS_MECHANOSENSITIVITY,
         CROSS_BODY_PAIN,
-        SPASTIC_ELBOW_FLEXORS,
     )
 }
 

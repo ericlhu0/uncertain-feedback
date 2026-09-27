@@ -7,14 +7,12 @@ from __future__ import annotations
 import numpy as np
 
 from uncertain_feedback.planners.mpc.human import Human
-from uncertain_feedback.simulated_users import MOTION_FPS, feature_series
 from uncertain_feedback.simulated_users.personas import (
     BICEPS_LONG_HEAD_CONTRACTURE,
     BRACHIAL_PLEXUS_MECHANOSENSITIVITY,
     CROSS_BODY_PAIN,
     OUT_OF_SYNERGY_REACH_PREFERENCE,
     PAINFUL_ARC,
-    SPASTIC_ELBOW_FLEXORS,
     TRICEPS_LONG_HEAD_CONTRACTURE,
     UNRESTRICTED,
 )
@@ -109,34 +107,6 @@ def test_neural_mechanosensitivity_requires_flexion_during_abduction() -> None:
     assert violations[0] == 0.0
     assert violations[1] > 0.0
     assert violations[2] == 0.0
-
-
-def test_spastic_elbow_tolerates_fast_extension_only_when_flexed() -> None:
-    features = {
-        "elbow_flexion": np.array([0.4, 0.4, 2.0]),
-        "elbow_flexion_velocity": np.array([-0.2, -1.0, -1.0]),
-    }
-
-    violations = SPASTIC_ELBOW_FLEXORS.violation_series(features)
-
-    assert violations[0] == 0.0  # slow extension near full extension: fine
-    assert violations[1] > 0.0  # fast extension near full extension: catch
-    assert violations[2] == 0.0  # same speed while deeply flexed: fine
-
-
-def test_feature_series_adds_velocities() -> None:
-    human = Human()
-    q = np.zeros((5, 7), dtype=np.float64)
-    q[:, 6] = np.linspace(0.2, 1.0, 5)
-
-    features = feature_series(human, q)
-
-    np.testing.assert_allclose(
-        features["elbow_flexion_velocity"],
-        np.gradient(features["elbow_flexion"]) * MOTION_FPS,
-    )
-    assert np.all(features["elbow_flexion_velocity"] > 0.0)
-    assert np.all(feature_series(human, q[:1])["elbow_flexion_velocity"] == 0.0)
 
 
 def test_limit_cost_penalizes_out_of_box_rollouts() -> None:

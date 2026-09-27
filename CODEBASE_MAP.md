@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-09-26
+**Last updated:** 2026-09-27
 **Branch:** human-class
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -1109,14 +1109,8 @@ instruction to their `feedback_text` (`resolve_feedback_text` in
 The hidden bounds are the evaluation ground truth for method-level evaluation
 (never shown to the cost generator).
 
-- Bounds reference the five anatomical joint features plus scoring-side
-  extensions computed by `simulated_users.base.feature_series`: per-feature
-  velocities (`<feature>_velocity`, rad/s via `np.gradient` at the repo-wide
-  20 fps `MOTION_FPS`). `SIM_FEATURE_NAMES` is the full allowed set; the
-  velocities exist only on the scoring side (the cost generator still sees
-  position features only). `spastic_elbow_flexors` uses them (velocity-dependent
-  catch: tolerable elbow extension speed shrinks as the elbow approaches full
-  extension).
+- Bounds reference the five anatomical joint features
+  (`simulated_users.base.feature_series`), the same ones the cost generator sees.
 - `HiddenBound` — one restriction over a shared joint feature (radians):
   `upper_bound` / `lower_bound` / `avoid_band` (painful range), optionally gated
   by a `FeatureCondition` on another feature.

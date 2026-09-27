@@ -1896,7 +1896,7 @@ optional YAML key `user:` (default `unrestricted` — no movement restrictions).
 Restricted personas (`adhesive_capsulitis`, `elbow_contracture`, `painful_arc`,
 `stroke_flexor_synergy`, `triceps_long_head_contracture`,
 `biceps_long_head_contracture`, `brachial_plexus_mechanosensitivity`,
-`out_of_synergy_reach_preference`, `cross_body_pain`, `spastic_elbow_flexors`;
+`out_of_synergy_reach_preference`, `cross_body_pain`;
 see `src/uncertain_feedback/simulated_users/personas.py`)
 carry hidden joint-limit bounds and a fixed feedback line. When the configured
 user has bounds:
@@ -1914,10 +1914,6 @@ outside the post-stroke flexor synergy ([Hadjiosif et al., 2024](https://pmc.ncb
 - `feedback.uq.user_cluster: true` delegates UQ cluster selection to the user (it picks
   the most comfortable cluster mean), taking precedence over `feedback.uq.auto_cluster`
   and the interactive picker.
-
-Beyond the five anatomical position features, hidden bounds may reference each
-feature's velocity (`<feature>_velocity`, rad/s; `spastic_elbow_flexors` caps
-elbow extension speed as a function of elbow flexion).
 
 The same hidden bounds are the evaluation ground truth for the method-level
 experiments that will live in the repo-root `evaluation/` directory.

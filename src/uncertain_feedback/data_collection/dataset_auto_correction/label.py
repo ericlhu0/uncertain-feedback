@@ -664,7 +664,7 @@ el('play').addEventListener('click', () => {
     const s = el('scrub');
     s.value = (+s.value >= +s.max) ? 0 : +s.value + 1;
     render();
-  }, 50);   // 20 fps, the project's MOTION_FPS
+  }, 50);   // 20 fps, the project's motion frame rate
 });
 
 el('next').addEventListener('click', async () => {

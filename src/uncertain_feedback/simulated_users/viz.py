@@ -30,12 +30,6 @@ _FORBIDDEN_COLOR = "tab:red"
 _GRID_N = 200
 
 
-def _feature_unit(name: str) -> str:
-    if name.endswith("_velocity"):
-        return "rad/s"
-    return "rad"
-
-
 def _condition_feature(bound: Bound) -> str | None:
     if isinstance(bound, CoupledBound):
         return bound.cond_feature
@@ -91,8 +85,8 @@ def _draw_plane(
         (line,) = ax.plot(x, y, label=name, linewidth=1.5)
         ax.plot(x[0], y[0], "o", color=line.get_color(), markersize=6)
         ax.plot(x[-1], y[-1], "s", color=line.get_color(), markersize=6)
-    ax.set_xlabel(f"{cond_name} ({_feature_unit(cond_name)})")
-    ax.set_ylabel(f"{bound.feature} ({_feature_unit(bound.feature)})")
+    ax.set_xlabel(f"{cond_name} (rad)")
+    ax.set_ylabel(f"{bound.feature} (rad)")
     ax.set_title(
         f"{bound.bound_type} on {bound.feature}\nvs {cond_name} (shaded = forbidden)"
     )
@@ -117,7 +111,7 @@ def _draw_series(
         ax.plot(features[bound.feature], label=name, linewidth=1.5)
     ax.set_ylim(y_lo, y_hi)
     ax.set_xlabel("frame")
-    ax.set_ylabel(f"{bound.feature} ({_feature_unit(bound.feature)})")
+    ax.set_ylabel(f"{bound.feature} (rad)")
     ax.set_title(f"{bound.bound_type} on {bound.feature} (shaded = forbidden)")
 
 

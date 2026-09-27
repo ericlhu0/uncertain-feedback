@@ -10,9 +10,7 @@ generator — it is the ground truth the generated cost is evaluated against.
 
 Restrictions are expressed over the five anatomical joint features the cost
 generator uses (see ``GeneratedCostContext``), so a hidden bound and a generated
-bound are directly comparable. Simulated-user bounds may additionally reference
-each feature's velocity (``<feature>_velocity``, rad/s), which exists only on the
-scoring side.
+bound are directly comparable.
 """
 
 from __future__ import annotations
@@ -34,27 +32,10 @@ from uncertain_feedback.planners.mpc.human import Human
 
 BOUND_TYPES = ("upper_bound", "lower_bound", "avoid_band")
 
-MOTION_FPS = 20.0
-VELOCITY_FEATURE_NAMES = tuple(f"{name}_velocity" for name in FEATURE_NAMES)
-SIM_FEATURE_NAMES = (*FEATURE_NAMES, *VELOCITY_FEATURE_NAMES)
-
 
 def feature_series(human: Human, trajectory: np.ndarray) -> dict[str, np.ndarray]:
-    """Return anatomical features plus their velocities.
-
-    Velocities are central finite differences along the trajectory's time
-    axis in rad/s at the repo-wide 20 fps frame convention (zero for
-    single-frame inputs).
-    """
-    features = dict(arm_feature_series(trajectory, human))
-    for name in FEATURE_NAMES:
-        values = features[name]
-        if values.ndim == 0 or values.shape[-1] < 2:
-            velocity = np.zeros_like(values)
-        else:
-            velocity = np.gradient(values, axis=-1) * MOTION_FPS
-        features[f"{name}_velocity"] = velocity
-    return features
+    """Return the anatomical joint features of ``trajectory``."""
+    return dict(arm_feature_series(trajectory, human))
 
 
 @dataclass(frozen=True)
@@ -82,12 +63,9 @@ class HiddenBound:
     condition: FeatureCondition | None = None
 
     def __post_init__(self) -> None:
-        if self.feature not in SIM_FEATURE_NAMES:
+        if self.feature not in FEATURE_NAMES:
             raise ValueError(f"Unknown feature {self.feature!r}.")
-        if (
-            self.condition is not None
-            and self.condition.feature not in SIM_FEATURE_NAMES
-        ):
+        if self.condition is not None and self.condition.feature not in FEATURE_NAMES:
             raise ValueError(f"Unknown condition feature {self.condition.feature!r}.")
         if self.bound_type not in BOUND_TYPES:
             raise ValueError(f"Unknown bound_type {self.bound_type!r}.")
@@ -133,9 +111,9 @@ class CoupledBound:
     slope: float
 
     def __post_init__(self) -> None:
-        if self.feature not in SIM_FEATURE_NAMES:
+        if self.feature not in FEATURE_NAMES:
             raise ValueError(f"Unknown feature {self.feature!r}.")
-        if self.cond_feature not in SIM_FEATURE_NAMES:
+        if self.cond_feature not in FEATURE_NAMES:
             raise ValueError(f"Unknown cond_feature {self.cond_feature!r}.")
         if self.bound_type not in ("upper_bound", "lower_bound"):
             raise ValueError(

@@ -20,10 +20,9 @@ from uncertain_feedback.demo_runner.session import (
 )
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    MpcCostContext,
     build_generated_cost_context,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import HiddenCostTerm, SimulatedUser
 
 
@@ -104,26 +103,22 @@ def test_generated_cost_field_identifies_single_named_feature(
         def __call__(self, q_trajs):
             return np.arange(q_trajs.shape[0], dtype=np.float64)
 
-    fk = SmplLeftArmFK()
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     session = Session(
-        rig=SimpleNamespace(context=context),  # type: ignore[arg-type]
+        rig=SimpleNamespace(human=Human()),  # type: ignore[arg-type]
         persona_name="persona",
         user=SimpleNamespace(),  # type: ignore[arg-type]
         dir=tmp_path,
         corpus=SimpleNamespace(),  # type: ignore[arg-type]
     )
     session.trajectory = SimpleNamespace(  # type: ignore[assignment]
-        base_traj=np.zeros((2, 3, 3)),
+        human=Human().step(np.zeros(7)),
         cluster_fulls={},
         cluster_corrections={},
     )
     monkeypatch.setattr(
         demo_session,
         "arm_feature_series",
-        lambda poses, context: {"elbow_flexion": np.linspace(0.0, 1.0, poses.shape[0])},
+        lambda poses, human: {"elbow_flexion": np.linspace(0.0, 1.0, poses.shape[0])},
     )
 
     field = Session.generated_cost_field(session, SingleFeatureCost())  # type: ignore[arg-type]
@@ -133,18 +128,12 @@ def test_generated_cost_field_identifies_single_named_feature(
 
 
 def test_demo_trajectory_payload_uses_canonical_shoulder_twist() -> None:
-    fk = SmplLeftArmFK()
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
+    human = Human()
     rig = SimpleNamespace(
-        fk=fk,
-        context=context,
-        spine3_pos=context.spine3_pos,
-        spine3_aa=context.spine3_aa,
+        human=human,
         meshes=SimpleNamespace(register=lambda *_args, **_kwargs: "mesh"),
     )
-    axis = fk.tpose_joints[3] - fk.tpose_joints[2]
+    axis = human.fk.tpose_joints[3] - human.fk.tpose_joints[2]
     axis = axis / np.linalg.norm(axis)
     trajectory = np.zeros((2, 7), dtype=np.float64)
     trajectory[-1, 3:6] = axis * 0.5
@@ -197,14 +186,11 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(
 ) -> None:
     user = SimulatedUser("persona", "", "", bounds=())
     rig = SimpleNamespace(
-        context=object(),
-        body_pos=np.zeros((22, 3)),
-        spine3_pos=np.zeros(3),
-        spine3_aa=np.zeros(3),
+        human=Human(),
         _cfg_with_goal=lambda goal: object(),
         _extra_costs=lambda selected: CompositeTrajectoryCost([]),
         package_trajectory=lambda traj, selected, pin_mesh=False: {
-            "values": traj[:, 0, 0].tolist(),
+            "values": traj[:, 0].tolist(),
             "mesh_id": "mesh",
         },
         meshes=SimpleNamespace(
@@ -214,16 +200,10 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(
         ),
     )
     unpinned: list[str] = []
-    q_feedback = np.full((3, 3), 2.0)
     trajectory = SimpleNamespace(
-        start_q=np.full((3, 3), 9.0),
+        start=Human().reset_human_with_q(np.full(7, 9.0)),
         goal=np.array([0.1, 0.2, 0.3]),
-        q_feedback=q_feedback,
-        q_history=[
-            np.full((3, 3), 0.0),
-            np.full((3, 3), 1.0),
-            q_feedback,
-        ],
+        feedback=Human().step(np.array([np.full(7, 1.0), np.full(7, 2.0)])),
         oracle_traj=None,
         oracle_source=None,
         oracle_package=None,
@@ -240,10 +220,8 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(
 
     def fake_rollout(*args, **kwargs):
         calls.append((args, kwargs))
-        start = args[1][0, 0]
-        result = np.zeros((2, 3, 3))
-        result[:, 0, 0] = [start, start + 1]
-        return result
+        start = args[1].reset_human_with_q(args[1].q)
+        return start.step(start.q + 1.0)
 
     monkeypatch.setattr(demo_session, "rollout_to_goal", fake_rollout)
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *args: {})
@@ -252,9 +230,9 @@ def test_oracle_rollouts_start_at_initial_and_trigger_poses(
     initial = session.run_oracle(from_trigger=False)  # pylint: disable=not-callable
     trigger = session.run_oracle(from_trigger=True)  # pylint: disable=not-callable
 
-    np.testing.assert_array_equal(calls[0][0][1], trajectory.start_q)
-    np.testing.assert_array_equal(calls[1][0][1], trajectory.q_feedback)
-    assert isinstance(calls[0][0][4].terms()[-1], HiddenCostTerm)
+    assert calls[0][0][1] is trajectory.start
+    assert calls[1][0][1] is trajectory.feedback
+    assert isinstance(calls[0][0][3].terms()[-1], HiddenCostTerm)
     assert initial["source"] == "initial"
     assert initial["trajectory"]["values"] == [9.0, 10.0]
     assert trigger["source"] == "trigger"
@@ -317,9 +295,8 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
     planner = SimpleNamespace(set_extra_costs=lambda costs: None)
     trajectory = SimpleNamespace(
         goal=np.array([0.1, 0.2, 0.3]),
-        start_q=np.ones((3, 3)),
+        start=Human(),
         mpc=planner,
-        base_traj=np.zeros((1, 3, 3)),
         cluster_fulls={},
         cluster_corrections={},
     )
@@ -332,13 +309,10 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
                 codex_cmd="codex",
             )
         ),
-        context=object(),
-        body_pos=np.zeros((22, 3)),
-        spine3_pos=np.zeros(3),
-        spine3_aa=np.zeros(3),
+        human=Human(),
         _cfg_with_goal=lambda goal: object(),
         _extra_costs=lambda user: CompositeTrajectoryCost([]),
-        package_trajectory=lambda traj, user: {"values": traj[:, 0, 0].tolist()},
+        package_trajectory=lambda traj, user: {"values": traj[:, 0].tolist()},
     )
     session = Session.__new__(Session)
     session.rig = rig  # type: ignore[assignment]
@@ -352,7 +326,7 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
     )
     session._save = MethodType(lambda self: None, session)  # type: ignore[method-assign]
     session.generated_cost_field = MethodType(lambda self, cost: {}, session)  # type: ignore[method-assign]
-    rollout = np.zeros((2, 3, 3))
+    rollout = Human().step(np.zeros(7))
     calls = []
 
     def fake_rollout(*args, **kwargs):
@@ -371,7 +345,7 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
     assert constructor_args["rollout_fn"] == "persisted rollout"
     assert constructor_args["summaries"] == {"round": 2}
     assert constructor_args["images"] == {"second.png": tmp_path / "second.png"}
-    np.testing.assert_array_equal(calls[0][0][1], trajectory.start_q)
+    assert calls[0][0][1] is trajectory.start
     assert calls[0][1]["progress_label"] == "unified-from-start"
     assert result["trajectory"]["values"] == [0.0, 0.0]
 
@@ -491,14 +465,9 @@ def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) 
         encoding="utf-8",
     )
     user = SimulatedUser("persona", "", "", bounds=())
-    rig = SimpleNamespace(context=object(), get_persona=lambda name: user)
-    fk = SmplLeftArmFK()
+    rig = SimpleNamespace(human=object(), get_persona=lambda name: user)
     generated_context = build_generated_cost_context(
-        MpcCostContext(fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)),
-        current_q=np.zeros(7),
-        mdm_traj=np.zeros((1, 7)),
-        q_history=[],
-        window=1,
+        Human(), mdm_traj=np.zeros((1, 7)), window=1
     )
 
     class FakeEvalState:

@@ -26,6 +26,7 @@ from uncertain_feedback.planners.mpc import (
     RobotActionsConfig,
 )
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_DIM,
     SmplLeftArmFK,
@@ -138,60 +139,53 @@ class _RecordingCost:
         return np.zeros(q_trajs.shape[0])
 
 
-def _make_env_and_start(fk: SmplLeftArmFK) -> tuple[_KinematicRobotEnv, np.ndarray]:
+def _make_env_and_start() -> tuple[_KinematicRobotEnv, Human]:
     q_seed = np.zeros(Q_DIM)
     q_seed[6] = -0.8
-    env = _KinematicRobotEnv(fk, q_seed)
-    return env, env._measured_q()
+    human = Human()
+    env = _KinematicRobotEnv(human.fk, q_seed)
+    return env, human.reset_human_with_q(env._measured_q())
 
 
 def test_no_mdm_robot_planner_reaches_cartesian_goal() -> None:
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    spine3 = fk.tpose_spine3_pos
-    goal = (wrist0 - spine3) + np.array([0.0, 0.08, -0.05])
+    env, human = _make_env_and_start()
+    wrist0 = human.wrist_from_q(human.q)
+    goal = wrist0 + np.array([0.0, 0.08, -0.05])
 
     recorder = _RecordingCost()
     mpc = ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=128,
-        fk=fk,
         extra_costs=CompositeTrajectoryCost([recorder]),
         seed=0,
         env=env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         # The grasp gate scales with the sampling std dev; match it here (the
         # default is tuned for the configs' 0.005).
         robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.05),
     )
-    dist0 = float(np.linalg.norm((wrist0 - spine3) - goal))
-    q = q0
+    dist0 = float(np.linalg.norm(wrist0 - goal))
     for _ in range(60):
-        q = mpc.step(q)
+        q = mpc.step().q
         if mpc.goal_reached(q):
             break
-    wrist = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), None, None)[4]
-    dist = float(np.linalg.norm((wrist - spine3) - goal))
+    dist = float(np.linalg.norm(human.wrist_from_q(mpc.human.q) - goal))
     assert dist < 0.05 < dist0
     assert all(shape == (128, 6, 3, 3) for shape in recorder.shapes)
 
 
 def test_mdm_robot_planner_tracks_playback_then_reaches_goal() -> None:
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    spine3 = fk.tpose_spine3_pos
-    goal = (wrist0 - spine3) + np.array([0.0, 0.06, -0.04])
+    env, human = _make_env_and_start()
+    q0 = human.q
+    goal = human.wrist_from_q(q0) + np.array([0.0, 0.06, -0.04])
 
     mpc = ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=256,
-        fk=fk,
         seed=0,
         env=env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         feedback=FeedbackConfig(max_playback_delta=0.1),
         robot_actions=RobotActionsConfig(max_joint_delta=0.01, max_grasp_residual=0.03),
@@ -202,20 +196,18 @@ def test_mdm_robot_planner_tracks_playback_then_reaches_goal() -> None:
     mpc.push_trajectory(frames)
     assert mpc._feedback is not None and mpc._feedback.in_playback()
 
-    q = q0
     for _ in range(80):
-        q = mpc.step(q)
+        mpc.step()
         if mpc.mdm_ready_to_terminate:
             break
     assert mpc.mdm_ready_to_terminate
-    assert abs(float(q[6]) - float(frames[-1, 6])) < 0.15
+    assert abs(float(mpc.human.q[6]) - float(frames[-1, 6])) < 0.15
 
     for _ in range(80):
-        q = mpc.step(q)
+        q = mpc.step().q
         if mpc.goal_reached(q):
             break
-    wrist = fk.fk(q_to_arm_aa(q, fk.elbow_hinge_axis), None, None)[4]
-    assert float(np.linalg.norm((wrist - spine3) - goal)) < 0.05
+    assert float(np.linalg.norm(human.wrist_from_q(mpc.human.q) - goal)) < 0.05
 
 
 def test_robot_planner_yaml_configs_load() -> None:
@@ -246,17 +238,15 @@ def test_robot_planner_yaml_configs_load() -> None:
 
 
 def test_robot_solve_discards_grasp_breaking_rollouts() -> None:
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.08, -0.05])
+    env, human = _make_env_and_start()
+    q0 = human.q
+    goal = human.wrist_from_q(q0) + np.array([0.0, 0.08, -0.05])
     mpc = ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=128,
-        fk=fk,
         seed=0,
         env=env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         robot_actions=RobotActionsConfig(
             max_joint_delta=0.02, max_grasp_residual=0.02, grasp_residual_frames=3
@@ -273,70 +263,63 @@ def test_robot_solve_discards_grasp_breaking_rollouts() -> None:
     ee_pos, ee_rot = env.robot_fk().ee_pose(step[np.newaxis])
     forearm_rot_pb = ee_rot @ grasp.rotation.inv().as_matrix()
     _aa, _w, residual = project_forearm_frames(
-        fk,
+        human.fk,
         ee_pos @ _SMPL_TO_PB,
         _SMPL_TO_PB.T @ forearm_rot_pb,
         grasp.position,
-        np.asarray(q0, dtype=np.float64),
-        fk.tpose_spine3_pos,
-        np.zeros(3),
+        q0,
+        human.spine3_pos,
+        human.spine3_aa,
     )
     assert float(residual[0, 1]) <= 0.02 + 1e-9
 
     # An impossible gate falls back to the least-violating sample, not a crash.
     mpc_strict = ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=64,
-        fk=fk,
         seed=0,
         env=env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.0),
     )
-    q = mpc_strict.step(q0)
-    assert q.shape == (Q_DIM,)
+    assert mpc_strict.step().q.shape == (Q_DIM,)
 
 
 def test_robot_plan_preview_env_rollout_is_consistent() -> None:
     from uncertain_feedback.envs.robot_preview import RobotPlanPreviewEnv
 
-    fk = SmplLeftArmFK()
-    env, q0 = _make_env_and_start(fk)
+    env, human = _make_env_and_start()
     preview_env = RobotPlanPreviewEnv(
-        fk=fk,
+        fk=human.fk,
         chain=env.robot_fk(),
-        grasp=env.current_grasp(q0),
+        grasp=env.current_grasp(human.q),
         robot_q=env.current_robot_q(),
         joint_limits=env.robot_joint_limits(),
-        q_ref=q0,
+        q_ref=human.q,
         spine3_pos=None,
         spine3_aa=None,
         ik_env=env,
         max_joint_delta=0.02,
     )
-    wrist0 = fk.fk(q_to_arm_aa(q0, fk.elbow_hinge_axis), None, None)[4]
-    goal = (wrist0 - fk.tpose_spine3_pos) + np.array([0.0, 0.05, -0.03])
+    goal = human.wrist_from_q(human.q) + np.array([0.0, 0.05, -0.03])
     mpc = ArmMPC(
+        human,
         horizon=5,
         n_mpc_samples=64,
-        fk=fk,
         seed=0,
         env=preview_env,
-        initial_q=q0,
         cartesian=CartesianConfig(goals=[goal]),
         robot_actions=RobotActionsConfig(max_joint_delta=0.02, max_grasp_residual=0.05),
     )
-    q = q0
-    human = [q0]
     for _ in range(15):
-        q = mpc.step(q)
-        human.append(q)
+        mpc.step()
+    history = mpc.human.history
     robot = np.asarray(preview_env.robot_trajectory)
-    assert robot.shape == (len(human), 7)
+    assert robot.shape == (len(history), 7)
     # Re-projecting each recorded robot configuration reproduces the human
     # trajectory frame — the previewed robot and arm agree by construction.
-    for joints, q_frame in zip(robot[1:], human[1:]):
+    for joints, q_frame in zip(robot[1:], history[1:]):
         preview_env._robot_q = np.asarray(joints)
         np.testing.assert_allclose(preview_env._measured_q(), q_frame, atol=1e-9)
 

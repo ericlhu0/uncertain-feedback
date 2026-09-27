@@ -30,8 +30,8 @@ from scipy.spatial.transform import Rotation
 from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.planners.mpc.action_spaces.base import RolloutBatch
 from uncertain_feedback.planners.mpc.constraints.base import FeasibilityConstraint
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
-    SmplLeftArmFK,
     _frame_block_distances,
 )
 
@@ -65,14 +65,12 @@ class RobotIkConstraint(FeasibilityConstraint):
         cfg: RobotIkConfig,
         *,
         env: ExecutionEnv,
-        fk: SmplLeftArmFK,
-        spine3_pos: np.ndarray,
-        spine3_aa: np.ndarray,
+        human: Human,
     ) -> None:
         self._env = env
-        self._fk = fk
-        self._spine3_pos = spine3_pos
-        self._spine3_aa = spine3_aa
+        self._fk = human.fk
+        self._spine3_pos = human.spine3_pos
+        self._spine3_aa = human.spine3_aa
         self._max_residual = float(cfg.max_residual)
         self._grasp_ik_frames = int(cfg.grasp_residual_frames)
         self.playback_stall_steps = int(cfg.playback_stall_steps)

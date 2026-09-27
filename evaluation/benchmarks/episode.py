@@ -18,19 +18,20 @@ from evaluation.benchmarks.verbalize import bind_verbalizer
 from evaluation.metrics.cost_learning.success import goal_row
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
+from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    MpcCostContext,
+    base_extra_costs,
 )
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import goal_reach, rollout_to_goal
-from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs, cfg_with_goal
 from uncertain_feedback.simulated_users import (
     ChoiceResult,
     HiddenCostTerm,
     SimulatedUser,
     attribute_correction,
     choose_correction,
-    compute_violations,
+    feedback_anchor,
     first_violation_step,
     violation_metrics,
 )
@@ -41,19 +42,6 @@ _LOG = "[evaluation]"
 def _write_json(path: Path, payload: Any) -> None:
     with open(path, "w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2, sort_keys=True, default=str)
-
-
-def feedback_anchor(
-    user: SimulatedUser, context: MpcCostContext, trajectory: np.ndarray, trigger: int
-) -> int:
-    """The last frame before ``trigger`` with no violation, else ``trigger`` itself.
-
-    A correction anchored on a frame already past the bound can never be
-    acceptable to the simulated user, whose test is the peak violation over
-    every frame it contains (see ``build_sampled_case``).
-    """
-    clean = np.nonzero(compute_violations(user, context, trajectory[:trigger]) <= 0)[0]
-    return int(clean[-1]) if clean.size > 0 else trigger
 
 
 def _save_round_trajectories(
@@ -106,14 +94,15 @@ def _episode_summary(interactions: list[Interaction]) -> dict[str, Any]:
         "executed_metrics": {
             key: float(value)
             for key, value in violation_metrics(
-                first.user, first.context, executed
+                first.user, first.human, executed
             ).items()
         },
     }
 
 
 def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
-    rig: PlanningRig,
+    cfg: MpcRunConfig,
+    human: Human,
     user: SimulatedUser,
     task: InteractionTask,
     approach: Approach,
@@ -121,6 +110,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 ) -> list[Interaction]:
     """Play one persona through the task's goal sequence against ``approach``.
 
+    ``human`` supplies the body (and, without ``task.start_q``, the start arm).
     Per goal: an oracle path (base + hidden cost) defines the persona's ideal;
     the approach plans with its current learned costs; discomfort triggers a
     feedback round anchored on the last clean frame before the trigger (attribute -> verbalize -> ground -> choose -> learn ->
@@ -134,19 +124,18 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     every round's ``trajectories.npz`` under ``goal_NN/round_NN/``.
     """
     episode_dir.mkdir(parents=True, exist_ok=True)
-    cfg = rig.cfg
     assert cfg.cartesian is not None
     threshold = cfg.corrections.trigger_threshold
     sim_cfg = cfg.simulated_user
-    base = base_extra_costs(rig, user)
+    base = base_extra_costs(cfg.costs, human, user)
     oracle_costs = CompositeTrajectoryCost(
-        [*base.terms(), HiddenCostTerm(user=user, context=rig.context)]
+        [*base.terms(), HiddenCostTerm(user=user, human=human)]
     )
 
     interactions: list[Interaction] = []
     event_index = 0
     q_current = np.asarray(
-        rig.q0 if task.start_q is None else task.start_q, dtype=np.float64
+        human.q if task.start_q is None else task.start_q, dtype=np.float64
     )
     chooser_rng = np.random.default_rng(task.seed)
 
@@ -158,54 +147,41 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 
         oracle_path = rollout_to_goal(
             goal_cfg,
-            q_current,
+            human.reset_human_with_q(q_current),
             goal_arr,
-            rig.context,
             oracle_costs,
-            rig.body_pos,
-            rig.spine3_pos,
-            rig.spine3_aa,
             progress_label=f"{task.persona} goal {goal_index} oracle",
             log_prefix=_LOG,
-        )
+        ).history
         np.save(goal_dir / "oracle_path.npy", oracle_path)
         approach.begin_goal(goal_arr, oracle_path)
         episode_key = (
             f"{task.persona}_{task.verbalizer}_seed{task.seed}_goal{goal_index}"
         )
         verbalize = bind_verbalizer(
-            task,
-            cfg,
-            rig.context,
-            oracle_path,
-            episode_key,
-            goal_dir / "visual_cache",
-            body_pos=rig.body_pos,
+            task, cfg, human, oracle_path, episode_key, goal_dir / "visual_cache"
         )
 
-        rollout = rollout_to_goal(
+        rolled = rollout_to_goal(
             goal_cfg,
-            q_current,
+            human.reset_human_with_q(q_current),
             goal_arr,
-            rig.context,
             approach.planning_costs(),
-            rig.body_pos,
-            rig.spine3_pos,
-            rig.spine3_aa,
             progress_label=f"{task.persona} goal {goal_index} rollout",
             log_prefix=_LOG,
         )
+        rollout = rolled.history
         np.save(goal_dir / "initial_rollout.npy", rollout)
-        trigger = first_violation_step(user, rig.context, rollout, threshold)
+        trigger = first_violation_step(user, human, rollout, threshold)
         rounds: list[FeedbackRound] = []
         if trigger is None:
-            reach = goal_reach(rig.context, goal_cfg, rollout, goal_arr)
+            reach = goal_reach(human, goal_cfg, rollout, goal_arr)
             interactions.append(
                 Interaction(
                     task=task,
                     approach=approach.name,
                     user=user,
-                    context=rig.context,
+                    human=human,
                     goal_index=goal_index,
                     goal=goal_arr,
                     oracle_path=oracle_path,
@@ -220,11 +196,8 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             q_current = np.asarray(rollout[-1], dtype=np.float64)
             continue
 
-        feedback_step = feedback_anchor(user, rig.context, rollout, trigger)
-        q_feedback = np.asarray(rollout[feedback_step], dtype=np.float64)
-        q_history = [
-            np.asarray(q, dtype=np.float64) for q in rollout[: feedback_step + 1]
-        ]
+        # The executed motion so far; its last frame is where feedback is given.
+        executed = rolled.rewind(feedback_anchor(user, human, rollout, trigger))
         min_join = 0
         result = "capped"
         reached = False
@@ -232,21 +205,19 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
         for round_index in range(task.max_rounds):
             round_dir = goal_dir / f"round_{round_index:02d}"
             round_dir.mkdir(parents=True, exist_ok=True)
+            at_feedback = executed
+            q_feedback = at_feedback.q
             nominal_plan = rollout_to_goal(
                 goal_cfg,
-                q_feedback,
+                at_feedback,
                 goal_arr,
-                rig.context,
                 approach.planning_costs(),
-                rig.body_pos,
-                rig.spine3_pos,
-                rig.spine3_aa,
                 steps=sim_cfg.nominal_steps,
                 stop_at_goal=False,
                 log_prefix=_LOG,
-            )
+            ).history
             intent = attribute_correction(
-                oracle_path, nominal_plan, q_feedback, rig.context, min_join=min_join
+                oracle_path, nominal_plan, q_feedback, human, min_join=min_join
             )
             utterance = verbalize(intent, q_feedback, event_index)
             if utterance is None:
@@ -264,7 +235,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             def _select(means: dict[int, np.ndarray]) -> tuple[int, float]:
                 choice = choose_correction(
                     user,
-                    rig.context,
+                    human,
                     means,
                     oracle_path,  # pylint: disable=cell-var-from-loop
                     min_join=round_join,  # pylint: disable=cell-var-from-loop
@@ -279,7 +250,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 
             ground_t0 = time.perf_counter()
             grounding = approach.ground(
-                utterance.text, q_feedback, nominal_plan, _select
+                utterance.text, at_feedback, nominal_plan, _select
             )
             ground_seconds = time.perf_counter() - ground_t0
             choice = choices[-1]
@@ -296,8 +267,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     goal=goal_arr,
                     utterance_text=utterance.text,
                     grounding=grounding,
-                    q_feedback=q_feedback,
-                    q_history=list(q_history),
+                    human=at_feedback,
                     event_index=event_index,
                     rejected_labels=rejected,
                     nominal_plan=nominal_plan,
@@ -305,25 +275,21 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             )
             learn_seconds = time.perf_counter() - learn_t0
 
-            correction_q = canonical_arm_q(grounding.correction_traj, rig.context)
-            q_history.extend(np.asarray(correction_q[1:], dtype=np.float64))
+            correction_q = canonical_arm_q(grounding.correction_traj, human)
+            executed = executed.step(correction_q[1:])
 
             continuation = rollout_to_goal(
                 goal_cfg,
-                np.asarray(correction_q[-1], dtype=np.float64),
+                executed,
                 goal_arr,
-                rig.context,
                 approach.planning_costs(),
-                rig.body_pos,
-                rig.spine3_pos,
-                rig.spine3_aa,
                 progress_label=(
                     f"{task.persona} goal {goal_index} round {round_index} "
                     "continuation"
                 ),
                 log_prefix=_LOG,
-            )
-            retrigger = first_violation_step(user, rig.context, continuation, threshold)
+            ).history
+            retrigger = first_violation_step(user, human, continuation, threshold)
             _save_round_trajectories(
                 round_dir,
                 q_feedback,
@@ -356,25 +322,22 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             event_index += 1
 
             if retrigger is None:
-                q_history.extend(np.asarray(continuation[1:], dtype=np.float64))
-                reach = goal_reach(rig.context, goal_cfg, continuation, goal_arr)
+                executed = executed.step(continuation[1:])
+                reach = goal_reach(human, goal_cfg, continuation, goal_arr)
                 reached = bool(reach["reached"])
                 result = "ok" if reached else "goal_not_reached"
                 break
-            feedback_step = feedback_anchor(user, rig.context, continuation, retrigger)
-            q_history.extend(
-                np.asarray(continuation[1 : feedback_step + 1], dtype=np.float64)
-            )
-            q_feedback = np.asarray(continuation[feedback_step], dtype=np.float64)
+            feedback_step = feedback_anchor(user, human, continuation, retrigger)
+            executed = executed.step(continuation[1 : feedback_step + 1])
             min_join = intent.join_index
 
-        q_current = np.asarray(q_history[-1], dtype=np.float64)
+        q_current = executed.q
         interactions.append(
             Interaction(
                 task=task,
                 approach=approach.name,
                 user=user,
-                context=rig.context,
+                human=human,
                 goal_index=goal_index,
                 goal=goal_arr,
                 oracle_path=oracle_path,
@@ -383,7 +346,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 rounds=tuple(rounds),
                 result=result,
                 reached=reached,
-                executed=np.asarray(q_history, dtype=np.float64),
+                executed=executed.history,
             )
         )
 

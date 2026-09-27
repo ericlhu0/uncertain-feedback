@@ -91,7 +91,7 @@ class TestPositionsToSmplBodyPose:
             arm_aa_4 = rng.uniform(-0.5, 0.5, (4, 3))
             collar_aa = arm_aa_4[0]
             arm_aa = arm_aa_4[1:]
-            fk.collar_aa = collar_aa
+            fk = SmplLeftArmFK(collar_aa=collar_aa)
             positions = fk.full_body_positions(arm_aa)  # (22, 3)
 
             body_pose = positions_to_smpl_body_pose(positions, fk.tpose_all_joints)
@@ -99,7 +99,7 @@ class TestPositionsToSmplBodyPose:
             recovered_collar_aa = smpl_body_pose_to_collar_aa(body_pose)
 
             original_arm_pos = fk.fk(arm_aa)  # (5, 3)
-            fk.collar_aa = recovered_collar_aa
+            fk = SmplLeftArmFK(collar_aa=recovered_collar_aa)
             recovered_arm_pos = fk.fk(recovered_arm_aa)  # (5, 3)
             np.testing.assert_allclose(recovered_arm_pos, original_arm_pos, atol=1e-4)
 
@@ -121,7 +121,7 @@ class TestPositionsToSmplBodyPose:
                 [0.0, 0.0, 0.0],  # left_wrist
             ]
         )
-        fk.collar_aa = collar_aa
+        fk = SmplLeftArmFK(collar_aa=collar_aa)
         positions = fk.full_body_positions(arm_aa)
         body_pose = positions_to_smpl_body_pose(positions, fk.tpose_all_joints)
         recovered_arm_aa = smpl_body_pose_to_arm_aa(body_pose)
@@ -129,7 +129,7 @@ class TestPositionsToSmplBodyPose:
 
         # Joint positions must match — axis-angles may differ (twist ambiguity).
         original_pos = fk.fk(arm_aa)
-        fk.collar_aa = recovered_collar_aa
+        fk = SmplLeftArmFK(collar_aa=recovered_collar_aa)
         np.testing.assert_allclose(
             fk.fk(recovered_arm_aa),
             original_pos,
@@ -150,7 +150,7 @@ class TestPositionsToSmplBodyPose:
             ],
             dtype=np.float64,
         )
-        fk.collar_aa = mdm_collar_aa
+        fk = SmplLeftArmFK(collar_aa=mdm_collar_aa)
         mdm_positions = fk.full_body_positions(
             target_arm_aa,
             fk.tpose_spine3_pos,
@@ -159,7 +159,7 @@ class TestPositionsToSmplBodyPose:
 
         fixed_spine_aa = np.array([-0.1, 0.15, 0.05])
         fixed_collar_aa = np.array([-0.2, 0.05, -0.1])
-        fk.collar_aa = fixed_collar_aa
+        fk = SmplLeftArmFK(collar_aa=fixed_collar_aa)
         projected_arm_aa = fk.arm_aa_from_positions(
             mdm_positions,
             spine3_aa=fixed_spine_aa,

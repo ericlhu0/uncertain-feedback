@@ -15,7 +15,6 @@ from evaluation.benchmarks.informative_scenarios import (
 def main() -> None:
     """Generate scenarios from the command line."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--geometry-dir", type=Path)
     parser.add_argument(
         "--mpc-config", type=Path, default=Path("evaluation/conf/mpc_demo_low1.yaml")
     )
@@ -41,10 +40,7 @@ def main() -> None:
     parser.add_argument("--no-render", action="store_true")
     args = parser.parse_args()
     if not args.render_only:
-        if args.geometry_dir is None:
-            parser.error("--geometry-dir is required for generation")
         generate_scenarios(
-            args.geometry_dir,
             args.mpc_config,
             args.out_dir,
             args.personas,

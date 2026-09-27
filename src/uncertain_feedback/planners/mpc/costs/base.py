@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -13,7 +13,10 @@ from uncertain_feedback.planners.mpc.arm_features import (
     elbow_heights,
     shoulder_abduction_angles,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
+
+if TYPE_CHECKING:
+    from uncertain_feedback.simulated_users.base import SimulatedUser
 
 
 class TrajectoryCost(Protocol):
@@ -23,20 +26,6 @@ class TrajectoryCost(Protocol):
         """Return one scalar cost per rollout."""
 
 
-@dataclass(frozen=True)
-class MpcCostContext:
-    """Shared FK context needed by Cartesian feature costs.
-
-    ``time_of_day`` is the session clock in hours ``[0, 24)`` for
-    time-conditioned preferences; ``None`` for untimed sessions.
-    """
-
-    fk: SmplLeftArmFK
-    spine3_pos: np.ndarray
-    spine3_aa: np.ndarray
-    time_of_day: float | None = None
-
-
 @runtime_checkable
 class LearnablePreferenceCost(TrajectoryCost, Protocol):
     """Range cost whose bounds can be updated from preference demonstrations."""
@@ -44,7 +33,7 @@ class LearnablePreferenceCost(TrajectoryCost, Protocol):
     cost_name: str
     weight: float
     progress_weight: float
-    context: MpcCostContext
+    human: Human
 
     @property
     def min_value(self) -> float:
@@ -143,7 +132,7 @@ class ElbowHeightCost:
     max_height: float
     weight: float
     progress_weight: float
-    context: MpcCostContext
+    human: Human
 
     def __post_init__(self) -> None:
         _validate_range_cost(
@@ -176,7 +165,7 @@ class ElbowHeightCost:
 
     def feature_values(self, trajectory: np.ndarray) -> np.ndarray:
         """Return spine3-relative elbow heights."""
-        return compute_elbow_heights(trajectory, self.context)
+        return compute_elbow_heights(trajectory, self.human)
 
     def with_range(self, min_value: float, max_value: float) -> "ElbowHeightCost":
         """Return a copy with updated height bounds."""
@@ -197,7 +186,7 @@ class ElbowFlexionAngleCost:
     max_angle: float
     weight: float
     progress_weight: float
-    context: MpcCostContext
+    human: Human
 
     def __post_init__(self) -> None:
         _validate_range_cost(
@@ -230,7 +219,7 @@ class ElbowFlexionAngleCost:
 
     def feature_values(self, trajectory: np.ndarray) -> np.ndarray:
         """Return elbow flexion angles."""
-        return compute_elbow_flexion_angles(trajectory, self.context)
+        return compute_elbow_flexion_angles(trajectory, self.human)
 
     def with_range(self, min_value: float, max_value: float) -> "ElbowFlexionAngleCost":
         """Return a copy with updated angle bounds."""
@@ -251,7 +240,7 @@ class ShoulderAbductionAngleCost:
     max_angle: float
     weight: float
     progress_weight: float
-    context: MpcCostContext
+    human: Human
 
     def __post_init__(self) -> None:
         _validate_range_cost(
@@ -284,7 +273,7 @@ class ShoulderAbductionAngleCost:
 
     def feature_values(self, trajectory: np.ndarray) -> np.ndarray:
         """Return shoulder abduction angles."""
-        return compute_shoulder_abduction_angles(trajectory, self.context)
+        return compute_shoulder_abduction_angles(trajectory, self.human)
 
     def with_range(
         self,
@@ -327,7 +316,7 @@ class JointLimitCost:
 
 def build_extra_costs(
     cost_configs: dict[str, dict[str, Any]] | None,
-    context: MpcCostContext,
+    human: Human,
 ) -> CompositeTrajectoryCost:
     """Build configured extra MPC costs from YAML-shaped dictionaries."""
     if not cost_configs:
@@ -340,46 +329,55 @@ def build_extra_costs(
             raise ValueError(f"Unknown MPC cost '{name}'.")
         if not isinstance(params, dict):
             raise ValueError(f"{name} config must be a mapping.")
-        terms.append(builder(params, context))
+        terms.append(builder(params, human))
     return CompositeTrajectoryCost(terms)
 
 
-CostBuilder = Callable[[dict[str, Any], MpcCostContext], TrajectoryCost]
+def base_extra_costs(
+    cost_configs: dict[str, dict[str, Any]] | None,
+    human: Human,
+    user: SimulatedUser,
+) -> CompositeTrajectoryCost:
+    """Hand-authored comfort costs plus the persona's joint-box limits."""
+    return CompositeTrajectoryCost(
+        [*build_extra_costs(cost_configs, human).terms(), user.limit_cost()]
+    )
 
 
-def _build_elbow_height(
-    params: dict[str, Any], context: MpcCostContext
-) -> ElbowHeightCost:
+CostBuilder = Callable[[dict[str, Any], Human], TrajectoryCost]
+
+
+def _build_elbow_height(params: dict[str, Any], human: Human) -> ElbowHeightCost:
     return ElbowHeightCost(
         min_height=float(params["min"]),
         max_height=float(params["max"]),
         weight=float(params.get("weight", 1.0)),
         progress_weight=float(params.get("progress_weight", params.get("weight", 1.0))),
-        context=context,
+        human=human,
     )
 
 
 def _build_elbow_flexion_angle(
-    params: dict[str, Any], context: MpcCostContext
+    params: dict[str, Any], human: Human
 ) -> ElbowFlexionAngleCost:
     return ElbowFlexionAngleCost(
         min_angle=float(params["min"]),
         max_angle=float(params["max"]),
         weight=float(params.get("weight", 1.0)),
         progress_weight=float(params.get("progress_weight", params.get("weight", 1.0))),
-        context=context,
+        human=human,
     )
 
 
 def _build_shoulder_abduction_angle(
-    params: dict[str, Any], context: MpcCostContext
+    params: dict[str, Any], human: Human
 ) -> ShoulderAbductionAngleCost:
     return ShoulderAbductionAngleCost(
         min_angle=float(params["min"]),
         max_angle=float(params["max"]),
         weight=float(params.get("weight", 1.0)),
         progress_weight=float(params.get("progress_weight", params.get("weight", 1.0))),
-        context=context,
+        human=human,
     )
 
 
@@ -402,23 +400,23 @@ def available_cost_names() -> set[str]:
 
 def compute_elbow_heights(
     trajectory: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
 ) -> np.ndarray:
     """Return spine3-relative elbow Y-heights for each frame in a trajectory.
 
     Args:
         trajectory: ``(N, 7)`` q states or ``(N, 3, 3)`` boundary frames.
-        context:    Shared FK context with spine3 position and collar angle.
+        human:      The person whose spine3 frame and collar the FK uses.
 
     Returns:
         ``(N,)`` elbow heights relative to spine3.
     """
-    return elbow_heights(trajectory, context)
+    return elbow_heights(trajectory, human)
 
 
 def compute_elbow_flexion_angles(
     trajectory: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
 ) -> np.ndarray:
     """Return elbow bend as the angle between upper arm and forearm, in radians.
 
@@ -426,21 +424,21 @@ def compute_elbow_flexion_angles(
     canonicalizes boundary input to q before measuring the hinge-constrained
     forearm angle.
     """
-    return arm_feature_series(trajectory, context)["elbow_flexion"]
+    return arm_feature_series(trajectory, human)["elbow_flexion"]
 
 
 def compute_shoulder_abduction_angles(
     trajectory: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
 ) -> np.ndarray:
-    """Return unsigned upper-arm abduction angles in the spine3 frame.
+    """Return signed upper-arm abduction angles in the spine3 frame.
 
-    The angle is measured between the shoulder-to-elbow direction and the
-    torso-down direction. Larger values mean the upper arm is farther away
-    from the torso. The direction is the composed collar∘shoulder∘elbow joint
-    rotation applied to the T-pose bone axis (the spine3 rotation cancels).
+    The ``shoulder_abduction_adduction`` feature: the arcsine of the upper arm's
+    sideways component, positive out to the side (about pi/2 in the T-pose) and
+    negative across the body. Forward flexion leaves it unchanged, and above
+    shoulder height it falls again.
     """
-    return shoulder_abduction_angles(trajectory, context)
+    return shoulder_abduction_angles(trajectory, human)
 
 
 def update_elbow_cost(

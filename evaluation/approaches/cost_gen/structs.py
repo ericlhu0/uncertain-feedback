@@ -8,18 +8,22 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.metrics.grounding.structs import GroundingResult
+from uncertain_feedback.planners.mpc.human import Human
 
 
 @dataclass(frozen=True)
 class RoundContext:
-    """Everything an approach needs to learn from one resolved correction."""
+    """Everything an approach needs to learn from one resolved correction.
+
+    ``human`` is the person at the feedback moment: its history is the executed
+    motion and its ``q`` the configuration the correction starts from.
+    """
 
     round_dir: Path
     goal: np.ndarray
     utterance_text: str
     grounding: GroundingResult
-    q_feedback: np.ndarray
-    q_history: list[np.ndarray]
+    human: Human
     event_index: int
     rejected_labels: frozenset[int]
     nominal_plan: np.ndarray | None = None

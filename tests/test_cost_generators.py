@@ -32,11 +32,10 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedCostContext,
     GeneratedCostValidationError,
     GeneratedPythonCost,
-    MpcCostContext,
     build_generated_cost_context,
     extract_json_object,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.utils.plot import ArmVisualizer
 
 _COST_CODE = (
@@ -95,15 +94,9 @@ class _FakeLlmModel:
 
 
 def _context() -> GeneratedCostContext:
-    fk = SmplLeftArmFK()
-    mpc_context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     return build_generated_cost_context(
-        mpc_context,
-        current_q=np.zeros((3, 3), dtype=np.float64),
+        Human(),
         mdm_traj=np.zeros((4, 3, 3), dtype=np.float64),
-        q_history=[],
         window=5,
     )
 
@@ -158,7 +151,7 @@ def test_create_cost_generator_selects_backend(tmp_path) -> None:
 def test_llm_generator_produces_and_installs_cost(tmp_path) -> None:
     fake = _FakeLlmModel(_response())
     kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
-    mpc = ArmMPC()
+    mpc = ArmMPC(Human())
     gen = create_cost_generator(mpc=mpc, **kwargs)
 
     cost = gen.generate(install=True)
@@ -317,16 +310,10 @@ def test_generator_saves_reference_with_correction_video(tmp_path, monkeypatch) 
     monkeypatch.setattr(
         ArmVisualizer, "render_rollout_video", fake_render_rollout_video
     )
-    fk = SmplLeftArmFK()
-    mpc_context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     full_correction = np.full((6, 3, 3), 0.2, dtype=np.float64)
     context = build_generated_cost_context(
-        mpc_context,
-        current_q=np.zeros((3, 3), dtype=np.float64),
+        Human(),
         mdm_traj=np.zeros((4, 3, 3), dtype=np.float64),
-        q_history=[],
         window=5,
         full_correction_traj=full_correction,
     )
@@ -392,17 +379,11 @@ def test_evaluate_candidate_cost_is_finite() -> None:
 
 def _ranking_context() -> object:
     """Context with revealed preferences: chosen (still) vs original + one rejected."""
-    fk = SmplLeftArmFK()
-    mpc_context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     original = np.linspace(0.0, 0.8, 6)[:, None, None] * np.ones((6, 3, 3))
     rejected = np.linspace(0.0, 0.4, 5)[:, None, None] * np.ones((5, 3, 3))
     return build_generated_cost_context(
-        mpc_context,
-        current_q=np.zeros((3, 3), dtype=np.float64),
+        Human(),
         mdm_traj=np.zeros((4, 3, 3), dtype=np.float64),
-        q_history=[],
         window=5,
         reference_traj=original,
         rejected_trajs=(rejected,),
@@ -411,17 +392,11 @@ def _ranking_context() -> object:
 
 def _original_tie_context() -> object:
     """Context where the test cost rejects another candidate but ties the original."""
-    fk = SmplLeftArmFK()
-    mpc_context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     chosen_and_original = np.zeros((4, 3, 3), dtype=np.float64)
     rejected = np.linspace(0.0, 0.4, 5)[:, None, None] * np.ones((5, 3, 3))
     return build_generated_cost_context(
-        mpc_context,
-        current_q=np.zeros((3, 3), dtype=np.float64),
+        Human(),
         mdm_traj=chosen_and_original,
-        q_history=[],
         window=5,
         reference_traj=chosen_and_original,
         rejected_trajs=(rejected,),
@@ -430,17 +405,11 @@ def _original_tie_context() -> object:
 
 def _rejected_tie_context() -> object:
     """Context where the test cost prefers chosen to original but ties a negative."""
-    fk = SmplLeftArmFK()
-    mpc_context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     chosen_and_rejected = np.zeros((4, 3, 3), dtype=np.float64)
     original = np.linspace(0.0, 0.8, 6)[:, None, None] * np.ones((6, 3, 3))
     return build_generated_cost_context(
-        mpc_context,
-        current_q=np.zeros((3, 3), dtype=np.float64),
+        Human(),
         mdm_traj=chosen_and_rejected,
-        q_history=[],
         window=5,
         reference_traj=original,
         rejected_trajs=(chosen_and_rejected,),

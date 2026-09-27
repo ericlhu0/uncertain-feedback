@@ -15,12 +15,11 @@ from uncertain_feedback.demo_runner.core import DemoRig
 from uncertain_feedback.demo_runner.session import ClusterLevel, Session
 from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
 from uncertain_feedback.planners.mpc.config import load_mpc_config
-from uncertain_feedback.planners.mpc.costs import (
-    CompositeTrajectoryCost,
-    MpcCostContext,
-)
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
 from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
+from uncertain_feedback.simulated_users import base as simulated_users_base
 
 
 class FakeCost:
@@ -40,14 +39,16 @@ class FakePlanner:
     mdm_ready_to_terminate = True
     mdm_tracking_complete = True
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, human, **kwargs) -> None:
+        self.human = human
         self.kwargs = kwargs
         self.pushed = None
         self.costs = None
         self.mdm_goal = None
 
-    def step(self, q):
-        return np.asarray(q) + 1.0
+    def step(self):
+        self.human = self.human.step(self.human.q + 1.0)
+        return self.human
 
     def goal_reached(self, q):
         del q
@@ -76,15 +77,18 @@ def test_mdm_locked_seed_resets_before_each_generation() -> None:
     assert calls == [7, 7]
 
 
-def test_cluster_activation_canonicalizes_mdm_axis_angles_before_history_concat(
+def test_cluster_activation_converts_mdm_positions_before_history_concat(
     monkeypatch, tmp_path
 ) -> None:
     session, _ = make_session(monkeypatch, tmp_path)
     trajectory = session.start_trajectory(
         np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False
     )
-    trajectory.q_history = [np.zeros(7), np.ones(7)]
+    trajectory.feedback = trajectory.start.step(np.ones(7))
     trajectory.samples = np.zeros((1, 2, 22, 3), dtype=np.float64)
+    trajectory.samples[..., LEFT_ARM_CHAIN_INDICES, :] = (
+        trajectory.start.fk_positions_from_q(np.zeros((1, 2, 7)))
+    )
     trajectory.cluster_levels = [
         ClusterLevel(
             sample_indices=np.array([0]),
@@ -95,20 +99,16 @@ def test_cluster_activation_canonicalizes_mdm_axis_angles_before_history_concat(
             medoid_indices={0: 0},
         )
     ]
-    session.rig.gen = SimpleNamespace(
-        smpl_positions_to_left_arm_trajectory=lambda *_args, **_kwargs: np.zeros(
-            (2, 3, 3)
-        )
-    )  # type: ignore[assignment]
     monkeypatch.setattr(demo_session, "oracle_cluster_scores", lambda *args: {0: 0.0})
 
     session._activate_cluster_level()
 
     # anchor_correction drops the generator's pinned frame 0, so only one free
-    # frame of a 2-frame sample reaches the history concat.
+    # frame of a 2-frame sample reaches the history concat, where it replaces
+    # the feedback frame it starts at.
     assert trajectory.cluster_means[0].shape == (1, 7)
     assert trajectory.cluster_corrections[0].shape == (1, 7)
-    assert trajectory.cluster_fulls[0].shape == (3, 7)
+    assert trajectory.cluster_fulls[0].shape == (2, 7)
 
 
 def make_session(monkeypatch, tmp_path) -> tuple[Session, SimulatedUser]:
@@ -141,21 +141,14 @@ corrections:
         feedback_text="keep it comfortable",
         bounds=(HiddenBound("elbow_flexion", "lower_bound", low=0.5),),
     )
-    fk = SmplLeftArmFK()
     rig = DemoRig.__new__(DemoRig)
     rig.cfg = load_mpc_config(config_path)
-    rig.fk = fk
-    rig.context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
-    rig.body_pos = np.zeros((22, 3))
-    rig.spine3_pos = fk.tpose_spine3_pos
-    rig.spine3_aa = np.zeros(3)
+    rig.human = Human()
     rig._extra_costs = MethodType(  # type: ignore[method-assign]
         lambda self, selected: CompositeTrajectoryCost([]), rig
     )
     rig._manual_planner = MethodType(  # type: ignore[method-assign]
-        lambda self, start, goal, extra: FakePlanner(extra_costs=extra), rig
+        lambda self, human, goal, extra: FakePlanner(human, extra_costs=extra), rig
     )
     rig._cfg_with_goal = MethodType(lambda self, goal: self.cfg, rig)  # type: ignore[method-assign]
     rig.package_trajectory = MethodType(  # type: ignore[method-assign]
@@ -173,7 +166,7 @@ corrections:
         persona_name=user.name,
         user=user,
         dir=session_dir,
-        corpus=TrajectoryCorpus.create(session_dir / "trajectory_corpus", rig.context),
+        corpus=TrajectoryCorpus.create(session_dir / "trajectory_corpus", rig.human),
     )
     rig.session = session
     session.run_oracle = MethodType(lambda self, from_trigger: {}, session)  # type: ignore[method-assign]
@@ -187,7 +180,7 @@ def test_trajectory_pauses_and_logs_discomfort_segment(monkeypatch, tmp_path) ->
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
+        lambda selected, human, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
     )
 
     trajectory = session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
@@ -217,12 +210,85 @@ def test_trajectory_pauses_and_logs_discomfort_segment(monkeypatch, tmp_path) ->
     }
 
 
+def _violations_by_frame(monkeypatch, values: dict[int, float]) -> None:
+    """Violation of each frame keyed by its step (FakePlanner adds 1 per step)."""
+
+    def violations(_user, _human, q):
+        steps = np.asarray(q).reshape(len(q), -1)[:, 0]
+        return np.array([values.get(int(step), 0.0) for step in steps])
+
+    monkeypatch.setattr(demo_session, "_arm_aa", lambda _rig, q: q)
+    monkeypatch.setattr(demo_session, "compute_violations", violations)
+    monkeypatch.setattr(simulated_users_base, "compute_violations", violations)
+
+
+def test_pause_gives_feedback_from_the_last_comfortable_frame(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    # Frame 2 is under the trigger threshold but not comfortable.
+    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+
+    trajectory = session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    payload = session._trajectory_payload()
+
+    assert payload["step"] == 3
+    assert payload["trigger"] == {"step": 1, "reason": "discomfort", "violation": 0.03}
+    assert trajectory.feedback is not None
+    np.testing.assert_array_equal(
+        trajectory.feedback.history, trajectory.human.history[:2]
+    )
+
+
+def test_ignoring_a_backed_up_pause_resumes_from_the_live_frame(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+
+    payload = session.ignore_comfort_violation()
+
+    assert payload["status"] == "complete"
+    history = session.trajectory.human.history  # type: ignore[union-attr]
+    np.testing.assert_array_equal(history[:, 0], np.arange(7.0))
+
+
+def test_applying_a_backed_up_correction_rewinds_to_the_feedback_frame(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+    session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
+    trajectory = session.trajectory
+    assert trajectory is not None
+    paused_planner = trajectory.mpc
+    correction = np.stack([np.full((3, 3), 0.5), np.ones((3, 3))])
+    trajectory.scaled_correction = correction
+    trajectory._last_cost = FakeCost()  # type: ignore[assignment]
+
+    def fake_commit(self):
+        self._round_costs.append(self.trajectory._last_cost)
+        self.round_records.append({"index": 0})
+        return {"rounds": self.round_records, "unified": None}
+
+    session.commit_round = MethodType(fake_commit, session)  # type: ignore[method-assign]
+
+    payload = session.apply_round_and_continue()
+
+    assert trajectory.mpc is not paused_planner
+    np.testing.assert_array_equal(trajectory.mpc.pushed, correction)  # type: ignore[attr-defined]
+    # Re-planned from frame 1, then paused at the same place again.
+    np.testing.assert_array_equal(trajectory.human.history[:, 0], np.arange(4.0))
+    assert payload["trigger"]["step"] == 1
+
+
 def test_trajectory_can_advance_one_live_frame_at_a_time(monkeypatch, tmp_path) -> None:
     session, _ = make_session(monkeypatch, tmp_path)
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
+        lambda selected, human, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
     )
 
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False)
@@ -250,7 +316,7 @@ def test_exit_trajectory_keeps_session_context(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
+        lambda selected, human, q: np.array([0.03 if q[0, 0, 0] == 1 else 0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
     artifact_dir = str(session.trajectory.artifact_dir)  # type: ignore[union-attr]
@@ -274,7 +340,7 @@ def test_new_trajectory_installs_session_costs_from_frame_zero(
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.0]),
+        lambda selected, human, q: np.array([0.0]),
     )
     learned = FakeCost()
     session._round_costs = [learned]  # type: ignore[list-item]
@@ -294,7 +360,7 @@ def test_apply_round_resumes_same_planner_and_pauses_again(
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.03 if q[0, 0, 0] in (1, 3) else 0.0]),
+        lambda selected, human, q: np.array([0.03 if q[0, 0, 0] in (1, 3) else 0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
     trajectory = session.trajectory
@@ -327,7 +393,7 @@ def test_ignore_comfort_violation_resumes_until_a_new_violation(
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.03 if q[0, 0, 0] in (1, 3) else 0.0]),
+        lambda selected, human, q: np.array([0.03 if q[0, 0, 0] in (1, 3) else 0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
 
@@ -350,7 +416,7 @@ def test_correction_can_be_requested_while_the_user_is_comfortable(
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.0]),
+        lambda selected, human, q: np.array([0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False)
     session.advance_trajectory(max_steps=2)
@@ -361,9 +427,9 @@ def test_correction_can_be_requested_while_the_user_is_comfortable(
     assert payload["trigger"] == {"step": 2, "reason": "operator", "violation": 0.0}
     assert payload["trajectory"]["n_frames"] == 3
     trajectory = session.trajectory
-    assert trajectory is not None and trajectory.q_feedback is not None
-    np.testing.assert_array_equal(trajectory.q_feedback, trajectory.executed[-1])
-    assert len(trajectory.q_history) == 3
+    assert trajectory is not None and trajectory.feedback is not None
+    np.testing.assert_array_equal(trajectory.feedback.q, trajectory.human.q)
+    assert len(trajectory.feedback.history) == 3
 
 
 def test_retroactive_correction_rewinds_the_rollout_and_replans(
@@ -373,7 +439,7 @@ def test_retroactive_correction_rewinds_the_rollout_and_replans(
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.0]),
+        lambda selected, human, q: np.array([0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
     assert session.trajectory is not None and session.trajectory.complete
@@ -387,7 +453,7 @@ def test_retroactive_correction_rewinds_the_rollout_and_replans(
     trajectory = session.trajectory
     assert trajectory.step == 2
     assert not trajectory.complete
-    np.testing.assert_allclose(trajectory.q, trajectory.executed[0] + 2.0)
+    np.testing.assert_allclose(trajectory.human.q, trajectory.human.history[0] + 2.0)
     assert trajectory.mpc is not planner
     saved = np.load(trajectory.artifact_dir / "executed_trajectory.npy")
     assert saved.shape == (3, 7)
@@ -400,7 +466,7 @@ def test_retroactive_correction_re_rolls_the_rest_of_the_trajectory(
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.0]),
+        lambda selected, human, q: np.array([0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
     trajectory = session.trajectory
@@ -431,7 +497,7 @@ def test_operator_pause_can_be_resumed_without_feedback(monkeypatch, tmp_path) -
     monkeypatch.setattr(
         demo_session,
         "compute_violations",
-        lambda selected, context, q: np.array([0.0]),
+        lambda selected, human, q: np.array([0.0]),
     )
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False)
     session.advance_trajectory(max_steps=2)

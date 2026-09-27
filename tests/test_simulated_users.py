@@ -4,21 +4,21 @@
 
 from __future__ import annotations
 
-import dataclasses
-
 import numpy as np
 
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
-from uncertain_feedback.simulated_users import MOTION_FPS, feature_series
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.simulated_users import (
+    HiddenBound,
+    SimulatedUser,
+    feature_series,
+    feedback_anchor,
+)
 from uncertain_feedback.simulated_users.personas import (
     BICEPS_LONG_HEAD_CONTRACTURE,
     BRACHIAL_PLEXUS_MECHANOSENSITIVITY,
     CROSS_BODY_PAIN,
-    MORNING_SHOULDER_STIFFNESS,
     OUT_OF_SYNERGY_REACH_PREFERENCE,
     PAINFUL_ARC,
-    SPASTIC_ELBOW_FLEXORS,
     TRICEPS_LONG_HEAD_CONTRACTURE,
     UNRESTRICTED,
 )
@@ -115,54 +115,23 @@ def test_neural_mechanosensitivity_requires_flexion_during_abduction() -> None:
     assert violations[2] == 0.0
 
 
-def test_morning_stiffness_only_restricts_in_the_morning() -> None:
-    elevations = np.array([1.5, 0.8])
+def test_feedback_anchor_backs_up_to_the_last_comfortable_frame() -> None:
+    human = Human()
+    q = np.zeros((7, 7), dtype=np.float64)
+    q[:, 6] = np.linspace(0.2, 1.4, 7)
+    flexion = feature_series(human, q)["elbow_flexion"]
+    assert np.all(np.diff(flexion) > 0.0)
 
-    morning = MORNING_SHOULDER_STIFFNESS.violation_series(
-        {"shoulder_elevation": elevations, "time_of_day": np.array([8.0, 8.0])}
-    )
-    afternoon = MORNING_SHOULDER_STIFFNESS.violation_series(
-        {"shoulder_elevation": elevations, "time_of_day": np.array([14.0, 14.0])}
-    )
+    def user(high: float) -> SimulatedUser:
+        bound = HiddenBound("elbow_flexion", "upper_bound", high=high)
+        return SimulatedUser(
+            name="t", description="", feedback_text="", bounds=(bound,)
+        )
 
-    assert morning[0] > 0.0  # elevated in the morning: stiff
-    assert morning[1] == 0.0  # carried low in the morning: fine
-    assert np.all(afternoon == 0.0)  # same poses after loosening up: fine
-
-
-def test_spastic_elbow_tolerates_fast_extension_only_when_flexed() -> None:
-    features = {
-        "elbow_flexion": np.array([0.4, 0.4, 2.0]),
-        "elbow_flexion_velocity": np.array([-0.2, -1.0, -1.0]),
-    }
-
-    violations = SPASTIC_ELBOW_FLEXORS.violation_series(features)
-
-    assert violations[0] == 0.0  # slow extension near full extension: fine
-    assert violations[1] > 0.0  # fast extension near full extension: catch
-    assert violations[2] == 0.0  # same speed while deeply flexed: fine
-
-
-def test_feature_series_adds_velocities_and_session_clock() -> None:
-    fk = SmplLeftArmFK()
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
-    q = np.zeros((5, 7), dtype=np.float64)
-    q[:, 6] = np.linspace(0.2, 1.0, 5)
-
-    features = feature_series(context, q)
-
-    assert "time_of_day" not in features
-    np.testing.assert_allclose(
-        features["elbow_flexion_velocity"],
-        np.gradient(features["elbow_flexion"]) * MOTION_FPS,
-    )
-    assert np.all(features["elbow_flexion_velocity"] > 0.0)
-    assert np.all(feature_series(context, q[:1])["elbow_flexion_velocity"] == 0.0)
-
-    timed = feature_series(dataclasses.replace(context, time_of_day=8.5), q)
-    np.testing.assert_allclose(timed["time_of_day"], 8.5)
+    past_frame_3 = user(float(flexion[3:5].mean()))
+    assert feedback_anchor(past_frame_3, human, q, 5) == 3
+    assert feedback_anchor(past_frame_3, human, q, 2) == 2  # already comfortable
+    assert feedback_anchor(user(float(flexion[0]) - 0.1), human, q, 5) == 5
 
 
 def test_limit_cost_penalizes_out_of_box_rollouts() -> None:
@@ -186,10 +155,7 @@ def test_intent_aligned_chooser_picks_comfortable_aligned_candidate() -> None:
     from uncertain_feedback.simulated_users.chooser import choose_correction
     from uncertain_feedback.simulated_users.personas import ADHESIVE_CAPSULITIS
 
-    fk = SmplLeftArmFK()
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
+    human = Human()
     intent = CorrectionIntent(
         join_index=0,
         feature_deltas={
@@ -215,7 +181,7 @@ def test_intent_aligned_chooser_picks_comfortable_aligned_candidate() -> None:
 
     choice = choose_correction(
         ADHESIVE_CAPSULITIS,
-        context,
+        human,
         candidates,
         oracle,
         mode="intent_aligned",
@@ -229,7 +195,7 @@ def test_intent_aligned_chooser_picks_comfortable_aligned_candidate() -> None:
     for _ in range(5):
         random_choice = choose_correction(
             ADHESIVE_CAPSULITIS,
-            context,
+            human,
             candidates,
             oracle,
             mode="random",

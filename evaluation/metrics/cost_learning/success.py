@@ -14,7 +14,7 @@ def goal_row(interaction: Interaction) -> dict[str, Any]:
     """One flat record per goal; the unit success-at-k and rounds aggregate over."""
     task = interaction.task
     executed_metrics = violation_metrics(
-        interaction.user, interaction.context, interaction.executed
+        interaction.user, interaction.human, interaction.executed
     )
     return {
         "persona": task.persona,

@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING, Any, Callable
 import numpy as np
 
 from uncertain_feedback.motion_generators.steering import SteeringConfig, SteeringSpec
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import (
+    LEFT_ARM_CHAIN_INDICES,
+    SmplLeftArmFK,
+)
 from uncertain_feedback.uncertainty.cluster_picker import (
     pick_cluster,
     pick_cluster_positions,
@@ -101,9 +105,9 @@ class UqSelector:
         self,
         gen: MotionGenerator,
         text: str,
+        human: Human,
         *,
-        start_pose: np.ndarray | None = None,
-        current_q: np.ndarray | None = None,
+        prefix: bool,
         auto_cluster: int | None = None,
         mdm_frames: int | None = None,
         frozen_body: bool = False,
@@ -112,9 +116,6 @@ class UqSelector:
             Callable[[dict[int, np.ndarray]], int | tuple[int, float]] | None
         ) = None,
         trajectory_fraction: float = 1.0,
-        spine3_pos: np.ndarray | None = None,
-        spine3_aa: np.ndarray | None = None,
-        body_pos: np.ndarray | None = None,
         steering: SteeringSpec | None = None,
     ) -> UqClusterResult:
         """Generate multiple MDM samples, cluster them, let the user pick.
@@ -130,7 +131,10 @@ class UqSelector:
         Args:
             gen:        Motion generator (already loaded or lazy).
             text:       Natural-language motion description.
-            start_pose: ``(263,)`` HML263 vector conditioning the motion start.
+            human:      The person the motion starts from; the medoids are
+                        converted onto its arm.
+            prefix:     Condition MDM on the arm's recent history instead of
+                        its current pose alone.
             mdm_frames: Exact number of MDM frames to generate. ``None`` keeps
                         the generator default.
             frozen_body: If ``True``, freeze non-left-arm body features during
@@ -150,32 +154,26 @@ class UqSelector:
         print(f"Generating {self._n_diffusion_samples} motion samples for: '{text}' …")
         generation_t0 = time.perf_counter()
         use_position_uq = getattr(self._clusterer, "supports_positions", False)
-        base_spine_aa = (
-            np.asarray(spine3_aa, dtype=np.float64)
-            if spine3_aa is not None
-            else np.zeros(3, dtype=np.float64)
-        )
+
+        def arm_trajectory(sample_positions: np.ndarray) -> np.ndarray:
+            chain = sample_positions[..., LEFT_ARM_CHAIN_INDICES, :]
+            return human.arm_aa_from_q(human.ik_q_from_positions(chain))
+
+        drawn = gen.generate_positions(
+            text,
+            human,
+            prefix=prefix,
+            num_samples=self._n_diffusion_samples,
+            num_frames=mdm_frames,
+            frozen_body=frozen_body,
+            **steer_kwargs,
+        )  # (n_diffusion_samples, n_frames, 22, 3)
         if use_position_uq:
-            positions = gen.generate_left_arm_position_samples(
-                text,
-                start_pose=start_pose,
-                num_samples=self._n_diffusion_samples,
-                num_frames=mdm_frames,
-                frozen_body=frozen_body,
-                **steer_kwargs,
-            )  # (n_diffusion_samples, n_frames, 22, 3)
+            positions: np.ndarray | None = drawn
             trajectories = None
         else:
             positions = None
-            trajectories = gen.generate_left_arm_trajectory(
-                text,
-                start_pose=start_pose,
-                num_samples=self._n_diffusion_samples,
-                num_frames=mdm_frames,
-                frozen_body=frozen_body,
-                spine3_aa=base_spine_aa,
-                **steer_kwargs,
-            )  # (n_diffusion_samples, n_frames, 3, 3)
+            trajectories = arm_trajectory(drawn)  # (n_samples, n_frames, 3, 3)
         print(
             f"[timing] MDM generation pipeline: {time.perf_counter() - generation_t0:.3f}s"
         )
@@ -207,10 +205,7 @@ class UqSelector:
         cluster_means: dict[int, np.ndarray] = {}
         for label, medoid in sorted(self._clusterer.medoid_indices(labels).items()):
             if positions is not None:
-                cluster_means[label] = gen.smpl_positions_to_left_arm_trajectory(
-                    positions[medoid],
-                    spine3_aa=base_spine_aa,
-                )
+                cluster_means[label] = arm_trajectory(positions[medoid])
             else:
                 assert trajectories is not None
                 cluster_means[label] = trajectories[medoid]
@@ -236,11 +231,8 @@ class UqSelector:
         else:
             fk = self._fk
             root_features = self._clusterer.features
-            spine_pos = (
-                np.asarray(spine3_pos, dtype=np.float64)
-                if spine3_pos is not None
-                else fk.tpose_spine3_pos
-            )
+            spine_pos, spine_aa = human.spine3_pos, human.spine3_aa
+            current_arm_aa = human.arm_aa_from_q(human.q)
             picker_t0 = time.perf_counter()
             if positions is not None:
                 pick_result = pick_cluster_positions(
@@ -249,13 +241,9 @@ class UqSelector:
                     fk=fk,
                     trajectory_fraction=trajectory_fraction,
                     spine_pos=spine_pos,
-                    spine_aa=base_spine_aa,
-                    body_pos=body_pos,
-                    current_arm_aa=(
-                        q_to_arm_aa(current_q, self._fk.elbow_hinge_axis)
-                        if current_q is not None
-                        else None
-                    ),
+                    spine_aa=spine_aa,
+                    body_pos=human.posture,
+                    current_arm_aa=current_arm_aa,
                     init_scale=default_scale,
                     recluster=self._clusterer.cluster_positions,  # type: ignore[attr-defined]
                     n_clusters=self._clusterer.n_clusters,
@@ -263,11 +251,8 @@ class UqSelector:
                 medoid = pick_result.sample_indices[
                     medoid_index(root_features[pick_result.sample_indices])
                 ]
-                cluster_means[pick_result.root_label] = (
-                    gen.smpl_positions_to_left_arm_trajectory(
-                        positions[medoid],
-                        spine3_aa=base_spine_aa,
-                    )
+                cluster_means[pick_result.root_label] = arm_trajectory(
+                    positions[medoid]
                 )
             else:
                 assert trajectories is not None
@@ -277,13 +262,9 @@ class UqSelector:
                     fk=fk,
                     trajectory_fraction=trajectory_fraction,
                     spine_pos=spine_pos,
-                    spine_aa=base_spine_aa,
-                    body_pos=body_pos,
-                    current_arm_aa=(
-                        q_to_arm_aa(current_q, self._fk.elbow_hinge_axis)
-                        if current_q is not None
-                        else None
-                    ),
+                    spine_aa=spine_aa,
+                    body_pos=human.posture,
+                    current_arm_aa=current_arm_aa,
                     init_scale=default_scale,
                     recluster=self._clusterer.cluster,
                     n_clusters=self._clusterer.n_clusters,

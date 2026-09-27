@@ -22,7 +22,7 @@ _LEG_BONES = ((1, 4), (4, 7), (7, 10), (2, 5), (5, 8), (8, 11))
 # same in every pose.
 _LEFT_ARM_LBS_JOINTS = (16, 18, 20, 22)
 # Left clavicle, upper arm, forearm as SMPL joint pairs — the three segments
-# `SmplLeftArmFK.scale_arm_lengths` rescales, in the same order.
+# `SmplLeftArmFK.scaled` rescales, in the same order.
 _LEFT_ARM_BONES = ((13, 16), (16, 18), (18, 20))
 
 
@@ -41,7 +41,7 @@ class SmplMeshCache:
     Only the *directions* of those bones are recoverable that way, so the drawn
     arm is as long as whatever body the model is running. That is exact while the
     planner is on the SMPL neutral skeleton, and wrong by the difference once
-    ``SmplLeftArmFK.scale_arm_lengths`` has put it on a measured person's — a few
+    ``SmplLeftArmFK.scaled`` has put it on a measured person's — a few
     centimetres at the wrist, next to a 5 cm Cartesian goal threshold. Passing
     ``arm_lengths`` fits ``betas`` to those three measured segments so the mesh is
     the body the planner is planning for.
@@ -50,7 +50,7 @@ class SmplMeshCache:
         body_positions: ``(22, 3)`` joint positions of the pose to fit the torso to.
         max_entries:    Registered pose sequences to keep before evicting.
         arm_lengths:    Measured ``(clavicle, upper_arm, forearm)`` lengths in
-                        metres, in :meth:`SmplLeftArmFK.scale_arm_lengths` order.
+                        metres, in :meth:`SmplLeftArmFK.scaled` order.
                         Default: leave the model at neutral shape.
     """
 

@@ -1,31 +1,21 @@
-"""MDM API for generating left arm motion trajectories from text descriptions.
+"""MDM API for sampling left-arm corrections from text descriptions.
 
 Provides :class:`MdmMotionGenerator`, which lazily loads the MDM model and
-HumanML3D dataset and exposes a simple one-call interface for generating left
-arm trajectories.  The caller supplies a starting pose (loaded via
-:meth:`MdmMotionGenerator.load_pose`) and the generator constrains all
-body joints except the left arm to that pose via inpainting — the same
-approach used in ``sample_leftarm.py``.
+HumanML3D dataset. Generation is conditioned on the person being moved: every
+body joint except the left arm is inpainted to the person's pose file
+(``human.hml_pose``) — the same approach used in ``sample_leftarm.py`` — and
+the arm starts at its current state or recent history.
 
 Typical usage::
 
+    human = Human(pose="path/to/pose.pt")
     gen = MdmMotionGenerator()
 
-    # Load the starting pose and decode it.
-    start_pose = gen.load_pose("path/to/pose.pt")
-    initial_q, body_positions, spine3_aa, collar_aa = gen.decode_pose(start_pose)
-
-    # Build a start pose that reflects the current arm configuration.
-    current_pose = gen.build_pose_from_arm_aa(start_pose, current_arm_aa)
-
-    # Generate a trajectory from a text prompt.
-    trajectory = gen.generate_left_arm_trajectory(
-        "a person raises their left arm above their head",
-        start_pose=current_pose,
-    )  # (n_frames, 3, 3)
-
-    # Validate against the safety costs and queue for direct playback.
-    mpc.push_trajectory(trajectory)
+    positions = gen.generate_positions(
+        "a person raises their left arm above their head", human, prefix=False
+    )  # (1, n_frames, 22, 3)
+    correction = human.ik_q_from_positions(positions[0, :, LEFT_ARM_CHAIN_INDICES])
+    mpc.push_trajectory(correction)
 """
 
 from __future__ import annotations
@@ -53,15 +43,9 @@ if str(_SRC_ROOT) not in sys.path:
 from uncertain_feedback.consts import MDM_MODEL_WEIGHTS_PATH, MDM_ROOT
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.motion_generators.mdm.hml_smpl_conversion import (
-    hml263_batch_to_smpl_body_pose,
     hml263_batch_to_smpl_positions,
-    hml263_to_smpl_body_pose,
     smpl_arm_aa_seq_to_hml263_frames,
     smpl_arm_aa_to_hml263_frame,
-    smpl_body_pose_to_arm_aa,
-    smpl_body_pose_to_collar_aa,
-    smpl_body_pose_to_positions,
-    smpl_body_pose_to_spine3_aa,
 )
 from uncertain_feedback.motion_generators.steering import (
     SteeringEvent,
@@ -196,9 +180,9 @@ class MdmMotionGenerator(
 ):  # pylint: disable=too-many-instance-attributes
     """Lazy-loading wrapper for the MDM model.
 
-    The MDM model and HumanML3D dataset are loaded on the first call to
-    :meth:`generate_left_arm_trajectory` or :meth:`decode_pose`.
-    Subsequent calls reuse the already-loaded resources.
+    The MDM model and HumanML3D dataset are loaded on the first generation
+    or pose-patching call. Subsequent calls reuse the already-loaded
+    resources.
 
     Args:
         model_path: Path to the MDM weights ``.pt`` file.  Defaults to
@@ -380,68 +364,6 @@ class MdmMotionGenerator(
         if self._fixseed is not None:
             self._fixseed(seed)
 
-    def load_pose(self, path: str | Path) -> np.ndarray:
-        """Load a saved HML263 pose file and return as a ``(263,)`` numpy
-        array.
-
-        Args:
-            path: Path to the ``.pt`` file.
-
-        Returns:
-            ``(263,)`` HML263 feature vector suitable for use as ``start_pose``
-            in :meth:`generate_left_arm_trajectory` or :meth:`decode_pose`.
-        """
-        import torch  # pylint: disable=import-outside-toplevel
-
-        return (
-            torch.load(Path(path), map_location="cpu", weights_only=True)
-            .squeeze()
-            .numpy()
-        )  # (263,)
-
-    def decode_pose(
-        self, pose: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Decode a ``(263,)`` HML263 pose into arm angles, body positions, spine, and collar.
-
-        Args:
-            pose: ``(263,)`` HML263 feature vector (e.g. as returned by
-                  :meth:`load_pose`).
-
-        Returns:
-            arm_aa:         ``(3, 3)`` left arm axis-angles for
-                            ``[left_shoulder, left_elbow, left_wrist]``.
-            body_positions: ``(22, 3)`` world joint positions for all SMPL
-                            joints.
-            spine3_aa:      ``(3,)`` world axis-angle of spine3 (joint 9).
-                            Pass this to :meth:`SmplLeftArmFK.fk` as
-                            ``spine3_aa``, together with
-                            ``spine3_pos=body_positions[9]``, so that arm
-                            joint positions computed from ``arm_aa`` match
-                            those in ``body_positions``.
-            collar_aa:      ``(3,)`` local left-collar axis-angle from the
-                            decoded start pose.
-        """
-        self._ensure_loaded()
-        import torch  # pylint: disable=import-outside-toplevel
-
-        pose_t = torch.tensor(
-            pose, dtype=torch.float32, device=self._dist_util.dev()
-        ).unsqueeze(
-            0
-        )  # (1, 263)
-        body_pose = hml263_to_smpl_body_pose(
-            pose_t, self._data, self._fk.tpose_all_joints
-        )  # (1, 21, 3)
-        arm_aa = smpl_body_pose_to_arm_aa(body_pose[0])  # (3, 3)
-        collar_aa = smpl_body_pose_to_collar_aa(body_pose[0])  # (3,)
-        body_positions = smpl_body_pose_to_positions(
-            body_pose[0], self._fk.tpose_all_joints
-        )  # (22, 3)
-        spine3_aa = smpl_body_pose_to_spine3_aa(body_pose[0])  # (3,)
-
-        return arm_aa, body_positions, spine3_aa, collar_aa
-
     def build_pose_from_arm_aa(
         self,
         base_pose: np.ndarray,
@@ -452,11 +374,11 @@ class MdmMotionGenerator(
         Converts ``arm_aa`` to HML263 6D rotation features and replaces the
         corresponding entries in ``base_pose``.  Use this to construct a
         ``start_pose`` that reflects the MPC's current arm configuration
-        before calling :meth:`generate_left_arm_trajectory`.
+        before calling :meth:`generate_left_arm_position_samples`.
 
         Args:
-            base_pose: ``(263,)`` HML263 feature vector (e.g. sitting pose
-                       from :meth:`load_pose`).
+            base_pose: ``(263,)`` HML263 feature vector (e.g. a Human's
+                       ``hml_pose``).
             arm_aa:    ``(3, 3)`` axis-angle for
                        ``[left_shoulder, left_elbow, left_wrist]``.
 
@@ -491,12 +413,12 @@ class MdmMotionGenerator(
         MPC's recent arm history (oldest → newest, ending at the current
         configuration) and the resulting prefix carries real velocity features
         rather than the ~0 of a single pinned frame.  Feed the result to
-        :meth:`generate_left_arm_trajectory` as ``start_pose``, which requires
-        ``K == prefix_frames``.
+        :meth:`generate_left_arm_position_samples` as ``start_pose``, which
+        requires ``K == prefix_frames``.
 
         Args:
-            base_pose:  ``(263,)`` HML263 feature vector (e.g. sitting pose
-                        from :meth:`load_pose`).
+            base_pose:  ``(263,)`` HML263 feature vector (e.g. a Human's
+                        ``hml_pose``).
             arm_aa_seq: ``(K, 3, 3)`` axis-angles for
                         ``[left_shoulder, left_elbow, left_wrist]`` per frame,
                         oldest → newest.
@@ -569,7 +491,6 @@ class MdmMotionGenerator(
         assert self._hml_std is not None
         assert self._not_l_arm_mask is not None
         assert start_pose is not None, "sampling requires a start pose to pin"
-        self._align_fk_collar_to_pose(start_pose)
 
         # pylint: disable=import-outside-toplevel,import-error
         import torch
@@ -719,84 +640,35 @@ class MdmMotionGenerator(
         print(f"[timing] diffusion sampling: {time.perf_counter() - diffusion_t0:.3f}s")
         return img.detach()
 
-    def generate_left_arm_trajectory(  # pylint: disable=too-many-locals
+    def generate_left_arm_position_samples(  # pylint: disable=too-many-locals
         self,
         text: str,
         motion_length_seconds: float = 6.0,
         start_pose: np.ndarray | None = None,
-        save_path: str | Path | None = None,
         num_samples: int = 1,
         num_frames: int | None = None,
         frozen_body: bool = False,
-        spine3_aa: np.ndarray | None = None,
         *,
         steering: SteeringSpec | None = None,
         speed: float | None = None,
+        save_path: str | Path | None = None,
     ) -> np.ndarray:
-        """Generate a left arm motion trajectory from a text description.
+        """Generate MDM samples and return SMPL XYZ positions without IK.
 
-        All body joints except the left arm (left_shoulder, left_elbow,
-        left_wrist) are inpainted to ``start_pose`` throughout the motion.
-        The first ``N_PREFIX_FRAMES`` frames are locked to the arm
-        configuration(s) encoded in ``start_pose``.  To start from the MPC's
-        current arm state, pass a ``(263,)`` ``start_pose`` built with
-        :meth:`build_pose_from_arm_aa` — it is expanded into a static prefix —
-        or an ``(N_PREFIX_FRAMES, 263)`` prefix from
-        :meth:`build_prefix_from_arm_history` to condition on the arm's recent
-        history instead.
-
-        The prefix is **generation-time conditioning only**: it is additive to
-        the requested length and stripped from the result, so the returned
-        trajectory has exactly the requested number of frames and its frame 0
-        is the last pinned frame — the configuration the arm is in right now.
-        The ``save_path`` video is a diagnostic and still shows the full clip
-        including the prefix.
-
-        Args:
-            text:                  Natural-language description of the desired
-                                   motion (e.g. ``"a person waves their left
-                                   arm"``).
-            motion_length_seconds: Length of the generated motion in seconds.
-                                   Capped at 9.8 s (HumanML3D maximum).
-            start_pose:            ``(263,)`` HML263 feature vector used as
-                                   the inpainting base for all joints
-                                   throughout the motion, or an
-                                   ``(N_PREFIX_FRAMES, 263)`` prefix.  Pass the
-                                   output of :meth:`load_pose`,
-                                   :meth:`build_pose_from_arm_aa` or
-                                   :meth:`build_prefix_from_arm_history`.
-            save_path:             If provided, save a full-body visualization
-                                   of the generated motion to this path as an
-                                   MP4 (e.g. ``"motion.mp4"``).  Uses the same
-                                   ``plot_3d_motion`` pipeline as
-                                   ``sample_leftarm.py``.  Requires ``ffmpeg``
-                                   and ``moviepy``.  Defaults to ``None``
-                                   (no video saved).  When ``num_samples > 1``,
-                                   only the first sample is visualized.
-            num_samples:           Number of independent diffusion samples to
-                                   draw in a single forward pass.  Defaults to
-                                   ``1`` (backward-compatible).
-            num_frames:            Exact number of MDM frames to return.  If
-                                   ``None``, derived from
-                                   ``motion_length_seconds`` at 20 FPS.
-            frozen_body:           If ``True``, inpaint/freeze all non-left-arm
-                                   body features for the full motion.  If
-                                   ``False``, only the first ``N_PREFIX_FRAMES`` frames are
-                                   locked to ``start_pose``.
-            spine3_aa:             Optional fixed MPC spine3 world axis-angle.
-                                   When provided, the returned goals are
-                                   projected into the fixed MPC base instead
-                                   of using MDM's body frame.
-            steering:              Optional cost-steering spec biasing the
-                                   diffusion samples toward a user cost model.
-            speed:                 Requested mean left-arm speed in metres per
-                                   MDM frame (20 FPS).  Only used by
-                                   ``--speed_cond`` checkpoints; ``None`` means
-                                   the dataset-neutral value.
+        All body joints except the left arm are inpainted to ``start_pose``;
+        with ``frozen_body`` they stay frozen for the whole motion, otherwise
+        only the first ``N_PREFIX_FRAMES`` frames are locked. The pinned
+        frames are conditioning only: they are additive to ``num_frames`` and
+        stripped after decoding, so frame 0 of the result is the last pinned
+        frame (the current configuration).  ``start_pose`` is a ``(263,)``
+        pose — expanded into a static prefix — or an ``(N_PREFIX_FRAMES, 263)``
+        prefix.  ``save_path`` saves an MP4 of the first sample (prefix
+        included) through the ``plot_3d_motion`` pipeline of
+        ``sample_leftarm.py``; it needs ``ffmpeg`` and ``moviepy``.
 
         Returns:
-            ``(n_frames, 3, 3)`` axis-angle trajectory when ``num_samples==1``.
-            ``(num_samples, n_frames, 3, 3)`` when ``num_samples > 1``.
+            ``(num_samples, n_frames, 22, 3)`` global SMPL joint positions,
+            where ``n_frames`` is the requested count.
         """
         n_total = _resolve_total_frames(motion_length_seconds, num_frames)
         sample = self._sample_hml(
@@ -847,92 +719,9 @@ class MdmMotionGenerator(
             )
             print(f"Saved motion video to {save_path}")
 
-        # --- Convert normalized HML → SMPL body_pose/XYZ → arm axis-angles ---
-        # The prefix is dropped only after decoding: HML263 root features are
-        # frame-to-frame velocities that recover_from_ric integrates from frame
-        # 0, so slicing raw frames would move every decoded frame.
-        use_fixed_base = spine3_aa is not None
-        if use_fixed_base:
-            hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
-            convert_t0 = time.perf_counter()
-            positions = hml263_batch_to_smpl_positions(hml_vecs, data, model)
-            arm_aa = self.smpl_positions_to_left_arm_trajectory(
-                positions,
-                spine3_aa=spine3_aa,
-            )
-            print(
-                "[timing] HML-to-fixed-base arm conversion total: "
-                f"{time.perf_counter() - convert_t0:.3f}s"
-            )
-            arm_aa = arm_aa[:, N_PREFIX_FRAMES - 1 :]
-            return arm_aa[0] if num_samples == 1 else arm_aa
-
-        if num_samples == 1:
-            # Single-sample fast path: no ThreadPoolExecutor overhead.
-            hml_vec = sample[0, :, 0, :].T  # (n_total, 263)
-            convert_t0 = time.perf_counter()
-            body_pose = hml263_to_smpl_body_pose(
-                hml_vec, data, self._fk.tpose_all_joints
-            )  # (n_total, 21, 3)
-            print(
-                "[timing] HML-to-arm conversion: "
-                f"{time.perf_counter() - convert_t0:.3f}s"
-            )
-            arm_aa = smpl_body_pose_to_arm_aa(body_pose)
-            return arm_aa[N_PREFIX_FRAMES - 1 :]  # (n_frames, 3, 3)
-
-        # Batch path: recover positions for all samples at once, then IK.
-        # sample: (num_samples, 263, 1, n_total) → (num_samples, n_total, 263)
-        hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
-        convert_t0 = time.perf_counter()
-        body_pose_batch = hml263_batch_to_smpl_body_pose(
-            hml_vecs, data, self._fk.tpose_all_joints
-        )  # (num_samples, n_total, 21, 3)
-        print(
-            "[timing] HML-to-arm conversion total: "
-            f"{time.perf_counter() - convert_t0:.3f}s"
-        )
-        arm_aa = smpl_body_pose_to_arm_aa(body_pose_batch)
-        return arm_aa[:, N_PREFIX_FRAMES - 1 :]  # (num_samples, n_frames, 3, 3)
-
-    def generate_left_arm_position_samples(  # pylint: disable=too-many-locals
-        self,
-        text: str,
-        motion_length_seconds: float = 6.0,
-        start_pose: np.ndarray | None = None,
-        num_samples: int = 1,
-        num_frames: int | None = None,
-        frozen_body: bool = False,
-        *,
-        steering: SteeringSpec | None = None,
-        speed: float | None = None,
-    ) -> np.ndarray:
-        """Generate MDM samples and return SMPL XYZ positions without IK.
-
-        This is intended for UQ clustering and preview rendering.  It runs the
-        same batched diffusion process as :meth:`generate_left_arm_trajectory`,
-        then stops after HML recovery / ``rot2xyz`` instead of converting every
-        frame to local arm axis-angles.
-
-        As in :meth:`generate_left_arm_trajectory`, the ``N_PREFIX_FRAMES``
-        pinned frames are conditioning only: they are additive to
-        ``num_frames`` and stripped after decoding, so frame 0 of the result is
-        the last pinned frame (the current configuration).  ``start_pose`` is a
-        ``(263,)`` pose — expanded into a static prefix — or an
-        ``(N_PREFIX_FRAMES, 263)`` prefix.
-
-        Returns:
-            ``(num_samples, n_frames, 22, 3)`` global SMPL joint positions,
-            where ``n_frames`` is the requested count.
-        """
-        n_total = _resolve_total_frames(motion_length_seconds, num_frames)
-        sample = self._sample_hml(
-            text, start_pose, num_samples, n_total, frozen_body, steering, speed
-        )
-
         convert_t0 = time.perf_counter()
         hml_vecs = sample[:, :, 0, :].permute(0, 2, 1)
-        positions = hml263_batch_to_smpl_positions(hml_vecs, self._data, self._model)
+        positions = hml263_batch_to_smpl_positions(hml_vecs, data, model)
         print(
             "[timing] HML-to-position conversion total: "
             f"{time.perf_counter() - convert_t0:.3f}s"

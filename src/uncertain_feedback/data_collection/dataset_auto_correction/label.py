@@ -32,9 +32,9 @@ Each run animates in three orthogonal projections drawn in the browser from the
 trajectories on disk — stage (a) writes no video, so a clip set stays a few hundred
 KB. Playback covers the *whole* story, walking that run's naive rollout from frame 0
 to the trigger and then into the corrected window, with the transition marked on the
-scrubber and in the wrist trail. Reads only ``manifest.json``, ``geometry.npz`` and
-the per-run ``naive.npy`` / ``clip.npy``, so it needs neither the MDM environment
-nor a GPU.
+scrubber and in the wrist trail. Reads only ``manifest.json`` (and the planner
+config it names, for the person) and the per-run ``naive.npy`` / ``clip.npy``, so
+it needs neither the MDM environment nor a GPU.
 
 **Draft caption** hands the first sentence to a VLM: the server renders *one* image
 of the selected window — the arm where it starts, the arm where it ends, and the
@@ -79,7 +79,6 @@ from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
     MAX_WINDOW,
     MIN_WINDOW,
     ClipSource,
-    arm_positions,
     clip_source_from_dir,
     motion_frames,
     new_session_dir,
@@ -87,7 +86,6 @@ from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_BONE_PAIRS_22,
     SMPL_BONE_PAIRS_22,
-    SmplLeftArmFK,
 )
 from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 
@@ -168,7 +166,7 @@ def _mesh() -> SmplMeshCache:
     rest reuse it.
     """
     if not _MESH:
-        _MESH.append(SmplMeshCache(_geometry()["body_pos"]))
+        _MESH.append(SmplMeshCache(_source().human.posture))
     return _MESH[0]
 
 
@@ -227,19 +225,6 @@ def _prefetch(index: int) -> None:
             _ensure_run(index)
 
     threading.Thread(target=work, daemon=True).start()
-
-
-def _geometry() -> dict[str, Any]:
-    """The decoded body geometry plus an FK bound to its collar rotation."""
-    geo = np.load(_clips_dir() / _load_manifest()["geometry_file"])
-    fk = SmplLeftArmFK()
-    fk.collar_aa = geo["collar_aa"]
-    return {
-        "fk": fk,
-        "spine3_pos": geo["spine3_pos"],
-        "spine3_aa": geo["spine3_aa"],
-        "body_pos": geo["body_pos"],
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -679,7 +664,7 @@ el('play').addEventListener('click', () => {
     const s = el('scrub');
     s.value = (+s.value >= +s.max) ? 0 : +s.value + 1;
     render();
-  }, 50);   // 20 fps, the project's MOTION_FPS
+  }, 50);   // 20 fps, the project's motion frame rate
 });
 
 el('next').addEventListener('click', async () => {
@@ -775,17 +760,17 @@ def run(index: int) -> ResponseReturnValue:
 def _motion(manifest: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     """One run's whole motion as arm-chain positions, plus the transition index."""
     clips_dir = _clips_dir()
-    geo = _geometry()
+    human = _source().human
 
     naive = np.load(clips_dir / row["naive_file"])
     continuation = np.load(clips_dir / row["continuation_file"])
     motion, transition = motion_frames(naive, continuation, row["trigger_step"])
     anchor = row["clip_anchor"]
     clip_end = min(anchor + row["correction_frames"], len(motion) - 1)
-    positions = arm_positions(motion, geo["fk"], geo["spine3_pos"], geo["spine3_aa"])
+    positions = human.fk_positions_from_q(motion)
 
-    body = np.asarray(geo["body_pos"], dtype=np.float64)
-    goal = np.asarray(row["goal"], dtype=np.float64) + geo["spine3_pos"]
+    body = human.posture
+    goal = np.asarray(row["goal"], dtype=np.float64) + human.spine3_pos
     extent = np.concatenate([positions.reshape(-1, 3), body, goal[None]])
     lo, hi = extent.min(axis=0), extent.max(axis=0)
     return {
@@ -855,7 +840,7 @@ def suggest() -> ResponseReturnValue:
         captions = draft_captions(
             _clips_dir(),
             row,
-            _source().context,
+            _source().human,
             _mesh(),
             _caption_model(),
             prompt,

@@ -9,17 +9,22 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.approaches.base import Approach
-from evaluation.benchmarks.episode import feedback_anchor, run_episode
+from evaluation.benchmarks.episode import run_episode
 from evaluation.benchmarks.structs import InteractionTask, MenuProbe
 from evaluation.benchmarks.verbalize import bind_verbalizer
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
+from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    base_extra_costs,
+)
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import rollout_to_goal
-from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs, cfg_with_goal
 from uncertain_feedback.simulated_users import (
     HiddenCostTerm,
     SimulatedUser,
     attribute_correction,
     choose_correction,
+    feedback_anchor,
     first_violation_step,
 )
 
@@ -27,7 +32,8 @@ _LOG = "[transfer]"
 
 
 def probe_menu(
-    rig: PlanningRig,
+    cfg: MpcRunConfig,
+    human: Human,
     user: SimulatedUser,
     task: InteractionTask,
     approach: Approach,
@@ -43,74 +49,62 @@ def probe_menu(
     goal starts where it ends) and the probe, or ``None`` when the goal never
     provokes the bound or leaves the persona nothing to say.
     """
-    cfg = rig.cfg
     sim_cfg = cfg.simulated_user
     threshold = cfg.corrections.trigger_threshold
     goal = np.asarray(task.goals[goal_index], dtype=np.float64)
     goal_cfg = cfg_with_goal(cfg, goal)
     goal_dir.mkdir(parents=True, exist_ok=True)
-    base = base_extra_costs(rig, user)
+    base = base_extra_costs(cfg.costs, human, user)
     oracle_costs = CompositeTrajectoryCost(
-        [*base.terms(), HiddenCostTerm(user=user, context=rig.context)]
+        [*base.terms(), HiddenCostTerm(user=user, human=human)]
     )
+    start = human.reset_human_with_q(q_start)
     label = f"{task.persona} goal {goal_index}"
 
     oracle_path = rollout_to_goal(
         goal_cfg,
-        q_start,
+        start,
         goal,
-        rig.context,
         oracle_costs,
-        rig.body_pos,
-        rig.spine3_pos,
-        rig.spine3_aa,
         progress_label=f"{label} oracle",
         log_prefix=_LOG,
-    )
+    ).history
     np.save(goal_dir / "oracle_path.npy", oracle_path)
     approach.begin_goal(goal, oracle_path)
 
-    rollout = rollout_to_goal(
+    rolled = rollout_to_goal(
         goal_cfg,
-        q_start,
+        start,
         goal,
-        rig.context,
         base,
-        rig.body_pos,
-        rig.spine3_pos,
-        rig.spine3_aa,
         progress_label=f"{label} unlearned rollout",
         log_prefix=_LOG,
     )
-    trigger = first_violation_step(user, rig.context, rollout, threshold)
+    rollout = rolled.history
+    trigger = first_violation_step(user, human, rollout, threshold)
     if trigger is None:
         print(f"{_LOG} {label}: unlearned plan never violates; no probe.", flush=True)
         return oracle_path, None
 
-    step = feedback_anchor(user, rig.context, rollout, trigger)
-    q_feedback = np.asarray(rollout[step], dtype=np.float64)
+    at_feedback = rolled.rewind(feedback_anchor(user, human, rollout, trigger))
+    q_feedback = at_feedback.q
     nominal_plan = rollout_to_goal(
         goal_cfg,
-        q_feedback,
+        at_feedback,
         goal,
-        rig.context,
         base,
-        rig.body_pos,
-        rig.spine3_pos,
-        rig.spine3_aa,
         steps=sim_cfg.nominal_steps,
         stop_at_goal=False,
         log_prefix=_LOG,
-    )
-    intent = attribute_correction(oracle_path, nominal_plan, q_feedback, rig.context)
+    ).history
+    intent = attribute_correction(oracle_path, nominal_plan, q_feedback, human)
     verbalize = bind_verbalizer(
         task,
         cfg,
-        rig.context,
+        human,
         oracle_path,
         f"{task.persona}_{task.verbalizer}_seed{task.seed}_probe{goal_index}",
         goal_dir / "visual_cache",
-        body_pos=rig.body_pos,
     )
     utterance = verbalize(intent, q_feedback, goal_index)
     if utterance is None:
@@ -123,7 +117,7 @@ def probe_menu(
     def _select(means: dict[int, np.ndarray]) -> tuple[int, float]:
         choice = choose_correction(
             user,
-            rig.context,
+            human,
             means,
             oracle_path,
             threshold=threshold,
@@ -134,7 +128,7 @@ def probe_menu(
         )
         return choice.label, choice.magnitude
 
-    grounding = approach.ground(utterance.text, q_feedback, nominal_plan, _select)
+    grounding = approach.ground(utterance.text, at_feedback, nominal_plan, _select)
     np.savez_compressed(
         goal_dir / "menu.npz",
         q_feedback=q_feedback,
@@ -145,7 +139,7 @@ def probe_menu(
         task=task,
         approach=approach.name,
         user=user,
-        context=rig.context,
+        human=human,
         goal_index=goal_index,
         goal=goal,
         utterance=utterance,
@@ -159,7 +153,8 @@ def probe_menu(
 
 
 def run_transfer(
-    rig: PlanningRig,
+    cfg: MpcRunConfig,
+    human: Human,
     user: SimulatedUser,
     task: InteractionTask,
     approach: Approach,
@@ -174,13 +169,14 @@ def run_transfer(
     Probes are pickled to ``probes.pkl``.
     """
     learn_task = replace(task, goals=task.goals[:1])
-    learned = run_episode(rig, user, learn_task, approach, episode_dir / "learn")
+    learned = run_episode(cfg, human, user, learn_task, approach, episode_dir / "learn")
     q_start = np.asarray(learned[0].oracle_path[-1], dtype=np.float64)
 
     probes: list[MenuProbe] = []
     for goal_index in range(1, len(task.goals)):
         oracle_path, probe = probe_menu(
-            rig,
+            cfg,
+            human,
             user,
             task,
             approach,

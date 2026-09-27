@@ -45,8 +45,9 @@ from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
     ClipSource,
     clip_source_from_dir,
 )
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
-from uncertain_feedback.planners.rig import PlanningRig, build_rig
+from uncertain_feedback.motion_generators import make_motion_generator
+from uncertain_feedback.motion_generators.base import MotionGenerator
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import attribute_correction, choose_correction
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
@@ -54,28 +55,11 @@ _LOG = "[grounding]"
 _METRICS = ("violation", "arc_progress", "alignment")
 
 
-def _rig(args: argparse.Namespace, source: ClipSource) -> PlanningRig:
-    if args.grounder == "mdm":
-        rig = build_rig(
-            source.cfg.config_path,
-            seed=args.seed,
-            load_generator=True,
-            model_path=args.model_path,
-        )
-        assert rig.body_pos is not None
-        assert np.allclose(rig.spine3_pos, source.context.spine3_pos, atol=1e-6)
-        assert np.allclose(rig.body_pos, source.body_pos, atol=1e-6)
-        return rig
-    return PlanningRig(
-        cfg=source.run_cfg,
-        fk=source.context.fk,
-        context=source.context,
-        q0=np.zeros(7),
-        spine3_pos=source.context.spine3_pos,
-        spine3_aa=source.context.spine3_aa,
-        body_pos=source.body_pos,
-        gen=None,
-        initial_hml_pose=None,
+def _generator(args: argparse.Namespace, source: ClipSource) -> MotionGenerator | None:
+    if args.grounder != "mdm":
+        return None
+    return make_motion_generator(
+        source.run_cfg.motion_generator, args.model_path, seed=args.seed
     )
 
 
@@ -87,14 +71,15 @@ def _grounder(args: argparse.Namespace) -> Grounder:
     )
 
 
-def _start_at(rig: PlanningRig, arm_aa: np.ndarray, q_start: np.ndarray) -> np.ndarray:
-    q = rig.fk.arm_aa_to_q_batch(arm_aa, rig.spine3_aa)
-    return q_to_arm_aa(q - q[0] + q_start, rig.fk.elbow_hinge_axis)
+def _start_at(human: Human, arm_aa: np.ndarray, q_start: np.ndarray) -> np.ndarray:
+    q = human.q_from_arm_aa(arm_aa)
+    return human.arm_aa_from_q(q - q[0] + q_start)
 
 
 def _menu(
     grounder: Grounder,
-    rig: PlanningRig,
+    source: ClipSource,
+    gen: MotionGenerator | None,
     case: OracleCase,
     utterance: str,
     case_dir: Path,
@@ -106,13 +91,16 @@ def _menu(
         # shift it onto this case's start, keeping every per-frame displacement.
         saved = np.load(path)
         return {
-            int(key.split("_")[1]): _start_at(rig, saved[key], case.q_feedback)
+            int(key.split("_")[1]): _start_at(source.human, saved[key], case.q_feedback)
             for key in saved.files
             if key.startswith("candidate_")
         }
-    grounder.reset(rig, case.user, seed, case_dir)
+    grounder.reset(source.run_cfg, gen, case.user, seed, case_dir)
     result = grounder.ground(
-        utterance, case.q_feedback, case.nominal_continuation, lambda _: (0, 1.0)
+        utterance,
+        source.human.reset_human_with_q(case.q_feedback),
+        case.nominal_continuation,
+        lambda _: (0, 1.0),
     )
     np.savez(
         path,
@@ -143,9 +131,9 @@ def main() -> None:
     source = clip_source_from_dir(clips_dir)
     runs = json.loads((clips_dir / "manifest.json").read_text(encoding="utf-8"))["runs"]
     sim_cfg = source.run_cfg.simulated_user
-    rig = _rig(args, source)
+    gen = _generator(args, source)
     grounder = _grounder(args)
-    context = source.context
+    human = source.human
     rng = np.random.default_rng(args.seed)
 
     rows = []
@@ -157,14 +145,14 @@ def main() -> None:
         utterance = run["captions"][0]
         case_dir = out_dir / case.label
         case_dir.mkdir(parents=True, exist_ok=True)
-        menu = _menu(grounder, rig, case, utterance, case_dir, args.seed)
+        menu = _menu(grounder, source, gen, case, utterance, case_dir, args.seed)
 
         intent = attribute_correction(
-            case.oracle_correction, case.nominal_continuation, case.q_feedback, context
+            case.oracle_correction, case.nominal_continuation, case.q_feedback, human
         )
         choice = choose_correction(
             case.user,
-            context,
+            human,
             menu,
             case.oracle_correction,
             threshold=source.threshold,
@@ -174,11 +162,9 @@ def main() -> None:
             rng=rng,
         )
         chosen = scale_trajectory(menu[choice.label], choice.magnitude)
-        chosen_scores = candidate_row(
-            case.user, case.oracle_correction, chosen, context
-        )
+        chosen_scores = candidate_row(case.user, case.oracle_correction, chosen, human)
         nominal_scores = candidate_row(
-            case.user, case.oracle_correction, case.nominal_continuation, context
+            case.user, case.oracle_correction, case.nominal_continuation, human
         )
         rows.append(
             {
@@ -189,7 +175,7 @@ def main() -> None:
                 "no_acceptable_cluster": choice.no_acceptable_cluster,
                 **{f"chosen_{k}": v for k, v in chosen_scores.items()},
                 **{f"nominal_{k}": v for k, v in nominal_scores.items()},
-                **case_row(menu, context),
+                **case_row(menu, human),
             }
         )
         print(

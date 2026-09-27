@@ -21,7 +21,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_feature_series,
     canonical_arm_q,
 )
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 
 
 @dataclass(frozen=True)
@@ -29,16 +29,16 @@ class TrajectoryCorpus:
     """On-disk log of executed and corrected trajectories for one session."""
 
     dir: Path
-    context: MpcCostContext
+    human: Human
 
     @classmethod
-    def create(cls, corpus_dir: Path, context: MpcCostContext) -> "TrajectoryCorpus":
+    def create(cls, corpus_dir: Path, human: Human) -> "TrajectoryCorpus":
         """Open (creating if needed) the corpus rooted at ``corpus_dir``."""
         corpus_dir.mkdir(parents=True, exist_ok=True)
         manifest = corpus_dir / "manifest.json"
         if not manifest.exists():
             manifest.write_text("[]")
-        return cls(dir=corpus_dir, context=context)
+        return cls(dir=corpus_dir, human=human)
 
     def entries(self) -> list[dict[str, Any]]:
         """Every logged entry, in insertion order."""
@@ -59,10 +59,10 @@ class TrajectoryCorpus:
         entries = self.entries()
         index = max((e["index"] for e in entries), default=-1) + 1
 
-        trajectory = canonical_arm_q(trajectory, self.context)
+        trajectory = canonical_arm_q(trajectory, self.human)
         np.save(self.dir / f"traj_{index:03d}.npy", trajectory)
 
-        feats = arm_feature_series(trajectory, self.context)
+        feats = arm_feature_series(trajectory, self.human)
         n_frames = int(trajectory.shape[0])
         with (self.dir / f"traj_{index:03d}_features.csv").open("w", newline="") as f:
             writer = csv.writer(f)

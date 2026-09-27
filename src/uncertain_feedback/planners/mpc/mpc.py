@@ -50,9 +50,11 @@ from uncertain_feedback.planners.mpc.goal_spaces import (
     CartesianGoalSpace,
     GoalRegion,
 )
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_DIM,
     SmplLeftArmFK,
+    anchor_q_trajectory,
     q_to_arm_aa,
 )
 from uncertain_feedback.uncertainty.clustering.base import TrajectoryClusterer
@@ -90,21 +92,16 @@ class ArmMPC:
     """Sampling-based MPC for the SMPL left arm with pluggable modules.
 
     Args:
+        human:           The person to move; :meth:`step` plans from its
+                         current arm state and replaces it with the result.
         horizon:         Number of look-ahead steps.
         n_mpc_samples:   Candidate action sequences sampled per solve call.
         max_angle_delta: Std dev of the human-arm action sampling (radians).
         visualize:       Open a live matplotlib window updated each step.
-                         Requires ``fk``.
-        fk:              :class:`SmplLeftArmFK` instance.
-        spine3_pos:      ``(3,)`` world position of spine3 (default: T-pose).
-        spine3_aa:       ``(3,)`` world axis-angle of spine3 (default: zeros).
-        body_pos:        ``(22, 3)`` background skeleton joint positions.
         extra_costs:     Composite of extra cost terms scoring every rollout.
         seed:            Seed for planner-local action sampling.
         env:             Execution env realizing each commanded step
                          (default: :class:`KinematicEnv`, exact pass-through).
-        initial_q:       ``(7,)`` controlled arm state at run start; ghost-arm
-                         anchor in the visualiser. Required with ``cartesian``.
         cartesian:       Goal space: spine3-relative Cartesian wrist goals.
         feedback:        Feedback method: MDM playback (+ optional ``uq``).
         constraints:     Mapping of constraint name to its parsed config
@@ -115,33 +112,21 @@ class ArmMPC:
 
     def __init__(
         self,
+        human: Human,
         *,
         horizon: int = 10,
         n_mpc_samples: int = 512,
         max_angle_delta: float = 0.0025,
         visualize: bool = False,
-        fk: SmplLeftArmFK | None = None,
-        spine3_pos: np.ndarray | None = None,
-        spine3_aa: np.ndarray | None = None,
-        body_pos: np.ndarray | None = None,
         extra_costs: CompositeTrajectoryCost | None = None,
         seed: int | None = None,
         env: ExecutionEnv | None = None,
-        initial_q: np.ndarray | None = None,
         cartesian: CartesianConfig | None = None,
         feedback: FeedbackConfig | None = None,
         constraints: Mapping[str, object] | None = None,
         robot_actions: RobotActionsConfig | None = None,
         clusterer: TrajectoryClusterer | None = None,
     ) -> None:
-        if cartesian is not None and fk is None:
-            raise ValueError("fk is required when cartesian goals are configured.")
-        if cartesian is not None and initial_q is None:
-            raise ValueError(
-                "initial_q is required when cartesian goals are configured."
-            )
-        if visualize and fk is None:
-            raise ValueError("visualize=True requires `fk` to be provided.")
         if constraints and env is None:
             raise ValueError("feasibility constraints require a robot env.")
         if robot_actions is not None and env is None:
@@ -159,37 +144,21 @@ class ArmMPC:
         self.visualize = visualize
         self._extra_costs = extra_costs or CompositeTrajectoryCost()
         self._env: ExecutionEnv = env if env is not None else KinematicEnv()
-        self._fk: SmplLeftArmFK = fk if fk is not None else SmplLeftArmFK()
-        self._spine3_pos = (
-            np.asarray(spine3_pos, dtype=np.float64)
-            if spine3_pos is not None
-            else self._fk.tpose_spine3_pos
-        )
-        self._spine3_aa = (
-            np.asarray(spine3_aa, dtype=np.float64)
-            if spine3_aa is not None
-            else np.zeros(3, dtype=np.float64)
-        )
-        self._body_pos = (
-            np.asarray(body_pos, dtype=np.float64) if body_pos is not None else None
-        )
-        self._initial_q = (
-            np.asarray(initial_q, dtype=np.float64) if initial_q is not None else None
-        )
+        # The live person; step() replaces it. Its body never changes, so the
+        # modules below keep the one they were built with.
+        self._human = human
+        self._fk: SmplLeftArmFK = human.fk
+        self._spine3_pos = human.spine3_pos
+        self._spine3_aa = human.spine3_aa
+        self._initial_q = human.q
 
         self._constraints: tuple[FeasibilityConstraint, ...] = tuple(
-            CONSTRAINT_BUILDERS[name][1](
-                cfg,
-                env=self._env,
-                fk=self._fk,
-                spine3_pos=self._spine3_pos,
-                spine3_aa=self._spine3_aa,
-            )
+            CONSTRAINT_BUILDERS[name][1](cfg, env=self._env, human=human)
             for name, cfg in (constraints or {}).items()
         )
 
         self._human_actions = HumanArmActions(
-            self._fk,
+            human,
             self._rng,
             n_mpc_samples,
             horizon,
@@ -199,25 +168,17 @@ class ArmMPC:
         self._actions: ActionSpace = (
             RobotJointActions(
                 robot_actions,
-                self._fk,
+                human,
                 self._rng,
                 n_mpc_samples,
                 horizon,
-                self._spine3_pos,
-                self._spine3_aa,
             )
             if robot_actions is not None
             else self._human_actions
         )
 
         self._goal_space: CartesianGoalSpace | None = (
-            CartesianGoalSpace(
-                list(cartesian.goals),
-                cartesian.threshold,
-                self._fk,
-                self._spine3_pos,
-                self._spine3_aa,
-            )
+            CartesianGoalSpace(list(cartesian.goals), cartesian.threshold, human)
             if cartesian is not None
             else None
         )
@@ -241,7 +202,7 @@ class ArmMPC:
             else None
         )
         self._uq: UqSelector | None = (
-            UqSelector(feedback.uq, self._fk, clusterer=clusterer)
+            UqSelector(feedback.uq, human.fk, clusterer=clusterer)
             if feedback is not None and feedback.uq is not None
             else None
         )
@@ -249,7 +210,7 @@ class ArmMPC:
 
         if visualize:
             self._vis_config: _VisConfig | None = _VisConfig(
-                self._fk, spine3_pos, spine3_aa, body_pos=body_pos
+                self._fk, self._spine3_pos, self._spine3_aa, body_pos=human.posture
             )
         else:
             self._vis_config = None
@@ -257,6 +218,11 @@ class ArmMPC:
 
         # Warm-start: previous best plan shifted forward by one step
         self._prev_best: np.ndarray | None = None
+
+    @property
+    def human(self) -> Human:
+        """The person as of the last executed step."""
+        return self._human
 
     # ------------------------------------------------------------------
     # Capability flags
@@ -428,26 +394,21 @@ class ArmMPC:
             )
         return warnings
 
-    def push_trajectory(
-        self,
-        frames: np.ndarray,
-        current_q: np.ndarray | None = None,
-    ) -> None:
+    def push_trajectory(self, frames: np.ndarray, screen: bool = False) -> None:
         """Validate a generated trajectory and queue it for direct playback.
 
         The trajectory is checked against the configured range safety costs
         (see :meth:`validate_trajectory`); violations are warned about but do
-        not block playback.  With ``current_q`` (the live measured
-        configuration) and feasibility constraints active, frames the
-        constraints rule out are dropped before playback starts.  The
-        surviving frames are stored so that :meth:`step` follows them one
-        frame per step; once exhausted, the MPC resumes toward the goal space.
+        not block playback.  With ``screen`` and feasibility constraints
+        active, frames the constraints rule out from the current arm state
+        are dropped before playback starts.  The surviving frames are stored
+        so that :meth:`step` follows them one frame per step; once exhausted,
+        the MPC resumes toward the goal space.
 
         Args:
             frames: ``(n_frames, 7)`` canonical arm trajectory or
                     ``(n_frames, 3, 3)`` decoded axis-angle trajectory.
-            current_q: Live measured configuration at push time; enables the
-                    constraint screening.
+            screen: Screen the frames with the feasibility constraints.
         """
         feedback = self._feedback
         assert feedback is not None, "push_trajectory requires a feedback method."
@@ -455,11 +416,11 @@ class ArmMPC:
         q_frames = (
             frames
             if frames.shape[-1:] == (Q_DIM,)
-            else self._fk.arm_aa_to_q_batch(frames, self._spine3_aa)
+            else self._human.q_from_arm_aa(frames)
         )
-        screened = current_q is not None and bool(self._constraints)
+        screened = screen and bool(self._constraints)
         if screened:
-            current = np.asarray(current_q, dtype=np.float64)
+            current = self._human.q
             for constraint in self._constraints:
                 q_frames = constraint.screen_frames(q_frames, current)
                 if len(q_frames) == 0:
@@ -494,8 +455,8 @@ class ArmMPC:
         self,
         gen: MotionGenerator,
         text: str,
-        start_pose: np.ndarray | None = None,
-        current_q: np.ndarray | None = None,
+        *,
+        prefix: bool,
         auto_cluster: int | None = None,
         mdm_frames: int | None = None,
         frozen_body: bool = False,
@@ -508,9 +469,13 @@ class ArmMPC:
         """Generate multiple MDM samples, cluster, pick, and queue the mean.
 
         Runs the UQ layer's sample → cluster → pick pipeline (see
-        :meth:`UqSelector.query`), then enqueues the first
-        ``trajectory_fraction`` portion of the chosen cluster mean and sets
-        the feedback goal marker.
+        :meth:`UqSelector.query`) from the current person, then enqueues the
+        first ``trajectory_fraction`` portion of the chosen cluster mean and
+        sets the feedback goal marker. ``prefix`` conditions MDM on the arm's
+        recent history instead of its current pose alone.
+
+        Returns:
+            ``(n_frames, 7)`` chosen correction, anchored when configured.
         """
         feedback = self._feedback
         assert feedback is not None and self._uq is not None, (
@@ -519,8 +484,8 @@ class ArmMPC:
         result = self._uq.query(
             gen,
             text,
-            start_pose=start_pose,
-            current_q=current_q,
+            self._human,
+            prefix=prefix,
             auto_cluster=auto_cluster,
             mdm_frames=mdm_frames,
             frozen_body=frozen_body,
@@ -528,28 +493,21 @@ class ArmMPC:
             cluster_selector=cluster_selector,
             steering=steering,
             trajectory_fraction=feedback.trajectory_fraction,
-            spine3_pos=self._spine3_pos,
-            spine3_aa=self._spine3_aa,
-            body_pos=self._body_pos,
         )
         self._last_uq_result = result
-        chosen_mean = result.chosen_mean  # (n_frames, 3, 3)
-        if feedback.anchor_correction and current_q is not None:
-            chosen_mean = self._fk.anchor_arm_trajectory(
-                chosen_mean, current_q, self._spine3_aa
-            )
+        chosen = self._human.q_from_arm_aa(result.chosen_mean)
+        if feedback.anchor_correction:
+            chosen = anchor_q_trajectory(chosen, self._human.q)
 
-        n_frames = chosen_mean.shape[0]
+        n_frames = chosen.shape[0]
         cutoff = max(1, round(n_frames * feedback.trajectory_fraction))
         print(
             f"Enqueuing first {cutoff} frames of chosen cluster mean"
             f" ({feedback.trajectory_fraction:.0%})."
         )
-        self.set_mdm_goal(
-            self._fk.arm_aa_to_q(chosen_mean[cutoff - 1], self._spine3_aa)
-        )
-        self.push_trajectory(chosen_mean[:cutoff], current_q=current_q)
-        return chosen_mean
+        self.set_mdm_goal(chosen[cutoff - 1])
+        self.push_trajectory(chosen[:cutoff], screen=True)
+        return chosen
 
     # ------------------------------------------------------------------
     # Solve loop
@@ -621,30 +579,25 @@ class ArmMPC:
     # Stepping
     # ------------------------------------------------------------------
 
-    def step(
-        self,
-        current_q: np.ndarray,
-        advance_threshold: float | None = None,
-    ) -> np.ndarray:
-        """Perform one MPC step.
+    def step(self) -> Human:
+        """Plan from the current arm state, execute it, and record the result.
 
         While a feedback trajectory is queued for playback, the arm follows it
         directly — without sampling-based re-planning — at a bounded angular
         speed.  Once the trajectory is exhausted, the MPC resumes sampling
         toward the goal space's queue; with nothing left to do it holds.
 
-        Args:
-            current_q: ``(7,)`` current planner state.
-            advance_threshold: Unused; kept for API compatibility.
-
         Returns:
-            ``(7,)`` achieved planner state.
+            The person after the step (also :attr:`human`); its last history
+            frame is the achieved planner state.
         """
-        _ = advance_threshold
-        current_q = np.asarray(current_q, dtype=np.float64)
+        current_q = self._human.q
         if self._feedback is not None and self._feedback.in_playback():
-            return self._playback_step(current_q)
-        return self._goal_step(current_q)
+            next_q = self._playback_step(current_q)
+        else:
+            next_q = self._goal_step(current_q)
+        self._human = self._human.step(next_q)
+        return self._human
 
     def _playback_step(self, current_q: np.ndarray) -> np.ndarray:
         """Follow the feedback trajectory one rate-limited frame per step."""
@@ -723,7 +676,7 @@ class ArmMPC:
         """Return configured elbow-height bounds as world-space Y coordinates."""
         for term in self._extra_costs._terms:  # pylint: disable=protected-access
             if isinstance(term, ElbowHeightCost):
-                spine_y = float(term.context.spine3_pos[1])
+                spine_y = float(term.human.spine3_pos[1])
                 return (
                     spine_y + float(term.min_height),
                     spine_y + float(term.max_height),

@@ -24,11 +24,10 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedCostContext,
     GeneratedPythonCost,
     JointLimitCost,
-    MpcCostContext,
     build_generated_cost_context,
     replace_generated_costs,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
 
 _CODE = (
     "def cost(q_trajs, context, params):\n"
@@ -37,15 +36,9 @@ _CODE = (
 
 
 def _context() -> GeneratedCostContext:
-    fk = SmplLeftArmFK()
-    mpc_context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     return build_generated_cost_context(
-        mpc_context,
-        current_q=np.zeros((3, 3)),
+        Human(),
         mdm_traj=np.zeros((3, 3, 3)),
-        q_history=[],
         window=3,
     )
 
@@ -53,10 +46,6 @@ def _context() -> GeneratedCostContext:
 def _round(tmp_path: Path, index: int) -> CostRound:
     round_dir = tmp_path / f"round_{index:02d}"
     round_dir.mkdir()
-    fk = SmplLeftArmFK()
-    cost_context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     full_cfg = SimpleNamespace(
         steps=3,
         horizon=2,
@@ -70,15 +59,10 @@ def _round(tmp_path: Path, index: int) -> CostRound:
     )
     state = EvalState(
         cfg=full_cfg,  # type: ignore[arg-type]
-        current_q=np.zeros((3, 3)),
+        human=Human(),
         correction_traj=np.zeros((2, 3, 3)),
-        q_history=[],
         window=2,
-        cost_context=cost_context,
         base_extra_costs=CompositeTrajectoryCost(),
-        body_pos=None,
-        spine3_pos=cost_context.spine3_pos,
-        spine3_aa=cost_context.spine3_aa,
     )
     state.cfg = full_cfg  # type: ignore[assignment]
     with open(round_dir / "state.pkl", "wb") as file:
@@ -153,7 +137,7 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
         slots=(0,), low=np.full((1, 3), -1.0), high=np.full((1, 3), 1.0)
     )
     old = GeneratedPythonCost(_CODE, {"weight": 9.0}, context)
-    mpc = ArmMPC(extra_costs=CompositeTrajectoryCost([base, old]))
+    mpc = ArmMPC(Human(), extra_costs=CompositeTrajectoryCost([base, old]))
     generator = CombineCostGenerator(
         context=context,
         instruction="feedback",

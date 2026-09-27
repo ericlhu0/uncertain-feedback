@@ -10,20 +10,16 @@ import numpy as np
 
 from evaluation.benchmarks.sampled_bounds import sample_bound
 from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
-    arm_positions,
     sample_arm_q,
-    wrist_goal,
 )
 from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
-from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.config import cfg_with_goal, load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
-    MpcCostContext,
-    build_extra_costs,
+    base_extra_costs,
 )
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import goal_reach, rollout_to_goal
-from uncertain_feedback.planners.rig import cfg_with_goal
 from uncertain_feedback.simulated_users import HiddenCostTerm, get_persona
 from uncertain_feedback.simulated_users.base import compute_violations
 from uncertain_feedback.simulated_users.personas import UNRESTRICTED
@@ -43,7 +39,6 @@ class ScenarioCriteria:
 
 
 def generate_scenarios(
-    geometry_dir: Path,
     config_path: Path,
     out_dir: Path,
     personas: list[str],
@@ -52,24 +47,15 @@ def generate_scenarios(
     criteria: ScenarioCriteria,
     sampled_bounds: int = 0,
 ) -> None:
-    """Keep the first passing reach per fixed persona or synthetic case slot."""
+    """Keep the first passing reach per fixed persona or synthetic case slot.
+
+    The person is the one ``config_path`` describes (its pose file and
+    ``arm:``); sampled starts and goals keep its clavicle.
+    """
     out_dir.mkdir(parents=True, exist_ok=False)
-    geo = np.load(geometry_dir / "geometry.npz")
-    manifest = json.loads((geometry_dir / "manifest.json").read_text())
-    fk = SmplLeftArmFK()
-    fk.collar_aa = geo["collar_aa"]
     cfg = replace(load_mpc_config(config_path), seed=seed, max_angle_delta=0.0025)
-    context = MpcCostContext(
-        fk=fk,
-        spine3_pos=geo["spine3_pos"],
-        spine3_aa=geo["spine3_aa"],
-        time_of_day=cfg.simulated_user.time_of_day,
-    )
-    body = geo["body_pos"]
-    np.savez(out_dir / "geometry.npz", **{key: geo[key] for key in geo.files})
-    base = CompositeTrajectoryCost(
-        [*build_extra_costs(cfg.costs, context).terms(), UNRESTRICTED.limit_cost()]
-    )
+    human = Human(pose=cfg.pose, arm=cfg.arm)
+    base = base_extra_costs(cfg.costs, human, UNRESTRICTED)
     audit: dict[str, object] = {
         "seed": seed,
         "criteria": asdict(criteria),
@@ -93,13 +79,13 @@ def generate_scenarios(
             user = UNRESTRICTED if sampled_bounds else get_persona(name)
             row: dict[str, object] = {"persona": name, "attempt": attempt}
             rows.append(row)
-            q0 = sample_arm_q(rng, np.asarray(manifest["clavicle"]), context)
-            q_goal = sample_arm_q(rng, np.asarray(manifest["clavicle"]), context)
-            goal = wrist_goal(q_goal, context)
-            if np.max(compute_violations(user, context, np.stack([q0, q_goal]))) > 0:
+            q0 = sample_arm_q(rng, human)
+            q_goal = sample_arm_q(rng, human)
+            goal = human.wrist_from_q(q_goal)
+            if np.max(compute_violations(user, human, np.stack([q0, q_goal]))) > 0:
                 row["rejected"] = "uncomfortable_endpoint"
                 continue
-            if np.linalg.norm(goal - wrist_goal(q0, context)) < 0.25:
+            if np.linalg.norm(goal - human.wrist_from_q(q0)) < 0.25:
                 row["rejected"] = "short_reach"
                 continue
             goal_cfg = cfg_with_goal(cfg, goal)
@@ -109,15 +95,11 @@ def generate_scenarios(
             ) -> np.ndarray:
                 return rollout_to_goal(
                     goal_cfg,
-                    start,
+                    human.reset_human_with_q(start),
                     goal,
-                    context,
                     extra,
-                    body,
-                    context.spine3_pos,
-                    context.spine3_aa,
                     steps=600,
-                )
+                ).history
 
             naive = rollout(q0, base)
             if sampled_bounds:
@@ -125,7 +107,7 @@ def generate_scenarios(
                     rng,
                     naive,
                     q_goal,
-                    context,
+                    human,
                     name,
                     "constant" if persona_index % 2 == 0 else "coupled",
                     criteria.min_history,
@@ -141,17 +123,12 @@ def generate_scenarios(
             costs = CompositeTrajectoryCost(
                 [
                     *base.terms(),
-                    HiddenCostTerm(
-                        user=replace(user, joint_limits=()), context=context
-                    ),
+                    HiddenCostTerm(user=replace(user, joint_limits=()), human=human),
                 ]
             )
-            violations = compute_violations(user, context, naive)
+            violations = compute_violations(user, human, naive)
             crossing = np.flatnonzero(violations > 1e-8)
-            if (
-                not goal_reach(context, cfg, naive, goal)["reached"]
-                or not crossing.size
-            ):
+            if not goal_reach(human, cfg, naive, goal)["reached"] or not crossing.size:
                 row["rejected"] = "no_reached_violating_reach"
                 continue
             trigger = int(crossing[0]) - 1
@@ -164,28 +141,24 @@ def generate_scenarios(
             nominal_full = rollout(naive[trigger], base)
             if (
                 len(nominal_full) <= criteria.window
-                or not goal_reach(context, cfg, nominal_full, goal)["reached"]
+                or not goal_reach(human, cfg, nominal_full, goal)["reached"]
             ):
                 row["rejected"] = "unusable_nominal_restart"
                 continue
             nominal = nominal_full[: criteria.window + 1]
-            nominal_peak = float(compute_violations(user, context, nominal).max())
+            nominal_peak = float(compute_violations(user, human, nominal).max())
             if nominal_peak < criteria.min_nominal_violation:
                 row["rejected"] = "weak_nominal_violation"
                 continue
             oracle = rollout(naive[trigger], costs)
             window = oracle[np.minimum(np.arange(criteria.window + 1), len(oracle) - 1)]
-            nom_pos = arm_positions(nominal, fk, context.spine3_pos, context.spine3_aa)[
-                :, -2:
-            ]
-            oracle_pos = arm_positions(
-                window, fk, context.spine3_pos, context.spine3_aa
-            )[:, -2:]
+            nom_pos = human.fk_positions_from_q(nominal)[:, -2:]
+            oracle_pos = human.fk_positions_from_q(window)[:, -2:]
             position_rms = float(
                 np.sqrt(np.mean(np.sum((nom_pos - oracle_pos) ** 2, axis=-1)))
             )
-            nom_feats = arm_feature_series(nominal, context)
-            ora_feats = arm_feature_series(window, context)
+            nom_feats = arm_feature_series(nominal, human)
+            ora_feats = arm_feature_series(window, human)
             features = {bound.feature for bound in user.bounds}
             features.update(
                 bound.cond_feature
@@ -196,11 +169,11 @@ def generate_scenarios(
                 float(np.sqrt(np.mean((nom_feats[key] - ora_feats[key]) ** 2)))
                 for key in features
             )
-            oracle_peak = float(compute_violations(user, context, oracle).max())
+            oracle_peak = float(compute_violations(user, human, oracle).max())
             motion = float(
                 np.linalg.norm(oracle_pos[-1] - oracle_pos[0], axis=-1).max()
             )
-            reach = goal_reach(context, cfg, oracle, goal)
+            reach = goal_reach(human, cfg, oracle, goal)
             row.update(
                 trigger=trigger,
                 nominal_peak=nominal_peak,
@@ -249,7 +222,6 @@ def render_scenarios(out_dir: Path) -> None:
 
     import imageio_ffmpeg
 
-    from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
     from uncertain_feedback.utils.mesh_video import (
         MeshLayer,
         arm_mesh_vertices,
@@ -257,12 +229,10 @@ def render_scenarios(out_dir: Path) -> None:
         render_layers,
     )
 
-    geo = np.load(out_dir / "geometry.npz")
-    fk = SmplLeftArmFK()
-    fk.collar_aa = geo["collar_aa"]
+    audit = json.loads((out_dir / "selection.json").read_text())
+    cfg = load_mpc_config(Path(audit["config"]))
+    human = Human(pose=cfg.pose, arm=cfg.arm)
     for path in sorted(out_dir.glob("*.npz")):
-        if path.name == "geometry.npz":
-            continue
         data = np.load(path)
         trigger = int(data["trigger"])
         history = data["naive"][max(0, trigger - 20) : trigger]
@@ -275,10 +245,7 @@ def render_scenarios(out_dir: Path) -> None:
         for name, future in futures.items():
             q = np.concatenate([history, future])
             vertices, faces = arm_mesh_vertices(
-                q_to_arm_aa(q, fk.elbow_hinge_axis),
-                geo["body_pos"],
-                fk,
-                geo["spine3_aa"],
+                human.arm_aa_from_q(q), human.posture, human.fk, human.spine3_aa
             )
             meshes[name] = vertices
         flat = np.concatenate([v.reshape(-1, 3) for v in meshes.values()])
@@ -288,7 +255,7 @@ def render_scenarios(out_dir: Path) -> None:
             render_layers(
                 (
                     MeshLayer(vertices, faces),
-                    goal_layer(data["goal"] + geo["spine3_pos"], len(vertices)),
+                    goal_layer(data["goal"] + human.spine3_pos, len(vertices)),
                 ),
                 out_dir / f"{path.stem}_{name}.mp4",
                 resolution=480,

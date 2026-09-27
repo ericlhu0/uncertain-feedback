@@ -58,7 +58,7 @@ class KinematicEnv(ExecutionEnv):
         )
 
         fk = self._fk
-        assert fk is not None, "set_pose_context must be called before rendering"
+        assert fk is not None, "measure must be called before rendering"
         all_pos = np.stack(
             [
                 fk.full_body_positions(

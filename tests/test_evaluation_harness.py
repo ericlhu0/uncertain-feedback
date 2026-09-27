@@ -1,5 +1,6 @@
 """Smoke tests for the evaluation harness (benchmarks x approaches x episode)."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,7 @@ from evaluation.approaches import (
 from evaluation.benchmarks.base import InteractionBenchmark
 from evaluation.benchmarks.episode import run_episode
 from uncertain_feedback.planners.mpc.config import load_mpc_config
-from uncertain_feedback.planners.rig import build_rig
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import get_persona
 
 _SMOKE_MPC = (
@@ -39,7 +40,8 @@ def test_benchmark_generates_persona_verbalizer_grid() -> None:
 
 def test_bridge_baseline_episode_smoke(tmp_path: Path) -> None:
     """The episode loop runs end-to-end on CPU with the potential-field baseline."""
-    rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
+    cfg = replace(load_mpc_config(_SMOKE_MPC), seed=0)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
     user = get_persona("elbow_contracture")
     bench = InteractionBenchmark(
         name="smoke",
@@ -48,21 +50,22 @@ def test_bridge_baseline_episode_smoke(tmp_path: Path) -> None:
         goals=[[-0.18, 0.40, 0.34]],
         max_rounds=1,
     )
-    task = bench.generate_tasks(0, rig.cfg)[0]
+    task = bench.generate_tasks(0, cfg)[0]
     approach = Approach(
         name="bridge_baseline",
         grounder=BridgePotentialFieldGrounder(),
         cost_gen=NoCostGen(),
     )
-    approach.reset(rig, user, task.seed, tmp_path / "episode")
-    result = run_episode(rig, user, task, approach, tmp_path / "episode")
+    approach.reset(cfg, human, None, user, task.seed, tmp_path / "episode")
+    result = run_episode(cfg, human, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
     assert result, "episode recorded no interactions"
 
 
 def test_keypoint_baseline_episode_smoke(tmp_path: Path) -> None:
     """The episode loop runs end-to-end with a stubbed keypoint interpreter."""
-    rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
+    cfg = replace(load_mpc_config(_SMOKE_MPC), seed=0)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
     user = get_persona("elbow_contracture")
     bench = InteractionBenchmark(
         name="smoke",
@@ -71,7 +74,7 @@ def test_keypoint_baseline_episode_smoke(tmp_path: Path) -> None:
         goals=[[-0.18, 0.40, 0.34]],
         max_rounds=1,
     )
-    task = bench.generate_tasks(0, rig.cfg)[0]
+    task = bench.generate_tasks(0, cfg)[0]
     grounder = LlmKeypointGrounder()
     grounder._interpret = (  # type: ignore[method-assign]
         lambda text, scene_context: {
@@ -80,7 +83,7 @@ def test_keypoint_baseline_episode_smoke(tmp_path: Path) -> None:
         }
     )
     approach = Approach(name="llm_keypoint", grounder=grounder, cost_gen=NoCostGen())
-    approach.reset(rig, user, task.seed, tmp_path / "episode")
-    result = run_episode(rig, user, task, approach, tmp_path / "episode")
+    approach.reset(cfg, human, None, user, task.seed, tmp_path / "episode")
+    result = run_episode(cfg, human, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
     assert result, "episode recorded no interactions"

@@ -19,12 +19,11 @@ from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
 )
 from uncertain_feedback.planners.interactive import OperatorPause
-from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig, SmplLeftArmFK
+from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig
 from uncertain_feedback.planners.mpc.config import load_mpc_config
-from uncertain_feedback.planners.mpc.costs import (
-    CompositeTrajectoryCost,
-    MpcCostContext,
-)
+from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
 from uncertain_feedback.planners.run import RunSetup, run_repeated_correction_session
 from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
 
@@ -108,17 +107,16 @@ def test_operator_pause_prompts_when_the_request_line_is_empty() -> None:
 
 
 def test_remaining_mdm_trajectory_is_snapshot_and_replacement_discards_suffix() -> None:
-    fk = SmplLeftArmFK()
-    q0 = np.zeros(7, dtype=np.float64)
+    human = Human()
     old = np.stack([np.full((3, 3), value) for value in (0.1, 0.2, 0.3)])
-    old_q = fk.arm_aa_to_q_batch(old)
+    old_q = human.q_from_arm_aa(old)
     planner = ArmMPC(
+        human,
         visualize=False,
-        fk=fk,
         feedback=FeedbackConfig(max_playback_delta=10.0),
     )
     planner.push_trajectory(old)
-    q1 = planner.step(q0)
+    q1 = planner.step().q
 
     snapshot = planner.remaining_mdm_trajectory(q1)
     assert snapshot is not None
@@ -126,25 +124,24 @@ def test_remaining_mdm_trajectory_is_snapshot_and_replacement_discards_suffix() 
     np.testing.assert_allclose(snapshot[1:], old_q[1:])
 
     replacement = np.stack([np.full((3, 3), value) for value in (0.8, 0.9)])
-    replacement_q = fk.arm_aa_to_q_batch(replacement)
+    replacement_q = human.q_from_arm_aa(replacement)
     planner.push_trajectory(replacement)
     snapshot[1:] = -1.0
 
-    np.testing.assert_allclose(planner.step(q1), replacement_q[0])
-    np.testing.assert_allclose(planner.step(replacement_q[0]), replacement_q[1])
+    np.testing.assert_allclose(planner.step().q, replacement_q[0])
+    np.testing.assert_allclose(planner.step().q, replacement_q[1])
     assert planner.remaining_mdm_trajectory(replacement_q[1]) is None
 
 
 def test_session_triggers_again_after_comfort_rearms(monkeypatch, tmp_path) -> None:
     q0 = np.zeros(7, dtype=np.float64)
-    fk = SmplLeftArmFK()
-    planner = ArmMPC(visualize=False, fk=fk, feedback=FeedbackConfig())
-    monkeypatch.setattr(planner, "step", np.asarray)
+    planner = ArmMPC(Human(), visualize=False, feedback=FeedbackConfig())
+    monkeypatch.setattr(planner, "step", lambda: planner.human)
     violations = iter((0.0, 0.03, 0.0, 0.03, 0.04))
     monkeypatch.setattr(
         session_module,
         "compute_violations",
-        lambda _user, _context, _q: np.array([next(violations)]),
+        lambda _user, _human, _traj: np.array([next(violations)]),
     )
     user = SimulatedUser(
         name="restricted",
@@ -154,7 +151,7 @@ def test_session_triggers_again_after_comfort_rearms(monkeypatch, tmp_path) -> N
     )
     handled: list[tuple[int, str]] = []
 
-    def handle(step, _q, _history, reason, violation, local_index):
+    def handle(step, _human, reason, violation, local_index):
         handled.append((step, reason))
         return CorrectionRoundResult(
             round_index=local_index,
@@ -172,9 +169,6 @@ def test_session_triggers_again_after_comfort_rearms(monkeypatch, tmp_path) -> N
     session = CorrectionSession(
         mpc=planner,
         user=user,
-        cost_context=MpcCostContext(
-            fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-        ),
         feedback_text=user.feedback_text,
         trigger_threshold=0.02,
         text_time=0,
@@ -182,7 +176,7 @@ def test_session_triggers_again_after_comfort_rearms(monkeypatch, tmp_path) -> N
         handle_correction=handle,
     )
 
-    result = session.run_trajectory(q0, 5)
+    result = session.run_trajectory(5)
 
     assert handled == [(0, "text_time"), (3, "discomfort")]
     assert len(result.rounds) == 2
@@ -210,10 +204,8 @@ corrections:
         encoding="utf-8",
     )
     cfg = load_mpc_config(config_path)
-    q0 = np.zeros(7, dtype=np.float64)
-    fk = SmplLeftArmFK()
-    planner = ArmMPC(visualize=False, fk=fk, feedback=FeedbackConfig())
-    monkeypatch.setattr(planner, "step", np.asarray)
+    planner = ArmMPC(Human(), visualize=False, feedback=FeedbackConfig())
+    monkeypatch.setattr(planner, "step", lambda: planner.human)
     requests = iter((False, True, False, False))
 
     class FakePause:
@@ -235,31 +227,18 @@ corrections:
     class FakeGenerator:
         """Motion generator stand-in returning a canned correction."""
 
-        prefix_frames = 4
-
         @staticmethod
-        def build_prefix_from_arm_history(_initial_pose, arm_aa_seq):
-            return np.asarray(arm_aa_seq)
-
-        @staticmethod
-        def generate_left_arm_trajectory(_text, *, start_pose, **_kwargs):
-            # Mirrors the real contract: the prefix conditions generation and
-            # the returned motion starts at its last frame.
-            current = np.asarray(start_pose)[-1]
-            return np.stack([current, current])
+        def generate_positions(_text, human, **_kwargs):
+            # Mirrors the real contract: the returned motion starts at the
+            # person's current pose.
+            positions = np.zeros((1, 2, 22, 3))
+            positions[:, :, LEFT_ARM_CHAIN_INDICES] = human.fk_positions_from_q(human.q)
+            return positions
 
     setup = RunSetup(
         mpc=planner,
-        gen=FakeGenerator(),
-        fk=fk,
-        cost_context=MpcCostContext(
-            fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-        ),
-        body_pos=None,
-        spine3_pos=fk.tpose_spine3_pos,
-        spine3_aa=np.zeros(3),
-        q0=q0,
-        initial_pose=np.zeros(263),
+        gen=FakeGenerator(),  # type: ignore[arg-type]
+        human=planner.human,
         uses_mdm=True,
         visualize=False,
         compact=False,
@@ -310,15 +289,13 @@ corrections:
         encoding="utf-8",
     )
     cfg = load_mpc_config(config_path)
-    q0 = np.zeros(7, dtype=np.float64)
-    fk = SmplLeftArmFK()
-    planner = ArmMPC(visualize=False, fk=fk, feedback=FeedbackConfig())
-    monkeypatch.setattr(planner, "step", np.asarray)
+    planner = ArmMPC(Human(), visualize=False, feedback=FeedbackConfig())
+    monkeypatch.setattr(planner, "step", lambda: planner.human)
     violations = iter((0.0, 0.03, 0.0, 0.03, 0.04))
     monkeypatch.setattr(
         session_module,
         "compute_violations",
-        lambda _user, _context, _q: np.array([next(violations)]),
+        lambda _user, _human, _traj: np.array([next(violations)]),
     )
     user = SimulatedUser(
         name="restricted",
@@ -330,32 +307,18 @@ corrections:
     class FakeGenerator:
         """Motion generator stand-in returning a canned correction."""
 
-        prefix_frames = 4
-
         @staticmethod
-        def build_prefix_from_arm_history(_initial_pose, arm_aa_seq):
-            return np.asarray(arm_aa_seq)
+        def generate_positions(_text, human, **_kwargs):
+            # Mirrors the real contract: the returned motion starts at the
+            # person's current pose.
+            positions = np.zeros((1, 2, 22, 3))
+            positions[:, :, LEFT_ARM_CHAIN_INDICES] = human.fk_positions_from_q(human.q)
+            return positions
 
-        @staticmethod
-        def generate_left_arm_trajectory(_text, *, start_pose, **_kwargs):
-            # Mirrors the real contract: the prefix conditions generation and
-            # the returned motion starts at its last frame.
-            current = np.asarray(start_pose)[-1]
-            return np.stack([current, current])
-
-    context = MpcCostContext(
-        fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-    )
     setup = RunSetup(
         mpc=planner,
-        gen=FakeGenerator(),
-        fk=fk,
-        cost_context=context,
-        body_pos=None,
-        spine3_pos=fk.tpose_spine3_pos,
-        spine3_aa=np.zeros(3),
-        q0=q0,
-        initial_pose=np.zeros(263),
+        gen=FakeGenerator(),  # type: ignore[arg-type]
+        human=planner.human,
         uses_mdm=True,
         visualize=False,
         compact=False,

@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Callable, Literal, Sequence
 import numpy as np
 
 from uncertain_feedback.planners.mpc import ArmMPC
-from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost, MpcCostContext
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
+from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import run_planning_loop
 from uncertain_feedback.simulated_users import SimulatedUser, compute_violations
 
@@ -101,7 +101,7 @@ class CorrectionTrajectoryResult:
 
 
 CorrectionHandler = Callable[
-    [int, np.ndarray, list[np.ndarray], TriggerReason, float | None, int],
+    [int, Human, TriggerReason, float | None, int],
     CorrectionRoundResult,
 ]
 FinishHandler = Callable[[Sequence[CorrectionRoundResult]], GeneratedPythonCost | None]
@@ -113,7 +113,6 @@ class CorrectionSession:
 
     mpc: ArmMPC
     user: SimulatedUser
-    cost_context: MpcCostContext
     feedback_text: str
     trigger_threshold: float
     text_time: int | None
@@ -128,13 +127,13 @@ class CorrectionSession:
 
     def run_trajectory(
         self,
-        q0: np.ndarray,
         n_steps: int,
         *,
         progress: bool = False,
         progress_desc: str = "MPC",
     ) -> CorrectionTrajectoryResult:
-        """Roll out ``n_steps``, pausing for a round whenever the trigger fires."""
+        """Roll out ``n_steps`` from the planner's person, pausing for a round
+        whenever the trigger fires."""
         automatic = bool(self.user.bounds and self.user.feedback_text)
         trigger = CorrectionTrigger(
             threshold=self.trigger_threshold,
@@ -143,29 +142,24 @@ class CorrectionSession:
             operator_requested=self.operator_requested,
         )
 
-        def on_pre_step(step: int, q: np.ndarray, q_history: list[np.ndarray]) -> None:
+        def on_pre_step(step: int, human: Human) -> None:
             violation = None
             if automatic:
                 violation = float(
                     compute_violations(
-                        self.user,
-                        self.cost_context,
-                        q_to_arm_aa(
-                            q[np.newaxis], self.cost_context.fk.elbow_hinge_axis
-                        ),
+                        self.user, human, human.arm_aa_from_q(human.q[np.newaxis])
                     )[0]
                 )
             reason = trigger.evaluate(step, violation)
             if reason is None:
                 return
             result = self.handle_correction(
-                step, q, q_history, reason, violation, len(self.rounds)
+                step, human, reason, violation, len(self.rounds)
             )
             self.rounds.append(result)
 
         loop_result = run_planning_loop(
             self.mpc,
-            q0,
             n_steps,
             on_pre_step=on_pre_step,
             progress=progress,

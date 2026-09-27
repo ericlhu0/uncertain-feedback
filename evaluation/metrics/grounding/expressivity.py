@@ -39,7 +39,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_aa_from_state,
     resample_equidistant,
 )
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX
 
 N_WAYPOINTS = 15
@@ -69,7 +69,7 @@ def _normalized_dispersion(paths: np.ndarray) -> DiversityResult:
 
 
 def candidate_diversity(
-    candidates: dict[int, np.ndarray], context: MpcCostContext
+    candidates: dict[int, np.ndarray], human: Human
 ) -> DiversityResult:
     """Score how varied a grounder's candidate corrections are.
 
@@ -82,26 +82,24 @@ def candidate_diversity(
     paths = np.stack(
         [
             resample_equidistant(path - path[0], N_WAYPOINTS)
-            for path in (
-                feature_path(c, context) for _, c in sorted(candidates.items())
-            )
+            for path in (feature_path(c, human) for _, c in sorted(candidates.items()))
         ]
     )
     return _normalized_dispersion(paths)
 
 
-def _position_path(trajectory: np.ndarray, context: MpcCostContext) -> np.ndarray:
+def _position_path(trajectory: np.ndarray, human: Human) -> np.ndarray:
     """``(T, 6)`` elbow and wrist world positions in metres."""
-    positions = context.fk.fk_batch(
-        arm_aa_from_state(trajectory, context).reshape(-1, 3, 3),
-        context.spine3_pos,
-        context.spine3_aa,
+    positions = human.fk.fk_batch(
+        arm_aa_from_state(trajectory, human).reshape(-1, 3, 3),
+        human.spine3_pos,
+        human.spine3_aa,
     )
     return positions[:, [ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX]].reshape(len(positions), 6)
 
 
 def candidate_position_diversity(
-    candidates: dict[int, np.ndarray], context: MpcCostContext
+    candidates: dict[int, np.ndarray], human: Human
 ) -> DiversityResult:
     """:func:`candidate_diversity` over elbow and wrist positions instead of features.
 
@@ -111,7 +109,7 @@ def candidate_position_diversity(
         [
             resample_equidistant(path - path[0], N_WAYPOINTS)
             for path in (
-                _position_path(c, context) for _, c in sorted(candidates.items())
+                _position_path(c, human) for _, c in sorted(candidates.items())
             )
         ]
     )

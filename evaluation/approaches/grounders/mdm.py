@@ -10,9 +10,11 @@ import numpy as np
 from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.steering import NoSteering, Steering
 from evaluation.metrics.grounding.structs import GroundingResult
+from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.motion_generators.steering import SteeringSpec
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
-from uncertain_feedback.planners.rig import PlanningRig
+from uncertain_feedback.planners.mpc.config import MpcRunConfig
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import anchor_q_trajectory
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty import UqConfig, UqSelector, make_clusterer
 
@@ -43,13 +45,13 @@ class MdmGrounder(Grounder):
 
     def reset(
         self,
-        rig: PlanningRig,
+        cfg: MpcRunConfig,
+        gen: MotionGenerator | None,
         user: SimulatedUser,
         seed: int,
         episode_dir: Path,
     ) -> None:
-        super().reset(rig, user, seed, episode_dir)
-        cfg = rig.cfg
+        super().reset(cfg, gen, user, seed, episode_dir)
         if cfg.feedback is None or cfg.feedback.uq is None:
             raise ValueError("MdmGrounder requires feedback: (with uq:).")
         uq = cfg.feedback.uq
@@ -59,41 +61,32 @@ class MdmGrounder(Grounder):
             uq = replace(uq, n_clusters=self._n_clusters)
         uq = replace(uq, steering=replace(uq.steering, mode=self.steering.mode))
         self._uq_cfg = uq
-        assert rig.gen is not None
         self._steering_spec = (  # pylint: disable=assignment-from-none
-            self.steering.spec(rig.gen, user, uq.steering, seed=seed)
+            self.steering.spec(self.gen, user, uq.steering, seed=seed)
         )
 
     def ground(
         self,
         text: str,
-        q_feedback: np.ndarray,
+        human: Human,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
     ) -> GroundingResult:
         del nominal_plan
-        rig = self.rig
-        assert rig.gen is not None and rig.initial_hml_pose is not None
         assert self._uq_cfg is not None
         uq = self._uq_cfg
-        feedback = rig.cfg.feedback
+        feedback = self.cfg.feedback
         assert feedback is not None
-        clusterer = make_clusterer(uq.clusterer, uq.n_clusters, fk=rig.fk)
-        selector = UqSelector(uq, rig.fk, clusterer=clusterer)
-        start_pose = rig.gen.build_pose_from_arm_aa(
-            rig.initial_hml_pose, q_to_arm_aa(q_feedback, rig.fk.elbow_hinge_axis)
-        )
+        clusterer = make_clusterer(uq.clusterer, uq.n_clusters, fk=human.fk)
+        selector = UqSelector(uq, human.fk, clusterer=clusterer)
         result = selector.query(
-            rig.gen,
+            self.gen,
             text,
-            start_pose=start_pose,
-            current_q=q_feedback,
+            human,
+            prefix=False,
             mdm_frames=feedback.frames,
             default_scale=uq.scale,
             cluster_selector=cluster_selector,
-            spine3_pos=rig.spine3_pos,
-            spine3_aa=rig.spine3_aa,
-            body_pos=rig.body_pos,
             steering=self._steering_spec,
         )
         candidates = result.cluster_means
@@ -102,7 +95,9 @@ class MdmGrounder(Grounder):
             # the echoed prefix frame and start the demonstrated shape at the
             # live configuration, so no candidate carries the frame-0 seam.
             candidates = {
-                label: rig.fk.anchor_arm_trajectory(mean, q_feedback, rig.spine3_aa)
+                label: human.arm_aa_from_q(
+                    anchor_q_trajectory(human.q_from_arm_aa(mean), human.q)
+                )
                 for label, mean in candidates.items()
             }
         return GroundingResult(

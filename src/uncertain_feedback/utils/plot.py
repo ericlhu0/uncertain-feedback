@@ -2336,7 +2336,7 @@ class ArmVisualizer:  # pylint: disable=too-many-instance-attributes
             dist = float(np.linalg.norm(current_q - target_q))
             frames.append({"q": current_q.copy(), "positions": positions, "dist": dist})
             if step < n_steps:
-                current_q = mpc.step(current_q)
+                current_q = mpc.step().q
 
         return frames
 
@@ -2650,6 +2650,7 @@ def _save(anim: FuncAnimation, path: str) -> None:
 
 if __name__ == "__main__":
     from uncertain_feedback.planners.mpc.goal_spaces import CartesianConfig
+    from uncertain_feedback.planners.mpc.human import Human
     from uncertain_feedback.planners.mpc.mpc import ArmMPC
 
     # Entry point for the animate demo.
@@ -2671,10 +2672,9 @@ if __name__ == "__main__":
         - demo_fk.tpose_spine3_pos
     )
     demo_mpc = ArmMPC(
+        Human(),
         horizon=demo_args.horizon,
         n_mpc_samples=demo_args.samples,
-        fk=demo_fk,
-        initial_q=demo_initial_q,
         cartesian=CartesianConfig(goals=[list(demo_goal)]),
     )
     demo_vis = ArmVisualizer(demo_fk)

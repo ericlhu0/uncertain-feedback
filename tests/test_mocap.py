@@ -25,6 +25,7 @@ from uncertain_feedback.mocap.registration import (
     _RIGHT_COLLAR_22,
     ArmRegistration,
 )
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK, q_to_arm_aa
 
 if TYPE_CHECKING:
@@ -398,8 +399,7 @@ def test_ik_keeps_the_gripper_on_the_forearm(monkeypatch, base_offset_pb) -> Non
         real_mirror_host=None,
         live_view=False,
     )
-    env.set_pose_context(fk, None, None, fk.tpose_all_joints.copy())
-    q = env.initial_q(fk.arm_aa_to_q(arm_aa, None))
+    q = env.measure(Human(arm=arm_aa)).q
     env._capture_grasp(q)  # pylint: disable=protected-access
 
     assert _gripper_offset_from_forearm(env, q) < 0.05
@@ -460,8 +460,7 @@ def test_ik_holds_position_when_the_pose_is_infeasible(monkeypatch) -> None:
         real_mirror_host=None,
         live_view=False,
     )
-    env.set_pose_context(fk, None, None, fk.tpose_all_joints.copy())
-    q0 = env.initial_q(fk.arm_aa_to_q(arm_aa, None))
+    q0 = env.measure(Human(arm=arm_aa)).q
     env._capture_grasp(q0)  # pylint: disable=protected-access
 
     q_goal = q0.copy()
@@ -527,8 +526,7 @@ def test_closed_live_view_window_continues_headless(monkeypatch, capsys) -> None
         real_mirror_host=None,
         live_view=False,
     )
-    env.set_pose_context(fk, None, None, fk.tpose_all_joints.copy())
-    q0 = env.initial_q(fk.arm_aa_to_q(arm_aa, None))
+    q0 = env.measure(Human(arm=arm_aa)).q
     env._capture_grasp(q0)  # pylint: disable=protected-access
     robot_q = env._current_q()  # pylint: disable=protected-access
 
@@ -585,8 +583,7 @@ def test_preview_reports_the_grasp_error(monkeypatch, capsys) -> None:
         real_mirror_host=None,
         live_view=False,
     )
-    env.set_pose_context(fk, None, None, fk.tpose_all_joints.copy())
-    q0 = env.initial_q(fk.arm_aa_to_q(arm_aa, None))
+    q0 = env.measure(Human(arm=arm_aa)).q
     env._capture_grasp(q0)  # pylint: disable=protected-access
 
     # One stride of the sweep the infeasibility test walks in 600 steps, so the
@@ -690,18 +687,15 @@ def test_replaying_a_recording_registers_where_the_live_stream_did(
     live = real_module.RealEnv(
         mocap_rigid_bodies=body_ids, mocap_host="stub", live_view=False
     )
-    live.set_pose_context(fk_live, None, None, fk_live.tpose_all_joints.copy())
-    q_live = live.initial_q(fk_live.arm_aa_to_q(arm_aa, None))
+    q_live = live.measure(Human(arm=arm_aa)).q
 
-    fk_replay = SmplLeftArmFK()
     replay = real_module.RealEnv(
         mocap_rigid_bodies=body_ids,
         recording=path,
         real_mirror_host="replay",
         live_view=False,
     )
-    replay.set_pose_context(fk_replay, None, None, fk_replay.tpose_all_joints.copy())
-    q_replay = replay.initial_q(fk_replay.arm_aa_to_q(arm_aa, None))
+    q_replay = replay.measure(Human(arm=arm_aa)).q
 
     np.testing.assert_allclose(q_replay, q_live, atol=1e-12)
     assert replay._registration is not None and live._registration is not None

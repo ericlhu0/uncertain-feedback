@@ -13,10 +13,11 @@ The parsed section dataclasses are passed straight into ``ArmMPC``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from uncertain_feedback.consts import MDM_START_POSE_PATH
@@ -77,18 +78,13 @@ class CorrectionConfig:
 
 @dataclass(frozen=True)
 class SimulatedUserConfig:
-    """Automated simulated-user episode settings (verbalizer + re-trigger loop).
-
-    ``time_of_day`` is the session clock in hours ``[0, 24)`` seen by
-    time-conditioned personas; ``None`` runs an untimed session.
-    """
+    """Automated simulated-user episode settings (verbalizer + re-trigger loop)."""
 
     verbalizer: str = "everyday"
     seed: int = 0
     max_rounds: int = 3
     magnitudes: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5)
     nominal_steps: int = 20
-    time_of_day: float | None = None
     # Candidate-selection model: oracle_progress | intent_aligned | progress | random.
     chooser: str = "oracle_progress"
 
@@ -579,14 +575,6 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     )
     if not isinstance(magnitudes_value, list) or not magnitudes_value:
         raise ValueError("simulated_user.magnitudes must be a non-empty list.")
-    time_of_day_value = simulated_user_data.get("time_of_day")
-    time_of_day = (
-        None
-        if time_of_day_value is None
-        else _float(time_of_day_value, "simulated_user.time_of_day")
-    )
-    if time_of_day is not None and not 0.0 <= time_of_day < 24.0:
-        raise ValueError("simulated_user.time_of_day must be in [0, 24).")
     chooser_value = str(simulated_user_data.get("chooser", default_sim_user.chooser))
     if chooser_value not in ("oracle_progress", "intent_aligned", "progress", "random"):
         raise ValueError(
@@ -613,7 +601,6 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             simulated_user_data.get("nominal_steps", default_sim_user.nominal_steps),
             "simulated_user.nominal_steps",
         ),
-        time_of_day=time_of_day,
         chooser=chooser_value,
     )
 
@@ -674,3 +661,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         corrections=CorrectionConfig(trigger_threshold=trigger_threshold),
         simulated_user=simulated_user,
     )
+
+
+def cfg_with_goal(cfg: MpcRunConfig, goal: np.ndarray) -> MpcRunConfig:
+    """The run config with its Cartesian goal queue replaced by ``goal``."""
+    assert cfg.cartesian is not None
+    return replace(cfg, cartesian=replace(cfg.cartesian, goals=[goal]))

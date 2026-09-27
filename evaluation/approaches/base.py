@@ -13,8 +13,13 @@ from evaluation.approaches.grounders.mdm import MdmGrounder
 from evaluation.approaches.grounders.nominal import NominalGrounder
 from evaluation.approaches.steering import NoSteering, Steering
 from evaluation.metrics.grounding.structs import GroundingResult
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
-from uncertain_feedback.planners.rig import PlanningRig, base_extra_costs
+from uncertain_feedback.motion_generators.base import MotionGenerator
+from uncertain_feedback.planners.mpc.config import MpcRunConfig
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    base_extra_costs,
+)
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import SimulatedUser
 
 
@@ -56,20 +61,22 @@ class Approach:
 
     @property
     def requires_generator(self) -> bool:
-        """Whether the rig must load the motion generator for this approach."""
+        """Whether this approach needs the motion generator loaded."""
         return self.grounder.requires_generator
 
     def reset(
         self,
-        rig: PlanningRig,
+        cfg: MpcRunConfig,
+        human: Human,
+        gen: MotionGenerator | None,
         user: SimulatedUser,
         seed: int,
         episode_dir: Path,
     ) -> None:
         """Bind the episode and drop all learned state."""
-        self._base = base_extra_costs(rig, user)
-        self.grounder.reset(rig, user, seed, episode_dir)
-        self.cost_gen.reset(rig, self._base, episode_dir)
+        self._base = base_extra_costs(cfg.costs, human, user)
+        self.grounder.reset(cfg, gen, user, seed, episode_dir)
+        self.cost_gen.reset(cfg, self._base, episode_dir)
 
     def planning_costs(self) -> CompositeTrajectoryCost:
         """Base comfort costs plus whatever has been learned so far."""
@@ -84,12 +91,12 @@ class Approach:
     def ground(
         self,
         text: str,
-        q_feedback: np.ndarray,
+        human: Human,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
     ) -> GroundingResult:
         """Turn one utterance into candidate motions and a selected correction."""
-        return self.grounder.ground(text, q_feedback, nominal_plan, cluster_selector)
+        return self.grounder.ground(text, human, nominal_plan, cluster_selector)
 
     def learn(self, ctx: RoundContext) -> LearnOutcome:
         """Distill the resolved correction into persistent planner costs."""

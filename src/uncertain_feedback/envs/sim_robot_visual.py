@@ -19,11 +19,8 @@ from scipy.spatial.transform import Rotation
 from uncertain_feedback.envs.base import ExecutionEnv
 from uncertain_feedback.envs.grasp import GRASP_FRACTION, grasp_pose_fk
 from uncertain_feedback.envs.human_mesh import HumanMeshBody
-from uncertain_feedback.planners.mpc.kinematics import (
-    _SMPL_PKL_DEFAULT,
-    SmplLeftArmFK,
-    q_to_arm_aa,
-)
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import _SMPL_PKL_DEFAULT, q_to_arm_aa
 from uncertain_feedback.utils.smpl_mesh import SmplMeshCache
 
 _PANDA_URDF = Path(__file__).parent / "assets" / "panda" / "panda.urdf"
@@ -67,15 +64,10 @@ class SimRobotVisualEnv(ExecutionEnv):
         self._spine3_pb: np.ndarray = np.zeros(3, dtype=np.float64)
         self._human_mesh: HumanMeshBody | None = None
 
-    def set_pose_context(
-        self,
-        fk: SmplLeftArmFK,
-        spine3_pos: np.ndarray | None,
-        spine3_aa: np.ndarray | None,
-        body_pos: np.ndarray | None = None,
-    ) -> None:
-        super().set_pose_context(fk, spine3_pos, spine3_aa, body_pos)
+    def measure(self, human: Human) -> Human:
+        human = super().measure(human)
         self._build_scene()
+        return human
 
     def execute(self, q_cmd: np.ndarray) -> np.ndarray:
         q = np.asarray(q_cmd, dtype=np.float64)

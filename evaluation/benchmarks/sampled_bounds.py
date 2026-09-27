@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_features import arm_feature_series
-from uncertain_feedback.planners.mpc.costs import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users.base import (
     CoupledBound,
     HiddenBound,
@@ -25,7 +25,7 @@ def sample_bound(
     rng: np.random.Generator,
     naive: np.ndarray,
     goal_pose: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
     name: str,
     family: str,
     min_history: int,
@@ -40,8 +40,8 @@ def sample_bound(
     """
     if len(naive) <= min_history + window + 1:
         return None
-    features = arm_feature_series(naive, context)
-    goal_features = arm_feature_series(goal_pose[None], context)
+    features = arm_feature_series(naive, human)
+    goal_features = arm_feature_series(goal_pose[None], human)
     for _ in range(128):
         feature, conditioning = rng.choice(_FEATURES, size=2, replace=False)
         feature, conditioning = str(feature), str(conditioning)

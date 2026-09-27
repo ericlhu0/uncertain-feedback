@@ -12,8 +12,8 @@ from uncertain_feedback.cost_generation.generate import _rejected_candidate_traj
 from uncertain_feedback.demo_runner import session as demo_session
 from uncertain_feedback.demo_runner.session import Session
 from uncertain_feedback.planners.mpc import FeedbackConfig
-from uncertain_feedback.planners.mpc.costs import MpcCostContext
-from uncertain_feedback.planners.mpc.kinematics import SmplLeftArmFK
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty import UqConfig
 from uncertain_feedback.uncertainty.cluster_picker import (
@@ -103,14 +103,6 @@ def test_recursive_navigation_splits_small_subset_into_singletons() -> None:
     np.testing.assert_array_equal(result.sample_indices, [1])
 
 
-class _FakeGenerator:
-    def smpl_positions_to_left_arm_trajectory(
-        self, positions: np.ndarray, spine3_aa: np.ndarray | None = None
-    ) -> np.ndarray:
-        del spine3_aa
-        return positions[:, :3, :]
-
-
 class _DeterministicClusterer:
     def __init__(self, n_clusters: int, fk: object) -> None:
         del fk
@@ -132,14 +124,22 @@ def _fake_make_clusterer(
     return _DeterministicClusterer(n_clusters, fk)
 
 
+def _arm_samples(human: Human, frame_step: float = 0.0) -> np.ndarray:
+    """Eight 2-frame MDM samples, each bending the elbow to its own angle."""
+    q = np.zeros((8, 2, 7))
+    q[..., 6] = 0.1 * np.arange(8)[:, None] + frame_step * np.arange(2)
+    samples = np.zeros((8, 2, 22, 3))
+    samples[..., LEFT_ARM_CHAIN_INDICES, :] = human.fk_positions_from_q(q)
+    return samples
+
+
 def _demo_session(tmp_path) -> Session:
+    human = Human()
     trajectory = SimpleNamespace()
-    trajectory.samples = np.broadcast_to(
-        np.arange(8, dtype=np.float64)[:, None, None, None], (8, 2, 22, 3)
-    ).copy()
+    trajectory.samples = _arm_samples(human)
     trajectory.cluster_levels = []
     trajectory.goal = np.zeros(3)
-    trajectory.q_history = []
+    trajectory.feedback = None
     trajectory.labels = None
     trajectory.cluster_means = {}
     trajectory.cluster_corrections = {}
@@ -150,17 +150,11 @@ def _demo_session(tmp_path) -> Session:
     trajectory.prompt = None
     trajectory._last_cost_payload = None
     user = SimulatedUser("test", "", "", bounds=())
-    fk = SmplLeftArmFK()
     rig = SimpleNamespace(
         cfg=SimpleNamespace(
             feedback=FeedbackConfig(anchor_correction=False, uq=UqConfig())
         ),
-        gen=_FakeGenerator(),
-        fk=fk,
-        context=MpcCostContext(
-            fk=fk, spine3_pos=fk.tpose_spine3_pos, spine3_aa=np.zeros(3)
-        ),
-        spine3_aa=np.zeros(3),
+        human=human,
         _cfg_with_goal=lambda goal: object(),
         package_trajectory=lambda traj, selected: {"n_frames": len(traj)},
     )
@@ -180,7 +174,7 @@ def test_demo_runner_refines_recursively_and_backs_up(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(
         demo_session,
         "oracle_cluster_scores",
-        lambda _user, _context, means, _scale: {label: float(label) for label in means},
+        lambda _user, _human, means, _scale: {label: float(label) for label in means},
     )
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
@@ -222,7 +216,7 @@ def test_demo_runner_reclusters_only_current_subset(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(
         demo_session,
         "oracle_cluster_scores",
-        lambda _user, _context, means, _scale: {label: float(label) for label in means},
+        lambda _user, _human, means, _scale: {label: float(label) for label in means},
     )
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
@@ -245,7 +239,7 @@ def test_replay_records_only_the_final_cluster_selection_path(
     monkeypatch.setattr(
         demo_session,
         "oracle_cluster_scores",
-        lambda _user, _context, means, _scale: {label: float(label) for label in means},
+        lambda _user, _human, means, _scale: {label: float(label) for label in means},
     )
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
@@ -300,7 +294,7 @@ def test_demo_runner_marks_restore_across_cluster_levels(monkeypatch, tmp_path) 
     monkeypatch.setattr(
         demo_session,
         "oracle_cluster_scores",
-        lambda _user, _context, means, _scale: {label: float(label) for label in means},
+        lambda _user, _human, means, _scale: {label: float(label) for label in means},
     )
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
@@ -330,29 +324,25 @@ def test_demo_runner_threads_scaled_clusters_to_cost_generation(
     monkeypatch.setattr(
         demo_session,
         "oracle_cluster_scores",
-        lambda _user, _context, means, _scale: {label: float(label) for label in means},
+        lambda _user, _human, means, _scale: {label: float(label) for label in means},
     )
     monkeypatch.setattr(demo_session, "violation_metrics", lambda *_args: {})
     monkeypatch.setattr(demo_session, "goal_reach", lambda *_args: {"reached": True})
     captured: dict[str, object] = {}
 
-    def fake_generate_cost_for_cluster(**kwargs):
+    def fake_generate_cost_for_correction(**kwargs):
         captured.update(kwargs)
         return SimpleNamespace(generated_cost=None)
 
     monkeypatch.setattr(
-        demo_session, "generate_cost_for_cluster", fake_generate_cost_for_cluster
+        demo_session, "generate_cost_for_correction", fake_generate_cost_for_correction
     )
     session = _demo_session(tmp_path)
     session.corpus = SimpleNamespace(dir=tmp_path)  # type: ignore[assignment]
     session.rig._extra_costs = lambda _user: object()  # type: ignore[assignment, method-assign, return-value]
-    session.rig.body_pos = None  # type: ignore[assignment]
-    session.rig.spine3_pos = None  # type: ignore[assignment]
-    session.trajectory.base_traj = np.zeros((1, 3, 3))  # type: ignore[union-attr]
-    session.trajectory.start_q = np.zeros((3, 3))  # type: ignore[union-attr]
-    session.trajectory.q_feedback = None  # type: ignore[union-attr]
+    session.trajectory.corrected = session.rig.human  # type: ignore[misc, union-attr]
     session.trajectory.prompt = "move comfortably"  # type: ignore[union-attr]
-    session.trajectory.samples[:, 1] += 10.0  # type: ignore[index, union-attr]
+    session.trajectory.samples = _arm_samples(session.rig.human, frame_step=0.5)  # type: ignore[union-attr]
     session.recluster(2, 0.4)
     session.pick_cluster(0)
     session.mark_cluster(1, True)
@@ -368,4 +358,4 @@ def test_demo_runner_threads_scaled_clusters_to_cost_generation(
         assert not np.array_equal(
             candidate_trajs[label], session.trajectory.cluster_means[label]  # type: ignore[union-attr]
         )
-    np.testing.assert_allclose(captured["cluster_traj"], candidate_trajs[0])  # type: ignore[call-overload]
+    np.testing.assert_allclose(captured["correction_traj"], candidate_trajs[0])  # type: ignore[call-overload]

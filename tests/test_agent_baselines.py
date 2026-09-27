@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,8 @@ from evaluation.approaches.grounders.llm_trajectory import (
 from evaluation.benchmarks.base import InteractionBenchmark
 from evaluation.benchmarks.episode import run_episode
 from evaluation.benchmarks.structs import InteractionTask
-from uncertain_feedback.planners.mpc.kinematics import q_to_arm_aa
-from uncertain_feedback.planners.rig import PlanningRig, build_rig
+from uncertain_feedback.planners.mpc.config import MpcRunConfig, load_mpc_config
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import get_persona
 
 _SMOKE_MPC = (
@@ -57,7 +58,12 @@ class _Selector:
         return min(candidates), 1.0
 
 
-def _smoke_task(rig: PlanningRig) -> InteractionTask:
+def _setup() -> tuple[MpcRunConfig, Human]:
+    cfg = replace(load_mpc_config(_SMOKE_MPC), seed=0)
+    return cfg, Human(pose=cfg.pose, arm=cfg.arm)
+
+
+def _smoke_task(cfg: MpcRunConfig) -> InteractionTask:
     bench = InteractionBenchmark(
         name="smoke",
         personas=[_PERSONA],
@@ -65,33 +71,27 @@ def _smoke_task(rig: PlanningRig) -> InteractionTask:
         goals=[list(_GOAL)],
         max_rounds=1,
     )
-    return bench.generate_tasks(0, rig.cfg)[0]
+    return bench.generate_tasks(0, cfg)[0]
 
 
 def _bind(
-    grounder: LlmTrajectoryGrounder, rig: PlanningRig, tmp_path: Path, *responses: str
+    grounder: LlmTrajectoryGrounder, cfg: MpcRunConfig, tmp_path: Path, *responses: str
 ) -> _FakeModel:
-    grounder.reset(rig, get_persona(_PERSONA), _smoke_task(rig).seed, tmp_path)
+    grounder.reset(cfg, None, get_persona(_PERSONA), _smoke_task(cfg).seed, tmp_path)
     model = _FakeModel(*responses)
     grounder._llm = model
     return model
 
 
-def _nominal_plan(rig: PlanningRig, n_frames: int = 21) -> np.ndarray:
-    """A stand-in for the harness's nominal continuation from ``rig.q0``."""
+def _nominal_plan(human: Human, n_frames: int = 21) -> np.ndarray:
+    """A stand-in for the harness's nominal continuation from ``human.q``."""
     ramp = np.linspace(0.0, 1.0, n_frames)[:, None]
     delta = np.array([0.0, 0.0, 0.0, 0.1, 0.2, -0.1, 0.3])
-    return np.asarray(rig.q0, dtype=np.float64)[None] + ramp * delta
+    return human.q[None] + ramp * delta
 
 
-def _positions(rig: PlanningRig, q: np.ndarray) -> np.ndarray:
-    return rig.fk.fk_batch(
-        q_to_arm_aa(q, rig.fk.elbow_hinge_axis), rig.spine3_pos, rig.spine3_aa
-    )
-
-
-def _position_rows(rig: PlanningRig, q: np.ndarray) -> np.ndarray:
-    arm = _positions(rig, q)
+def _position_rows(human: Human, q: np.ndarray) -> np.ndarray:
+    arm = human.fk_positions_from_q(q)
     return np.concatenate([arm[:, _ELBOW], arm[:, _WRIST]], axis=1)
 
 
@@ -107,17 +107,15 @@ def _response(key: str, rows: list[list[float]], count: int) -> str:
 
 
 def test_dense_position_frames_become_four_candidates(tmp_path: Path) -> None:
-    rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
+    cfg, human = _setup()
     grounder = LlmTrajectoryGrounder(output_space="positions", n_frames=16)
-    target = np.asarray(rig.q0, dtype=np.float64).copy()
+    target = human.q
     target[3:6] += 0.3
-    rows = _position_rows(rig, np.linspace(rig.q0, target, 16)).tolist()
-    _bind(grounder, rig, tmp_path, _response("frames", rows, 4))
+    rows = _position_rows(human, np.linspace(human.q, target, 16)).tolist()
+    _bind(grounder, cfg, tmp_path, _response("frames", rows, 4))
     selector = _Selector()
 
-    result = grounder.ground(
-        "lift it higher", np.asarray(rig.q0), _nominal_plan(rig), selector
-    )
+    result = grounder.ground("lift it higher", human, _nominal_plan(human), selector)
 
     assert len(result.candidates) == 4
     assert len(selector.calls) == 1
@@ -127,23 +125,23 @@ def test_dense_position_frames_become_four_candidates(tmp_path: Path) -> None:
 
 
 def test_anatomical_frames_reproduce_the_requested_angles(tmp_path: Path) -> None:
-    rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
+    cfg, human = _setup()
     grounder = LlmTrajectoryGrounder(
         output_space="anatomical", n_frames=12, n_interpretations=2
     )
-    target = np.asarray(rig.q0, dtype=np.float64).copy()
+    target = human.q
     target[3:6] += 0.4
     target[6] += 0.5
-    rows = feature_rows(np.linspace(rig.q0, target, 12), rig.context)
-    _bind(grounder, rig, tmp_path, _response("frames", rows.tolist(), 2))
+    rows = feature_rows(np.linspace(human.q, target, 12), human)
+    _bind(grounder, cfg, tmp_path, _response("frames", rows.tolist(), 2))
 
     result = grounder.ground(
-        "bend my elbow more", np.asarray(rig.q0), _nominal_plan(rig), _Selector()
+        "bend my elbow more", human, _nominal_plan(human), _Selector()
     )
 
     assert len(result.candidates) == 2
     np.testing.assert_allclose(
-        feature_rows(result.candidates[0], rig.context), rows, atol=1e-9
+        feature_rows(result.candidates[0], human), rows, atol=1e-9
     )
 
 
@@ -159,51 +157,51 @@ def test_interpolation_passes_through_every_waypoint_row() -> None:
 
 
 def test_single_waypoint_lands_the_arm_on_the_waypoint(tmp_path: Path) -> None:
-    rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
+    cfg, human = _setup()
     grounder = LlmTrajectoryGrounder(n_waypoints=1, n_frames=8, n_interpretations=1)
-    target = np.asarray(rig.q0, dtype=np.float64).copy()
+    target = human.q
     target[3:6] += 0.25
     target[6] += 0.4
-    waypoint = _position_rows(rig, target[None])
-    _bind(grounder, rig, tmp_path, _response("waypoints", waypoint.tolist(), 1))
+    waypoint = _position_rows(human, target[None])
+    _bind(grounder, cfg, tmp_path, _response("waypoints", waypoint.tolist(), 1))
 
-    result = grounder.ground(
-        "stop there", np.asarray(rig.q0), _nominal_plan(rig), _Selector()
-    )
+    result = grounder.ground("stop there", human, _nominal_plan(human), _Selector())
 
-    reached = rig.fk.fk(result.candidates[0][-1], rig.spine3_pos, rig.spine3_aa)
+    reached = human.fk.fk(result.candidates[0][-1], human.spine3_pos, human.spine3_aa)
     np.testing.assert_allclose(reached[_ELBOW], waypoint[0, :3], atol=1e-9)
     np.testing.assert_allclose(reached[_WRIST], waypoint[0, 3:], atol=1e-9)
 
 
 def test_unparseable_response_falls_back_to_the_nominal_plan(tmp_path: Path) -> None:
-    rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
+    cfg, human = _setup()
     grounder = LlmTrajectoryGrounder()
-    _bind(grounder, rig, tmp_path, "sorry, I cannot help with that")
-    nominal = _nominal_plan(rig)
+    _bind(grounder, cfg, tmp_path, "sorry, I cannot help with that")
+    nominal = _nominal_plan(human)
 
-    result = grounder.ground("move it", np.asarray(rig.q0), nominal, _Selector())
+    result = grounder.ground("move it", human, nominal, _Selector())
 
     assert len(result.candidates) == 1
     np.testing.assert_allclose(
-        result.candidates[0], q_to_arm_aa(nominal, rig.fk.elbow_hinge_axis), atol=1e-12
+        result.candidates[0], human.arm_aa_from_q(nominal), atol=1e-12
     )
 
 
 def test_agent_waypoint_episode_smoke(tmp_path: Path) -> None:
     """The episode loop runs end-to-end with a stubbed interpretation call."""
-    rig = build_rig(_SMOKE_MPC, seed=0, load_generator=False)
+    cfg, human = _setup()
     grounder = LlmTrajectoryGrounder(n_waypoints=1, n_frames=8)
     approach = Approach(name="agent_waypoint", grounder=grounder, cost_gen=NoCostGen())
-    target = np.asarray(rig.q0, dtype=np.float64).copy()
+    target = human.q
     target[3:6] += 0.2
-    rows = _position_rows(rig, target[None]).tolist()
+    rows = _position_rows(human, target[None]).tolist()
     episode_dir = tmp_path / "episode"
-    approach.reset(rig, get_persona(_PERSONA), _smoke_task(rig).seed, episode_dir)
+    approach.reset(
+        cfg, human, None, get_persona(_PERSONA), _smoke_task(cfg).seed, episode_dir
+    )
     grounder._llm = _FakeModel(_response("waypoints", rows, 4))
 
     result = run_episode(
-        rig, get_persona(_PERSONA), _smoke_task(rig), approach, episode_dir
+        cfg, human, get_persona(_PERSONA), _smoke_task(cfg), approach, episode_dir
     )
 
     assert (episode_dir / "episode_summary.json").exists()

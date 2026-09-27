@@ -31,10 +31,6 @@ cartesian:
 preference_learning: false
 preference_alpha: 0
 
-# Session clock (hours) for time-conditioned personas (morning_shoulder_stiffness).
-simulated_user:
-  time_of_day: 9.0
-
 # Curated per-persona goals (from mdm_llm_transfer.yaml): geometry that makes
 # the nominal plan provoke each persona's restriction. Consumed only by the
 # evaluation/ benchmarks (use_persona_goals: true); inert everywhere in src/.

@@ -30,7 +30,6 @@ preference_learning: false
 preference_alpha: 0
 
 simulated_user:
-  time_of_day: 9.0
   nominal_steps: 40
 
 llm_cost:

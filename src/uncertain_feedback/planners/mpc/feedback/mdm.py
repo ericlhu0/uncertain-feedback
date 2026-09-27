@@ -44,7 +44,7 @@ class FeedbackConfig:
         anchor_correction:  Re-anchor the generated correction onto the arm's
                             current configuration before tracking it, dropping
                             the pinned frame (see
-                            ``SmplLeftArmFK.anchor_arm_trajectory``). Removes the
+                            ``anchor_q_trajectory``). Removes the
                             frame-0 seam; set false to track the raw sample.
         uq:                 Optional UQ layer: sample several diffusion
                             outputs, cluster, and pick, instead of following a

@@ -13,9 +13,6 @@ max_tasks: null
 tasks: null
 # Override simulated_user.chooser (oracle_progress | intent_aligned | progress | random).
 sim_chooser: null
-# Load the motion generator even for approaches that do not ground with it, so
-# every arm shares the pose file's body and start pose (null = only if needed).
-load_generator: null
 
 # run/sweep dirs are anchored to the launch cwd: the MDM loader os.chdir()s
 # into its submodule, which would otherwise relocate later jobs' output dirs.

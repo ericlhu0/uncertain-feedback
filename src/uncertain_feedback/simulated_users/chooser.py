@@ -30,7 +30,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_aa_from_state,
     canonical_arm_q,
 )
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users.attribution import (
     ATTRIBUTED_FEATURES,
     CorrectionIntent,
@@ -73,15 +73,15 @@ def _desired_vector(intent: CorrectionIntent) -> np.ndarray:
     return np.asarray(parts, dtype=np.float64)
 
 
-def _candidate_change(context: MpcCostContext, candidate: np.ndarray) -> np.ndarray:
+def _candidate_change(human: Human, candidate: np.ndarray) -> np.ndarray:
     """Candidate motion in the same coordinates as :func:`_desired_vector`."""
-    features = feature_series(context, candidate)
+    features = feature_series(human, candidate)
     parts = [
         float(np.mean(features[name][1:]) - features[name][0])
         for name in ATTRIBUTED_FEATURES
     ]
-    arm_aa = arm_aa_from_state(candidate, context).reshape(-1, 3, 3)
-    positions = context.fk.fk_batch(arm_aa, context.spine3_pos, context.spine3_aa)
+    arm_aa = arm_aa_from_state(candidate, human).reshape(-1, 3, 3)
+    positions = human.fk.fk_batch(arm_aa, human.spine3_pos, human.spine3_aa)
     for chain in (_WRIST_CHAIN_IDX, _ELBOW_CHAIN_IDX):
         change = positions[1:, chain].mean(axis=0) - positions[0, chain]
         parts.extend(change * _OFFSET_WEIGHT)
@@ -90,7 +90,7 @@ def _candidate_change(context: MpcCostContext, candidate: np.ndarray) -> np.ndar
 
 def choose_correction(
     user: SimulatedUser,
-    context: MpcCostContext,
+    human: Human,
     cluster_means: dict[int, np.ndarray],
     oracle_path: np.ndarray,
     min_join: int = 0,
@@ -116,7 +116,7 @@ def choose_correction(
     desired = _desired_vector(intent) if intent is not None else None
     desired_norm = float(np.linalg.norm(desired)) if desired is not None else 0.0
 
-    oracle_q = canonical_arm_q(oracle_path, context).reshape(-1, 7)
+    oracle_q = canonical_arm_q(oracle_path, human).reshape(-1, 7)
     tail = oracle_q[min_join:]
     limit = 0.0 if mode == "oracle_progress" else threshold
     step_lengths = np.linalg.norm(np.diff(tail, axis=0), axis=-1)
@@ -132,7 +132,7 @@ def choose_correction(
 
     for label in sorted(cluster_means):
         if desired is not None:
-            change = _candidate_change(context, cluster_means[label])
+            change = _candidate_change(human, cluster_means[label])
             change_norm = float(np.linalg.norm(change))
             cosine = (
                 float(np.dot(change, desired)) / (change_norm * desired_norm)
@@ -142,12 +142,12 @@ def choose_correction(
             alignment[label] = cosine
         for magnitude in magnitudes:
             candidate = scale_trajectory(cluster_means[label], magnitude)
-            end_q = canonical_arm_q(candidate, context).reshape(-1, 7)[-1]
+            end_q = canonical_arm_q(candidate, human).reshape(-1, 7)[-1]
             progress = float(
                 np.min(np.linalg.norm(tail - end_q, axis=-1) + remaining_arc)
             )
             scores[label] = min(progress, scores.get(label, np.inf))
-            violations = compute_violations(user, context, candidate)
+            violations = compute_violations(user, human, candidate)
             peak_violation = float(np.max(violations))
             if peak_violation < fallback_violation:
                 fallback_violation = peak_violation
@@ -160,7 +160,7 @@ def choose_correction(
             acceptable[label] = True
             acceptable_pairs.append((label, magnitude))
             if mode == "oracle_progress":
-                result = correction_progress(tail, candidate, context)
+                result = correction_progress(tail, candidate, human)
                 pair_keys[(label, magnitude)] = (
                     -abs(result.arc_progress - 1.0),
                     result.alignment,
@@ -170,7 +170,7 @@ def choose_correction(
             elif mode == "intent_aligned":
                 assert desired is not None
                 projection = float(
-                    np.dot(_candidate_change(context, candidate), desired)
+                    np.dot(_candidate_change(human, candidate), desired)
                 ) / max(desired_norm, 1e-9)
                 pair_keys[(label, magnitude)] = (
                     alignment[label],
@@ -192,12 +192,12 @@ def choose_correction(
 
 def oracle_cluster_scores(
     user: SimulatedUser,
-    context: MpcCostContext,
+    human: Human,
     cluster_means: dict[int, np.ndarray],
     scale: float,
 ) -> dict[int, float]:
     """Hidden-cost score for each cluster mean at the given magnitude."""
-    oracle_cost = HiddenCostTerm(user=user, context=context)
+    oracle_cost = HiddenCostTerm(user=user, human=human)
     return {
         label: float(
             oracle_cost(

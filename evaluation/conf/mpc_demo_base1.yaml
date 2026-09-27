@@ -1,11 +1,9 @@
 # Demo-runner scenario as an evaluation planner config: the `base1` initial pose
 # and the `hits limit 1` goal from demo_runner_artifacts/trajectory_configs.json.
 #
-# Unlike mpc_edit_baseline.yaml this keeps the MDM `pose:` default, so the
-# motion-generator arms and the baselines can share one rig: the pose supplies
-# the torso/body geometry and `arm:` overrides its arm (build_rig honours the
-# same precedence as planners/run.py). Baselines must therefore run with
-# `+approach.grounder.use_generator_rig=true` for the geometry to match the system.
+# Unlike mpc_edit_baseline.yaml this keeps the MDM `pose:` default: the pose
+# supplies the torso/body geometry and `arm:` overrides its arm, for every arm
+# alike (Human(pose=cfg.pose, arm=cfg.arm)).
 steps: 300
 horizon: 10
 n_mpc_samples: 200
@@ -47,9 +45,6 @@ cartesian:
 
 preference_learning: false
 preference_alpha: 0
-
-simulated_user:
-  time_of_day: 9.0
 
 llm_cost:
   enabled: true

@@ -19,7 +19,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_feature_series,
     canonical_arm_q,
 )
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import Q_DIM, SmplLeftArmFK
 
 ATTRIBUTED_FEATURES = (
@@ -50,16 +50,16 @@ class CorrectionIntent:
     elbow_offset: np.ndarray
 
 
-def _window_positions(context: MpcCostContext, window_q: np.ndarray) -> np.ndarray:
-    arm_aa = arm_aa_from_state(window_q, context).reshape(-1, 3, 3)
-    return context.fk.fk_batch(arm_aa, context.spine3_pos, context.spine3_aa)
+def _window_positions(human: Human, window_q: np.ndarray) -> np.ndarray:
+    arm_aa = arm_aa_from_state(window_q, human).reshape(-1, 3, 3)
+    return human.fk.fk_batch(arm_aa, human.spine3_pos, human.spine3_aa)
 
 
 def attribute_correction(
     oracle_path: np.ndarray,
     nominal_plan: np.ndarray,
     q_trigger: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
     min_join: int = 0,
 ) -> CorrectionIntent:
     """Attribute the trigger to a contrast against the nearest oracle window.
@@ -69,23 +69,23 @@ def attribute_correction(
     compared against the whole ``nominal_plan`` (both clamped at the path end)
     by window-mean feature and referent-position differences.
     """
-    oracle_q = canonical_arm_q(oracle_path, context).reshape(-1, Q_DIM)
-    nominal_q = canonical_arm_q(nominal_plan, context).reshape(-1, Q_DIM)
-    trigger_q = canonical_arm_q(q_trigger, context).reshape(Q_DIM)
+    oracle_q = canonical_arm_q(oracle_path, human).reshape(-1, Q_DIM)
+    nominal_q = canonical_arm_q(nominal_plan, human).reshape(-1, Q_DIM)
+    trigger_q = canonical_arm_q(q_trigger, human).reshape(Q_DIM)
 
     tail = oracle_q[min_join:]
     join = min_join + int(np.argmin(np.linalg.norm(tail - trigger_q, axis=-1)))
     window = oracle_q[join : join + nominal_q.shape[0]]
 
-    nominal_features = arm_feature_series(nominal_q, context)
-    oracle_features = arm_feature_series(window, context)
+    nominal_features = arm_feature_series(nominal_q, human)
+    oracle_features = arm_feature_series(window, human)
     deltas = {
         name: float(np.mean(nominal_features[name]) - np.mean(oracle_features[name]))
         for name in ATTRIBUTED_FEATURES
     }
 
-    nominal_pos = _window_positions(context, nominal_q)
-    oracle_pos = _window_positions(context, window)
+    nominal_pos = _window_positions(human, nominal_q)
+    oracle_pos = _window_positions(human, window)
     offsets = nominal_pos.mean(axis=0) - oracle_pos.mean(axis=0)
     return CorrectionIntent(
         join_index=join,

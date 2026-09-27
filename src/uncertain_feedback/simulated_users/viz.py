@@ -17,9 +17,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users.base import (
-    TIME_OF_DAY_FEATURE,
     Bound,
     CoupledBound,
     HiddenBound,
@@ -29,14 +28,6 @@ from uncertain_feedback.simulated_users.base import (
 
 _FORBIDDEN_COLOR = "tab:red"
 _GRID_N = 200
-
-
-def _feature_unit(name: str) -> str:
-    if name == TIME_OF_DAY_FEATURE:
-        return "h"
-    if name.endswith("_velocity"):
-        return "rad/s"
-    return "rad"
 
 
 def _condition_feature(bound: Bound) -> str | None:
@@ -94,8 +85,8 @@ def _draw_plane(
         (line,) = ax.plot(x, y, label=name, linewidth=1.5)
         ax.plot(x[0], y[0], "o", color=line.get_color(), markersize=6)
         ax.plot(x[-1], y[-1], "s", color=line.get_color(), markersize=6)
-    ax.set_xlabel(f"{cond_name} ({_feature_unit(cond_name)})")
-    ax.set_ylabel(f"{bound.feature} ({_feature_unit(bound.feature)})")
+    ax.set_xlabel(f"{cond_name} (rad)")
+    ax.set_ylabel(f"{bound.feature} (rad)")
     ax.set_title(
         f"{bound.bound_type} on {bound.feature}\nvs {cond_name} (shaded = forbidden)"
     )
@@ -120,13 +111,13 @@ def _draw_series(
         ax.plot(features[bound.feature], label=name, linewidth=1.5)
     ax.set_ylim(y_lo, y_hi)
     ax.set_xlabel("frame")
-    ax.set_ylabel(f"{bound.feature} ({_feature_unit(bound.feature)})")
+    ax.set_ylabel(f"{bound.feature} (rad)")
     ax.set_title(f"{bound.bound_type} on {bound.feature} (shaded = forbidden)")
 
 
 def render_hidden_bounds(
     user: SimulatedUser,
-    context: MpcCostContext,
+    human: Human,
     trajectories: dict[str, np.ndarray],
     path: Path,
 ) -> Path:
@@ -137,7 +128,7 @@ def render_hidden_bounds(
     are circles, end frames squares.
     """
     features_by_traj = {
-        name: feature_series(context, traj) for name, traj in trajectories.items()
+        name: feature_series(human, traj) for name, traj in trajectories.items()
     }
     n = len(user.bounds)
     fig, axes = plt.subplots(1, n, figsize=(6.0 * n, 5.0), squeeze=False)

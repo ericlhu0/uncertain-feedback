@@ -42,7 +42,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
     arm_feature_series,
 )
-from uncertain_feedback.planners.mpc.costs.base import MpcCostContext
+from uncertain_feedback.planners.mpc.human import Human
 
 # Below this the oracle asked for nothing on that axis and a fraction of it is
 # noise; matches the verbalizers' meaningful-change dead-band.
@@ -61,9 +61,9 @@ class ProgressResult:
     per_feature: dict[str, float]
 
 
-def feature_path(trajectory: np.ndarray, context: MpcCostContext) -> np.ndarray:
+def feature_path(trajectory: np.ndarray, human: Human) -> np.ndarray:
     """``(T, 5)`` anatomical feature path in radians."""
-    series = arm_feature_series(trajectory, context)
+    series = arm_feature_series(trajectory, human)
     return np.stack([series[name] for name in FEATURE_NAMES], axis=-1)
 
 
@@ -120,7 +120,7 @@ def _arc_projection(
 def correction_progress(
     oracle_correction: np.ndarray,
     generated_correction: np.ndarray,
-    context: MpcCostContext,
+    human: Human,
 ) -> ProgressResult:
     """Score a generated correction against the oracle correction.
 
@@ -133,8 +133,8 @@ def correction_progress(
     fraction of the oracle's net change achieved per anatomical feature,
     ``nan`` where the oracle barely moved it.
     """
-    oracle = feature_path(oracle_correction, context)
-    generated = feature_path(generated_correction, context)
+    oracle = feature_path(oracle_correction, human)
+    generated = feature_path(generated_correction, human)
     oracle_relative = oracle - oracle[0]
     chord = oracle_relative[-1]
     endpoint = generated[-1] - generated[0]

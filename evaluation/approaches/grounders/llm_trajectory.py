@@ -25,19 +25,15 @@ from evaluation.approaches.grounders.base import (
     required_llm_model,
 )
 from evaluation.metrics.grounding.structs import GroundingResult
+from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
     arm_feature_series,
-    arm_q_from_features,
 )
+from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.costs import extract_json_object
-from uncertain_feedback.planners.mpc.kinematics import (
-    ELBOW_CHAIN_IDX,
-    Q_CLAVICLE,
-    WRIST_CHAIN_IDX,
-    q_to_arm_aa,
-)
-from uncertain_feedback.planners.rig import PlanningRig
+from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
@@ -103,28 +99,27 @@ def feature_rows(trajectory: np.ndarray, context: Any) -> np.ndarray:
 
 def anatomical_context_text(
     nominal_plan: np.ndarray,
-    q_feedback: np.ndarray,
-    rig: PlanningRig,
+    human: Human,
     rows: int = 15,
     context_level: str = "full",
 ) -> str:
     """The trajectory context this grounder interprets, in anatomical space.
 
     The nominal plan as a per-frame feature table (downsampled to about ``rows``
-    rows), the pose the person is reacting to, and the arm and body landmark
+    rows), the pose the person is reacting to (``human.q``), and the arm and body landmark
     positions that anchor it in the world frame. The Cartesian goal is
     deliberately withheld so the LLM grounds the utterance, not the task; the
     nominal plan still shows where the robot was heading. ``context_level``
     trims the scene: ``"pose"`` is the current pose alone, ``"plan"`` adds the
     nominal-plan table, ``"full"`` adds the body landmarks.
     """
-    arm_aa = q_to_arm_aa(nominal_plan, rig.fk.elbow_hinge_axis)
-    plan_rows = feature_rows(nominal_plan, rig.context)
-    plan_pos = rig.fk.fk_batch(arm_aa, rig.spine3_pos, rig.spine3_aa)
-    current_pos = rig.fk.fk(
-        q_to_arm_aa(q_feedback, rig.fk.elbow_hinge_axis), rig.spine3_pos, rig.spine3_aa
+    arm_aa = human.arm_aa_from_q(nominal_plan)
+    plan_rows = feature_rows(nominal_plan, human)
+    plan_pos = human.fk.fk_batch(arm_aa, human.spine3_pos, human.spine3_aa)
+    current_pos = human.fk.fk(
+        human.arm_aa_from_q(human.q), human.spine3_pos, human.spine3_aa
     )
-    body = rig.body_pos if rig.body_pos is not None else rig.fk.tpose_all_joints
+    body = human.posture
     stride = max(1, len(plan_rows) // rows)
 
     def joints(positions: np.ndarray) -> str:
@@ -142,7 +137,7 @@ def anatomical_context_text(
         "Current pose, the moment the person spoke. This is where the arm IS and "
         "where the correction starts; relative words like up, higher, a bit, more "
         "refer to this pose:",
-        f"  features {_fmt(feature_rows(q_feedback, rig.context)[0])}",
+        f"  features {_fmt(feature_rows(human.q, human)[0])}",
         f"  {joints(current_pos)}",
     ]
     if context_level in ("plan", "full"):
@@ -215,7 +210,6 @@ class LlmTrajectoryGrounder(Grounder):
         output_space: str = "positions",
         n_waypoints: int = 0,
         n_frames: int = 16,
-        use_generator_rig: bool = False,
         model: str | None = None,
         context_level: str = "full",
     ) -> None:
@@ -233,19 +227,16 @@ class LlmTrajectoryGrounder(Grounder):
         self._history: list[str] = []
         self._llm: Any = None
         self._round = 0
-        # Load the motion generator anyway (unused for grounding) so the rig
-        # geometry (decoded pose spine3/body) matches the system arms exactly.
-        if use_generator_rig:
-            self.requires_generator = True
 
     def reset(
         self,
-        rig: PlanningRig,
+        cfg: MpcRunConfig,
+        gen: MotionGenerator | None,
         user: SimulatedUser,
         seed: int,
         episode_dir: Path,
     ) -> None:
-        super().reset(rig, user, seed, episode_dir)
+        super().reset(cfg, gen, user, seed, episode_dir)
         self._history = []
         self._llm = None
         self._round = 0
@@ -282,7 +273,7 @@ class LlmTrajectoryGrounder(Grounder):
             )
 
             self._llm = OpenAIModel(
-                model=self.model or required_llm_model(self.rig),
+                model=self.model or required_llm_model(self.cfg),
                 system_prompt=_SYSTEM_PROMPT.format(
                     n=self.n_interpretations, payload=self._payload_contract()
                 ),
@@ -322,72 +313,63 @@ class LlmTrajectoryGrounder(Grounder):
             )
         self._round += 1
 
-    def _current_row(self, q_feedback: np.ndarray) -> np.ndarray:
+    def _current_row(self, human: Human) -> np.ndarray:
         if self.output_space == "anatomical":
-            return feature_rows(q_feedback, self.rig.context)[0]
-        positions = self._chain(q_feedback)
+            return feature_rows(human.q, human)[0]
+        positions = self._chain(human)
         return np.concatenate([positions[ELBOW_CHAIN_IDX], positions[WRIST_CHAIN_IDX]])
 
-    def _chain(self, q_feedback: np.ndarray) -> np.ndarray:
-        rig = self.rig
-        return rig.fk.fk(
-            q_to_arm_aa(q_feedback, rig.fk.elbow_hinge_axis),
-            rig.spine3_pos,
-            rig.spine3_aa,
+    def _chain(self, human: Human) -> np.ndarray:
+        return human.fk.fk(
+            human.arm_aa_from_q(human.q),
+            human.spine3_pos,
+            human.spine3_aa,
         )
 
-    def _candidate(
-        self, payload: dict[str, Any], q_feedback: np.ndarray
-    ) -> np.ndarray | None:
+    def _candidate(self, payload: dict[str, Any], human: Human) -> np.ndarray | None:
         """One interpretation's payload as an arm trajectory, or ``None``."""
         rows = _rows(payload, self._key, _ROW[self.output_space][0])
         if rows is None:
             return None
         if self.n_waypoints:
             rows = _interpolate(
-                self._current_row(q_feedback), rows[: self.n_waypoints], self.n_frames
+                self._current_row(human), rows[: self.n_waypoints], self.n_frames
             )
-        rig = self.rig
         # Coincident elbow/wrist positions leave a zero-length limb vector, which
         # normalises to NaN and reaches scipy as a zero-norm quaternion. That is
         # a payload that fails to translate, not a run-ending error.
         try:
             if self.output_space == "anatomical":
-                q = arm_q_from_features(
-                    rows,
-                    np.asarray(q_feedback, dtype=np.float64)[Q_CLAVICLE],
-                    rig.context,
-                )
-                return q_to_arm_aa(q, rig.fk.elbow_hinge_axis)
+                return human.arm_aa_from_q(human.q_from_features(rows))
             # Frame completion, not repair: the joints upstream of the elbow are
             # unactuated, so they hold the pose the correction starts from.
-            chains = np.repeat(self._chain(q_feedback)[np.newaxis], len(rows), axis=0)
+            chains = np.repeat(self._chain(human)[np.newaxis], len(rows), axis=0)
             chains[:, ELBOW_CHAIN_IDX] = rows[:, :3]
             chains[:, WRIST_CHAIN_IDX] = rows[:, 3:]
-            return rig.fk.arm_aa_from_positions_batch(chains, rig.spine3_aa)
+            return human.arm_aa_from_q(human.ik_q_from_positions(chains))
         except ValueError:
             return None
 
     def ground(
         self,
         text: str,
-        q_feedback: np.ndarray,
+        human: Human,
         nominal_plan: np.ndarray,
         cluster_selector: ClusterSelector,
     ) -> GroundingResult:
         payloads = self._interpret(
             text,
             anatomical_context_text(
-                nominal_plan, q_feedback, self.rig, context_level=self.context_level
+                nominal_plan, human, context_level=self.context_level
             ),
         )
         candidates: dict[int, np.ndarray] = {}
         for payload in payloads:
-            candidate = self._candidate(payload, q_feedback)
+            candidate = self._candidate(payload, human)
             if candidate is not None:
                 candidates[len(candidates)] = candidate
         if not candidates:
-            candidates = {0: q_to_arm_aa(nominal_plan, self.rig.fk.elbow_hinge_axis)}
+            candidates = {0: human.arm_aa_from_q(nominal_plan)}
         self._save_interpretations(payloads, candidates)
         chosen_label, magnitude = cluster_selector(candidates)
         return GroundingResult(

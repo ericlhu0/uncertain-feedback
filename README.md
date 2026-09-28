@@ -764,6 +764,26 @@ time; speed is relative to the dataset's median clip, not to the arm's current m
 corrections cover little of a 50-frame window, after which the planner resumes its own pace,
 and UQ clustering and learned costs ignore timing; one start pose was evaluated.
 
+**Grounding regression — do not deploy this checkpoint as is.** On the first 20 cases of the
+80-case grounding eval (`run_grounding.py --grounder mdm`, `clips_auto200_s5`), paired against
+the deployed `correction_auto1100_vlm_lr1e5_26k@15k`:
+
+| checkpoint | violation | arc progress | alignment | acceptable rate | diversity |
+|---|---|---|---|---|---|
+| deployed (guidance 2.5) | 0.018 | 0.333 | 0.389 | 0.70 | 0.764 |
+| speed checkpoint, guidance 2.5 | 0.064 | 0.587 | 0.268 | 0.35 | 0.445 |
+| speed checkpoint, `--guidance 1.5` | 0.041 | 0.604 | 0.407 | 0.25 | 0.551 |
+
+The corrections go further along the oracle path and, at guidance 1.5, point the same way
+(alignment paired +0.02 ± 0.12), but the 500-sample menu is less diverse (paired −0.21 ± 0.05)
+and far less often holds a zero-violation option, which is the premise of the UQ layer. Endpoint
+spread of 48 unmarked samples (demo start) at matched 1000 steps is 0.41x travel with CLIP
+unfrozen and 0.48x frozen, against 0.65x for the deployed checkpoint and 0.71-0.75x for the
+earlier `_tempo4` builds, so the loss comes mostly from the final dataset rather than from
+CLIP — plausibly because once 82% of motions state their pace, an unmarked request means one
+pace instead of the spread of speeds and extents it used to sample. Speed control is therefore
+a trade-off against menu coverage here, not a free improvement.
+
 `evaluation/speed_probe.py` samples prompts seed-locked from one person, prints each prompt's
 peak wrist speed and frames-to-half-displacement (not the window mean, which cannot tell a
 fast move that stops early from a slow one), and with `--video_dir` renders one sample per

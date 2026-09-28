@@ -28,6 +28,13 @@ every motion gets the short single-axis imperatives
 :mod:`templated_captions` writes from its own measured facts, which are true by
 construction and land inside the ten words a bag-of-words text encoder can weigh.
 
+``--retimes`` adds copies of each clip whose described window replays the run's
+own motion at a different rate (:func:`retime_clip`), so the planner's single
+pace stops being the only one the model sees. Every motion's pace — its wrist
+speed over the set's median clip's, retimed or not — is written to
+``paces.json`` for :mod:`tempo_captions`, which rewrites its text to say how
+fast the change goes wherever that is noticeably off the usual pace.
+
 Clips are encoded with :func:`smpl_arm_aa_seq_to_hml263_frames` — the *same*
 function inference uses to build its pinned prefix — so training clips and
 query-time prefixes share a body and an encoding by construction. That function
@@ -55,7 +62,9 @@ from uncertain_feedback.data_collection.common.dataset import (
 )
 from uncertain_feedback.data_collection.common.hml263 import load_hml_stats
 from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
+    assemble_clip,
     clip_source_from_dir,
+    motion_frames,
 )
 from uncertain_feedback.data_collection.dataset_auto_correction.motion_facts import (
     MotionFacts,
@@ -86,6 +95,13 @@ _DEFAULT_STATS_DIR = _DATASET_ROOT / "custom1_seatedcanon"
 _MAX_AMPLIFICATION = 3.0
 _AMPLIFICATION_FLOOR = 0.05
 _MAX_TRANSPLANT_ATTEMPTS = 20
+
+# Retimed paces are log-uniform within this factor of the set's median clip
+# speed. A fast copy can outrun the recorded motion, which then holds its last
+# frame; the rate is capped so held frames stay a minority, since hold-dominated
+# clips taught an earlier speed fine-tune to jump to the end pose and freeze.
+_MAX_RETIME = 3.0
+_MAX_HELD_FRACTION = 0.4
 
 
 def run_captions(run: dict[str, Any]) -> list[str]:
@@ -155,6 +171,8 @@ class _Clip:
     label: str
     clip: np.ndarray
     naive: np.ndarray
+    motion: np.ndarray
+    anchor: int
     captions: list[str]
     feature: str
     base_pose: np.ndarray
@@ -230,6 +248,31 @@ def transplant_clip(
     return np.concatenate([prefix, window])
 
 
+def retime_clip(
+    motion: np.ndarray, anchor: int, window: int, n_prefix: int, rate: float
+) -> np.ndarray:
+    """Replay the ``window`` frames after ``anchor`` at ``rate`` times their pace.
+
+    The prefix is untouched — it is the arm's real history, at the pace it really
+    had — and window frame ``i`` is the motion at time ``anchor + i * rate``,
+    interpolated between frames and held at the motion's last frame once it runs
+    out. The path is the run's own; only how fast it is travelled changes, so a
+    slow copy covers less of it and a fast one more.
+    """
+    prefix, _ = assemble_clip(motion, anchor, 0, n_prefix)
+    t = np.minimum(anchor + rate * np.arange(1, window + 1), len(motion) - 1)
+    lo = np.floor(t).astype(int)
+    hi = np.minimum(lo + 1, len(motion) - 1)
+    frac = (t - lo)[:, None]
+    return np.concatenate([prefix, motion[lo] * (1 - frac) + motion[hi] * frac])
+
+
+def window_speed(clip: np.ndarray, human: Human, n_prefix: int) -> float:
+    """Mean wrist travel per frame over the described window, in metres."""
+    wrist = human.wrist_from_q(clip[n_prefix - 1 :])
+    return float(np.linalg.norm(np.diff(wrist, axis=0), axis=1).mean())
+
+
 def transplant_is_valid(
     clip: np.ndarray,
     moved: np.ndarray,
@@ -278,6 +321,7 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     transplants: int = 0,
     consistent: bool = False,
     templated: bool = False,
+    retimes: int = 0,
 ) -> None:
     """Encode every captioned clip across *clips_dirs* into one MDM dataset.
 
@@ -303,6 +347,15 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     measured facts, still gated by :func:`consistent_captions` so a template that
     stops agreeing with the word table shows up as a dropped line. It supersedes
     ``consistent``, whose work the generated lines already do.
+
+    ``retimes`` adds that many copies of each captioned clip replayed at a pace
+    drawn log-uniformly within ``_MAX_RETIME`` of the set's median clip speed,
+    alternating faster and slower (:func:`retime_clip`), captioned like a
+    transplant. Clips move at different speeds to begin with, so the pace is
+    measured against that median rather than the clip's own, which keeps one
+    label meaning one speed. Every motion's pace, originals and transplants at
+    their clip's own, goes to ``paces.json`` keyed by id; the lines still
+    describe only the path until :mod:`tempo_captions` rewrites them.
     """
     hml_mean, hml_std = load_hml_stats(hml_stats_dir)
     fk = SmplLeftArmFK()
@@ -313,6 +366,9 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
 
     ids: list[str] = []
     rng = np.random.default_rng(seed)
+    # Separate stream, so adding retimes leaves every transplant draw unchanged.
+    retime_rng = np.random.default_rng([seed, 1])
+    paces: dict[str, float] = {}
 
     def encode(
         clip: np.ndarray, captions: list[str], base_pose: np.ndarray, label: str
@@ -340,16 +396,30 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
             if not captions and not templated:
                 print(f"{clips_dir.name}/{run['run_id']}: no caption — skipping")
                 continue
+            clip = np.load(clips_dir / run["clip_file"])  # (K, 7)
+            # The run's own naive rollout, since every run has its own scenario;
+            # the manifest-level fallback keeps sets captioned under the old
+            # single-scenario layout buildable.
+            naive = np.load(
+                clips_dir / run.get("naive_file", manifest.get("naive_file"))
+            )
+            # Sets saved before continuations were kept only have the clip, which
+            # is itself a stretch of the motion ending on its last frame.
+            motion, anchor = clip, manifest["n_prefix_frames"] - 1
+            if "continuation_file" in run:
+                motion, _ = motion_frames(
+                    naive,
+                    np.load(clips_dir / run["continuation_file"]),
+                    run["trigger_step"],
+                )
+                anchor = run["clip_anchor"]
             clips.append(
                 _Clip(
                     label=f"{clips_dir.name}/{run['run_id']}",
-                    clip=np.load(clips_dir / run["clip_file"]),  # (K, 7)
-                    # The run's own naive rollout, since every run has its own
-                    # scenario; the manifest-level fallback keeps sets captioned
-                    # under the old single-scenario layout buildable.
-                    naive=np.load(
-                        clips_dir / run.get("naive_file", manifest.get("naive_file"))
-                    ),
+                    clip=clip,
+                    naive=naive,
+                    motion=motion,
+                    anchor=anchor,
                     captions=captions,
                     feature=run["feature"],
                     base_pose=base_pose,
@@ -375,6 +445,26 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     n_transplants = 0
     n_transplant_dropped = 0
     n_transplant_fallbacks = 0
+
+    def copy_captions(
+        moved: np.ndarray, entry: _Clip, captions: list[str]
+    ) -> list[str]:
+        """The lines an augmented copy of *entry* trains on."""
+        nonlocal n_transplants, n_transplant_dropped, n_transplant_fallbacks
+        if templated:
+            return generated(moved, entry)
+        if not consistent:
+            return captions
+        kept, fell_back = transplant_captions(
+            captions, moved, entry.human, entry.n_prefix
+        )
+        n_transplants += 1
+        n_transplant_dropped += len(captions) - len(kept)
+        n_transplant_fallbacks += int(fell_back)
+        return kept
+
+    speeds = {e.label: window_speed(e.clip, e.human, e.n_prefix) for e in clips}
+    usual = float(np.median(list(speeds.values())))
     for entry in clips:
         captions = (
             generated(entry.clip, entry)
@@ -382,6 +472,8 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
             else cleaned.get(entry.label, entry.captions)
         )
         encode(entry.clip, captions, entry.base_pose, entry.label)
+        if retimes:
+            paces[ids[-1]] = speeds[entry.label] / usual
 
         for _ in range(transplants):
             for _attempt in range(_MAX_TRANSPLANT_ATTEMPTS):
@@ -390,28 +482,41 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
                 if transplant_is_valid(
                     entry.clip, moved, entry.feature, entry.human, entry.n_prefix
                 ):
-                    moved_captions = captions
-                    if templated:
-                        moved_captions = generated(moved, entry)
-                    elif consistent:
-                        moved_captions, fell_back = transplant_captions(
-                            captions, moved, entry.human, entry.n_prefix
-                        )
-                        n_transplants += 1
-                        n_transplant_dropped += len(captions) - len(moved_captions)
-                        n_transplant_fallbacks += int(fell_back)
                     encode(
                         moved,
-                        moved_captions,
+                        copy_captions(moved, entry, captions),
                         entry.base_pose,
                         f"{entry.label}@{start}",
                     )
+                    if retimes:
+                        paces[ids[-1]] = speeds[entry.label] / usual
                     break
             else:
                 print(
                     f"{entry.label}: no valid transplant in "
                     f"{_MAX_TRANSPLANT_ATTEMPTS} draws — skipping one copy"
                 )
+
+        window = len(entry.clip) - entry.n_prefix
+        room = len(entry.motion) - 1 - entry.anchor
+        for j in range(retimes):
+            sign = 1 if j % 2 == 0 else -1
+            pace = float(np.exp(sign * retime_rng.uniform(0, np.log(_MAX_RETIME))))
+            rate = min(
+                pace * usual / speeds[entry.label],
+                room / ((1 - _MAX_HELD_FRACTION) * window),
+            )
+            moved = retime_clip(
+                entry.motion, entry.anchor, window, entry.n_prefix, rate
+            )
+            pace = rate * speeds[entry.label] / usual
+            encode(
+                moved,
+                copy_captions(moved, entry, captions),
+                entry.base_pose,
+                f"{entry.label}x{pace:.2f}",
+            )
+            paces[ids[-1]] = pace
 
     if templated_records:
         print(templated_report(templated_records))
@@ -420,7 +525,7 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     if n_transplants:
         print(
             f"\n=== transplant consistency ===\n"
-            f"{n_transplants} transplants re-filtered against their own motion: "
+            f"{n_transplants} augmented copies re-filtered against their own motion: "
             f"{n_transplant_dropped} lines dropped, {n_transplant_fallbacks} "
             f"({n_transplant_fallbacks / n_transplants:.1%}) kept only their "
             f"least-contradictory line\n"
@@ -432,6 +537,10 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
         )
 
     write_splits(output_dir, ids, val_fraction, test_fraction, seed)
+    if paces:
+        (output_dir / "paces.json").write_text(
+            json.dumps(paces, indent=1), encoding="utf-8"
+        )
 
     copy_stats(hml_stats_dir, output_dir)
 
@@ -498,6 +607,18 @@ def main() -> None:
             "captions are used). Supersedes --consistent_captions."
         ),
     )
+    parser.add_argument(
+        "--retimes",
+        type=int,
+        default=0,
+        help=(
+            "Copies per captioned clip whose window replays the run's motion at "
+            f"a pace within {_MAX_RETIME:g}x of the set's median clip speed, "
+            "alternating faster and slower; every motion's pace goes to "
+            "paces.json for tempo_captions.py (default: 0, every clip at the "
+            "planner's pace)."
+        ),
+    )
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--test_fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -513,6 +634,7 @@ def main() -> None:
         transplants=args.transplants,
         consistent=args.consistent_captions,
         templated=args.templated_captions,
+        retimes=args.retimes,
     )
 
 

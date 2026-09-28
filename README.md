@@ -666,6 +666,116 @@ uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/par
 paraphrases kept (90%), **3250 unique lines** against the templated set's 157, on the same
 1499 motions and splits.
 
+**Speed from data: retimed copies plus tempo captions.** Every clip moves at the one pace its
+`--max_angle_delta` gave the planner, and no caption says how fast anything moves (the VLM
+sees still frames), so no checkpoint can read "slowly" or "quickly" (measured 2026-09-27:
+both come out *slower* than the unmarked prompt), even though native pace already varies ~2x
+between clip sets (auto sets ~3.2 mm/frame, elbow sets ~6.8, the 0.00375/0.005 elbow sets
+~9-10.7). `build_dataset.py --retimes N` adds N copies of each clip whose described window
+replays the run's own motion at another rate. The pinned prefix keeps the pace the arm really
+had, so a clip no longer teaches "continue at the prefix's pace", and the clip length is
+unchanged, so length cannot stand in for speed. The target *pace* — wrist speed over the
+set's median clip's — is log-uniform within 3x, alternating faster and slower; a fast copy
+that outruns the recorded motion holds its last frame, capped at 40% of the window. With
+`--retimes` every motion's pace (originals and transplants at their clip's own) goes to
+`<dataset>/paces.json`. `tempo_captions.py` then gives a text-only LLM each motion's lines and
+its pace ("0.40 times the speed the caregiver usually moves your arm") and asks it to rewrite
+every line so it also says how fast — briefly, as someone would say it in the moment while
+their arm is being moved, wherever in the line it comes naturally, varying the wording. No
+speed vocabulary is supplied, numbers/fractions/multiples and negations are ruled out, each
+line keeps its source's wording, register and person, and paces close to usual come back
+unchanged, so a request that says nothing about speed keeps meaning the usual pace. Every
+line passes the direction-word gate of `paraphrase_captions.py`. Motions are symlinked;
+completions cache in `<out>/tempo.json` per line-set and pace (a transplant shares its clip's).
+```
+C=src/uncertain_feedback/data_collection/data/dataset_auto_correction
+DS=src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/build_dataset.py \
+    --clips_dir $C/clips_auto100_vlm $C/clips_auto500_s{1,2,3,4}_vlm \
+                $C/clips_elbow500_s{1,2,3,4,7,8,13,14,15,16}_vlm \
+    --output_dir $DS/correction_auto1850_vlm_retime_cc --transplants 2 --retimes 2 --consistent_captions
+uv run python src/uncertain_feedback/data_collection/dataset_auto_correction/tempo_captions.py \
+    --src $DS/correction_auto1850_vlm_retime_cc --out $DS/correction_auto1850_vlm_tempo_cc   # --workers 32, ~80 min
+```
+**`--consistent_captions` is required with `--retimes`.** A slowed copy shows only the start
+of its correction, which often still carries the pre-correction momentum, so the clip's own
+lines stop describing it: on `clips_auto500_s1_vlm`, 22% of a clip's VLM lines contradict its
+own measured motion at 1x and 45% at 0.4x. A checkpoint trained without the gate (see below)
+turned "move my arm left, slowly" into a small drift the *other* way. The gate re-filters every
+copy's lines against that copy's motion, dead band included, so a barely-moving slow copy is
+not captioned with a direction it does not make. `motion_facts`' direction words skip tempo
+idioms ("speed (it) up", "hurry up", "pick up the pace/speed", "slow (it) down"; "pick up my
+arm" is still up), which assert no direction —
+before, the gate read "speed up" as *up* and silently dropped every such line off an upward
+motion, and CLIP alone reads it the same way (a checkpoint without these lines answered "speed
+up, bring my hand in" by raising the hand).
+`clips_elbow500_s{7,8,13,14,15,16}_vlm` (2026-09-28) are the faster-paced elbow sets copied
+and captioned by `autolabel.py --n_captions 5` (stock prompt, `MPLBACKEND=Agg
+QT_QPA_PLATFORM=offscreen` on a Wayland session), so fast motion also comes from full-length
+native windows, not only from held-frame retimes. `correction_auto1850_vlm_tempo_cc`: 1850
+clips -> 9249 motions, paces 34% below 0.7x / 42% 0.7-1.4x / 23% above 1.4x; the gate dropped
+1708 of the copies' lines (3.1% of copies fell back to their least-contradictory line); 7550
+motions carry tempo text, 0 multiples, 1.6% negations; "slow down" 22 lines, "speed up" 4,
+"hurry" 60. (It was built before the "pick up <body part>" / "speed it up" / "slow it down"
+refinement of the idiom guard, which touches very few lines.) Earlier builds, all dropped:
+`correction_auto1850_vlm_tempo` (no direction gate), `correction_auto1100_vlm_tempo` (rates relative to each clip's own
+pace, freely drafted lines — 11 words, polite "could you" openers, "twice as fast"; flagged by
+an independent review), `_tempo2` (rewrites, but 14% of lines still quantified the pace),
+`_tempo3` (four comparatives carried two thirds of the lines) and `_tempo4` (the 1100-clip
+version of the current prompt, retimed copies only).
+
+Fine-tune from the deployed weights with the two MDM flags described in CODEBASE_MAP §14
+(`--clean_prefix 8`: the pinned history is fed un-noised in training and sampling, removing a
+10-30 mm/frame opening rush every sample had; `--unfreeze_clip_layers 2`: CLIP's top two text
+blocks train, since the frozen pooled embedding barely separates "slowly" from "quickly").
+The deployed checkpoint's optimizer state is CUDA-`capturable`, so on CPU resume from a
+directory holding only the weights:
+```
+SAVE=/home/eric/safe-contact/data/mdm_save   # the MDM submodule's save/ symlinks here
+mkdir -p $SAVE/deployed_weights_only
+ln -s $SAVE/correction_auto1100_vlm_lr1e5_26k/model000765000.pt $SAVE/deployed_weights_only/
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto1850_vlm_tempo_cc correction_auto1850_vlm_tempo_cc_cp_clip2_from_deployed 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --clean_prefix 8 --unfreeze_clip_layers 2 \
+    --num_steps 5549 --save_interval 1000 \
+    --resume_checkpoint $SAVE/deployed_weights_only/model000765000.pt
+```
+(7 epochs of 924 batches = 6468 steps, ~1.8 h on 20 CPU cores; the last checkpoint,
+`model000771469.pt`, is the one evaluated — not selected on the probe prompts.)
+
+**Outcome (2026-09-28, `mpc_demo_low1` person, 32 seed-locked samples per prompt, executed =
+anchored trajectories, peak wrist m/frame, seeds 1-3).** Slow / unmarked / fast:
+"move my arm left, slowly / – / quickly" 0.0017 / 0.0085 / 0.016; "raise my arm, slower /
+– / faster" 0.0012 / 0.0050 / 0.026; "slow down / – / speed up, bring my hand in" 0.0020 /
+0.0094 / 0.013; "move my hand forward, gently / – / hurry" 0.0066 / 0.0185 / 0.016 (hurry ≈
+unmarked). The same ordering holds conditioned on a real executed history (`--history`) and on
+four request families written only after training ("lift my hand, take your time / quick",
+"easy / quick, move my arm out", "bring my elbow back, real slow / fast", "move my hand to my
+chest, easy / quickly": slow-to-fast 2.8-11x). The deployed checkpoint answers "move my arm
+left, slowly" *faster* than "…, quickly". A blind Claude judge (general-purpose agent, frames
+extracted with ffmpeg, A/B order randomized, key kept apart) picked the faster of each slow/fast
+video pair 12/12 (all high confidence) against 7/12 on the deployed checkpoint. Direction is
+kept: cosine of mean net wrist displacement with the unmarked request, seed 1 — left slowly
++0.93 / quickly +0.94, forward gently +0.97 / hurry +1.00, bring in slow down +0.72.
+**Limitations:** "speed up, bring my hand in" still also rises (cosine +0.32; +0.22 m up —
+CLIP reads the "up", and only 4 training lines carry the idiom); "raise my arm, slower" moves
+only ~3 cm in the 2.5 s window, and several slow outputs are smaller rather than stretched in
+time; speed is relative to the dataset's median clip, not to the arm's current motion; slow
+corrections cover little of a 50-frame window, after which the planner resumes its own pace,
+and UQ clustering and learned costs ignore timing; one start pose was evaluated.
+
+`evaluation/speed_probe.py` samples prompts seed-locked from one person, prints each prompt's
+peak wrist speed and frames-to-half-displacement (not the window mean, which cannot tell a
+fast move that stops early from a slow one), and with `--video_dir` renders one sample per
+prompt as `prompt_NN.mp4`. `--history <(T, 7) .npy>` conditions on arm states the person has
+just executed, as the planner path does; without it the prefix is the configured pose held
+still, as in the demo runner:
+```
+uv run python evaluation/speed_probe.py --model_path <checkpoint.pt> \
+    --prompts "move my arm to the left" "move my arm to the left slowly" "move my arm to the left quickly" \
+    --video_dir outputs/speed_probe   # --mpc_config evaluation/conf/mpc_demo_low1.yaml, 32 samples, 50 frames
+```
+
 Fine-tune on it from the **stock** checkpoint. `finetune_standing.sh` already resumes from
 `./save/humanml_enc_512_50steps/model000750000.pt`, so pass no `--resume_checkpoint`
 (MDM's argparse is last-flag-wins, so passing one would override it). Note the runner

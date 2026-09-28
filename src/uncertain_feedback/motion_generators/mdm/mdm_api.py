@@ -531,6 +531,10 @@ class MdmMotionGenerator(
         )
         model_kwargs["y"]["inpainted_motion"] = input_motions
         model_kwargs["y"]["inpainting_mask"] = inpainting_mask
+        # Checkpoints trained with --clean_prefix see the pinned prefix un-noised.
+        if getattr(args, "clean_prefix", 0):
+            assert args.clean_prefix == N_PREFIX_FRAMES, "trained on another prefix"
+            model_kwargs["y"]["clean_prefix"] = args.clean_prefix
 
         # --- Classifier-free guidance scale ----------------------------------
         model_kwargs["y"]["scale"] = (

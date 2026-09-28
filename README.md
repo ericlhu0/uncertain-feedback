@@ -3452,7 +3452,8 @@ the ground truth; the correction starts one frame before the bound crossing, and
 grounder sees the naive continuation from there as its nominal plan. `llm` is `LlmTrajectoryGrounder` (4 interpretations, 5 waypoints interpolated to 50
 frames, positions output, the config's `llm_cost.model`; one GPT call per case, ~70-90 s,
 needs `OPENAI_API_KEY`). `mdm` is `MdmGrounder` with the config's `feedback.uq` (500
-samples, 4 clusters, no steering) on `--model-path`, loading the generator and asserting
+samples, 4 clusters, no steering) on `--model-path` (`--guidance` overrides
+`mdm_config.yaml`'s classifier-free guidance scale), loading the generator and asserting
 its body matches the clip set's (GPU); its cluster means are re-anchored onto the trigger pose
 the way production does (`feedback.anchor_correction`, default on) — raw means start ~10 cm
 from it, the pinned-frame seam. Writes `cases.csv` (one row per case: chooser pick,

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from uncertain_feedback.cost_generation.base import CostGenerator, parse_goal_conflict
+from uncertain_feedback.cost_generation.base import CostGenerator
 from uncertain_feedback.cost_generation.prompts import build_refine_prompt
 from uncertain_feedback.cost_generation.summaries import build_rollout_joint_comparison
 from uncertain_feedback.evaluation_mechanism import (
@@ -40,7 +40,7 @@ from uncertain_feedback.planners.mpc.costs import (
 _NO_IMPROVE_PATIENCE = 2
 
 
-def _goal_feedback(report: dict[str, Any] | None, goal_conflict: bool) -> str:
+def _goal_feedback(report: dict[str, Any] | None) -> str:
     """Per-turn message telling the model whether the rollout still reaches the goal."""
     if report is None:
         return ""
@@ -50,17 +50,11 @@ def _goal_feedback(report: dict[str, Any] | None, goal_conflict: bool) -> str:
             f"\n\nGoal check: the arm still reaches the goal (wrist ended {dist:.3f} m "
             f"away, within the {thr:.3f} m threshold)."
         )
-    if goal_conflict:
-        return (
-            f"\n\nGoal check: the arm ended {dist:.3f} m from the goal (threshold "
-            f"{thr:.3f} m). This is acceptable here because the correction implies the "
-            "goal should not be reached this way."
-        )
     return (
         f"\n\nGoal check: THIS COST FAILED TO REACH THE GOAL — the wrist ended "
-        f"{dist:.3f} m short (it must finish within {thr:.3f} m). Your stage-one "
-        "interpretation said the goal is still reachable, so the motion MUST still reach "
-        "it. Revise the cost so it reaches the goal (e.g. relax or bound the constraint "
+        f"{dist:.3f} m short (it must finish within {thr:.3f} m). The goal is always "
+        "reachable within the person's limits, so the motion MUST still reach it. "
+        "Revise the cost so it reaches the goal (e.g. relax or bound the constraint "
         "near the goal) while still honoring the correction."
     )
 
@@ -104,9 +98,6 @@ class TurnsCostGenerator(CostGenerator):
         llm: Any,
         interpretation: str,
     ) -> tuple[GeneratedPythonCost, LlmCostResponse, CostRanking | None] | None:
-        # Only insist the rollout still reaches the goal when stage one judged the goal
-        # reachable; if the correction conflicts with the goal, stopping short is fine.
-        goal_conflict = parse_goal_conflict(interpretation)
         prompt_text = build_refine_prompt(
             interpretation, self.summaries, self.corpus_grounding_note()
         )
@@ -163,14 +154,9 @@ class TurnsCostGenerator(CostGenerator):
                 )
                 image_path = None
             report = goal_reach_report(self.context, rollout)
-            # A goal-reaching candidate beats a non-reaching one (unless the correction
-            # conflicts with the goal); within that, candidates order by ranking
-            # consistency, falling back to the L2 rollout score.
-            reach_rank = (
-                1
-                if report is not None and not goal_conflict and not report["reached"]
-                else 0
-            )
+            # A goal-reaching candidate beats a non-reaching one; within that,
+            # candidates order by ranking consistency, falling back to the L2 score.
+            reach_rank = 1 if report is not None and not report["reached"] else 0
             ranking = rank_candidate_cost(self.context, cost)
             rank_key = ranking.sort_key if ranking is not None else (score, 0.0)
             key = (float(reach_rank), *rank_key)
@@ -208,7 +194,7 @@ class TurnsCostGenerator(CostGenerator):
                     + json.dumps(comparison, indent=2)
                 )
 
-            goal_block = _goal_feedback(report, goal_conflict)
+            goal_block = _goal_feedback(report)
             score_block = _feedback_score_block(ranking, score)
             if image_path is not None:
                 messages.append(

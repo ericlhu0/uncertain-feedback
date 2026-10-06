@@ -16,7 +16,6 @@ from uncertain_feedback.cost_generation.base import (
     CostGenerator,
     artifact_run_dir,
     create_cost_generator,
-    parse_goal_conflict,
 )
 from uncertain_feedback.cost_generation.combine_costs import (
     CombineCostGenerator,
@@ -51,6 +50,5 @@ __all__ = [
     "build_rollout_joint_comparison",
     "create_cost_generator",
     "generate_cost_for_correction",
-    "parse_goal_conflict",
     "render_prompt_images",
 ]

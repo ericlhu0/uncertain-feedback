@@ -7,6 +7,8 @@ from __future__ import annotations
 import io
 import time
 from argparse import Namespace
+from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 
@@ -21,9 +23,14 @@ from uncertain_feedback.planners.correction_session import (
 from uncertain_feedback.planners.interactive import OperatorPause
 from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig
 from uncertain_feedback.planners.mpc.config import load_mpc_config
-from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
+from uncertain_feedback.planners.mpc.costs import (
+    CompositeTrajectoryCost,
+    GeneratedPythonCost,
+    build_generated_cost_context,
+)
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
+from uncertain_feedback.planners.mpc.rollout import StallProposal
 from uncertain_feedback.planners.run import RunSetup, run_repeated_correction_session
 from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
 
@@ -104,6 +111,65 @@ def test_operator_pause_prompts_when_the_request_line_is_empty() -> None:
 
     _await_request(pause)
     assert pause.feedback(3) == "keep my elbow down"
+
+
+def test_operator_confirm_takes_only_yes_and_leaves_a_pause_request() -> None:
+    pause = OperatorPause(io.StringIO("y\nno\n"))
+    assert pause.confirm("follow it?")
+    assert not pause.confirm("follow it?")
+
+    pending = OperatorPause(io.StringIO("keep my elbow down\n"))
+    _await_request(pending)
+    assert not pending.confirm("follow it?")
+    assert pending.feedback(4) == "keep my elbow down"
+
+
+def test_session_offers_the_stall_proposal_before_pausing(
+    monkeypatch, tmp_path
+) -> None:
+    planner = ArmMPC(Human(), visualize=False, feedback=FeedbackConfig())
+    monkeypatch.setattr(planner, "step", lambda: planner.human)
+    stalled = iter((False, True, True, False))
+    monkeypatch.setattr(ArmMPC, "goal_stalled", property(lambda _self: next(stalled)))
+    decisions = iter((False, True))
+    offered: list[int] = []
+    handled: list[tuple[int, str]] = []
+
+    def approve(step, _human):
+        offered.append(step)
+        return next(decisions)
+
+    def handle(step, _human, reason, violation, local_index):
+        handled.append((step, reason))
+        return CorrectionRoundResult(
+            round_index=local_index,
+            trajectory_index=0,
+            trigger_step=step,
+            trigger_reason=reason,
+            trigger_violation=violation,
+            feedback_text="",
+            correction_traj=np.zeros((1, 7)),
+            generated_cost=None,
+            cost_round=None,
+            artifact_dir=tmp_path / f"round_{local_index}",
+        )
+
+    session = CorrectionSession(
+        mpc=planner,
+        user=SimulatedUser(
+            name="unrestricted", description="", feedback_text="", bounds=()
+        ),
+        feedback_text="",
+        trigger_threshold=0.02,
+        text_time=None,
+        artifact_dir=tmp_path,
+        handle_correction=handle,
+        approve_stall_proposal=approve,
+    )
+    session.run_trajectory(4)
+
+    assert offered == [1, 2]
+    assert handled == [(1, "stalled")]
 
 
 def test_remaining_mdm_trajectory_is_snapshot_and_replacement_discards_suffix() -> None:
@@ -344,3 +410,136 @@ corrections:
     assert (result.artifact_dir / "round_00" / "correction.npy").exists()
     assert (result.artifact_dir / "round_01" / "correction.npy").exists()
     assert (result.artifact_dir / "executed_trajectory.npy").exists()
+
+
+def test_runner_retires_the_cost_a_rejected_proposal_left_out(
+    monkeypatch, tmp_path
+) -> None:
+    config_path = tmp_path / "mpc.yaml"
+    config_path.write_text(
+        """
+steps: 5
+horizon: 2
+n_mpc_samples: 2
+max_angle_delta: 0.01
+feedback:
+  text_time: 0
+preference_learning: false
+llm_cost:
+  enabled: true
+  artifact_dir: artifacts
+cartesian:
+  goals:
+    - [0.1, 0.2, 0.3]
+  stall: {}
+corrections:
+  trigger_threshold: 0.02
+""",
+        encoding="utf-8",
+    )
+    cfg = load_mpc_config(config_path)
+    planner = ArmMPC(
+        Human(), visualize=False, feedback=FeedbackConfig(), cartesian=cfg.cartesian
+    )
+    monkeypatch.setattr(planner, "step", lambda: planner.human)
+    monkeypatch.setattr(
+        session_module, "compute_violations", lambda *_args: np.array([0.0])
+    )
+    stalled = iter((False, False, True, False, False))
+    monkeypatch.setattr(ArmMPC, "goal_stalled", property(lambda _self: next(stalled)))
+    context = build_generated_cost_context(
+        Human(), mdm_traj=np.zeros((3, 3, 3)), window=3
+    )
+    learned = [
+        GeneratedPythonCost(
+            code="def cost(q_trajs, context, params):\n    return np.zeros(len(q_trajs))\n",
+            params={},
+            context=context,
+            description=f"round {i}",
+        )
+        for i in range(2)
+    ]
+    generations = iter(learned)
+    monkeypatch.setattr(
+        run_module,
+        "generate_cost_for_correction",
+        lambda **_kwargs: SimpleNamespace(
+            generated_cost=next(generations),
+            eval_state=SimpleNamespace(
+                save=lambda _path: None,
+                cartesian_goal=None,
+                make_rollout_fn=lambda: None,
+            ),
+            generated_context=context,
+            summaries={},
+            images={},
+        ),
+    )
+    monkeypatch.setattr(
+        run_module,
+        "propose_unblocked_path",
+        lambda _cfg, human, _costs: StallProposal(
+            human.step(np.ones((2, 7))), (learned[0],), reached_goal=True
+        ),
+    )
+    monkeypatch.setattr(run_module, "first_violation_step", lambda *_args: 0)
+    combined: dict[str, Any] = {}
+
+    class FakeCombine:
+        """Combine stand-in that records the rounds it was handed."""
+
+        def __init__(self, **kwargs):
+            combined.update(kwargs)
+
+        @staticmethod
+        def generate(install):
+            del install
+
+    monkeypatch.setattr(run_module, "CombineCostGenerator", FakeCombine)
+
+    class FakeGenerator:
+        """Motion generator stand-in returning a canned correction."""
+
+        @staticmethod
+        def generate_positions(_text, human, **_kwargs):
+            positions = np.zeros((1, 2, 22, 3))
+            positions[:, :, LEFT_ARM_CHAIN_INDICES] = human.fk_positions_from_q(human.q)
+            return positions
+
+    user = SimulatedUser(
+        name="restricted",
+        description="",
+        feedback_text="keep it comfortable",
+        bounds=(HiddenBound("elbow_flexion", "lower_bound", low=0.5),),
+    )
+    setup = RunSetup(
+        mpc=planner,
+        gen=FakeGenerator(),  # type: ignore[arg-type]
+        human=planner.human,
+        uses_mdm=True,
+        visualize=False,
+        compact=False,
+        user=user,
+        env=KinematicEnv(),
+        extra_costs=CompositeTrajectoryCost([]),
+    )
+    args = Namespace(
+        text=None,
+        text_time=None,
+        interactive=False,
+        mdm_frames=None,
+        save_motion=None,
+        frozen_body=False,
+        mpc_config=config_path,
+    )
+
+    result, _, _ = run_repeated_correction_session(
+        args, cfg, setup, tmp_path, tmp_path / "learned.yaml"
+    )
+
+    assert [r.trigger_reason for r in result.rounds] == ["text_time", "stalled"]
+    installed = planner.extra_costs.terms()
+    assert all(term is not learned[0] for term in installed)
+    assert any(term is learned[1] for term in installed)
+    rounds = combined["rounds"]
+    assert "keep it comfortable" in rounds[0].retired and not rounds[1].retired

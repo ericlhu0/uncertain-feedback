@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -33,6 +33,7 @@ from uncertain_feedback.cost_generation import (
     CostRound,
     artifact_run_dir,
     generate_cost_for_correction,
+    stall_retired_note,
 )
 from uncertain_feedback.envs import make_env
 from uncertain_feedback.envs.base import ExecutionEnv
@@ -66,12 +67,14 @@ from uncertain_feedback.planners.mpc.kinematics import (
     anchor_q_trajectory,
 )
 from uncertain_feedback.planners.mpc.rollout import (
+    propose_unblocked_path,
     rollout_reference_trajectory,
     run_planning_loop,
 )
 from uncertain_feedback.simulated_users import (
     SimulatedUser,
     choose_cluster,
+    first_violation_step,
     get_persona,
 )
 from uncertain_feedback.uncertainty.clustering import make_clusterer
@@ -673,9 +676,7 @@ def run_repeated_correction_session(
         if operator is not None
         else (args.text_time if args.text_time is not None else feedback_cfg.text_time)
     )
-    configured_base_costs = replace_generated_costs(
-        mpc._extra_costs, None  # pylint: disable=protected-access
-    )
+    configured_base_costs = replace_generated_costs(mpc.extra_costs, None)
     artifact_root = (
         artifact_run_dir(artifact_base_dir, cfg.llm_cost.artifact_dir)
         / f"trajectory_{trajectory_index:02d}"
@@ -685,6 +686,11 @@ def run_repeated_correction_session(
     runtime_rounds: list[
         tuple[CostRound, EvalState, Any, dict[str, Any], dict[str, Path]]
     ] = []
+    # A rejected stall proposal's left-out costs are retired once the correction
+    # that follows has a cost; their rounds keep a note for the final combine.
+    round_costs: list[tuple[GeneratedPythonCost, int]] = []
+    pending_retire: tuple[GeneratedPythonCost, ...] = ()
+    retired_notes: dict[int, str] = {}
 
     def handle_correction(
         step: int,
@@ -693,7 +699,7 @@ def run_repeated_correction_session(
         violation: float | None,
         local_index: int,
     ) -> CorrectionRoundResult:
-        nonlocal feedback_text
+        nonlocal feedback_text, pending_retire
         if operator is not None:
             feedback_text = operator.feedback(step)
         old_suffix = mpc.remaining_mdm_trajectory(human.q)
@@ -822,11 +828,22 @@ def run_repeated_correction_session(
             result.eval_state.save(state_path)
             generated = result.generated_cost
             if generated is not None:
-                mpc.set_extra_costs(
-                    _append_extra_cost(
-                        mpc._extra_costs, generated  # pylint: disable=protected-access
+                mpc.set_extra_costs(_append_extra_cost(mpc.extra_costs, generated))
+                round_costs.append((generated, round_index))
+                if pending_retire:
+                    mpc.set_extra_costs(
+                        CompositeTrajectoryCost(
+                            [
+                                term
+                                for term in mpc.extra_costs.terms()
+                                if not any(term is gone for gone in pending_retire)
+                            ]
+                        )
                     )
-                )
+                    for cost, index in round_costs:
+                        if any(cost is gone for gone in pending_retire):
+                            retired_notes[index] = stall_retired_note(feedback_text)
+                            print(f"[stall] retired round {index}'s cost")
                 goal_pos = result.eval_state.cartesian_goal
                 goal = (
                     (float(goal_pos[0]), float(goal_pos[1]), float(goal_pos[2]))
@@ -860,6 +877,7 @@ def run_repeated_correction_session(
                     )
                 )
                 print(f"[llm-cost] stacked correction cost {round_index}")
+        pending_retire = ()
         _restore_interactive_backend()
         return CorrectionRoundResult(
             round_index=round_index,
@@ -878,8 +896,15 @@ def run_repeated_correction_session(
         rounds: Sequence[CorrectionRoundResult],
     ) -> GeneratedPythonCost | None:
         all_cost_rounds = [
-            *prior_rounds,
-            *(round_.cost_round for round_ in rounds if round_.cost_round),
+            (
+                replace(round_, retired=retired_notes[round_.index])
+                if round_.index in retired_notes
+                else round_
+            )
+            for round_ in (
+                *prior_rounds,
+                *(result.cost_round for result in rounds if result.cost_round),
+            )
         ]
         history_path = artifact_root / "history.json"
         history_path.write_text(
@@ -925,6 +950,43 @@ def run_repeated_correction_session(
         print("[combine] failed; retaining stacked generated costs")
         return prior_unified_cost
 
+    def approve_stall_proposal(step: int, human: Human) -> bool:
+        """Offer the path with the blocking learned costs left out; the operator,
+        or else the simulated persona, decides whether the arm follows it."""
+        nonlocal pending_retire
+        goal = mpc.current_cartesian_goal
+        assert cfg.cartesian is not None and goal is not None
+        proposed = propose_unblocked_path(
+            replace(cfg, cartesian=replace(cfg.cartesian, goals=[goal])),
+            human,
+            mpc.extra_costs,
+        )
+        if proposed is None or len(proposed.human.history) < 2:
+            return False
+        proposal = proposed.human.history
+        mpc.set_mdm_goal(proposal[-1])
+        print(
+            f"[stall] goal stalled at step {step}; proposed path: "
+            f"{len(proposal) - 1} steps"
+            f"{'' if proposed.reached_goal else ' (still short of the goal)'}, "
+            "end pose drawn as the correction goal; it leaves out:"
+        )
+        for term in proposed.dropped:
+            print(f"[stall]   {term.description or '(undescribed learned cost)'}")
+        approved = (
+            operator.confirm("follow the proposed path?")
+            if operator is not None
+            else first_violation_step(
+                setup.user, human, proposal, cfg.corrections.trigger_threshold
+            )
+            is None
+        )
+        if approved:
+            mpc.push_trajectory(proposal, screen=True)
+        else:
+            pending_retire = proposed.dropped
+        return approved
+
     session = CorrectionSession(
         mpc=mpc,
         user=setup.user,
@@ -938,6 +1000,7 @@ def run_repeated_correction_session(
         prior_rounds=prior_rounds,
         prior_unified_cost=prior_unified_cost,
         operator_requested=operator.requested if operator is not None else None,
+        approve_stall_proposal=approve_stall_proposal,
     )
     result = session.run_trajectory(cfg.steps, progress=True, progress_desc="MPC")
     np.save(artifact_root / "executed_trajectory.npy", result.loop_result.human.history)

@@ -362,6 +362,14 @@ def create_app(static_dir: Path) -> Flask:
 
         return _run_heavy(do)
 
+    @app.route("/api/manual_trajectory/accept_proposal", methods=["POST"])
+    def accept_proposal():
+        def do():
+            session, _ = _require_trajectory()
+            return session.accept_proposal()
+
+        return _run_heavy(do)
+
     @app.route("/api/rounds/<int:index>", methods=["DELETE"])
     def remove_round(index: int):
         return _run(lambda: _require_session().remove_round(index))

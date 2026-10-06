@@ -30,6 +30,7 @@ from uncertain_feedback.cost_generation import (
     CostGenerationResult,
     CostRound,
     generate_cost_for_correction,
+    stall_retired_note,
 )
 from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
 from uncertain_feedback.demo_runner.core import _LOG_PREFIX, _log, persona_to_json
@@ -62,6 +63,7 @@ from uncertain_feedback.planners.mpc.kinematics import (
 from uncertain_feedback.planners.mpc.rollout import (
     assemble_full_correction_traj,
     goal_reach,
+    propose_unblocked_path,
     rollout_to_goal,
 )
 from uncertain_feedback.simulated_users import oracle_cluster_scores
@@ -286,6 +288,11 @@ class Trajectory:
     oracle_package: dict[str, Any] | None = None
     clean_traj: np.ndarray | None = None
     clean_package: dict[str, Any] | None = None
+    # At a ``stalled`` pause: the path with the blocking learned costs left out,
+    # and the costs it leaves out (retired if the person corrects instead).
+    proposal: np.ndarray | None = None
+    proposal_package: dict[str, Any] | None = None
+    proposal_dropped: tuple[GeneratedPythonCost, ...] = ()
     samples: np.ndarray | None = None  # (N, T, 22, 3)
     cluster_levels: list[ClusterLevel] = field(default_factory=list)
     prompt: str | None = None
@@ -303,6 +310,9 @@ class Trajectory:
 
     def clear_pending_feedback(self) -> None:
         """Drop the uncommitted MDM samples, clusters, and pending correction."""
+        self.proposal = None
+        self.proposal_package = None
+        self.proposal_dropped = ()
         self.samples = None
         self.cluster_levels = []
         self.labels = None
@@ -350,6 +360,9 @@ class Trajectory:
         rig = session.rig
         user = session.user
         self.paused = False
+        self.proposal = None
+        self.proposal_package = None
+        self.proposal_dropped = ()
         stop_step = (
             rig.cfg.steps
             if max_steps is None
@@ -363,12 +376,24 @@ class Trajectory:
                         user, rig.human, _arm_aa(rig, self.human.q[np.newaxis])
                     )[0]
                 )
-            reason = self.trigger.evaluate(self.step, violation)
+            reason = self.trigger.evaluate(
+                self.step, violation, stalled=self.mpc.goal_stalled
+            )
             if reason is not None:
                 self.paused = True
                 self.trigger_reason = reason
                 self.trigger_violation = violation
                 self.set_feedback_frame(user, rig.human, self.step)
+                if reason == "stalled":
+                    proposed = propose_unblocked_path(
+                        rig._cfg_with_goal(self.goal), self.human, self.mpc.extra_costs
+                    )
+                    if proposed is not None:
+                        self.proposal = proposed.human.history
+                        self.proposal_package = rig.package_trajectory(
+                            self.proposal, user
+                        )
+                        self.proposal_dropped = proposed.dropped
                 _log(
                     f"trajectory paused at frame {self.step}: {reason} "
                     f"(violation={violation}); feedback from frame {self.trigger_step}"
@@ -623,7 +648,12 @@ class Session:
         base_terms = self.rig._extra_costs(self.user)
         if self.unified_cost is not None:
             return replace_generated_costs(base_terms, self.unified_cost)
-        return CompositeTrajectoryCost([*base_terms.terms(), *self._round_costs])
+        return CompositeTrajectoryCost([*base_terms.terms(), *self._live_round_costs()])
+
+    def _live_round_costs(self) -> list[GeneratedPythonCost]:
+        """Per-round costs still planned with: retired rounds are left out."""
+        retired = {i for i, round_ in enumerate(self.rounds) if round_.retired}
+        return [cost for i, cost in enumerate(self._round_costs) if i not in retired]
 
     def start_trajectory(
         self,
@@ -1289,6 +1319,7 @@ class Session:
             "trigger_violation": round_.trigger_violation,
             "cluster_labels": list(round_.cluster_labels),
             "description": round_.description,
+            "retired": round_.retired,
             "code": round_.cost_code,
             "rationale": _rationale_from_artifacts(round_.round_dir),
             "generated_bounds": _generated_bounds_from_artifacts(round_.round_dir),
@@ -1373,7 +1404,31 @@ class Session:
         if traj.scaled_correction is None or traj._last_cost is None:
             raise ValueError("Generate a cost for the selected cluster first.")
         correction = traj.scaled_correction.copy()
+        # Correcting at a stall rejects the proposal: what it left out is retired
+        # once this correction's cost is in. A unified cost covers every round.
+        retiring = [
+            i
+            for i, cost in enumerate(self._round_costs)
+            if traj.trigger_reason == "stalled"
+            and any(cost is term for term in traj.proposal_dropped)
+        ]
+        if (
+            traj.trigger_reason == "stalled"
+            and self.unified_cost is not None
+            and any(self.unified_cost is term for term in traj.proposal_dropped)
+        ):
+            retiring = list(range(len(self.rounds)))
+        instruction = traj._last_instruction or ""
         self.commit_round()
+        for i in retiring:
+            if not self.rounds[i].retired:
+                self.rounds[i] = replace(
+                    self.rounds[i], retired=stall_retired_note(instruction)
+                )
+                self.round_records[i] = self._round_record(self.rounds[i])
+                _log(f"retired round {i}: it kept the arm from the goal")
+        if retiring:
+            self._save()
         assert traj.trigger_step is not None
         if traj.step > traj.trigger_step:
             self._rewind_to(traj.trigger_step)
@@ -1383,7 +1438,7 @@ class Session:
         traj.mpc.push_trajectory(correction)
         traj.mpc.set_extra_costs(
             CompositeTrajectoryCost(
-                [*rig._extra_costs(self.user).terms(), *self._round_costs]
+                [*rig._extra_costs(self.user).terms(), *self._live_round_costs()]
             )
         )
         traj.paused = False
@@ -1406,6 +1461,21 @@ class Session:
         traj.advance(self)
         return self._record("trajectory", self._trajectory_payload())
 
+    def accept_proposal(self) -> dict[str, Any]:
+        """Follow the stalled trajectory's proposed path, keeping the learned costs."""
+        traj = self.trajectory
+        if traj is None or not traj.paused or traj.trigger_reason != "stalled":
+            raise ValueError("The multi-turn trajectory is not paused at a stall.")
+        if traj.proposal is None:
+            raise ValueError("This stall has no proposed path.")
+        _log(f"following the proposed path from frame {traj.step}")
+        traj.mpc.set_mdm_goal(traj.proposal[-1])
+        traj.mpc.push_trajectory(traj.proposal, screen=True)
+        traj.paused = False
+        traj.clear_pending_feedback()
+        traj.advance(self)
+        return self._record("trajectory", self._trajectory_payload())
+
     def remove_round(self, index: int) -> dict[str, Any]:
         """Drop a committed round and reindex the ones after it."""
         rig = self.rig
@@ -1423,7 +1493,7 @@ class Session:
         if self.trajectory is not None:
             self.trajectory.mpc.set_extra_costs(
                 CompositeTrajectoryCost(
-                    [*rig._extra_costs(self.user).terms(), *self._round_costs]
+                    [*rig._extra_costs(self.user).terms(), *self._live_round_costs()]
                 )
             )
         self._save()
@@ -1550,6 +1620,8 @@ class Session:
             ),
             "oracle": None if traj.oracle_traj is None else self._oracle_payload(),
             "clean_base": traj.clean_package,
+            "proposal": traj.proposal_package,
+            "proposal_drops": [term.description for term in traj.proposal_dropped],
             "metrics": violation_metrics(
                 self.user, rig.human, _arm_aa(rig, trajectory)
             ),

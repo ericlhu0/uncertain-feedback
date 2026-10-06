@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from uncertain_feedback.cost_generation.combine_costs import CostRound
     from uncertain_feedback.planners.mpc.rollout import LoopResult
 
-TriggerReason = Literal["text_time", "discomfort", "operator"]
+TriggerReason = Literal["text_time", "discomfort", "operator", "stalled"]
 
 
 @dataclass
@@ -42,13 +42,22 @@ class CorrectionTrigger:
         self.first_correction_triggered = True
         self.discomfort_armed = False
 
-    def evaluate(self, step: int, violation: float | None) -> TriggerReason | None:
-        """Decide whether this step should pause for feedback, and why."""
+    def evaluate(
+        self, step: int, violation: float | None, stalled: bool = False
+    ) -> TriggerReason | None:
+        """Decide whether this step should pause for feedback, and why.
+
+        ``stalled`` is the planner's :attr:`ArmMPC.goal_stalled`: the goal is
+        out of reach under the current costs, so only new feedback can help.
+        """
         if self.operator_requested is not None and self.operator_requested():
             # A live person asking outranks both the scripted step and the
             # discomfort edge, and needs no re-arming: they can ask again at will.
             self.note_operator_pause()
             return "operator"
+        if stalled:
+            self.note_operator_pause()
+            return "stalled"
         uncomfortable = (
             self.automatic and violation is not None and violation > self.threshold
         )
@@ -123,6 +132,9 @@ class CorrectionSession:
     prior_rounds: Sequence[CostRound] = ()
     prior_unified_cost: GeneratedPythonCost | None = None
     operator_requested: Callable[[], bool] | None = None
+    # Offered a stall first: True means the person took the proposed path (the
+    # handler queued it), False falls through to a ``stalled`` correction.
+    approve_stall_proposal: Callable[[int, Human], bool] | None = None
     rounds: list[CorrectionRoundResult] = field(default_factory=list, init=False)
 
     def run_trajectory(
@@ -150,7 +162,14 @@ class CorrectionSession:
                         self.user, human, human.arm_aa_from_q(human.q[np.newaxis])
                     )[0]
                 )
-            reason = trigger.evaluate(step, violation)
+            stalled = self.mpc.goal_stalled
+            if (
+                stalled
+                and self.approve_stall_proposal is not None
+                and self.approve_stall_proposal(step, human)
+            ):
+                return
+            reason = trigger.evaluate(step, violation, stalled=stalled)
             if reason is None:
                 return
             result = self.handle_correction(

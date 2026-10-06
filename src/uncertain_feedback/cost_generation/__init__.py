@@ -21,6 +21,7 @@ from uncertain_feedback.cost_generation.base import (
 from uncertain_feedback.cost_generation.combine_costs import (
     CombineCostGenerator,
     CostRound,
+    stall_retired_note,
 )
 from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
 from uncertain_feedback.cost_generation.generate import (
@@ -41,6 +42,7 @@ __all__ = [
     "CostGenerationResult",
     "CostGenerator",
     "CostRound",
+    "stall_retired_note",
     "LlmCostGenerator",
     "TrajectoryCorpus",
     "TurnsCostGenerator",

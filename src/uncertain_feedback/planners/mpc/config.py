@@ -33,6 +33,7 @@ from uncertain_feedback.planners.mpc.goal_spaces import (
     FeatureRegion,
     ForearmBoxRegion,
     GoalRegion,
+    GoalStallConfig,
     SphereRegion,
 )
 from uncertain_feedback.simulated_users.base import HiddenBound
@@ -416,6 +417,21 @@ def _parse_feedback(data: dict[str, Any]) -> FeedbackConfig:
     )
 
 
+def _parse_stall(data: dict[str, Any]) -> GoalStallConfig:
+    return GoalStallConfig(
+        window=_positive_int(
+            data.get("window", GoalStallConfig.window), "cartesian.stall.window"
+        ),
+        min_gain=_float(
+            data.get("min_gain", GoalStallConfig.min_gain), "cartesian.stall.min_gain"
+        ),
+        max_travel=_float(
+            data.get("max_travel", GoalStallConfig.max_travel),
+            "cartesian.stall.max_travel",
+        ),
+    )
+
+
 def _parse_constraints(data: dict[str, Any]) -> dict[str, Any]:
     constraints: dict[str, Any] = {}
     for name, params in data.items():
@@ -502,10 +518,16 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         ]
         if not goals:
             raise ValueError("cartesian.goals must be non-empty.")
+        stall_data = cartesian_data.get("stall")
         cartesian = CartesianConfig(
             goals=goals,
             threshold=_float(
                 cartesian_data.get("threshold", 0.01), "cartesian.threshold"
+            ),
+            stall=(
+                None
+                if stall_data is None
+                else _parse_stall(_mapping(stall_data, "cartesian.stall"))
             ),
         )
 

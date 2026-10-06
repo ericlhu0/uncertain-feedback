@@ -19,16 +19,34 @@ from uncertain_feedback.planners.mpc.human import Human
 
 
 @dataclass(frozen=True)
+class GoalStallConfig:
+    """When the goal phase counts as stuck.
+
+    Stuck: still outside the goal, and over the last ``window`` goal steps the
+    best distance to the front goal improved by less than ``min_gain`` (goal
+    units) while the arm's net joint change stayed under ``max_travel``
+    radians. The travel test keeps a detour that moves away from the goal from
+    reading as stuck.
+    """
+
+    window: int = 40
+    min_gain: float = 0.01
+    max_travel: float = 0.15
+
+
+@dataclass(frozen=True)
 class CartesianConfig:
     """Goal regions and the slack past a region's boundary that counts as reaching it.
 
     Each goal is a raw ``[x, y, z]`` spine3-relative wrist point or a
     :class:`GoalRegion`. ``threshold`` is in the region's own units: metres for
-    point/box/sphere regions, radians for feature regions.
+    point/box/sphere regions, radians for feature regions. ``stall`` enables
+    stall detection (:class:`GoalStallConfig`).
     """
 
     goals: Sequence[Sequence[float] | np.ndarray | GoalRegion] = ()
     threshold: float = 0.01
+    stall: GoalStallConfig | None = None
 
 
 class CartesianGoalSpace(GoalSpace):
@@ -36,7 +54,8 @@ class CartesianGoalSpace(GoalSpace):
 
     Only the terminal state is scored; rotation is unconstrained. The front
     region is popped (distance within ``threshold``) as the queue is worked
-    through.
+    through. With ``stall`` set, :meth:`progress` also tracks the best
+    distance so far and the arm state over the last ``stall.window`` steps.
     """
 
     def __init__(
@@ -44,6 +63,7 @@ class CartesianGoalSpace(GoalSpace):
         goals: Sequence[Sequence[float] | np.ndarray | GoalRegion],
         threshold: float,
         human: Human,
+        stall: GoalStallConfig | None = None,
     ) -> None:
         self._goals: deque[GoalRegion] = deque(as_goal_region(g) for g in goals)
         self._threshold = threshold
@@ -51,10 +71,35 @@ class CartesianGoalSpace(GoalSpace):
         self._fk = human.fk
         self._spine3_pos = human.spine3_pos
         self._spine3_aa = human.spine3_aa
+        self._stall = stall
+        self._stall_window: deque[tuple[float, np.ndarray]] = deque(
+            maxlen=stall.window + 1 if stall is not None else 0
+        )
+        self._stall_best = np.inf
+        self._last_dist = np.inf
 
     @property
     def has_goals(self) -> bool:
         return bool(self._goals)
+
+    @property
+    def stalled(self) -> bool:
+        """Whether the goal phase has stopped progressing (:class:`GoalStallConfig`)."""
+        stall = self._stall
+        if stall is None or len(self._stall_window) <= stall.window:
+            return False
+        best_then, q_then = self._stall_window[0]
+        best_now, q_now = self._stall_window[-1]
+        return (
+            self._last_dist >= self._threshold
+            and best_then - best_now < stall.min_gain
+            and float(np.linalg.norm(q_now - q_then)) < stall.max_travel
+        )
+
+    def reset_stall(self) -> None:
+        """Start a fresh stall window (new goal, costs or trajectory)."""
+        self._stall_window.clear()
+        self._stall_best = np.inf
 
     @property
     def current_goal(self) -> GoalRegion | None:
@@ -96,8 +141,12 @@ class CartesianGoalSpace(GoalSpace):
         if dist < self._threshold and len(self._goals) > 1:
             self._goals.popleft()
             on_pop()
+            self.reset_stall()
             goal = self._goals[0]
             dist = self._distance(next_q, goal)
+        self._stall_best = min(self._stall_best, dist)
+        self._stall_window.append((self._stall_best, np.array(next_q, dtype=float)))
+        self._last_dist = dist
         return goal, dist
 
     def stage_cost(self, extra_costs: CompositeTrajectoryCost) -> StageCost:

@@ -48,6 +48,17 @@ class OperatorPause:
                 return False
         return True
 
+    def confirm(self, question: str) -> bool:
+        """Block for a yes/no answer; anything but ``y``/``yes`` is a no.
+
+        A line typed before the question is a pause request, not an answer, so
+        it is left for :meth:`feedback` and counts as a no.
+        """
+        if self._pending is not None:
+            return False
+        print(f"\n>>> {question} [y/N] ", end="", flush=True)
+        return self._lines.get().lower() in ("y", "yes")
+
     def feedback(self, step: int) -> str:
         """Block for the correction to apply; the arm stays held meanwhile."""
         line = self._pending or ""

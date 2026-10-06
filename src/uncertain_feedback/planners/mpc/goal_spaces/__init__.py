@@ -4,6 +4,7 @@ from uncertain_feedback.planners.mpc.goal_spaces.base import GoalSpace
 from uncertain_feedback.planners.mpc.goal_spaces.cartesian_goal_space import (
     CartesianConfig,
     CartesianGoalSpace,
+    GoalStallConfig,
 )
 from uncertain_feedback.planners.mpc.goal_spaces.regions import (
     BoxRegion,
@@ -20,6 +21,7 @@ __all__ = [
     "GoalSpace",
     "CartesianConfig",
     "CartesianGoalSpace",
+    "GoalStallConfig",
     "GoalRegion",
     "PointRegion",
     "BoxRegion",

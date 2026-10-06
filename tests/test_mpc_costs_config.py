@@ -180,7 +180,9 @@ class _FakePositionClusterer(TrajectoryClusterer):
         return np.zeros(2, dtype=np.intp)
 
 
-class _TwoTrajectoryClusterer(TrajectoryClusterer):
+# _positions_to_features is an optional hook (see supports_positions) that
+# pylint >= 4.1 reports as unimplemented abstract.
+class _TwoTrajectoryClusterer(TrajectoryClusterer):  # pylint: disable=abstract-method
     """Split four fake trajectory samples into two deterministic clusters."""
 
     def _to_features(self, trajectories: np.ndarray) -> np.ndarray:

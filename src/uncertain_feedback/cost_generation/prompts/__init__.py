@@ -314,6 +314,11 @@ def build_combine_task_body(
                 [
                     f"### Round {round_data['index']}",
                     f"Feedback: {round_data['feedback_text']}",
+                    *(
+                        [f"Deleted during the run: {round_data['retired']}"]
+                        if round_data.get("retired")
+                        else []
+                    ),
                     f"Goal: {json.dumps(round_data['goal'])}",
                     f"Trigger step: {round_data['trigger_step']}",
                     f"Eval state: {round_data['state_path']}",

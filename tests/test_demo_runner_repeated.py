@@ -7,6 +7,7 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import numpy as np
+import pytest
 
 from uncertain_feedback.cost_generation import CostRound
 from uncertain_feedback.cost_generation.corpus import TrajectoryCorpus
@@ -18,6 +19,7 @@ from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
+from uncertain_feedback.planners.mpc.rollout import StallProposal
 from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
 from uncertain_feedback.simulated_users import base as simulated_users_base
 
@@ -38,10 +40,12 @@ class FakePlanner:
 
     mdm_ready_to_terminate = True
     mdm_tracking_complete = True
+    goal_stalled = False
 
     def __init__(self, human, **kwargs) -> None:
         self.human = human
         self.kwargs = kwargs
+        self.extra_costs = kwargs.get("extra_costs")
         self.pushed = None
         self.costs = None
         self.mdm_goal = None
@@ -57,7 +61,8 @@ class FakePlanner:
     def set_mdm_goal(self, goal):
         self.mdm_goal = goal
 
-    def push_trajectory(self, trajectory):
+    def push_trajectory(self, trajectory, screen=False):
+        del screen
         self.pushed = trajectory
 
     def set_extra_costs(self, costs):
@@ -490,6 +495,103 @@ def test_retroactive_correction_re_rolls_the_rest_of_the_trajectory(
     assert payload["status"] == "complete"
     assert payload["trajectory"]["n_frames"] == 7
     assert [entry["n_frames"] for entry in session.corpus.entries()] == [7, 4]
+
+
+def test_stall_pauses_with_a_proposal_that_can_be_accepted(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        demo_session,
+        "compute_violations",
+        lambda selected, human, q: np.array([0.0]),
+    )
+    proposal = Human().step(np.full((3, 7), 0.5))
+    monkeypatch.setattr(
+        demo_session,
+        "propose_unblocked_path",
+        lambda cfg, human, costs: StallProposal(proposal, (), reached_goal=True),
+    )
+    trajectory = session.start_trajectory(
+        np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False
+    )
+    trajectory.mpc.goal_stalled = True  # type: ignore[misc]
+
+    paused = session.advance_trajectory(max_steps=2)
+    assert paused["trigger"]["reason"] == "stalled"
+    assert paused["proposal"]["n_frames"] == 4
+    with pytest.raises(ValueError, match="cannot be resumed"):
+        session.ignore_comfort_violation()
+
+    trajectory.mpc.goal_stalled = False  # type: ignore[misc]
+    resumed = session.accept_proposal()
+    np.testing.assert_allclose(
+        trajectory.mpc.pushed, proposal.history  # type: ignore[attr-defined]
+    )
+    assert resumed["proposal"] is None
+    assert resumed["status"] == "complete"
+
+
+def test_correcting_at_a_stall_retires_the_blocking_round(
+    monkeypatch, tmp_path
+) -> None:
+    session, _ = make_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        demo_session,
+        "compute_violations",
+        lambda selected, human, q: np.array([0.0]),
+    )
+
+    def cost_round(index: int, text: str) -> CostRound:
+        return CostRound(
+            index=index,
+            goal=(0.4, 0.5, 0.6),
+            feedback_text=text,
+            trigger_step=0,
+            round_dir=tmp_path / f"round_{index}",
+            state_path=tmp_path / f"round_{index}" / "state.pkl",
+            cost_code=FakeCost.code,
+            params={},
+            summaries={},
+            image_paths=(),
+        )
+
+    blocking, correcting = FakeCost(), FakeCost()
+    session.rounds.append(cost_round(0, "keep my elbow down"))
+    session._round_costs.append(blocking)  # type: ignore[arg-type]
+    session.round_records.append(session._round_record(session.rounds[0]))
+    monkeypatch.setattr(
+        demo_session,
+        "propose_unblocked_path",
+        lambda cfg, human, costs: StallProposal(
+            Human().step(np.full((3, 7), 0.5)), (blocking,), reached_goal=True  # type: ignore[arg-type]
+        ),
+    )
+    trajectory = session.start_trajectory(
+        np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6], advance=False
+    )
+    trajectory.mpc.goal_stalled = True  # type: ignore[misc]
+    assert session.advance_trajectory(max_steps=2)["trigger"]["reason"] == "stalled"
+    trajectory.mpc.goal_stalled = False  # type: ignore[misc]
+
+    trajectory.scaled_correction = np.stack([np.full((3, 3), 0.5)])
+    trajectory._last_cost = correcting  # type: ignore[assignment]
+    trajectory._last_instruction = "bring my hand in"
+
+    def fake_commit(self):
+        self.rounds.append(cost_round(1, "bring my hand in"))
+        self._round_costs.append(self.trajectory._last_cost)
+        self.round_records.append(self._round_record(self.rounds[-1]))
+        return {"rounds": self.round_records, "unified": None}
+
+    session.commit_round = MethodType(fake_commit, session)  # type: ignore[method-assign]
+    session.apply_round_and_continue(advance=False)
+
+    assert "bring my hand in" in session.rounds[0].retired
+    assert session.round_records[0]["retired"] == session.rounds[0].retired
+    assert not session.rounds[1].retired
+    installed = trajectory.mpc.costs.terms()  # type: ignore[attr-defined]
+    assert correcting in installed and blocking not in installed
 
 
 def test_operator_pause_can_be_resumed_without_feedback(monkeypatch, tmp_path) -> None:

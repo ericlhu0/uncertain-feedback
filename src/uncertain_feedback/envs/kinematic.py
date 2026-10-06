@@ -10,7 +10,9 @@ import numpy as np
 from uncertain_feedback.envs.base import ExecutionEnv
 
 
-class KinematicEnv(ExecutionEnv):
+# The robot methods are optional: ExecutionEnv raises NotImplementedError for
+# envs without a robot, which pylint >= 4.1 reports as unimplemented abstract.
+class KinematicEnv(ExecutionEnv):  # pylint: disable=abstract-method
     """Pass-through env reproducing the original open-loop kinematic rollout."""
 
     def __init__(self) -> None:

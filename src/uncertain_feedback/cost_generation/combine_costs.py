@@ -46,6 +46,9 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
     explanation: str = ""
     interpretation: str = ""  # stage-1 response (plain-language preference)
     grounding: str = ""  # stage-2 response (numeric spec)
+    # Set when this round's cost was deleted mid-run for blocking the goal (see
+    # stall_retired_note); the round stays so consolidation still weighs it.
+    retired: str = ""
 
     def to_json(self) -> dict[str, Any]:
         """Return a JSON-safe record with absolute artifact paths."""
@@ -68,6 +71,7 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
             "explanation": self.explanation,
             "interpretation": self.interpretation,
             "grounding": self.grounding,
+            "retired": self.retired,
         }
 
     @classmethod
@@ -102,7 +106,18 @@ class CostRound:  # pylint: disable=too-many-instance-attributes
             explanation=str(data.get("explanation", "")),
             interpretation=str(data.get("interpretation", "")),
             grounding=str(data.get("grounding", "")),
+            retired=str(data.get("retired", "")),
         )
+
+
+def stall_retired_note(correction_text: str) -> str:
+    """Why a round's cost was deleted mid-run, for :attr:`CostRound.retired`."""
+    return (
+        "this round's cost kept the arm from reaching the goal; the recipient "
+        "rejected the path that left it out and then corrected with "
+        f"{correction_text!r}. The preference behind this round is real but its "
+        "bound was too strict: keep it, loose enough that every goal stays reachable."
+    )
 
 
 class CombineCostGenerator(AgentCostGenerator):

@@ -78,12 +78,6 @@ def artifact_run_dir(base_dir: Path, artifact_dir: Path) -> Path:
     return root / stamp
 
 
-def parse_goal_conflict(interpret_text: str) -> bool:
-    """Read the stage-1 ``goal_conflict`` flag; ``False`` if absent/unparseable."""
-    data = extract_json_object(interpret_text)
-    return bool(data is not None and data.get("goal_conflict", False))
-
-
 class CostGenerator(ABC):
     """Base class for cost-function generators.
 

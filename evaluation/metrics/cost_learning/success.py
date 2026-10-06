@@ -26,6 +26,7 @@ def goal_row(interaction: Interaction) -> dict[str, Any]:
         "resolved": interaction.resolved,
         "reached": interaction.reached,
         "rounds_used": interaction.rounds_used,
+        "proposal_approved": interaction.proposal_approved,
         "executed_mean_violation": float(executed_metrics["mean_violation"]),
         "executed_max_violation": float(executed_metrics["max_violation"]),
     }
@@ -45,7 +46,9 @@ def success_at_k(
 
     A goal that hit the round cap or stalled short of the goal never counts at
     any ``k``, so the curve needs no failure value. ``k = 0`` is the goal
-    completed with no feedback at all.
+    completed with no feedback at all. A goal resolved by an approved stall
+    proposal counts; filter on ``goal_table``'s ``proposal_approved`` to see
+    how much of the curve that is.
     """
     goals = goal_table(interactions)
     keys = [goals[column] for column in by]

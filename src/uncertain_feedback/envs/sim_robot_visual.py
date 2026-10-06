@@ -51,7 +51,9 @@ _CAMERA_TOP_PITCH = -89.0
 _CAMERA_FOV = 60.0
 
 
-class SimRobotVisualEnv(ExecutionEnv):
+# The robot methods are optional: ExecutionEnv raises NotImplementedError for
+# envs without a robot, which pylint >= 4.1 reports as unimplemented abstract.
+class SimRobotVisualEnv(ExecutionEnv):  # pylint: disable=abstract-method
     """Kinematic pass-through env rendering a Panda grasping the forearm."""
 
     def __init__(self) -> None:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from typing import Sequence
 
 from evaluation.approaches.cost_gen.base import CostGen
 from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
@@ -32,6 +34,17 @@ class ConsolidateCostGen(CostGen):
 
     def learned_terms(self) -> list[GeneratedPythonCost]:
         return [self._unified] if self._unified is not None else []
+
+    def retire(self, terms: Sequence[GeneratedPythonCost], note: str) -> None:
+        """Retiring the unified cost retires every round folded into it; the
+        next combination re-derives a cost from all rounds, notes included."""
+        if self._unified is None or not any(self._unified is term for term in terms):
+            return
+        self._cost_rounds = [
+            round_ if round_.retired else replace(round_, retired=note)
+            for round_ in self._cost_rounds
+        ]
+        self._unified = None
 
     def learn(self, ctx: RoundContext) -> LearnOutcome:
         return self.record(ctx, self.generate(ctx))

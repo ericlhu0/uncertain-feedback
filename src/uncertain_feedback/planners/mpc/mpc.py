@@ -178,7 +178,9 @@ class ArmMPC:
         )
 
         self._goal_space: CartesianGoalSpace | None = (
-            CartesianGoalSpace(list(cartesian.goals), cartesian.threshold, human)
+            CartesianGoalSpace(
+                list(cartesian.goals), cartesian.threshold, human, cartesian.stall
+            )
             if cartesian is not None
             else None
         )
@@ -278,6 +280,20 @@ class ArmMPC:
         if self._goal_space is None:
             return False
         return self._goal_space.reached(q)
+
+    @property
+    def extra_costs(self) -> CompositeTrajectoryCost:
+        """The active extra cost terms (see :meth:`set_extra_costs`)."""
+        return self._extra_costs
+
+    @property
+    def goal_stalled(self) -> bool:
+        """Whether the goal phase has stopped progressing (``cartesian.stall``).
+
+        Stays ``True`` until the stall window restarts: a new goal region,
+        :meth:`set_extra_costs` or :meth:`push_trajectory`.
+        """
+        return self._goal_space is not None and self._goal_space.stalled
 
     # ------------------------------------------------------------------
     # Feedback
@@ -412,6 +428,8 @@ class ArmMPC:
         """
         feedback = self._feedback
         assert feedback is not None, "push_trajectory requires a feedback method."
+        if self._goal_space is not None:
+            self._goal_space.reset_stall()
         frames = np.asarray(frames, dtype=np.float64)
         q_frames = (
             frames
@@ -669,6 +687,8 @@ class ArmMPC:
     def set_extra_costs(self, costs: CompositeTrajectoryCost) -> None:
         """Replace the active extra cost terms (e.g. after a preference update)."""
         self._extra_costs = costs
+        if self._goal_space is not None:
+            self._goal_space.reset_stall()
         if self._vis is not None:
             self._vis.update_elbow_height_range(self._elbow_height_world_range())
 

@@ -89,6 +89,7 @@ const TRAJ_STYLES = {
   clean_base: { color: "#6b7280", label: "baseline (box limits, no feedback)" },
   base: { color: "#e05252", label: "rollout" },
   oracle: { color: "#9c5f17", label: "oracle-cost rollout" },
+  proposal: { color: "#7c3aed", label: "proposed path (learned costs left out)" },
   full: { color: "#0e7a63", label: "full corrected path" },
   generated: { color: "#3567d6", label: "generated-cost corrected path" },
   generated_start: { color: "#6fa8ff", label: "generated-cost from start" },
@@ -335,7 +336,7 @@ function maxFrames() {
 }
 
 function setTraj(key, data) {
-  trajs[key] = { data, visible: key === "base", ...TRAJ_STYLES[key] };
+  trajs[key] = { data, visible: key === "base" || key === "proposal", ...TRAJ_STYLES[key] };
   refreshLegend();
   refreshTimeline();
   renderAll();
@@ -659,6 +660,15 @@ function setDecisionControls(data) {
   const ignoreDisabled = !paused
     || !["discomfort", "operator"].includes(data.trigger?.reason);
   $("ignore-violation").disabled = ignoreDisabled;
+  // A stall pauses with the planner's path to the goal, learned costs left out.
+  const proposal = paused && data.trigger?.reason === "stalled" ? data.proposal : null;
+  $("accept-proposal").disabled = !proposal;
+  if (proposal) {
+    setTraj("proposal", proposal);
+  } else if (trajs.proposal) {
+    clearTraj("proposal");
+    refreshLegend(); refreshTimeline(); renderAll();
+  }
 }
 
 function enterCorrection() {
@@ -806,9 +816,9 @@ function clearTrajectoryUi() {
   showMdmStart = false;
   setScenarioLocked(false);
   $("exit-trajectory").disabled = true;
-  for (const id of ["ignore-violation", "enter-correction", "correct-here", "generate",
-    "recluster", "correction-next", "generate-cost", "cost-next", "commit-round",
-    "apply-round"]) {
+  for (const id of ["ignore-violation", "accept-proposal", "enter-correction",
+    "correct-here", "generate", "recluster", "correction-next", "generate-cost",
+    "cost-next", "commit-round", "apply-round"]) {
     $(id).disabled = true;
   }
   $("trajectory-session").className = "trajectory-session";
@@ -918,7 +928,10 @@ function renderTrajectorySession(data) {
     out.textContent = `Paused at frame ${data.step}/${data.step_limit} · ` +
       `feedback from frame ${data.trigger.step} · ` +
       `${data.trigger.reason} · violation ${violation} · ` +
-      `feedback turn ${data.rounds.length + 1}`;
+      `feedback turn ${data.rounds.length + 1}` +
+      (data.proposal_drops?.length
+        ? ` · proposed path leaves out: ${data.proposal_drops.join("; ")}`
+        : "");
   } else {
     out.textContent = (data.reached_goal
       ? `Trajectory complete at frame ${data.step}/${data.step_limit} · goal reached`
@@ -1051,9 +1064,9 @@ async function exitManualTrajectory() {
   showMdmStart = false;
   setScenarioLocked(false);
   $("exit-trajectory").disabled = true;
-  for (const id of ["ignore-violation", "enter-correction", "correct-here", "generate",
-    "recluster", "correction-next", "generate-cost", "cost-next", "commit-round",
-    "apply-round"]) {
+  for (const id of ["ignore-violation", "accept-proposal", "enter-correction",
+    "correct-here", "generate", "recluster", "correction-next", "generate-cost",
+    "cost-next", "commit-round", "apply-round"]) {
     $(id).disabled = true;
   }
   $("trajectory-session").className = "trajectory-session";
@@ -1079,8 +1092,17 @@ function renderOracleMetrics(oracle) {
 }
 
 async function ignoreComfortViolation() {
-  const data = await api("/api/manual_trajectory/ignore_violation", {},
-    "ignoring the current comfort violation and advancing the trajectory");
+  resumeTrajectory(await api("/api/manual_trajectory/ignore_violation", {},
+    "ignoring the current comfort violation and advancing the trajectory"));
+}
+
+async function acceptProposal() {
+  resumeTrajectory(await api("/api/manual_trajectory/accept_proposal", {},
+    "following the proposed path and advancing the trajectory"));
+}
+
+// Render a trajectory the server resumed without a new correction.
+function resumeTrajectory(data) {
   session.trajectory = data;
   syncSessionContext(data);
   setTraj("base", data.trajectory);
@@ -1453,6 +1475,7 @@ function renderRounds() {
     const details = document.createElement("div");
     details.innerHTML = `<b>round ${r.index + 1}</b> · goal [${r.goal.map((v) => v.toFixed(2)).join(", ")}]` +
       ` · trigger @ ${r.trigger_step} (${r.trigger_reason || "feedback"})` +
+      (r.retired ? " · <i>deleted during the run (still used when combining)</i>" : "") +
       `<br>“${escapeHtml(r.feedback_text)}”<br>${escapeHtml(r.description || "")}` +
       rationaleHtml(r.rationale, r.artifact_dir);
     const remove = document.createElement("button");
@@ -3075,7 +3098,7 @@ function resetReplayState() {
 // beat was paused), but there is no live session behind them.
 function disableLiveControls() {
   for (const id of ["run-base", "exit-trajectory", "ignore-violation",
-    "enter-correction", "correct-here", "generate", "recluster", "cluster-refine",
+    "accept-proposal", "enter-correction", "correct-here", "generate", "recluster", "cluster-refine",
     "cluster-back", "correction-next", "generate-cost", "cost-next", "commit-round",
     "apply-round", "combine-rounds", "reset-rounds"]) {
     $(id).disabled = true;
@@ -3143,6 +3166,7 @@ async function main() {
   $("run-base").onclick = startManualTrajectory;
   $("exit-trajectory").onclick = exitManualTrajectory;
   $("ignore-violation").onclick = ignoreComfortViolation;
+  $("accept-proposal").onclick = acceptProposal;
   $("enter-correction").onclick = enterCorrection;
   $("correct-here").onclick = requestCorrectionHere;
   $("generate").onclick = generate;

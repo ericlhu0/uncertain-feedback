@@ -18,8 +18,10 @@ from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import CompositeTrajectoryCost
 from uncertain_feedback.planners.mpc.goal_spaces import (
     BoxRegion,
+    CartesianGoalSpace,
     FeatureRegion,
     ForearmBoxRegion,
+    GoalStallConfig,
     PointRegion,
     SphereRegion,
     as_goal_region,
@@ -201,6 +203,36 @@ def test_box_goal_reached_and_queue_advances() -> None:
     assert popped == [True]
     assert dist > 0.05
     assert mpc.current_cartesian_goal == far
+
+
+def test_goal_stall_needs_a_flat_distance_and_a_still_arm() -> None:
+    human = Human()
+    q0 = human.q
+    far = PointRegion(point=tuple(human.wrist_from_q(q0) + 0.5))
+    stall = GoalStallConfig(window=3, min_gain=0.01, max_travel=0.1)
+
+    held = CartesianGoalSpace([far], 0.05, human, stall)
+    stalled = []
+    for _ in range(4):
+        held.progress(q0, on_pop=lambda: None)
+        stalled.append(held.stalled)
+    held.reset_stall()
+    stalled.append(held.stalled)
+    assert stalled == [False, False, False, True, False]
+
+    moving = CartesianGoalSpace([far], 0.05, human, stall)
+    for i in range(4):
+        q = q0.copy()
+        q[6] += 0.1 * i
+        moving.progress(q, on_pop=lambda: None)
+    assert not moving.stalled
+
+    at_goal = CartesianGoalSpace(
+        [PointRegion(point=tuple(human.wrist_from_q(q0)))], 0.05, human, stall
+    )
+    for _ in range(4):
+        at_goal.progress(q0, on_pop=lambda: None)
+    assert not at_goal.stalled
 
 
 def test_forearm_box_rejects_wrist_only_success() -> None:

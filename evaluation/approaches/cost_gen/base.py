@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import abc
+from dataclasses import replace
 from pathlib import Path
+from typing import Sequence
 
 from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from uncertain_feedback.cost_generation import (
     CostGenerationResult,
     CostRound,
     generate_cost_for_correction,
+    stall_retired_note,
 )
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
 from uncertain_feedback.planners.mpc.costs import (
@@ -56,6 +59,16 @@ class CostGen(abc.ABC):
     def learn(self, ctx: RoundContext) -> LearnOutcome:
         """Distill the resolved correction into persistent planner costs."""
 
+    def retire(self, terms: Sequence[GeneratedPythonCost], note: str) -> None:
+        """Stop planning with ``terms`` (they kept the arm from the goal).
+
+        Their rounds stay recorded, marked with ``note``, so a later
+        consolidation still weighs the corrections behind them.
+        """
+        for i, (cost, round_) in enumerate(zip(self._generated, self._cost_rounds)):
+            if not round_.retired and any(cost is term for term in terms):
+                self._cost_rounds[i] = replace(round_, retired=note)
+
     def generate(self, ctx: RoundContext) -> CostGenerationResult:
         """Generate immediate evidence without changing accumulated costs."""
         cfg = self._cfg
@@ -91,6 +104,10 @@ class CostGen(abc.ABC):
         generated = generation.generated_cost
         if generated is None:
             return LearnOutcome(False, False)
+        # Before this round is appended, so a consolidation that follows sees the
+        # retired rounds' notes and this round as the correction that replaced them.
+        if ctx.retire:
+            self.retire(ctx.retire, stall_retired_note(ctx.utterance_text))
         self._generated.append(generated)
         state_path = ctx.round_dir / "state.pkl"
         generation.eval_state.save(state_path)

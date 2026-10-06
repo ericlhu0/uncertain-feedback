@@ -10,13 +10,19 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from uncertain_feedback.cost_generation import CombineCostGenerator, CostRound
+from uncertain_feedback.cost_generation import (
+    CombineCostGenerator,
+    CostRound,
+    stall_retired_note,
+)
+from uncertain_feedback.cost_generation.prompts import build_combine_task_body
 from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.costs import (
@@ -83,6 +89,20 @@ def _round(tmp_path: Path, index: int) -> CostRound:
         trigger_reason="text_time" if index == 0 else "discomfort",
         trigger_violation=None if index == 0 else 0.03,
     )
+
+
+def test_combine_prompt_marks_rounds_deleted_during_the_run(tmp_path: Path) -> None:
+    kept = _round(tmp_path, 0)
+    retired = replace(
+        _round(tmp_path, 1), retired=stall_retired_note("keep my elbow lower")
+    )
+    assert CostRound.from_json(retired.to_json()).retired == retired.retired
+
+    prompt, _ = build_combine_task_body([kept.to_json(), retired.to_json()])
+    assert prompt.count("Deleted during the run:") == 1
+    assert "keep my elbow lower" in prompt
+    plain, _ = build_combine_task_body([kept.to_json()])
+    assert "Deleted during the run" not in plain
 
 
 def test_replace_generated_costs_drops_all_generated_terms() -> None:

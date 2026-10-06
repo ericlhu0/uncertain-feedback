@@ -50,7 +50,10 @@ class FeedbackRound:
     oracle the utterance was verbalized from; ``grounding.candidates`` is the
     menu the approach proposed and ``choice`` how the persona judged it;
     ``correction_q`` is the executed correction and ``continuation`` the replan
-    from its end, with ``retrigger_step`` its first violation (None = resolved).
+    from its end, with ``retrigger_step`` its first violation. A continuation
+    that stalls short of the goal ends in a proposal; ``proposal_rejected``
+    means the persona turned it down, so the next round corrects it. The round
+    resolved its feedback when neither happened.
     """
 
     round_index: int
@@ -68,6 +71,12 @@ class FeedbackRound:
     retrigger_step: int | None
     ground_seconds: float
     learn_seconds: float
+    proposal_rejected: bool = False
+
+    @property
+    def resolved(self) -> bool:
+        """Whether the round's continuation needed no further feedback."""
+        return self.retrigger_step is None and not self.proposal_rejected
 
 
 @dataclass(frozen=True)
@@ -79,6 +88,8 @@ class Interaction:
     arm moved through for this goal, starting at the goal's start pose.
     ``result`` is ``no_violation`` (no feedback needed), ``ok`` (resolved after
     feedback), ``goal_not_reached``, ``capped`` or ``no_feedback_content``.
+    ``proposal_approved`` marks a goal that got there by following an approved
+    stall proposal rather than under the learned costs alone.
     """
 
     task: InteractionTask
@@ -94,6 +105,7 @@ class Interaction:
     result: str
     reached: bool
     executed: np.ndarray
+    proposal_approved: bool = False
 
     @property
     def rounds_used(self) -> int:

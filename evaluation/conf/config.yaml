@@ -13,6 +13,11 @@ max_tasks: null
 tasks: null
 # Override simulated_user.chooser (oracle_progress | intent_aligned | progress | random).
 sim_chooser: null
+# Goal-stall proposals: a rollout that stalls short of the goal offers the persona
+# a path with the blocking learned costs left out (see README "Goal stalls").
+# Adds cartesian.stall with defaults unless mpc_config sets its own; false
+# reproduces runs from before 2026-10-06.
+goal_stall: true
 
 # run/sweep dirs are anchored to the launch cwd: the MDM loader os.chdir()s
 # into its submodule, which would otherwise relocate later jobs' output dirs.

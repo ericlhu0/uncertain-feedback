@@ -66,7 +66,8 @@ def round_rows(interaction: Interaction) -> list[dict[str, Any]]:
                 "retrigger_step": (
                     np.nan if rnd.retrigger_step is None else int(rnd.retrigger_step)
                 ),
-                "resolved": rnd.retrigger_step is None,
+                "proposal_rejected": rnd.proposal_rejected,
+                "resolved": rnd.resolved,
                 "ground_seconds": rnd.ground_seconds,
                 "learn_seconds": rnd.learn_seconds,
             }

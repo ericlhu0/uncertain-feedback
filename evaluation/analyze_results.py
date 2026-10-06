@@ -109,7 +109,11 @@ def main() -> None:
 
     goals = goal_table(interactions)
     goals.to_csv(args.out / "all_goals.csv", index=False)
-    results = pd.crosstab(goals["approach"], goals["result"], normalize="index")
+    # Goals resolved by following an approved stall proposal get their own column.
+    result = goals["result"].where(
+        ~goals["proposal_approved"], goals["result"] + "_via_proposal"
+    )
+    results = pd.crosstab(goals["approach"], result, normalize="index")
     results.to_csv(args.out / "goal_results.csv")
     print(results.to_string())
 

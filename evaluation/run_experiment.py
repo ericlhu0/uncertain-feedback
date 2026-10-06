@@ -40,6 +40,7 @@ from evaluation.benchmarks.structs import Interaction
 from evaluation.metrics.cost_learning.success import goal_table
 from uncertain_feedback.motion_generators import make_motion_generator
 from uncertain_feedback.planners.mpc.config import load_mpc_config
+from uncertain_feedback.planners.mpc.goal_spaces import GoalStallConfig
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import get_persona
 
@@ -77,6 +78,12 @@ def _run(cfg: DictConfig) -> None:
     )
 
     run_cfg = replace(load_mpc_config(mpc_config), seed=seed)
+    if run_cfg.cartesian is not None:
+        stall = (
+            (run_cfg.cartesian.stall or GoalStallConfig()) if cfg.goal_stall else None
+        )
+        run_cfg = replace(run_cfg, cartesian=replace(run_cfg.cartesian, stall=stall))
+        logging.info("goal stall: %s", stall)
     human = Human(pose=run_cfg.pose, arm=run_cfg.arm)
     gen = (
         make_motion_generator(run_cfg.motion_generator, None, seed=seed)

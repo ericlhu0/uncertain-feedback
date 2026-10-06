@@ -1172,7 +1172,7 @@ presence of top-level YAML sections, one per module slot:
 
 | Section | Module | Absent means |
 |---|---|---|
-| `cartesian:` | goal space: a queue of goal regions (`goals`, `threshold`). Each entry is a spine3-relative wrist point `[x, y, z]` or a region mapping — `{box: {low, high}}`, `{forearm_box: {low, high, elbow: {low, high}, wrist: {low, high}}}` (both endpoints in the outer box; endpoint boxes optional), `{sphere: {center, radius}}` or `{features: {<feature>: [low, high]}}` over the five anatomical features (radians, `null` for one-sided). The goal cost is the squared distance to the region, zero inside, so inside a region only the comfort costs decide where the arm settles. `threshold` pads the region boundary in its own units (metres, or radians for `features`; default 0.01 — the region itself carries the tolerance, so the pad is only numerical slack) | no goal phase (hold after feedback) |
+| `cartesian:` | goal space: a queue of goal regions (`goals`, `threshold`, optional `stall`; see *Goal stalls* below). Each entry is a spine3-relative wrist point `[x, y, z]` or a region mapping — `{box: {low, high}}`, `{forearm_box: {low, high, elbow: {low, high}, wrist: {low, high}}}` (both endpoints in the outer box; endpoint boxes optional), `{sphere: {center, radius}}` or `{features: {<feature>: [low, high]}}` over the five anatomical features (radians, `null` for one-sided). The goal cost is the squared distance to the region, zero inside, so inside a region only the comfort costs decide where the arm settles. `threshold` pads the region boundary in its own units (metres, or radians for `features`; default 0.01 — the region itself carries the tolerance, so the pad is only numerical slack) | no goal phase (hold after feedback) |
 | `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`). `clusterer` defaults to `agglo_end_pose` and is resolved by `run.py`, the demo runner, and the evaluation approaches alike — runs from before that wiring used `XyzPositionClusterer` (KMeans) regardless of the key | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
@@ -1186,6 +1186,90 @@ loader.
 Set the optional top-level `seed` key to control MPC action sampling. It defaults
 to `0`; use another nonnegative integer to reproduce a different sampling
 sequence.
+
+### Goal stalls (`cartesian.stall`)
+
+An LLM-generated cost can outweigh the goal term and park the arm short of the
+goal. Every scenario is assumed reachable within the person's limits, so a cost
+that does this is miscalibrated, but the person, not the planner, decides what to
+do about it. Add `stall:` under `cartesian:` to detect it (`stall: {}` takes the
+defaults):
+
+```yaml
+cartesian:
+  goals: [[0.25, 0.3, 0.18]]
+  threshold: 0.05
+  stall:
+    window: 40       # goal steps compared
+    min_gain: 0.01   # minimum drop in best goal distance over the window (goal units)
+    max_travel: 0.15 # net joint change (rad) below which the arm counts as still
+```
+
+The goal phase is stalled when the arm is still outside the goal, the best
+distance to the front goal improved by less than `min_gain` over the last
+`window` steps, and the arm's net joint change over those steps is under
+`max_travel` (a detour away from the goal still moves, so it does not count).
+The window restarts on a new goal region, a cost change, and a pushed correction.
+
+On a stall the planner proposes a way on (`propose_unblocked_path`): it leaves
+out the smallest set of LLM-generated costs whose removal lets the arm reach the
+goal, trying each cost alone first, then pairs, then all of them, so every
+preference that does not block the goal is kept (comfort costs always apply;
+each attempt stops at its own stall). The search tries first the costs that
+charge the arm's next 5 steps without them (the cost at its edge, pushing back),
+newer first on ties: in the replayed stalls that found the blocker on the first
+rollout in 24 of 27 cases. With n learned costs it is at most n + n(n−1)/2 + 1
+rollouts; sets of three or more blocking costs are rare and get the all-out
+attempt. The person approves the
+proposal, and the arm follows it once while every learned cost stays installed,
+or rejects it and gives a correction:
+
+- **`planners/run.py`** prints which learned costs the proposal leaves out, draws
+  its end pose as the correction goal in the live window and asks
+  `follow the proposed path? [y/N]` on the operator's stdin (`--interactive`).
+  A no, or any line typed as a pause request, pauses with trigger reason
+  `stalled` and asks for feedback as usual. Scripted runs let the simulated
+  persona decide: it approves a proposal that stays under
+  `corrections.trigger_threshold`.
+- **The demo runner** pauses with reason `stalled`, draws the proposal as the
+  *proposed path* layer, names the costs it leaves out in the status line, and
+  enables **Accept proposed path** next to **Enter a correction**. A stalled
+  pause cannot be resumed with Ignore + continue.
+- **The `evaluation/` episode loop** stops a stalled rollout
+  (`rollout_to_goal(..., stop_on_stall=True)`) and lets the persona judge the
+  proposal the same way. Approved, the arm follows it and the goal resolves;
+  rejected, the next round starts from the stall pose with the proposal as its
+  nominal plan, so the correction is attributed against it. The round records
+  `proposal_rejected` (and so is not `resolved`), and a goal finished by an
+  approved proposal records `proposal_approved`. Without `cartesian.stall` the
+  loop behaves as before. `evaluation/run_experiment.py` adds `cartesian.stall`
+  (defaults) to every `mpc_config` unless it sets its own; pass
+  `goal_stall=false` to reproduce runs from before 2026-10-06.
+
+**A rejected proposal retires the costs it left out.** Once the correction that
+follows has been turned into a cost, the costs the proposal left out stop being
+planned with for the rest of the run: as written they kept a reachable goal out
+of reach. Their rounds are not discarded. Each keeps a `retired` note on its
+`CostRound` (`stall_retired_note`: why it was deleted and the correction that
+followed), and the consolidation step, `CombineCostGenerator`, still receives
+every round and shows the note as "Deleted during the run" in the combine
+prompt. The unified cost is therefore re-derived from the original correction
+behind each deleted cost, now known to be too strict. Where this happens:
+
+- `planners/run.py` drops them from the live planner and passes the notes to
+  the end-of-trajectory combine (`history.json` records them too);
+- the demo runner marks the rounds retired when a correction is applied at a
+  stalled pause (persisted in `session.json`, shown as *deleted during the run*
+  in the round list); **Combine rounds** still folds them in;
+- the `evaluation/` episode loop hands them to the next round's learning step
+  (`RoundContext.retire`); once that round's cost is accepted, `CostGen.retire`
+  marks their rounds before the new round is added. `ImmediateCostGen` stops
+  stacking those costs; `ConsolidateCostGen` drops its unified cost, and the
+  combination it runs in that same step re-derives it from every round, the
+  retired notes and the new correction included.
+
+If the correction produces no cost, nothing is retired and the arm may stall
+and propose again.
 
 ### Motion-generation backend (`motion_generator`)
 
@@ -2472,9 +2556,11 @@ rollout, and every `FeedbackRound` with its trigger pose, nominal plan, hidden i
 utterance, candidate menu and chosen correction, the persona's judgement of the menu, the
 learning outcome, the executed correction and the continuation with its re-trigger step.
 Every metric function takes that object. `evaluation/metrics/cost_learning/rows.py`
-flattens it: `round_rows` gives one record per feedback round, `goal_row` one per goal
-(`result`, `resolved`, `reached`, `rounds_used`, executed violation; a goal that hit the
-round cap keeps the cap as its count), `episode_summary` the episode record. `success.py`
+flattens it: `round_rows` gives one record per feedback round (`resolved` = no
+re-trigger and no rejected stall proposal), `goal_row` one per goal
+(`result`, `resolved`, `reached`, `rounds_used`, `proposal_approved`, executed violation;
+a goal that hit the round cap keeps the cap as its count), `episode_summary` the episode
+record. `success.py`
 takes a list of interactions, pooled across episodes and runs. The primary metric is
 **success at k** (`success_at_k`): the fraction of goals resolved within `k` feedback rounds,
 for `k = 0..max_rounds`. `k = 0` is the zero-shot case, the goal completed with no feedback,
@@ -2483,6 +2569,8 @@ never counts at any `k`, so failures need no sentinel value. The resolve rate is
 the cap and the zero-shot rate success at `k = 0`; group with `by=("approach", "goal_index")`
 for the transfer view. `goal_table` gives the raw goal rows, whose `result` column separates
 `capped` from `goal_not_reached`, the signature of an over-conservative learned cost.
+A goal resolved by following an approved stall proposal (see *Goal stalls*) counts as
+resolved; filter on `proposal_approved` to see how much of a curve that is.
 
 Each episode pickles its interactions to `interactions.pkl`, and
 
@@ -2491,7 +2579,8 @@ uv run python evaluation/analyze_results.py outputs/ multirun/ --out analysis/
 ```
 
 pools every one under the roots and writes `all_goals.csv`, `all_rounds.csv`,
-`goal_results.csv` (result breakdown per approach), `success_at_k.csv` / `.png` (one line per
+`goal_results.csv` (result breakdown per approach; goals finished by an approved stall
+proposal get their own `<result>_via_proposal` columns), `success_at_k.csv` / `.png` (one line per
 approach), and, when the runs have goal sequences, `success_at_k_by_goal.csv` and
 `success_by_goal.png` (zero-shot and within-cap success by goal index), plus the per-event
 grounding and violation plots.
@@ -2508,6 +2597,10 @@ uv run python evaluation/run_experiment.py -m seed=0 \
     hydra.sweep.dir=outputs/cost_learning/seed0
 uv run python evaluation/analyze_results.py outputs/cost_learning --out outputs/cost_learning/analysis
 ```
+
+Stall proposals are on by default (`goal_stall`, see *Goal stalls*): a rollout that stalls
+short of the goal offers the persona a path with the blocking learned costs left out. Add
+`goal_stall=false` to compare against runs from before 2026-10-06.
 
 The four arms share the `language_only` cost generator (the LLM is anchored on the
 utterance and nominal plan, never on the executed correction; since 2026-09-11 the

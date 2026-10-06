@@ -262,7 +262,7 @@ def test_rejected_proposal_becomes_the_next_rounds_plan(tmp_path: Path) -> None:
     assert np.linalg.norm(second.nominal_plan[-1] - second.nominal_plan[0]) > 0.1
     # The correction after the rejection is learned with the pinned cost to retire.
     assert len(cost_gen.retired) == 1
-    ((retired_terms, correction_text),) = cost_gen.retired
+    retired_terms, correction_text = cost_gen.retired[0]
     assert retired_terms[0] is cost_gen.cost
     assert correction_text == second.utterance.text
 

@@ -17,6 +17,7 @@ from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import anchor_q_trajectory
 from uncertain_feedback.simulated_users import SimulatedUser
 from uncertain_feedback.uncertainty import UqConfig, UqSelector, make_clusterer
+from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
 
 class MdmGrounder(Grounder):
@@ -79,6 +80,26 @@ class MdmGrounder(Grounder):
         assert feedback is not None
         clusterer = make_clusterer(uq.clusterer, uq.n_clusters, fk=human.fk)
         selector = UqSelector(uq, human.fk, clusterer=clusterer)
+        candidates: dict[int, np.ndarray] = {}
+
+        def select(means: dict[int, np.ndarray]) -> tuple[int, float]:
+            # The person must judge each option as it will be tracked. With
+            # anchor_correction that is the re-anchored shape production applies
+            # (planners/run.py): the echoed prefix frame dropped and the motion
+            # started at the live configuration, so no option carries the
+            # frame-0 seam.
+            candidates.update(
+                {
+                    label: human.arm_aa_from_q(
+                        anchor_q_trajectory(human.q_from_arm_aa(mean), human.q)
+                    )
+                    for label, mean in means.items()
+                }
+                if feedback.anchor_correction
+                else means
+            )
+            return cluster_selector(candidates)
+
         result = selector.query(
             self.gen,
             text,
@@ -86,25 +107,18 @@ class MdmGrounder(Grounder):
             prefix=False,
             mdm_frames=feedback.frames,
             default_scale=uq.scale,
-            cluster_selector=cluster_selector,
+            cluster_selector=select,
             steering=self._steering_spec,
         )
-        candidates = result.cluster_means
-        if feedback.anchor_correction:
-            # The same re-anchoring production applies (planners/run.py): drop
-            # the echoed prefix frame and start the demonstrated shape at the
-            # live configuration, so no candidate carries the frame-0 seam.
-            candidates = {
-                label: human.arm_aa_from_q(
-                    anchor_q_trajectory(human.q_from_arm_aa(mean), human.q)
-                )
-                for label, mean in candidates.items()
-            }
+        # Scaled here rather than taken from the selector, which scales the raw
+        # option; scaling (axis-angle) and anchoring (q) do not commute.
         return GroundingResult(
             candidates=candidates,
             chosen_label=result.chosen_label,
             magnitude=result.scale,
-            correction_traj=candidates[result.chosen_label],
+            correction_traj=scale_trajectory(
+                candidates[result.chosen_label], result.scale
+            ),
             samples=result.samples,
             sample_labels=result.labels,
         )

@@ -2430,7 +2430,9 @@ Applied in all three correction paths: `Mpc.query_mdm_with_uncertainty` (the pla
 route), `run.py`'s single-sample route, and the demo runner, which builds and pushes its own
 corrections — `demo_runner/session.py::_activate_cluster_level` anchors each cluster mean, so
 the browser's feature plots, the oracle cluster scores, the Magnitude slider and the tracked
-trajectory all see the anchored version.
+trajectory all see the anchored version. The evaluation harness's MDM grounder (`evaluation/approaches/grounders/mdm.py`)
+anchors the menu before the simulated user chooses and scales the anchored pick, so the
+persona judges each option exactly as it is tracked.
 
 ## Cost-generation backends
 

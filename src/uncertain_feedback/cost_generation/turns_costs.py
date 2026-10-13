@@ -47,12 +47,13 @@ def _goal_feedback(report: dict[str, Any] | None) -> str:
     dist, thr = report["distance"], report["threshold"]
     if report["reached"]:
         return (
-            f"\n\nGoal check: the arm still reaches the goal (wrist ended {dist:.3f} m "
-            f"away, within the {thr:.3f} m threshold)."
+            f"\n\nGoal check: the arm still reaches the goal (ended {dist:.3f} outside "
+            f"the goal region, within the {thr:.3f} threshold)."
         )
     return (
-        f"\n\nGoal check: THIS COST FAILED TO REACH THE GOAL — the wrist ended "
-        f"{dist:.3f} m short (it must finish within {thr:.3f} m). The goal is always "
+        f"\n\nGoal check: THIS COST FAILED TO REACH THE GOAL — the arm ended "
+        f"{dist:.3f} outside the goal region (it must finish within {thr:.3f}; "
+        "metres for position goals, radians for joint-angle goals). The goal is always "
         "reachable within the person's limits, so the motion MUST still reach it. "
         "Revise the cost so it reaches the goal (e.g. relax or bound the constraint "
         "near the goal) while still honoring the correction."

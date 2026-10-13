@@ -29,7 +29,7 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedPythonCost,
     build_generated_cost_context,
 )
-from uncertain_feedback.planners.mpc.goal_spaces import goal_point
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion, as_goal_region
 from uncertain_feedback.planners.mpc.human import Human
 
 if TYPE_CHECKING:
@@ -45,7 +45,7 @@ class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
     n_mpc_samples: int
     max_angle_delta: float
     seed: int | None
-    cartesian_goals: tuple[tuple[float, float, float], ...]
+    cartesian_goals: tuple[GoalRegion, ...]
     cartesian_threshold: float
     # Constrained rollouts need the env's robot IK, which cannot ride a
     # pickle, so candidate costs are not scoreable for constrained configs.
@@ -63,9 +63,8 @@ class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
             max_angle_delta=cfg.max_angle_delta,
             seed=cfg.seed,
             cartesian_goals=tuple(
-                (float(point[0]), float(point[1]), float(point[2]))
+                as_goal_region(goal)
                 for goal in (cfg.cartesian.goals if cfg.cartesian is not None else ())
-                if (point := goal_point(goal)) is not None
             ),
             cartesian_threshold=(
                 cfg.cartesian.threshold if cfg.cartesian is not None else 0.01
@@ -92,6 +91,7 @@ class EvalState:
     cartesian_goal: np.ndarray | None = None
     cartesian_threshold: float | None = None
     rejected_trajs: tuple[np.ndarray, ...] = ()
+    cartesian_region: GoalRegion | None = None
 
     def __post_init__(self) -> None:
         self.cfg = EvalMpcConfig.from_config(self.cfg)
@@ -109,6 +109,9 @@ class EvalState:
         with open(path, "rb") as f:
             state = pickle.load(f)
         state.cfg = EvalMpcConfig.from_config(state.cfg)
+        # Pickles from before cartesian_region judged goal reach by the point alone.
+        if state.cartesian_region is None and state.cartesian_goal is not None:
+            state.cartesian_region = as_goal_region(state.cartesian_goal)
         return state
 
     def make_generated_context(self) -> GeneratedCostContext:
@@ -122,6 +125,7 @@ class EvalState:
             cartesian_goal=self.cartesian_goal,
             cartesian_threshold=self.cartesian_threshold,
             rejected_trajs=self.rejected_trajs,
+            cartesian_region=self.cartesian_region,
         )
 
     def make_rollout_fn(
@@ -155,7 +159,7 @@ class EvalState:
                 extra_costs=extra_costs,
                 seed=cfg.seed,
                 cartesian=CartesianConfig(
-                    goals=[list(goal) for goal in cfg.cartesian_goals],
+                    goals=list(cfg.cartesian_goals),
                     threshold=cfg.cartesian_threshold,
                 ),
             )

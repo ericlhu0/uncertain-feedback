@@ -16,7 +16,7 @@ import ast
 import json
 from dataclasses import dataclass, field
 from types import FunctionType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -34,6 +34,9 @@ from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_NAMES,
     SmplLeftArmFK,
 )
+
+if TYPE_CHECKING:
+    from uncertain_feedback.planners.mpc.goal_spaces.regions import GoalRegion
 
 # The FK chain names plus their "left_"-stripped short aliases.
 _JOINT_NAMES = {name: i for i, name in enumerate(LEFT_ARM_CHAIN_NAMES)} | {
@@ -75,6 +78,8 @@ class GeneratedCostContext:
     Arm-state fields are canonical q arrays ending in ``(7,)``. Helper methods
     also accept decoded arrays ending in ``(3, 3)`` at generated-code/FK boundaries.
     ``rejected_trajs`` contains only candidates the person explicitly marked wrong.
+    ``cartesian_goal`` is the goal region's representative wrist point (``None``
+    for feature regions); ``cartesian_region`` is the region reaching is judged by.
     """
 
     fk: SmplLeftArmFK
@@ -89,6 +94,7 @@ class GeneratedCostContext:
     cartesian_goal: np.ndarray | None = None
     cartesian_threshold: float | None = None
     rejected_trajs: tuple[np.ndarray, ...] = ()
+    cartesian_region: GoalRegion | None = None
 
     @property
     def current_positions(self) -> np.ndarray:
@@ -324,6 +330,7 @@ def build_generated_cost_context(
     cartesian_goal: np.ndarray | None = None,
     cartesian_threshold: float | None = None,
     rejected_trajs: tuple[np.ndarray, ...] | None = None,
+    cartesian_region: GoalRegion | None = None,
 ) -> GeneratedCostContext:
     """Build the q-native runtime context generated Python costs see.
 
@@ -357,4 +364,5 @@ def build_generated_cost_context(
         rejected_trajs=tuple(
             canonical_arm_q(traj, human) for traj in (rejected_trajs or ())
         ),
+        cartesian_region=cartesian_region,
     )

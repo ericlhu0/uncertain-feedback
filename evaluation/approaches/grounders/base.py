@@ -11,6 +11,7 @@ import numpy as np
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import SMPL_JOINT_NAMES_22
 from uncertain_feedback.simulated_users import SimulatedUser
@@ -84,7 +85,7 @@ class Grounder(abc.ABC):
         self._user = user
         self._episode_dir = episode_dir
 
-    def begin_goal(self, goal: np.ndarray, oracle_path: np.ndarray) -> None:
+    def begin_goal(self, goal: GoalRegion, oracle_path: np.ndarray) -> None:
         """Called once per goal before any round; the oracle grounder reads it."""
         del goal, oracle_path
 

@@ -118,7 +118,7 @@ def _episode_summary(interactions: list[Interaction]) -> dict[str, Any]:
         "verbalizer": first.task.verbalizer,
         "seed": first.task.seed,
         "approach": first.approach,
-        "goals": [list(goal) for goal in first.task.goals],
+        "goals": [repr(goal) for goal in first.task.goals],
         "goal_results": [goal_row(item) for item in interactions],
         "feedback_events": sum(item.rounds_used for item in interactions),
         "all_goals_resolved": all(item.resolved for item in interactions),
@@ -180,21 +180,20 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     propose = cfg.cartesian.stall is not None
 
     for goal_index, goal in enumerate(task.goals):
-        goal_arr = np.asarray(goal, dtype=np.float64)
-        goal_cfg = cfg_with_goal(cfg, goal_arr)
+        goal_cfg = cfg_with_goal(cfg, goal)
         goal_dir = episode_dir / f"goal_{goal_index:02d}"
         goal_dir.mkdir(parents=True, exist_ok=True)
 
         oracle_path = rollout_to_goal(
             goal_cfg,
             human.reset_human_with_q(q_current),
-            goal_arr,
+            goal,
             oracle_costs,
             progress_label=f"{task.persona} goal {goal_index} oracle",
             log_prefix=_LOG,
         ).history
         np.save(goal_dir / "oracle_path.npy", oracle_path)
-        approach.begin_goal(goal_arr, oracle_path)
+        approach.begin_goal(goal, oracle_path)
         episode_key = (
             f"{task.persona}_{task.verbalizer}_seed{task.seed}_goal{goal_index}"
         )
@@ -205,7 +204,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
         rolled = rollout_to_goal(
             goal_cfg,
             human.reset_human_with_q(q_current),
-            goal_arr,
+            goal,
             approach.planning_costs(),
             stop_on_stall=True,
             progress_label=f"{task.persona} goal {goal_index} rollout",
@@ -231,7 +230,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             )
             if trigger is None
             and propose
-            and not goal_reach(human, goal_cfg, rollout, goal_arr)["reached"]
+            and not goal_reach(human, goal_cfg, rollout, goal)["reached"]
             else None
         )
         if offer is not None and offer[1]:
@@ -242,7 +241,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             pending_plan = offer[0].human.history
             pending_retire = offer[0].dropped
         if trigger is None:
-            reach = goal_reach(human, goal_cfg, rolled.history, goal_arr)
+            reach = goal_reach(human, goal_cfg, rolled.history, goal)
             interactions.append(
                 Interaction(
                     task=task,
@@ -250,7 +249,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     user=user,
                     human=human,
                     goal_index=goal_index,
-                    goal=goal_arr,
+                    goal=goal,
                     oracle_path=oracle_path,
                     initial_rollout=rollout,
                     trigger_step=None,
@@ -281,7 +280,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 nominal_plan = rollout_to_goal(
                     goal_cfg,
                     at_feedback,
-                    goal_arr,
+                    goal,
                     approach.planning_costs(),
                     steps=sim_cfg.nominal_steps,
                     stop_at_goal=False,
@@ -335,7 +334,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             outcome = approach.learn(
                 RoundContext(
                     round_dir=round_dir,
-                    goal=goal_arr,
+                    goal=goal,
                     utterance_text=utterance.text,
                     grounding=grounding,
                     human=at_feedback,
@@ -354,7 +353,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             continuation = rollout_to_goal(
                 goal_cfg,
                 executed,
-                goal_arr,
+                goal,
                 approach.planning_costs(),
                 stop_on_stall=True,
                 progress_label=(
@@ -378,7 +377,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 None if retrigger is not None else executed.step(continuation[1:])
             )
             reached = stalled_at is not None and bool(
-                goal_reach(human, goal_cfg, continuation, goal_arr)["reached"]
+                goal_reach(human, goal_cfg, continuation, goal)["reached"]
             )
             offer = (
                 _stall_proposal(
@@ -430,9 +429,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             if offer is not None:
                 executed = executed.step(offer[0].human.history[1:])
                 reached = bool(
-                    goal_reach(human, goal_cfg, offer[0].human.history, goal_arr)[
-                        "reached"
-                    ]
+                    goal_reach(human, goal_cfg, offer[0].human.history, goal)["reached"]
                 )
                 proposal_approved = True
             result = "ok" if reached else "goal_not_reached"
@@ -446,7 +443,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 user=user,
                 human=human,
                 goal_index=goal_index,
-                goal=goal_arr,
+                goal=goal,
                 oracle_path=oracle_path,
                 initial_rollout=rollout,
                 trigger_step=int(trigger),

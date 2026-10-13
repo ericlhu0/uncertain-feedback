@@ -9,6 +9,7 @@ import numpy as np
 
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion
 from uncertain_feedback.planners.mpc.human import Human
 
 
@@ -23,7 +24,7 @@ class RoundContext:
     """
 
     round_dir: Path
-    goal: np.ndarray
+    goal: GoalRegion
     utterance_text: str
     grounding: GroundingResult
     human: Human

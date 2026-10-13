@@ -297,3 +297,120 @@ def test_forearm_endpoint_boxes_are_simultaneous() -> None:
     )
     np.testing.assert_allclose(inside.marker(), wrist)
     assert len(inside.outline()) == 36
+
+
+def test_goal_reach_and_benchmark_goals_keep_the_region() -> None:
+    from pathlib import Path
+
+    from evaluation.benchmarks.base import InteractionBenchmark
+    from uncertain_feedback.planners.mpc.rollout import goal_reach
+
+    bathing = load_mpc_config(
+        Path(__file__).resolve().parents[1]
+        / "src/uncertain_feedback/planners/mpc/configs/bathing.yaml"
+    )
+    assert bathing.cartesian is not None
+    tasks = InteractionBenchmark("tasks", personas=["painful_arc"]).generate_tasks(
+        0, bathing
+    )
+    assert tasks[0].goals == tuple(bathing.cartesian.goals)
+
+    human = Human()
+    q0 = human.q
+    wrist0 = human.wrist_from_q(q0)
+    box = BoxRegion(low=tuple(wrist0 - 0.02), high=tuple(wrist0 + 0.2))
+    assert goal_reach(human, bathing, q0[None], box)["reached"]
+    assert not goal_reach(human, bathing, q0[None], box.marker())["reached"]
+
+
+def test_task_starts_benchmark_keeps_accepted_starts(tmp_path) -> None:
+    import json
+    from pathlib import Path
+
+    from evaluation.benchmarks.task_starts import TaskStartsBenchmark
+
+    bathing = load_mpc_config(
+        Path(__file__).resolve().parents[1]
+        / "src/uncertain_feedback/planners/mpc/configs/bathing.yaml"
+    )
+    assert bathing.cartesian is not None
+    start = [0.1] * Q_DIM
+    rows = [
+        {"persona": "painful_arc", "start_q": start, "rejected": ""},
+        {"persona": "painful_arc", "start_q": start, "rejected": "no_violation"},
+    ]
+    (tmp_path / "starts.json").write_text(json.dumps({"attempts": rows}))
+    tasks = TaskStartsBenchmark(
+        "task_starts", str(tmp_path), verbalizers=["vague", "everyday"]
+    ).generate_tasks(3, bathing)
+    assert [task.verbalizer for task in tasks] == ["vague", "everyday"]
+    assert all(task.start_q == tuple(start) for task in tasks)
+    assert all(task.goals == (bathing.cartesian.goals[0],) for task in tasks)
+    assert all(task.seed == 3 and task.persona == "painful_arc" for task in tasks)
+    assert all(task.user is None for task in tasks)
+
+
+def test_task_starts_benchmark_restores_generated_users(tmp_path) -> None:
+    import json
+    from dataclasses import asdict, replace
+    from pathlib import Path
+
+    from evaluation.benchmarks.task_starts import TaskStartsBenchmark
+    from uncertain_feedback.simulated_users import CoupledBound, HiddenBound
+    from uncertain_feedback.simulated_users.personas import UNRESTRICTED
+
+    bathing = load_mpc_config(
+        Path(__file__).resolve().parents[1]
+        / "src/uncertain_feedback/planners/mpc/configs/bathing.yaml"
+    )
+    users = [
+        replace(
+            UNRESTRICTED,
+            name="sampled_000",
+            bounds=(HiddenBound("elbow_flexion", "upper_bound", high=1.2),),
+        ),
+        replace(
+            UNRESTRICTED,
+            name="sampled_001",
+            bounds=(
+                CoupledBound(
+                    "elbow_flexion", "lower_bound", "shoulder_elevation", 0.3, -1.4
+                ),
+            ),
+        ),
+    ]
+    start = [0.1] * Q_DIM
+    rows: list[dict[str, object]] = [
+        {"persona": user.name, "start_q": start, "rejected": "", "user": asdict(user)}
+        for user in users
+    ]
+    rows.append({"persona": "elbow_contracture", "start_q": start, "rejected": ""})
+    (tmp_path / "starts.json").write_text(json.dumps({"attempts": rows}))
+    tasks = TaskStartsBenchmark("task_starts", str(tmp_path)).generate_tasks(0, bathing)
+    assert [task.persona for task in tasks] == [
+        "sampled_000",
+        "sampled_001",
+        "elbow_contracture",
+    ]
+    assert [task.user for task in tasks] == [*users, None]
+
+
+def test_sample_bound_fits_short_region_rollouts() -> None:
+    from evaluation.benchmarks.sampled_bounds import sample_bound
+    from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
+        sample_arm_q,
+    )
+    from uncertain_feedback.simulated_users import feature_series
+
+    human = Human()
+    rng = np.random.default_rng(0)
+    q0, q1 = sample_arm_q(rng, human), sample_arm_q(rng, human)
+    path = q0 + (q1 - q0) * np.linspace(0.0, 1.0, 30)[:, None]
+    args = (human, "sampled_000", "constant", 8, 40, 0.15)
+    # 30 frames cannot hold 8 frames of history plus a full 40-frame window.
+    assert sample_bound(np.random.default_rng(1), path, path[-1], *args) is None
+    user = sample_bound(np.random.default_rng(1), path, None, *args, clip_window=True)
+    assert user is not None
+    violation = user.violation_series(feature_series(human, path))
+    assert int(np.flatnonzero(violation > 0)[0]) > 8
+    assert violation.max() >= 0.15

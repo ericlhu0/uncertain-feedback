@@ -19,6 +19,7 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     base_extra_costs,
 )
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import SimulatedUser
 
@@ -84,7 +85,7 @@ class Approach:
             [*self._base.terms(), *self.cost_gen.learned_terms()]
         )
 
-    def begin_goal(self, goal: np.ndarray, oracle_path: np.ndarray) -> None:
+    def begin_goal(self, goal: GoalRegion, oracle_path: np.ndarray) -> None:
         """Announce the goal and its oracle path before the goal's rounds."""
         self.grounder.begin_goal(goal, oracle_path)
 

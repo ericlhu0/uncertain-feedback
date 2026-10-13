@@ -17,6 +17,7 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     base_extra_costs,
 )
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import rollout_to_goal
 from uncertain_feedback.simulated_users import HiddenCostTerm
@@ -28,11 +29,11 @@ class OracleGrounder(Grounder):
 
     def __init__(self) -> None:
         super().__init__()
-        self._goal: np.ndarray | None = None
+        self._goal: GoalRegion | None = None
 
-    def begin_goal(self, goal: np.ndarray, oracle_path: np.ndarray) -> None:
+    def begin_goal(self, goal: GoalRegion, oracle_path: np.ndarray) -> None:
         del oracle_path
-        self._goal = np.asarray(goal, dtype=np.float64)
+        self._goal = goal
 
     def ground(
         self,

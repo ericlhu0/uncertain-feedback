@@ -9,6 +9,7 @@ import numpy as np
 
 from evaluation.approaches.cost_gen.structs import LearnOutcome
 from evaluation.metrics.grounding.structs import GroundingResult
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import (
     ChoiceResult,
@@ -33,7 +34,7 @@ class InteractionTask:
 
     persona: str
     verbalizer: str
-    goals: tuple[tuple[float, float, float], ...]
+    goals: tuple[GoalRegion, ...]
     max_rounds: int
     seed: int
     feedback_text: str | None = None
@@ -97,7 +98,7 @@ class Interaction:
     user: SimulatedUser
     human: Human
     goal_index: int
-    goal: np.ndarray
+    goal: GoalRegion
     oracle_path: np.ndarray
     initial_rollout: np.ndarray
     trigger_step: int | None
@@ -132,7 +133,7 @@ class MenuProbe:
     user: SimulatedUser
     human: Human
     goal_index: int
-    goal: np.ndarray
+    goal: GoalRegion
     utterance: Utterance
     q_feedback: np.ndarray
     nominal_plan: np.ndarray

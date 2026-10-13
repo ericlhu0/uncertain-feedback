@@ -685,7 +685,7 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     )
 
 
-def cfg_with_goal(cfg: MpcRunConfig, goal: np.ndarray) -> MpcRunConfig:
+def cfg_with_goal(cfg: MpcRunConfig, goal: np.ndarray | GoalRegion) -> MpcRunConfig:
     """The run config with its Cartesian goal queue replaced by ``goal``."""
     assert cfg.cartesian is not None
     return replace(cfg, cartesian=replace(cfg.cartesian, goals=[goal]))

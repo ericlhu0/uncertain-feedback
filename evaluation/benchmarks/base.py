@@ -5,9 +5,11 @@ from __future__ import annotations
 import abc
 from typing import Sequence
 
+import numpy as np
+
 from evaluation.benchmarks.structs import InteractionTask
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
-from uncertain_feedback.planners.mpc.goal_spaces import goal_point
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion, as_goal_region
 from uncertain_feedback.simulated_users import PERSONAS
 
 
@@ -27,7 +29,8 @@ class InteractionBenchmark(Benchmark):
 
     Goals resolve per persona: an explicit ``goals`` list wins; otherwise
     ``use_persona_goals`` takes the planner config's per-persona cartesian +
-    transfer goals; otherwise the config's ``cartesian.goals``.
+    transfer goals; otherwise the config's ``cartesian.goals``, which may be
+    goal regions (the task configs' boxes and feature bounds).
     """
 
     def __init__(
@@ -54,10 +57,8 @@ class InteractionBenchmark(Benchmark):
         self.max_goals = max_goals
         self.max_rounds = max_rounds
 
-    def _goal_sequence(
-        self, persona: str, cfg: MpcRunConfig
-    ) -> tuple[tuple[float, float, float], ...]:
-        goals: list[Sequence[float]]
+    def _goal_sequence(self, persona: str, cfg: MpcRunConfig) -> tuple[GoalRegion, ...]:
+        goals: list[Sequence[float] | np.ndarray | GoalRegion]
         if self.goals is not None:
             goals = list(self.goals)
         elif self.use_persona_goals and persona in cfg.persona_goals:
@@ -65,14 +66,8 @@ class InteractionBenchmark(Benchmark):
             goals = [*persona_goals.cartesian, *persona_goals.transfer]
         else:
             assert cfg.cartesian is not None
-            goals = []
-            for goal in cfg.cartesian.goals:
-                point = goal_point(goal)
-                if point is None:
-                    raise ValueError("Evaluation benchmarks require point goals.")
-                goals.append(point.tolist())
-        goals = goals[: self.max_goals]
-        return tuple((float(goal[0]), float(goal[1]), float(goal[2])) for goal in goals)
+            goals = list(cfg.cartesian.goals)
+        return tuple(as_goal_region(goal) for goal in goals[: self.max_goals])
 
     def generate_tasks(self, seed: int, cfg: MpcRunConfig) -> list[InteractionTask]:
         names = self.personas

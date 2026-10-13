@@ -26,7 +26,7 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
     build_generated_cost_context,
 )
-from uncertain_feedback.planners.mpc.goal_spaces import GoalStallConfig
+from uncertain_feedback.planners.mpc.goal_spaces import GoalStallConfig, PointRegion
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import propose_unblocked_path
 from uncertain_feedback.simulated_users import get_persona
@@ -48,7 +48,7 @@ def test_benchmark_generates_persona_verbalizer_grid() -> None:
     tasks = bench.generate_tasks(3, cfg)
     assert len(tasks) == 4
     assert {task.persona for task in tasks} == {"elbow_contracture", "painful_arc"}
-    assert all(task.goals == ((-0.18, 0.40, 0.34),) for task in tasks)
+    assert all(task.goals == (PointRegion((-0.18, 0.40, 0.34)),) for task in tasks)
     assert all(task.seed == 3 for task in tasks)
 
 
@@ -117,7 +117,7 @@ def _pinned_episode(
     task = InteractionTask(
         persona=persona,
         verbalizer="joint_resolved",
-        goals=((-0.18, 0.40, 0.34),),
+        goals=(PointRegion((-0.18, 0.40, 0.34)),),
         max_rounds=max_rounds,
         seed=0,
     )
@@ -225,7 +225,7 @@ def test_consolidation_sees_the_retired_round_note(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(cost_gen, "_combine", fake_combine)
     ctx = RoundContext(
         round_dir=tmp_path,
-        goal=np.zeros(3),
+        goal=PointRegion((0.0, 0.0, 0.0)),
         utterance_text="bring my hand in",
         grounding=None,  # type: ignore[arg-type]
         human=human,

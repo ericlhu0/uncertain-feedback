@@ -36,7 +36,7 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
     build_generated_cost_context,
 )
-from uncertain_feedback.planners.mpc.goal_spaces import goal_point
+from uncertain_feedback.planners.mpc.goal_spaces import as_goal_region
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import (
     assemble_full_correction_traj,
@@ -168,11 +168,12 @@ def generate_cost_for_correction(  # pylint: disable=too-many-arguments,too-many
     else:
         reference = rollout_reference_trajectory(cfg_backend, human, base_extra_costs)
         reference_q = None if reference is None else reference.history
-    goal_pos = (
-        goal_point(cfg_backend.cartesian.goals[0])
+    goal_region = (
+        as_goal_region(cfg_backend.cartesian.goals[0])
         if cfg_backend.cartesian is not None
         else None
     )
+    goal_pos = goal_region.marker() if goal_region is not None else None
     cartesian_threshold = (
         cfg_backend.cartesian.threshold if cfg_backend.cartesian is not None else 0.01
     )
@@ -211,6 +212,7 @@ def generate_cost_for_correction(  # pylint: disable=too-many-arguments,too-many
         cartesian_goal=goal_pos,
         cartesian_threshold=cartesian_threshold,
         rejected_trajs=rejected_trajs,
+        cartesian_region=goal_region,
     )
     summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
     if language_only:
@@ -259,6 +261,7 @@ def generate_cost_for_correction(  # pylint: disable=too-many-arguments,too-many
         cartesian_goal=goal_pos,
         cartesian_threshold=cartesian_threshold,
         rejected_trajs=rejected_trajs,
+        cartesian_region=goal_region,
     )
     generator: CostGenerator = create_cost_generator(
         cfg_backend.llm_cost,

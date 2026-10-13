@@ -1,0 +1,8 @@
+# Care-task benchmark: each accepted start in starts_dir (generate_task_starts.py)
+# pursues the run config's goal region. Pair with the mpc_config the starts were
+# generated with, e.g. mpc_config=src/uncertain_feedback/planners/mpc/configs/bathing.yaml.
+_target_: evaluation.benchmarks.task_starts.TaskStartsBenchmark
+name: task_starts
+starts_dir: outputs/task_starts/bathing
+verbalizers: [everyday]
+max_rounds: 3

@@ -109,12 +109,17 @@ class CostGen(abc.ABC):
         if ctx.retire:
             self.retire(ctx.retire, stall_retired_note(ctx.utterance_text))
         self._generated.append(generated)
+        marker = ctx.goal.marker()
         state_path = ctx.round_dir / "state.pkl"
         generation.eval_state.save(state_path)
         self._cost_rounds.append(
             CostRound(
                 index=len(self._cost_rounds),
-                goal=(float(ctx.goal[0]), float(ctx.goal[1]), float(ctx.goal[2])),
+                goal=(
+                    None
+                    if marker is None
+                    else (float(marker[0]), float(marker[1]), float(marker[2]))
+                ),
                 feedback_text=ctx.utterance_text,
                 trigger_step=len(ctx.human.history) - 1,
                 round_dir=ctx.round_dir.resolve(),

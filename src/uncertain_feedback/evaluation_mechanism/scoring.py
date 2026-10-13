@@ -152,26 +152,26 @@ def _score_rollout(context: GeneratedCostContext, rollout: np.ndarray) -> float:
 def goal_reach_report(
     context: GeneratedCostContext, rollout: np.ndarray | None
 ) -> dict[str, Any] | None:
-    """Whether a candidate rollout still reaches the Cartesian goal.
+    """Whether a candidate rollout still reaches the goal region.
 
-    Reproduces the MPC's own criterion (``ArmMPCCartesian.goal_reached``): forward-
-    kinematics the final rollout frame, take the spine3-relative wrist, and compare its
-    distance to ``context.cartesian_goal`` against ``context.cartesian_threshold``.
-    Returns ``None`` when no Cartesian goal is available (non-Cartesian planners) or the
-    rollout is empty/malformed, so callers degrade to no goal feedback.
+    Reproduces the MPC's own criterion (``CartesianGoalSpace.reached``): the final
+    rollout frame's distance to ``context.cartesian_region`` against
+    ``context.cartesian_threshold``. Returns ``None`` when no goal region is available
+    (non-Cartesian planners) or the rollout is empty/malformed, so callers degrade to
+    no goal feedback.
     """
-    if context.cartesian_goal is None or context.cartesian_threshold is None:
+    region = context.cartesian_region
+    if region is None or context.cartesian_threshold is None:
         return None
     if rollout is None:
         return None
     rollout = canonical_arm_q(rollout, context)
     if rollout.ndim != 2 or rollout.shape[0] == 0:
         return None
-    arm_pos = context.fk.fk(
-        context.arm_aa(rollout[-1]), context.spine3_pos, context.spine3_aa
-    )
+    final_aa = context.arm_aa(rollout[-1])
+    arm_pos = context.fk.fk(final_aa, context.spine3_pos, context.spine3_aa)
     wrist_rel = arm_pos[-1] - context.spine3_pos
-    distance = float(np.linalg.norm(wrist_rel - context.cartesian_goal))
+    distance = float(region.distance(wrist_rel[None], final_aa[None], context)[0])
     return {
         "reached": distance < context.cartesian_threshold,
         "distance": distance,

@@ -24,24 +24,33 @@ _FEATURES = (
 def sample_bound(
     rng: np.random.Generator,
     naive: np.ndarray,
-    goal_pose: np.ndarray,
+    goal_pose: np.ndarray | None,
     human: Human,
     name: str,
     family: str,
     min_history: int,
     window: int,
     min_violation: float,
+    clip_window: bool = False,
 ) -> SimulatedUser | None:
     """Place an upper/lower boundary on f or f - slope*g at a first crossing.
 
     The prefix and goal witness must lie on the comfortable side, while the
     following window must open a substantial gap. Oracle replanning downstream
     still decides whether a comfortable connecting path exists.
+
+    ``goal_pose=None`` drops the witness, for goal regions: the rollout's end is
+    one of many poses in the region, usually its most extreme one, and the
+    oracle's reach decides whether a comfortable one exists. ``clip_window``
+    lets the window run past the end of a rollout too short to hold it.
     """
-    if len(naive) <= min_history + window + 1:
+    high = len(naive) - (1 if clip_window else window)
+    if high <= min_history + 1:
         return None
     features = arm_feature_series(naive, human)
-    goal_features = arm_feature_series(goal_pose[None], human)
+    goal_features = (
+        arm_feature_series(goal_pose[None], human) if goal_pose is not None else None
+    )
     for _ in range(128):
         feature, conditioning = rng.choice(_FEATURES, size=2, replace=False)
         feature, conditioning = str(feature), str(conditioning)
@@ -51,10 +60,7 @@ def sample_bound(
             else 0.0
         )
         residual = features[feature] - slope * features[conditioning]
-        goal_value = float(
-            goal_features[feature][0] - slope * goal_features[conditioning][0]
-        )
-        step = int(rng.integers(min_history + 1, len(naive) - window))
+        step = int(rng.integers(min_history + 1, high))
         if (
             family == "coupled"
             and abs(slope) * np.ptp(features[conditioning][step : step + window])
@@ -63,7 +69,12 @@ def sample_bound(
             continue
         direction = int(rng.choice([-1, 1]))
         signed = direction * residual
-        floor = max(float(signed[:step].max()), direction * goal_value)
+        floor = float(signed[:step].max())
+        if goal_features is not None:
+            goal_value = float(
+                goal_features[feature][0] - slope * goal_features[conditioning][0]
+            )
+            floor = max(floor, direction * goal_value)
         if signed[step] <= floor:
             continue
         boundary = float(rng.uniform(floor, signed[step]))

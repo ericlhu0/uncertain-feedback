@@ -2132,7 +2132,8 @@ frames with `data_collection.common.hml263.positions_to_hml263`, using the
 loaded MDM dataset's normalization statistics; the first frame is stored.
 
 The browser Demo Runner's saved-goal editor currently supports point goals only;
-run these region presets through `planners/run.py`.
+run these region presets through `planners/run.py` or `evaluation/run_experiment.py`
+(see *On task configs (goal regions)*).
 
 `feedback.uq.clusterer` selects the clustering method (used by the demo runner;
 the MPC planner keeps its injected clusterer):
@@ -2659,6 +2660,62 @@ uv run python evaluation/run_experiment.py -m seed=0 \
     hydra.sweep.dir=outputs/cost_learning/procedural_s23_seed0
 uv run python evaluation/analyze_results.py outputs/cost_learning/procedural_s23_seed0 \
     --out outputs/cost_learning/analysis_procedural_s23_seed0
+```
+
+**On task configs (goal regions).** Goals travel through the harness as `GoalRegion`s, so
+a care-task config's region goal (`bathing.yaml`'s feature bounds, `transfer.yaml`'s forearm
+box, the dressing boxes) is evaluated as the region, not its centre point. A benchmark with
+no explicit `goals` and no `persona_goals` entry for the persona takes the config's
+`cartesian.goals`:
+
+```bash
+uv run python evaluation/run_experiment.py approach=oracle_no_learning \
+    benchmark=personas_core 'benchmark.personas=[brachial_plexus_mechanosensitivity]' \
+    mpc_config=src/uncertain_feedback/planners/mpc/configs/bathing.yaml
+```
+
+Pick personas whose hidden bounds leave the region reachable: `painful_arc` avoids
+60–120° elevation and `adhesive_capsulitis` caps elevation, so their oracles never reach
+bathing's ≥75° elevation. The task configs carry no `feedback:`, `costs:`, `llm_cost:`,
+`corrections:` or `simulated_user:` sections, so as they stand only the oracle and nominal
+grounders run on them; MDM and LLM approaches need those sections added.
+
+From the config's single start pose most personas either never violate or can never
+reach the region. `evaluation/generate_task_starts.py` samples start poses per persona
+instead (`sample_arm_q`, the config's clavicle) and keeps up to `--per-persona` of them
+for which the start is comfortable, the base-cost rollout to the config's first goal
+triggers feedback (`first_violation_step` at `corrections.trigger_threshold`, stopping
+at a goal stall as `run_episode` does), and the oracle (base + hidden cost) still
+reaches the goal. Every attempt and its rejection reason (`uncomfortable_start`,
+`no_violation`, `oracle_did_not_reach`) goes to `<out-dir>/starts.json`;
+`--personas` defaults to every persona with hidden bounds.
+`benchmark=task_starts` (`TaskStartsBenchmark`) makes one task per kept start; run it
+with the same `mpc_config`, since each task pursues that config's first goal:
+
+```bash
+uv run python evaluation/generate_task_starts.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/bathing.yaml \
+    --out-dir outputs/task_starts/bathing --per-persona 5 --max-attempts 50
+uv run python evaluation/run_experiment.py approach=oracle_no_learning benchmark=task_starts \
+    benchmark.starts_dir=outputs/task_starts/bathing \
+    mpc_config=src/uncertain_feedback/planners/mpc/configs/bathing.yaml
+```
+
+`--sampled-bounds N` replaces the personas with N generated users (`sampled_000`, ...;
+alternating constant and coupled bounds, `sample_bound` as in `generate_scenarios.py`),
+one start each. The bound is placed so the base-cost rollout's first 8+ frames are
+comfortable and it then crosses by at least 0.15 rad within 40 frames or before it ends
+(`no_separating_bound` when no such bound exists). Unlike `generate_scenarios.py`, the
+rollout's end pose is not required to be comfortable: on a monotone approach to a region
+it is the most extreme pose, which rules out nearly every bound, and the oracle test
+already proves a comfortable pose in the region is reachable. The trigger and oracle
+tests above then apply unchanged. The user is saved in its `starts.json` row, and
+`benchmark=task_starts` hands it to the task, so the same run command works:
+
+```bash
+uv run python evaluation/generate_task_starts.py \
+    --mpc-config src/uncertain_feedback/planners/mpc/configs/bathing.yaml \
+    --out-dir outputs/task_starts/bathing_sampled --sampled-bounds 8 --max-attempts 50
 ```
 
 Episodes are independent, so spread them over processes with hydra's joblib launcher:

@@ -11,6 +11,7 @@ import numpy as np
 from evaluation.benchmarks.base import Benchmark
 from evaluation.benchmarks.structs import InteractionTask
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
+from uncertain_feedback.planners.mpc.goal_spaces import as_goal_region
 from uncertain_feedback.simulated_users import (
     Bound,
     CoupledBound,
@@ -94,14 +95,14 @@ class ScenarioBenchmark(Benchmark):
                 continue
             data = np.load(self.scenario_dir / f"{case}.npz")
             user = user_from_dict(row["user"]) if "user" in row else get_persona(case)
-            goal_x, goal_y, goal_z = (float(v) for v in data["goal"])
+            goal = as_goal_region(data["goal"])
             start = tuple(float(v) for v in data["naive"][0])
             for verbalizer in self.verbalizers:
                 tasks.append(
                     InteractionTask(
                         persona=case,
                         verbalizer=verbalizer,
-                        goals=((goal_x, goal_y, goal_z),),
+                        goals=(goal,),
                         max_rounds=self.max_rounds,
                         seed=seed,
                         user=user,

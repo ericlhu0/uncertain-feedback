@@ -21,6 +21,7 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
 )
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion, as_goal_region
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import WRIST_CHAIN_IDX
 from uncertain_feedback.planners.mpc.mpc import ArmMPC
@@ -298,7 +299,7 @@ def make_cost_eval_rollout(
 def rollout_to_goal(
     cfg: MpcRunConfig,
     human: Human,
-    goal: np.ndarray,
+    goal: np.ndarray | GoalRegion,
     extra_costs: CompositeTrajectoryCost,
     *,
     steps: int | None = None,
@@ -324,9 +325,7 @@ def rollout_to_goal(
         visualize=False,
         extra_costs=extra_costs,
         seed=cfg.seed,
-        cartesian=replace(
-            cfg.cartesian, goals=[list(np.asarray(goal, dtype=np.float64))]
-        ),
+        cartesian=replace(cfg.cartesian, goals=[as_goal_region(goal)]),
     )
     n_steps = max(1, cfg.steps if steps is None else steps)
 
@@ -351,14 +350,16 @@ def goal_reach(
     human: Human,
     cfg: MpcRunConfig,
     rollout: np.ndarray,
-    goal: np.ndarray,
+    goal: np.ndarray | GoalRegion,
 ) -> dict[str, Any]:
-    """Final spine3-relative wrist distance to ``goal``."""
+    """Final-frame distance to the ``goal`` region, in the region's own units."""
     final = np.asarray(rollout[-1], dtype=np.float64)
     final_aa = human.arm_aa_from_q(final) if final.shape == (7,) else final
     arm_pos = human.fk.fk(final_aa, human.spine3_pos, human.spine3_aa)
     wrist_rel = arm_pos[-1] - human.spine3_pos
-    distance = float(np.linalg.norm(wrist_rel - np.asarray(goal, dtype=np.float64)))
+    distance = float(
+        as_goal_region(goal).distance(wrist_rel[None], final_aa[None], human)[0]
+    )
     assert cfg.cartesian is not None
     return {
         "reached": distance < cfg.cartesian.threshold,

@@ -155,8 +155,9 @@ def main() -> None:
     if report is not None:
         print(
             f"[cost-compare] goal reached: {report['reached']} "
-            f"(wrist {report['distance']:.3f} m from goal, "
-            f"threshold {report['threshold']:.3f} m)"
+            f"({report['distance']:.3f} outside the goal region, "
+            f"threshold {report['threshold']:.3f}; metres for position goals, "
+            "radians for joint-angle goals)"
         )
     print(f"[cost-compare] comparison image: {image_path}")
     if args.angles_out is not None:

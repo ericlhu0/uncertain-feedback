@@ -40,6 +40,9 @@ from uncertain_feedback.planners.mpc.goal_spaces import (
 from uncertain_feedback.simulated_users.base import HiddenBound
 from uncertain_feedback.uncertainty.uq_selector import UqConfig
 
+# Relative ``base:`` paths resolve here, matching how configs name pose files.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
 # Keys of the retired name-based planner schema; present only to fail loudly
 # so a stale config cannot silently load with different capabilities (e.g. a
 # gated real-robot config running unconstrained).
@@ -487,11 +490,37 @@ def _parse_robot_actions(data: dict[str, Any]) -> RobotActionsConfig:
     )
 
 
-def load_mpc_config(path: Path) -> MpcRunConfig:
-    """Load required MPC controller settings from YAML."""
+def _read_config_data(path: Path, including: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Read a config's YAML mapping, with its ``base:`` files merged underneath.
+
+    ``base`` is a path or list of paths (relative ones resolved against the repo
+    root, like ``pose``). Merging is per top-level section: later bases replace
+    earlier ones, and the file's own sections replace every base's.
+    """
+    path = path.resolve()
+    if path in including:
+        raise ValueError(f"Config base cycle through {path}.")
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
-    data = _mapping(raw, "MPC config")
+    data = dict(_mapping(raw, f"MPC config {path}"))
+    bases = data.pop("base", [])
+    if isinstance(bases, str):
+        bases = [bases]
+    if not isinstance(bases, list) or not all(isinstance(b, str) for b in bases):
+        raise ValueError(f"{path}: base must be a path or a list of paths.")
+    merged: dict[str, Any] = {}
+    for base in bases:
+        base_path = Path(base)
+        if not base_path.is_absolute():
+            base_path = _REPO_ROOT / base_path
+        merged.update(_read_config_data(base_path, (*including, path)))
+    merged.update(data)
+    return merged
+
+
+def load_mpc_config(path: Path) -> MpcRunConfig:
+    """Load required MPC controller settings from YAML (see ``_read_config_data``)."""
+    data = _read_config_data(Path(path))
 
     for key in sorted(_LEGACY_KEYS.keys() & data.keys()):
         raise ValueError(f"'{key}' is retired: {_LEGACY_KEYS[key]}.")

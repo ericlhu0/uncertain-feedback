@@ -19,6 +19,7 @@ from evaluation.approaches.grounders import (
 )
 from evaluation.approaches.steering import (
     ClassifierGuidanceSteering,
+    LearnedSteering,
     NoSteering,
     Steering,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "CostGen",
     "Grounder",
     "ImmediateCostGen",
+    "LearnedSteering",
     "LlmKeypointGrounder",
     "LlmTrajectoryGrounder",
     "MdmGrounder",

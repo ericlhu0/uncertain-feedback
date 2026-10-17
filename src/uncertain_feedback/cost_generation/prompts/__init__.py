@@ -104,6 +104,7 @@ _GROUND_LANGUAGE_HEAD = _read(_STAGES_DIR / "ground_language.txt")
 _AUTHOR_HEAD = _read(_STAGES_DIR / "author.txt")
 _REFINE_HEAD = _read(_STAGES_DIR / "refine.txt")
 _COMBINE_HEAD = _read(_STAGES_DIR / "combine.txt")
+_COMBINE_TERMS = _read(_STAGES_DIR / "combine_terms.txt")
 
 
 def _substitute_images(
@@ -302,7 +303,8 @@ def build_combine_task_body(
 
     ``corpus_note``, when given, is appended after the combine head (before the
     runtime API / output contract); when ``None`` the text is byte-identical to the
-    no-corpus form.
+    no-corpus form. The request for the unified preference's bound ``terms``
+    follows the output contract, since it adds a key to it.
     """
     sections: list[str] = []
     image_paths: list[Path] = []
@@ -344,5 +346,5 @@ def build_combine_task_body(
         "{rounds}", "\n\n".join(sections)
     )
     parts = [head] if corpus_note is None else [head, corpus_note]
-    parts += [_RUNTIME_API, _OUTPUT_CONTRACT]
+    parts += [_RUNTIME_API, _OUTPUT_CONTRACT, _COMBINE_TERMS]
     return "\n\n".join(parts).strip(), image_paths

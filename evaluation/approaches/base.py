@@ -11,7 +11,7 @@ from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.grounders.mdm import MdmGrounder
 from evaluation.approaches.grounders.nominal import NominalGrounder
-from evaluation.approaches.steering import NoSteering, Steering
+from evaluation.approaches.steering import LearnedSteering, NoSteering, Steering
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
@@ -27,9 +27,10 @@ from uncertain_feedback.simulated_users import SimulatedUser
 class Approach:
     """A system variant under evaluation: grounder x cost_gen x steering.
 
-    ``steering`` selects how MDM sampling is steered toward the persona's
-    bounds. It is only meaningful for the mdm grounder, which reads its mode
-    from here rather than from the planner yaml's
+    ``steering`` selects how MDM sampling is steered: toward the persona's
+    hidden bounds (``cg``, a ceiling) or the bounds of the learned costs in
+    effect (``learned``, any cost learner). It is only meaningful for the mdm grounder, which reads its
+    mode from here rather than from the planner yaml's
     ``feedback.uq.steering.mode``.
     """
 
@@ -52,6 +53,8 @@ class Approach:
                 "the nominal grounder selects no correction; "
                 "cost_gen.source must be 'nominal'."
             )
+        if isinstance(steering, LearnedSteering):
+            steering.learned_bounds = cost_gen.learned_bounds
         self.name = name
         self.grounder = grounder
         self.cost_gen = cost_gen
@@ -102,3 +105,7 @@ class Approach:
     def learn(self, ctx: RoundContext) -> LearnOutcome:
         """Distill the resolved correction into persistent planner costs."""
         return self.cost_gen.learn(ctx)
+
+    def consolidate(self) -> None:
+        """The slow update between attempts: distill everything learned so far."""
+        self.cost_gen.consolidate()

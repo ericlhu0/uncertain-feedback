@@ -4,6 +4,7 @@ from evaluation.approaches.steering.base import Steering
 from evaluation.approaches.steering.classifier_guidance import (
     ClassifierGuidanceSteering,
 )
+from evaluation.approaches.steering.learned import LearnedSteering
 from evaluation.approaches.steering.none import NoSteering
 
-__all__ = ["ClassifierGuidanceSteering", "NoSteering", "Steering"]
+__all__ = ["ClassifierGuidanceSteering", "LearnedSteering", "NoSteering", "Steering"]

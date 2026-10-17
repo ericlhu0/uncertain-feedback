@@ -1,0 +1,10 @@
+# MDM grounding, user picks, consolidated learned cost, and MDM steered by
+# classifier guidance from the persona's hidden bounds: a ceiling on steering,
+# not the full method, which steers with the learned cost.
+defaults:
+  - grounder: mdm
+  - cost_gen: consolidate
+  - steering: cg
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: full_hidden_limit_steering

@@ -369,9 +369,9 @@ def test_consolidation_sees_the_retired_round_note(tmp_path: Path, monkeypatch) 
     cost_gen._unified = blocking
     seen: list[CostRound] = []
 
-    def fake_combine(_ctx, _generation):
+    def fake_combine():
         seen.extend(cost_gen._cost_rounds)
-        return combined
+        return combined, []
 
     monkeypatch.setattr(cost_gen, "_combine", fake_combine)
     ctx = RoundContext(
@@ -396,6 +396,12 @@ def test_consolidation_sees_the_retired_round_note(tmp_path: Path, monkeypatch) 
     )
 
     cost_gen.record(ctx, generation)  # type: ignore[arg-type]
+
+    # Until the attempt ends, the correction's own cost plans in place of the
+    # retired one.
+    assert cost_gen.learned_terms() == [correcting]
+
+    cost_gen.consolidate()
 
     assert "bring my hand in" in seen[0].retired and not seen[1].retired
     assert cost_gen.learned_terms() == [combined]

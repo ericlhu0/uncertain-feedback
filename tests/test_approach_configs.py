@@ -18,6 +18,7 @@ from evaluation.approaches import (
     ClassifierGuidanceSteering,
     ConsolidateCostGen,
     ImmediateCostGen,
+    LearnedSteering,
     MdmGrounder,
     NoCostGen,
     NominalGrounder,
@@ -57,13 +58,22 @@ def test_axis_overrides_compose_from_any_approach() -> None:
     assert approach.cost_gen.source == "nominal"
 
 
-def test_full_composes_mdm_consolidate_cg() -> None:
+def test_full_composes_mdm_consolidate_learned_steering() -> None:
     approach = _instantiate("full")
     assert isinstance(approach.grounder, MdmGrounder)
     assert isinstance(approach.cost_gen, ConsolidateCostGen)
-    assert isinstance(approach.steering, ClassifierGuidanceSteering)
+    assert isinstance(approach.steering, LearnedSteering)
     assert approach.grounder.steering is approach.steering
     assert approach.requires_generator
+    ceiling = _instantiate("full_hidden_limit_steering")
+    assert isinstance(ceiling.steering, ClassifierGuidanceSteering)
+
+
+def test_full_without_consolidation_steers_from_the_immediate_learner() -> None:
+    approach = _instantiate("full", overrides=["cost_gen=immediate"])
+    assert isinstance(approach.cost_gen, ImmediateCostGen)
+    assert isinstance(approach.steering, LearnedSteering)
+    assert approach.steering.learned_bounds == approach.cost_gen.learned_bounds
 
 
 def test_steering_axis_override_disables_cg() -> None:

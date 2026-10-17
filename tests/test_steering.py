@@ -186,7 +186,9 @@ def test_supported_bounds_skips_unsupported_features_and_joint_boxes() -> None:
         slope=-0.65,
     )
     unsupported_feature = HiddenBound(
-        feature="shoulder_flexion_extension", bound_type="upper_bound", high=1.0
+        feature="shoulder_internal_external_rotation",
+        bound_type="upper_bound",
+        high=1.0,
     )
     unsupported_condition = HiddenBound(
         feature="elbow_flexion",

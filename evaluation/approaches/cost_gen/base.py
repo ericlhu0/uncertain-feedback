@@ -5,8 +5,13 @@ from __future__ import annotations
 import abc
 from dataclasses import replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
+from evaluation.approaches.cost_gen.bounds import (
+    admissible_bounds,
+    bounds_from_terms,
+    grounding_terms,
+)
 from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from uncertain_feedback.cost_generation import (
     CostGenerationResult,
@@ -14,11 +19,13 @@ from uncertain_feedback.cost_generation import (
     generate_cost_for_correction,
     stall_retired_note,
 )
+from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
 )
+from uncertain_feedback.simulated_users.base import Bound
 
 COST_GEN_SOURCES = ("chosen", "nominal")
 
@@ -55,9 +62,33 @@ class CostGen(abc.ABC):
     def learned_terms(self) -> list[GeneratedPythonCost]:
         """Whatever has been learned so far, as extra planning cost terms."""
 
+    def learned_bounds(self) -> tuple[Bound, ...]:
+        """The learned costs in effect as bounds every recorded round admits.
+
+        Each round's cost states its preference as stage two's grounding terms;
+        these are what learned steering compiles.
+        """
+        in_effect = self.learned_terms()
+        terms = [
+            term
+            for cost, round_ in zip(self._generated, self._cost_rounds)
+            if any(cost is learned for learned in in_effect)
+            for term in grounding_terms(round_.grounding)
+        ]
+        return self._admissible(terms)
+
+    def _admissible(self, terms: list[dict[str, Any]]) -> tuple[Bound, ...]:
+        if not terms:
+            return ()
+        states = [EvalState.load(round_.state_path) for round_ in self._cost_rounds]
+        return admissible_bounds(bounds_from_terms(terms), states)
+
     @abc.abstractmethod
     def learn(self, ctx: RoundContext) -> LearnOutcome:
         """Distill the resolved correction into persistent planner costs."""
+
+    def consolidate(self) -> None:
+        """Between attempts: distill what was learned; nothing to do by default."""
 
     def retire(self, terms: Sequence[GeneratedPythonCost], note: str) -> None:
         """Stop planning with ``terms`` (they kept the arm from the goal).

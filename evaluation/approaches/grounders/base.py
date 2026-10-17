@@ -42,7 +42,10 @@ def required_llm_model(cfg: MpcRunConfig) -> str:
 
 
 class Grounder(abc.ABC):
-    """One grounding mechanism: language to candidate motions to selection."""
+    """One grounding mechanism: language to candidate motions to selection.
+
+    ``_history`` is the conversation so far, for grounders that keep one.
+    """
 
     requires_generator: bool = False
 
@@ -51,6 +54,7 @@ class Grounder(abc.ABC):
         self._gen: MotionGenerator | None = None
         self._user: SimulatedUser | None = None
         self._episode_dir = Path(".")
+        self._history: list[str] = []
 
     @property
     def cfg(self) -> MpcRunConfig:
@@ -84,6 +88,7 @@ class Grounder(abc.ABC):
         self._gen = gen
         self._user = user
         self._episode_dir = episode_dir
+        self._history = []
 
     def begin_goal(self, goal: GoalRegion, oracle_path: np.ndarray) -> None:
         """Called once per goal before any round; the oracle grounder reads it."""

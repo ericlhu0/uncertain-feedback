@@ -325,7 +325,9 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 utterance.text, at_feedback, nominal_plan, _select
             )
             ground_seconds = time.perf_counter() - ground_t0
-            choice = choices[-1]
+            # A grounder may play its pick at another size than the user chose
+            # (llm_keypoint runs its edit at 1x); record the grounder's size.
+            choice = replace(choices[-1], magnitude=grounding.magnitude)
             rejected = frozenset(
                 label
                 for label, acceptable in choice.acceptable.items()

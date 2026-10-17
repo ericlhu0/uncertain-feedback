@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
@@ -110,8 +111,30 @@ def test_nominal_grounder_episode_smoke(tmp_path: Path) -> None:
     result = run_episode(cfg, human, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
     assert result, "episode recorded no interactions"
-    assert all(
-        len(rnd.grounding.candidates) == 1
-        for interaction in result
-        for rnd in interaction.rounds
+    rounds = [rnd for interaction in result for rnd in interaction.rounds]
+    assert rounds, "the smoke episode should reach a feedback round"
+    for rnd in rounds:
+        assert len(rnd.grounding.candidates) == 1
+        # Nothing is replayed: the round's motion is the replan from the stop pose.
+        assert rnd.correction_q.shape == (1, 7)
+        np.testing.assert_allclose(rnd.continuation[0], rnd.q_feedback, atol=1e-9)
+
+
+def test_nominal_grounder_holds_at_the_stop_pose() -> None:
+    cfg = load_mpc_config(_SMOKE_MPC)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
+    nominal_plan = np.repeat(human.q[None], 12, axis=0)
+    nominal_plan[:, 0] += np.linspace(0.0, 0.3, 12)
+    judged: list[dict[int, np.ndarray]] = []
+
+    def select(means: dict[int, np.ndarray]) -> tuple[int, float]:
+        judged.append(means)
+        return 0, 0.5
+
+    result = NominalGrounder().ground("not like that", human, nominal_plan, select)
+    assert len(judged) == 1 and set(judged[0]) == {0}, "the plan is still judged"
+    np.testing.assert_allclose(result.candidates[0], human.arm_aa_from_q(nominal_plan))
+    np.testing.assert_allclose(
+        result.correction_traj, human.arm_aa_from_q(human.q[None])
     )
+    assert result.magnitude == 0.5

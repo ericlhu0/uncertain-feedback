@@ -1,0 +1,13 @@
+# The GPT-writes-the-motion baseline with the format left to GPT: 4
+# interpretations, each picking its own space, waypoints or frames, count and
+# timing, on gpt-6-sol at high reasoning effort (agent_waypoint runs on the
+# config's llm_cost.model, gpt-6-luna). No cost learning, no steering.
+defaults:
+  - grounder: llm_free_form
+  - cost_gen: none
+  - steering: none
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: agent_free_form
+grounder:
+  model: gpt-6-sol

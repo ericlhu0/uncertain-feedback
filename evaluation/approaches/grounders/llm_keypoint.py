@@ -4,8 +4,12 @@ The utterance is interpreted by an LLM into a single 3D keypoint that one arm
 part (elbow or wrist) should move toward — the "language to workspace keypoint"
 grounding style. The correction ramps the chosen joint from the nominal plan
 toward the keypoint and projects back to arm axis-angles by position IK. The
-simulated user only tunes playback magnitude of the one proposed motion; it
-never selects among alternatives.
+edit runs as proposed, at magnitude 1: the user neither picks among
+alternatives nor resizes the one motion. The simulated user still judges it
+(``cluster_selector``), so the round records whether it was acceptable;
+``rescale=True`` instead plays it at the user's chosen magnitude. When the LLM
+gives no keypoint, the nominal plan is judged but not replayed: the arm holds
+at the stop pose and replans.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from evaluation.approaches.grounders.base import (
     Grounder,
     required_llm_model,
 )
+from evaluation.approaches.grounders.nominal import stop_pose
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.motion_generators.base import MotionGenerator
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
@@ -48,10 +53,10 @@ _JOINT_CHAINS = {"elbow": ELBOW_CHAIN_IDX, "wrist": WRIST_CHAIN_IDX}
 class LlmKeypointGrounder(Grounder):
     """Candidates are single LLM-proposed keypoint edits of the nominal plan."""
 
-    def __init__(self, displacement_cap: float = 0.4) -> None:
+    def __init__(self, displacement_cap: float = 0.4, rescale: bool = False) -> None:
         super().__init__()
         self._displacement_cap = displacement_cap
-        self._history: list[str] = []
+        self._rescale = rescale
         self._llm: Any = None
 
     def reset(
@@ -63,7 +68,6 @@ class LlmKeypointGrounder(Grounder):
         episode_dir: Path,
     ) -> None:
         super().reset(cfg, gen, user, seed, episode_dir)
-        self._history = []
         self._llm = None
 
     def _interpret(self, text: str, scene_context: str) -> dict[str, Any] | None:
@@ -145,8 +149,13 @@ class LlmKeypointGrounder(Grounder):
             positions[:, chain] += ramp * delta
             candidates[1] = human.arm_aa_from_q(human.ik_q_from_positions(positions))
             chosen = 1
-        _, magnitude = cluster_selector({chosen: candidates[chosen]})
-        correction = scale_trajectory(candidates[chosen], magnitude)
+        _, user_magnitude = cluster_selector({chosen: candidates[chosen]})
+        magnitude = user_magnitude if self._rescale else 1.0
+        correction = (
+            scale_trajectory(candidates[chosen], magnitude)
+            if chosen
+            else stop_pose(human)
+        )
         return GroundingResult(
             candidates=candidates,
             chosen_label=chosen,

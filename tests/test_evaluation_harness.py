@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from evaluation.approaches import (
     Approach,
@@ -30,6 +31,7 @@ from uncertain_feedback.planners.mpc.goal_spaces import GoalStallConfig, PointRe
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import propose_unblocked_path
 from uncertain_feedback.simulated_users import get_persona
+from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
 _SMOKE_MPC = (
     Path(__file__).resolve().parents[1] / "evaluation" / "conf" / "mpc_smoke.yaml"
@@ -340,3 +342,58 @@ def test_keypoint_baseline_episode_smoke(tmp_path: Path) -> None:
     result = run_episode(cfg, human, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
     assert result, "episode recorded no interactions"
+    for rnd in (r for interaction in result for r in interaction.rounds):
+        assert rnd.grounding.magnitude == rnd.choice.magnitude == 1.0
+
+
+@pytest.mark.parametrize("rescale, expected", [(False, 1.0), (True, 0.5)])
+def test_keypoint_edit_runs_at_1x_unless_rescaled(
+    rescale: bool, expected: float
+) -> None:
+    """The keypoint edit runs as proposed; ``rescale`` plays the user's size."""
+    cfg = load_mpc_config(_SMOKE_MPC)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
+    nominal_plan = np.repeat(human.q[None], 12, axis=0)
+    grounder = LlmKeypointGrounder(rescale=rescale)
+    grounder._interpret = (  # type: ignore[method-assign]
+        lambda text, scene_context: {
+            "joint": "wrist",
+            "keypoint": np.array([0.1, 0.3, 0.2]),
+        }
+    )
+    judged: list[list[int]] = []
+
+    def select(means: dict[int, np.ndarray]) -> tuple[int, float]:
+        judged.append(list(means))
+        return next(iter(means)), 0.5
+
+    result = grounder.ground("move my hand up", human, nominal_plan, select)
+    assert judged == [[1]], "the user should still judge the one edit"
+    assert result.chosen_label == 1
+    assert result.magnitude == expected
+    np.testing.assert_allclose(
+        result.correction_traj,
+        scale_trajectory(result.candidates[1], expected),
+    )
+
+
+def test_keypoint_without_an_edit_holds_at_the_stop_pose() -> None:
+    """No keypoint: the nominal plan is judged but not replayed."""
+    cfg = load_mpc_config(_SMOKE_MPC)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
+    nominal_plan = np.repeat(human.q[None], 12, axis=0)
+    grounder = LlmKeypointGrounder()
+    grounder._interpret = (  # type: ignore[method-assign]
+        lambda text, scene_context: None
+    )
+    judged: list[list[int]] = []
+
+    def select(means: dict[int, np.ndarray]) -> tuple[int, float]:
+        judged.append(list(means))
+        return next(iter(means)), 1.0
+
+    result = grounder.ground("hmm", human, nominal_plan, select)
+    assert judged == [[0]] and result.chosen_label == 0
+    np.testing.assert_allclose(
+        result.correction_traj, human.arm_aa_from_q(human.q[None])
+    )

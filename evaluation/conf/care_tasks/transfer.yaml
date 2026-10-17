@@ -1,0 +1,5 @@
+# Chair-to-chair transfer preparation with the evaluation's learning stack; the task geometry lives in
+# the planner config, which wins on any shared section.
+base:
+  - evaluation/conf/mpc_task_learning.yaml
+  - src/uncertain_feedback/planners/mpc/configs/transfer.yaml

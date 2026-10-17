@@ -1,0 +1,32 @@
+# The learning stack the evaluation runs care tasks with: mpc_procedural.yaml's
+# feedback/uq/llm_cost sections, without any geometry. evaluation/conf/care_tasks/*.yaml
+# combine it with a planner task config through `base:`.
+feedback:
+  max_playback_delta: 0.05
+  trajectory_fraction: 1
+  frames: 50
+  uq:
+    diffusion_samples: 500
+    n_clusters: 6
+    scale: 1.0
+    user_cluster: true
+
+corrections:
+  trigger_threshold: 0.02
+
+preference_learning: false
+preference_alpha: 0
+
+simulated_user:
+  nominal_steps: 40
+
+llm_cost:
+  enabled: true
+  backend: llm
+  model: gpt-6-luna
+  strict: false
+  artifact_dir: llm_cost_artifacts
+  use_images: true
+  max_turns: 3
+  # The combiner's model: the agent sandbox ignores ~/.codex/config.toml, so name it here.
+  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access -m gpt-6-sol -c model_reasoning_effort=high"

@@ -11,7 +11,8 @@ max_tasks: null
 # Run only these task indices (null = all); sweep it to spread one benchmark's
 # episodes over parallel jobs, e.g. -m tasks=0,1,2,3 hydra/launcher=joblib.
 tasks: null
-# Override simulated_user.chooser (oracle_progress | intent_aligned | progress | random).
+# Override simulated_user.chooser (oracle_progress | intent_aligned | progress | random |
+# robot_top: no user choice, the robot runs its own top candidate as proposed).
 sim_chooser: null
 # Goal-stall proposals: a rollout that stalls short of the goal offers the persona
 # a path with the blocking learned costs left out (see README "Goal stalls").

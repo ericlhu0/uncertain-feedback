@@ -16,6 +16,10 @@ Modes model different users picking among candidate corrections:
   by how much of the internal oracle path would remain after taking them.
   Superhuman path knowledge; kept for ablation.
 - ``random``: uniform choice among comfortable candidates.
+- ``robot_top``: no choice by the user; the robot runs its own top pick as
+  proposed, the first candidate in the grounder's order (the largest cluster
+  for MDM) at magnitude 1, comfortable or not. ``acceptable`` is still judged
+  as ``oracle_progress`` would, so the metrics read the same.
 
 No mode sees language; ``intent_aligned`` sees the intent behind it.
 """
@@ -44,7 +48,13 @@ from uncertain_feedback.simulated_users.base import (
 from uncertain_feedback.simulated_users.progress import correction_progress
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
-CHOOSER_MODES = ("oracle_progress", "intent_aligned", "progress", "random")
+CHOOSER_MODES = (
+    "oracle_progress",
+    "intent_aligned",
+    "progress",
+    "random",
+    "robot_top",
+)
 
 # Offsets are meters, features radians; 5 cm of offset weighs as much as 0.15 rad.
 _OFFSET_WEIGHT = 0.15 / 0.05
@@ -106,7 +116,8 @@ def choose_correction(
     Candidates whose playback exceeds the pain ``threshold`` at any frame are
     rejected, matching the execution-time trigger; ``oracle_progress`` rejects
     any violation at all. When none survives, the lowest peak-violation
-    candidate is returned with ``no_acceptable_cluster=True``.
+    candidate is returned with ``no_acceptable_cluster=True``. ``robot_top``
+    returns the first candidate at magnitude 1 regardless, flagging the same.
     """
     if mode not in CHOOSER_MODES:
         raise ValueError(f"Unknown chooser mode {mode!r}; expected {CHOOSER_MODES}.")
@@ -118,7 +129,7 @@ def choose_correction(
 
     oracle_q = canonical_arm_q(oracle_path, human).reshape(-1, 7)
     tail = oracle_q[min_join:]
-    limit = 0.0 if mode == "oracle_progress" else threshold
+    limit = 0.0 if mode in ("oracle_progress", "robot_top") else threshold
     step_lengths = np.linalg.norm(np.diff(tail, axis=0), axis=-1)
     remaining_arc = np.concatenate([np.cumsum(step_lengths[::-1])[::-1], [0.0]])
 
@@ -177,6 +188,15 @@ def choose_correction(
                     -abs(projection - desired_norm),
                 )
 
+    if mode == "robot_top":
+        return ChoiceResult(
+            next(iter(cluster_means)),
+            1.0,
+            acceptable,
+            scores,
+            not acceptable_pairs,
+            alignment,
+        )
     if not acceptable_pairs:
         assert fallback is not None
         label, magnitude = fallback

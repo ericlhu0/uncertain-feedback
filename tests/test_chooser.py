@@ -93,3 +93,21 @@ def test_grid_finds_scaled_only_acceptable_variant(human: Human) -> None:
     assert result.label == 0
     assert result.magnitude == 0.5
     assert result.acceptable == {0: True}
+
+
+def test_robot_top_runs_the_first_candidate_as_proposed(human: Human) -> None:
+    oracle = _q_traj(list(np.linspace(0.0, 1.2, 21)))
+    # Listed painful one first, as the grounder would its most likely reading.
+    means = {1: _aa_mean(human, 1.2), 0: _aa_mean(human, 0.2)}
+    result = choose_correction(
+        _user(human, 0.45), human, means, oracle, mode="robot_top"
+    )
+    assert (result.label, result.magnitude) == (1, 1.0)
+    assert result.acceptable == {0: True, 1: False}
+    assert not result.no_acceptable_cluster
+
+    result = choose_correction(
+        _user(human, 0.05), human, means, oracle, mode="robot_top"
+    )
+    assert (result.label, result.magnitude) == (1, 1.0)
+    assert result.no_acceptable_cluster

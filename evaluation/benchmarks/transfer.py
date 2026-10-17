@@ -51,7 +51,7 @@ def probe_menu(
     """
     sim_cfg = cfg.simulated_user
     threshold = cfg.corrections.trigger_threshold
-    goal = task.goals[goal_index]
+    goal = task.goals[goal_index].bind(human.arm_aa_from_q(q_start), human)
     goal_cfg = cfg_with_goal(cfg, goal)
     goal_dir.mkdir(parents=True, exist_ok=True)
     base = base_extra_costs(cfg.costs, human, user)

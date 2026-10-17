@@ -30,6 +30,7 @@ from uncertain_feedback.planners.mpc.feedback import FeedbackConfig
 from uncertain_feedback.planners.mpc.goal_spaces import (
     BoxRegion,
     CartesianConfig,
+    DisplacementRegion,
     FeatureRegion,
     ForearmBoxRegion,
     GoalRegion,
@@ -273,12 +274,24 @@ def _parse_goal_region(value: Any, name: str) -> list[float] | GoalRegion:
         "forearm_box",
         "sphere",
         "features",
+        "displacement",
     ):
         raise ValueError(
             f"{name} must be a 3-number list or a mapping with exactly one of "
-            "'box', 'forearm_box', 'sphere', 'features'."
+            "'box', 'forearm_box', 'sphere', 'features', 'displacement'."
         )
     kind, params = next(iter(region.items()))
+    if kind == "displacement":
+        params = _mapping(params, f"{name}.displacement")
+        joint = params.get("joint")
+        if not isinstance(joint, str):
+            raise ValueError(f"{name}.displacement.joint must be a string.")
+        return DisplacementRegion(
+            joint=joint,
+            min_distance=_float(
+                params.get("min_distance"), f"{name}.displacement.min_distance"
+            ),
+        )
     if kind in ("box", "forearm_box"):
         params = _mapping(params, f"{name}.{kind}")
         low = _point(params.get("low"), f"{name}.{kind}.low")

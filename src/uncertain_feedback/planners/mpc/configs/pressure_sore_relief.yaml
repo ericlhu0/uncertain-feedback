@@ -1,0 +1,19 @@
+# Pressure-sore relief: move the left elbow at least 10 cm from where it started, in any
+# direction, to take the load off that spot (e.g. an elbow resting on a wheelchair
+# armrest). A limitation that blocks the direct route leaves others open, so the planner
+# has to find a different one. Seated body, like the other care tasks: MDM's direction
+# words were trained for sitting. Support surfaces are not simulated.
+# Upright SMPL frame: +x left, +y up, +z forward.
+pose: src/uncertain_feedback/motion_generators/mdm/transfer_seated_pose.pt
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.0025
+
+cartesian:
+  goals:
+    - displacement:
+        joint: elbow
+        min_distance: 0.10
+  threshold: 0.001

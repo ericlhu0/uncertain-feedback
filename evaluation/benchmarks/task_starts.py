@@ -56,10 +56,12 @@ def generate_task_starts(
 ) -> None:
     """Keep up to ``per_persona`` start poses per persona for the task config's goal.
 
-    A start is kept when it is comfortable, the base-cost rollout from it to the
-    config's first goal triggers feedback (as ``run_episode`` tests it, with the
-    default stall stop), and the oracle (base + hidden cost) still reaches the
-    goal, so the persona has something to correct and the task is solvable.
+    A start is kept when it is comfortable, costs nothing under the task's base
+    costs, the base-cost rollout from it to the config's first goal triggers
+    feedback (as ``run_episode`` tests it, with the default stall stop), and the
+    oracle (base + hidden cost) still reaches the goal, so the persona has
+    something to correct and the task is solvable. A start-relative goal
+    (``DisplacementRegion``) is bound to each start.
 
     ``sampled_bounds > 0`` replaces ``personas`` with that many generated users
     (``sampled_000``, ...; alternating constant and coupled bounds), one start
@@ -119,9 +121,14 @@ def generate_task_starts(
             }
             rows.append(row)
             start = human.reset_human_with_q(q0)
+            start_goal = goal.bind(human.arm_aa_from_q(q0), human)
+            # The task's own costs (e.g. a mattress floor) must hold at the start.
+            if float(base(human.arm_aa_from_q(q0)[None, None])[0]) > 0.0:
+                row["rejected"] = "infeasible_start"
+                continue
             if sampled_bounds:
                 nominal = rollout_to_goal(
-                    cfg, start, goal, base, stop_on_stall=True
+                    cfg, start, start_goal, base, stop_on_stall=True
                 ).history
                 sampled = sample_bound(
                     rng,
@@ -146,7 +153,7 @@ def generate_task_starts(
                     row["rejected"] = "uncomfortable_start"
                     continue
                 nominal = rollout_to_goal(
-                    cfg, start, goal, base, stop_on_stall=True
+                    cfg, start, start_goal, base, stop_on_stall=True
                 ).history
             trigger = first_violation_step(user, human, nominal, threshold)
             if trigger is None:
@@ -155,8 +162,8 @@ def generate_task_starts(
             oracle_costs = CompositeTrajectoryCost(
                 [*base.terms(), HiddenCostTerm(user=user, human=human)]
             )
-            oracle = rollout_to_goal(cfg, start, goal, oracle_costs).history
-            if not goal_reach(human, cfg, oracle, goal)["reached"]:
+            oracle = rollout_to_goal(cfg, start, start_goal, oracle_costs).history
+            if not goal_reach(human, cfg, oracle, start_goal)["reached"]:
                 row["rejected"] = "oracle_did_not_reach"
                 continue
             row.update(trigger=trigger, rejected="")

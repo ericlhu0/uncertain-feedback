@@ -9,7 +9,7 @@ costs decide where the arm settles. A single wrist point is the degenerate
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -18,7 +18,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     ArmFeatureContext,
     arm_feature_series,
 )
-from uncertain_feedback.planners.mpc.kinematics import ELBOW_CHAIN_IDX
+from uncertain_feedback.planners.mpc.kinematics import ELBOW_CHAIN_IDX, WRIST_CHAIN_IDX
 
 _CIRCLE_POINTS = 33
 
@@ -45,6 +45,21 @@ class GoalRegion(ABC):
     def outline(self) -> list[np.ndarray]:
         """Spine3-relative ``(K, 3)`` polylines tracing the region's boundary."""
         return []
+
+    def bind(self, arm_aa: np.ndarray, context: ArmFeatureContext) -> GoalRegion:
+        """This region fixed to the ``(3, 3)`` arm state its goal starts from.
+
+        Most regions do not depend on the start and return themselves; see
+        :class:`DisplacementRegion`.
+        """
+        del arm_aa, context
+        return self
+
+
+def _chain_rel(arm_aa: np.ndarray, context: ArmFeatureContext) -> np.ndarray:
+    """``(N, chain, 3)`` spine3-relative FK positions for ``(N, 3, 3)`` arm states."""
+    chain = context.fk.fk_batch(arm_aa, context.spine3_pos, context.spine3_aa)
+    return chain - context.spine3_pos
 
 
 @dataclass(frozen=True)
@@ -192,6 +207,60 @@ class FeatureRegion(GoalRegion):
         return np.linalg.norm(np.stack(hinges, axis=-1), axis=-1)
 
 
+_JOINT_CHAIN_IDX = {"elbow": ELBOW_CHAIN_IDX, "wrist": WRIST_CHAIN_IDX}
+
+
+@dataclass(frozen=True)
+class DisplacementRegion(GoalRegion):
+    """Move ``joint`` at least ``min_distance`` metres from where the goal began.
+
+    Any direction will do, e.g. lifting a resting elbow off a pressure point.
+    ``origin`` is the joint's spine3-relative start position, set by
+    :meth:`bind` once per goal; an unbound region refuses to score states,
+    since anchoring on whatever state a planner is rebuilt from (a replan after
+    a correction) would move the goal with the arm.
+    """
+
+    joint: str
+    min_distance: float
+    origin: tuple[float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.joint not in _JOINT_CHAIN_IDX:
+            raise ValueError(
+                f"joint must be one of {sorted(_JOINT_CHAIN_IDX)}; got {self.joint!r}."
+            )
+        if self.min_distance <= 0.0:
+            raise ValueError("min_distance must be positive.")
+
+    def bind(self, arm_aa: np.ndarray, context: ArmFeatureContext) -> GoalRegion:
+        if self.origin is not None:
+            return self
+        start = _chain_rel(np.asarray(arm_aa, dtype=np.float64)[None], context)
+        x, y, z = (float(v) for v in start[0, _JOINT_CHAIN_IDX[self.joint]])
+        return replace(self, origin=(x, y, z))
+
+    def distance(
+        self, wrist_rel: np.ndarray, arm_aa: np.ndarray, context: ArmFeatureContext
+    ) -> np.ndarray:
+        if self.origin is None:
+            raise ValueError(
+                "DisplacementRegion has no origin; bind it to the goal's start state."
+            )
+        position = (
+            wrist_rel
+            if self.joint == "wrist"
+            else _chain_rel(arm_aa, context)[:, ELBOW_CHAIN_IDX]
+        )
+        moved = np.linalg.norm(position - np.asarray(self.origin), axis=-1)
+        return np.maximum(self.min_distance - moved, 0.0)
+
+    def outline(self) -> list[np.ndarray]:
+        if self.origin is None:
+            return []
+        return SphereRegion(self.origin, self.min_distance).outline()
+
+
 def as_goal_region(goal: Sequence[float] | np.ndarray | GoalRegion) -> GoalRegion:
     """Wrap a raw ``[x, y, z]`` goal as a :class:`PointRegion`; pass regions through."""
     if isinstance(goal, GoalRegion):
@@ -212,6 +281,7 @@ __all__ = [
     "ForearmBoxRegion",
     "SphereRegion",
     "FeatureRegion",
+    "DisplacementRegion",
     "as_goal_region",
     "goal_point",
 ]

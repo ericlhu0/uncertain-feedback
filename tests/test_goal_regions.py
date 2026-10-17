@@ -265,7 +265,7 @@ def test_care_demo_configs_use_regions() -> None:
     assert transfer.cartesian is not None
     assert isinstance(bathing.cartesian.goals[0], FeatureRegion)
     assert isinstance(transfer.cartesian.goals[0], ForearmBoxRegion)
-    assert bathing.pose is None and transfer.pose is not None
+    assert bathing.pose == transfer.pose and transfer.pose is not None
     assert transfer.cartesian.goals[0].wrist is not None
     assert transfer.cartesian.goals[0].elbow is None
     bed = load_mpc_config(configs / "transfer_bed.yaml")
@@ -414,3 +414,37 @@ def test_sample_bound_fits_short_region_rollouts() -> None:
     violation = user.violation_series(feature_series(human, path))
     assert int(np.flatnonzero(violation > 0)[0]) > 8
     assert violation.max() >= 0.15
+
+
+def test_displacement_region_is_anchored_once_at_the_goal_start() -> None:
+    from uncertain_feedback.data_collection.dataset_auto_correction.clips import (
+        sample_arm_q,
+    )
+    from uncertain_feedback.planners.mpc.goal_spaces import DisplacementRegion
+
+    human = Human()
+    rng = np.random.default_rng(0)
+    q_start, q_far = sample_arm_q(rng, human), sample_arm_q(rng, human)
+    region = DisplacementRegion(joint="elbow", min_distance=0.1)
+
+    def distance(goal: DisplacementRegion, q: np.ndarray) -> float:
+        return float(
+            goal.distance(
+                human.wrist_from_q(q)[None], human.arm_aa_from_q(q)[None], human
+            )[0]
+        )
+
+    with pytest.raises(ValueError, match="bind"):
+        distance(region, q_start)
+    bound = region.bind(human.arm_aa_from_q(q_start), human)
+    assert isinstance(bound, DisplacementRegion)
+    assert distance(bound, q_start) == pytest.approx(0.1)
+    # Binding again (a replan from a later state) keeps the original anchor.
+    assert bound.bind(human.arm_aa_from_q(q_far), human) is bound
+    elbows = human.fk_positions_from_q(np.stack([q_start, q_far]))[:, -2]
+    moved = float(np.linalg.norm(elbows[1] - elbows[0]))
+    assert distance(bound, q_far) == pytest.approx(max(0.1 - moved, 0.0))
+    assert len(bound.outline()) == 3 and region.outline() == []
+    assert PointRegion((0.0, 0.0, 0.0)).bind(
+        human.arm_aa_from_q(q_start), human
+    ) == PointRegion((0.0, 0.0, 0.0))

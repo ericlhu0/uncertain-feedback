@@ -8,6 +8,7 @@ from uncertain_feedback.planners.mpc.goal_spaces.cartesian_goal_space import (
 )
 from uncertain_feedback.planners.mpc.goal_spaces.regions import (
     BoxRegion,
+    DisplacementRegion,
     FeatureRegion,
     ForearmBoxRegion,
     GoalRegion,
@@ -28,6 +29,7 @@ __all__ = [
     "ForearmBoxRegion",
     "SphereRegion",
     "FeatureRegion",
+    "DisplacementRegion",
     "as_goal_region",
     "goal_point",
 ]

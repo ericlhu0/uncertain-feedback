@@ -179,7 +179,9 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     chooser_rng = np.random.default_rng(task.seed)
     propose = cfg.cartesian.stall is not None
 
-    for goal_index, goal in enumerate(task.goals):
+    for goal_index, task_goal in enumerate(task.goals):
+        # Start-relative goals anchor here, not on each replan's start.
+        goal = task_goal.bind(human.arm_aa_from_q(q_current), human)
         goal_cfg = cfg_with_goal(cfg, goal)
         goal_dir = episode_dir / f"goal_{goal_index:02d}"
         goal_dir.mkdir(parents=True, exist_ok=True)

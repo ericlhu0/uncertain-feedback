@@ -1,4 +1,4 @@
-"""Aggregate interactions: success within k feedback rounds."""
+"""Aggregate interactions: success within k user turns (feedback rounds + approvals)."""
 
 from __future__ import annotations
 
@@ -26,9 +26,14 @@ def goal_row(interaction: Interaction) -> dict[str, Any]:
         "resolved": interaction.resolved,
         "reached": interaction.reached,
         "rounds_used": interaction.rounds_used,
+        "approvals": interaction.approvals,
+        "user_turns": interaction.user_turns,
         "proposal_approved": interaction.proposal_approved,
+        "violation_count": interaction.violation_count,
         "executed_mean_violation": float(executed_metrics["mean_violation"]),
         "executed_max_violation": float(executed_metrics["max_violation"]),
+        "motion_steps": interaction.motion_steps,
+        "robot_seconds": interaction.robot_seconds,
     }
 
 
@@ -42,19 +47,21 @@ def success_at_k(
     max_k: int,
     by: Sequence[str] = ("approach",),
 ) -> pd.DataFrame:
-    """Fraction of goals resolved within ``k`` feedback rounds, for k in 0..max_k.
+    """Fraction of goals resolved within ``k`` user turns, for k in 0..max_k.
 
-    A goal that hit the round cap or stalled short of the goal never counts at
-    any ``k``, so the curve needs no failure value. ``k = 0`` is the goal
-    completed with no feedback at all. A goal resolved by an approved stall
-    proposal counts; filter on ``goal_table``'s ``proposal_approved`` to see
-    how much of the curve that is.
+    A user turn is a feedback round or an approved stall proposal
+    (:attr:`Interaction.user_turns`), so a goal that needed the persona's
+    approval to get there costs that answer too. A goal that hit the round cap
+    or stalled short of the goal never counts at any ``k``, so the curve needs
+    no failure value. ``k = 0`` is the goal completed with no feedback at all;
+    filter on ``goal_table``'s ``proposal_approved`` to see how much of the
+    curve relied on an approval.
     """
     goals = goal_table(interactions)
     keys = [goals[column] for column in by]
     frames = []
     for k in range(max_k + 1):
-        hit = goals["resolved"] & (goals["rounds_used"] <= k)
+        hit = goals["resolved"] & (goals["user_turns"] <= k)
         frame = hit.groupby(keys).mean().rename("success").reset_index()
         frame["k"] = k
         frames.append(frame)

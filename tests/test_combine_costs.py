@@ -7,8 +7,6 @@ from __future__ import annotations
 import json
 import pickle
 import shlex
-import shutil
-import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -22,6 +20,8 @@ from uncertain_feedback.cost_generation import (
     CostRound,
     stall_retired_note,
 )
+from uncertain_feedback.cost_generation.agent_costs import _bwrap_usable
+from uncertain_feedback.cost_generation.landlock import abi_version
 from uncertain_feedback.cost_generation.prompts import build_combine_task_body
 from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.planners.mpc import ArmMPC
@@ -210,36 +210,13 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
     assert not hasattr(EvalState.load(staged_state_path).cfg, "user")
 
 
-def _bwrap_usable() -> bool:
-    """Whether bwrap can create a user namespace on this host.
-
-    Ubuntu's apparmor_restrict_unprivileged_userns denies it to unconfined
-    binaries ("setting up uid map: Permission denied"), which no amount of
-    bwrap flags can work around.
-    """
-    bwrap = shutil.which("bwrap")
-    if bwrap is None:
-        return False
-    try:
-        probe = subprocess.run(
-            [bwrap, "--ro-bind", "/", "/", "true"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return probe.returncode == 0
-
-
-_requires_bwrap = pytest.mark.skipif(
-    not _bwrap_usable(),
-    reason="bwrap cannot create a user namespace on this host",
+_requires_sandbox = pytest.mark.skipif(
+    not _bwrap_usable() and abi_version() < 1,
+    reason="neither bwrap nor Landlock can confine the agent on this host",
 )
 
 
-@_requires_bwrap
+@_requires_sandbox
 def test_combine_codex_streams_output_to_console_and_log(tmp_path, capsys) -> None:
     run_dir = tmp_path / "combine"
     run_dir.mkdir()
@@ -263,8 +240,10 @@ def test_combine_codex_streams_output_to_console_and_log(tmp_path, capsys) -> No
     assert message in (run_dir / "codex.log").read_text(encoding="utf-8")
 
 
-@_requires_bwrap
+@_requires_sandbox
 def test_agent_sandbox_hides_oracle_and_prior_runs(tmp_path) -> None:
+    """Under bwrap the hidden files are not mounted; under Landlock they exist
+    but cannot be opened, and ``/proc`` (other processes, mounts) is closed."""
     secret_session_name = "hidden_persona_session"
     run_dir = tmp_path / secret_session_name / "combine"
     run_dir.mkdir(parents=True)
@@ -272,15 +251,22 @@ def test_agent_sandbox_hides_oracle_and_prior_runs(tmp_path) -> None:
     marker.write_text("visible", encoding="utf-8")
     repo = Path(__file__).resolve().parents[1]
     oracle = repo / "src" / "uncertain_feedback" / "simulated_users" / "personas.py"
-    prior_runs = repo / "demo_runner_artifacts"
+    outputs = repo / "outputs"
     script = (
-        "from pathlib import Path; "
-        "assert Path('/tmp/workspace/visible.txt').is_file(); "
-        f"assert not Path({str(oracle)!r}).exists(); "
-        f"assert not Path({str(prior_runs)!r}).exists(); "
-        f"assert {secret_session_name!r} not in "
-        "Path('/proc/self/mountinfo').read_text(); "
-        "print('isolated', flush=True)"
+        "from pathlib import Path\n"
+        "assert Path('visible.txt').read_text() == 'visible'\n"
+        "Path('written.txt').write_text('ok')\n"
+        "def closed(read):\n"
+        "    try:\n"
+        "        read()\n"
+        "    except (FileNotFoundError, NotADirectoryError, PermissionError):\n"
+        "        return True\n"
+        "    return False\n"
+        f"assert closed(lambda: Path({str(oracle)!r}).read_text())\n"
+        f"assert closed(lambda: list(Path({str(outputs)!r}).iterdir()))\n"
+        "assert closed(lambda: Path('/proc/1/cmdline').read_bytes()) or "
+        f"{secret_session_name!r} not in Path('/proc/self/mountinfo').read_text()\n"
+        "print('isolated', flush=True)\n"
     )
     command = f"{shlex.quote(sys.executable)} -c " f"{shlex.quote(script)}"
     generator = CombineCostGenerator(

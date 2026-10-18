@@ -10,21 +10,21 @@ the RIC joint positions in the HML263 block, in torch, on device.
 The features mirror ``arm_features.arm_feature_series`` geometrically but read
 positions in the root's facing frame: elbow flexion is frame-invariant and
 matches exactly, shoulder elevation is measured from world-down rather than
-torso-down, and shoulder abduction from the root's lateral axis rather than
-spine3's, so the two agree only for an unleaned, untwisted torso. That
-approximation is fine for steering (it never leaves the sampler); trajectory
-*evaluation* keeps using the exact IK-based oracle.
+torso-down, and shoulder abduction and flexion/extension from the root's lateral
+and forward axes rather than spine3's, so the two agree only for an unleaned,
+untwisted torso. That approximation is fine for steering (it never leaves the
+sampler); trajectory *evaluation* keeps using the exact IK-based oracle.
 
-TODO(frame): shoulder abduction is the one feature here that is not
-yaw-invariant, and it is read in the root's facing frame (HML263 RIC positions
-are rotated so the pelvis faces +z) while ``arm_feature_series`` reads it in the
-spine3 frame. Any pelvis-to-spine3 twist becomes a constant abduction offset, so a
-coupled bound conditioned on abduction (``cross_body_pain``, the sampled coupled
-bounds) is steered toward a slightly displaced threshold. Fix: define the lateral
-axis per frame from the RIC shoulder pair (joints 16/17, left minus right) and
-measure abduction against it, which also makes elevation torso-relative; then
-tighten ``test_torch_position_features_match_arm_feature_series`` to a twisted
-``spine3_aa``. Introduced 2026-09-11 with abduction support.
+TODO(frame): shoulder abduction and flexion/extension are the features here
+that are not yaw-invariant, and they are read in the root's facing frame (HML263
+RIC positions are rotated so the pelvis faces +z) while ``arm_feature_series``
+reads them in the spine3 frame. Any pelvis-to-spine3 twist becomes a constant
+offset, so a bound on either (``cross_body_pain``, the sampled coupled bounds,
+learned bounds) is steered toward a slightly displaced threshold. Fix: define the
+lateral axis per frame from the RIC shoulder pair (joints 16/17, left minus
+right) and measure both against it, which also makes elevation torso-relative;
+then tighten ``test_torch_position_features_match_arm_feature_series`` to a
+twisted ``spine3_aa``. Introduced 2026-09-11 with abduction support.
 
 This module imports torch at module scope — import it lazily from anywhere that
 must stay torch-free (config parsing, the abstract generator interface).
@@ -47,6 +47,7 @@ SUPPORTED_FEATURES = (
     "elbow_flexion",
     "shoulder_elevation",
     "shoulder_abduction_adduction",
+    "shoulder_flexion_extension",
 )
 
 _RIC_OFFSET = 4  # root rotation/velocity block preceding the RIC positions
@@ -86,6 +87,16 @@ def shoulder_abduction(shoulder: torch.Tensor, elbow: torch.Tensor) -> torch.Ten
     return torch.asin(upper[..., 0].clamp(-1.0 + _ACOS_EPS, 1.0 - _ACOS_EPS))
 
 
+def shoulder_flexion(shoulder: torch.Tensor, elbow: torch.Tensor) -> torch.Tensor:
+    """Return the upper arm's signed angle out of the frontal plane.
+
+    The arcsine of the upper arm's forward component, as in
+    ``arm_feature_series`` (positive = forward, +z).
+    """
+    upper = torch.nn.functional.normalize(elbow - shoulder, dim=-1)
+    return torch.asin(upper[..., 2].clamp(-1.0 + _ACOS_EPS, 1.0 - _ACOS_EPS))
+
+
 def features_from_hml(
     x0: torch.Tensor, hml_mean: torch.Tensor, hml_std: torch.Tensor
 ) -> dict[str, torch.Tensor]:
@@ -111,6 +122,7 @@ def features_from_hml(
         "elbow_flexion": flexion,
         "shoulder_elevation": elevation,
         "shoulder_abduction_adduction": shoulder_abduction(shoulder, elbow),
+        "shoulder_flexion_extension": shoulder_flexion(shoulder, elbow),
     }
 
 

@@ -561,4 +561,6 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     _write_json(episode_dir / "episode_summary.json", summary)
     with open(episode_dir / "interactions.pkl", "wb") as file:
         pickle.dump(interactions, file)
+    # The attempt is over: the slow lifelong update runs now.
+    approach.consolidate()
     return interactions

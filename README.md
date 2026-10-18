@@ -1277,8 +1277,9 @@ behind each deleted cost, now known to be too strict. Where this happens:
 - the `evaluation/` episode loop hands them to the next round's learning step
   (`RoundContext.retire`); once that round's cost is accepted, `CostGen.retire`
   marks their rounds before the new round is added. `ImmediateCostGen` stops
-  stacking those costs; `ConsolidateCostGen` drops its unified cost, and the
-  combination it runs in that same step re-derives it from every round, the
+  stacking those costs; `ConsolidateCostGen` does the same for the round costs it
+  stacks and, when the consolidated cost is among them, drops it; the
+  consolidation at the end of the episode re-derives it from every round, the
   retired notes and the new correction included.
 
 If the correction produces no cost, nothing is retired and the arm may stall
@@ -2797,6 +2798,19 @@ largest MDM cluster) at 1×, and the user's verdict on the menu is still recorde
 and the plan is bent toward it) always runs its single edit as proposed, at 1×;
 `approach=llm_keypoint_rescaled` (grounder `rescale: true`) lets the user shrink or grow
 it over the magnitude grid instead, as the baseline did before 2026-10-16.
+`approach=full` is the full method: MDM grounding, user picks, the consolidated learned
+cost, and MDM steered by classifier guidance from that learned cost (`steering: learned`,
+`approaches/steering/learned.py`). The bounds come from every cost in effect: stage two's
+grounding terms of each round stacked since the last consolidation, and the consolidated
+cost's own terms (a single round's grounding, or the `terms` the combination writes next
+to its code; `approaches/cost_gen/bounds.py`). They are kept only where every round's
+chosen correction ends inside them and some interrupted plan or rejected candidate
+crosses them, and are recompiled at every grounding, so steering follows each round's
+learning and a resumed run steers from its first round. With nothing learned it
+samples unsteered; it never reads the persona's hidden limits. To measure steering alone,
+run `approach=full approach/cost_gen=immediate`: the same learning as `mdm_chosen` (every
+accepted round's cost stacked, no consolidation), steered from the stacked rounds' grounding
+terms (any cost learner's `learned_bounds()`); the name stays `full`, so it resumes `full`
 runs.
 
 **GPT-written corrections.** `approach=agent_waypoint` (`LlmTrajectoryGrounder`,
@@ -2811,6 +2825,7 @@ prompt and the config's `llm_cost.model`. Each round's `interpretations_NN.json`
 every interpretation's form (`forms`) and whether each LLM call parsed (`calls`; an
 unparseable reply is retried once). When no interpretation converts, the persona judges
 the nominal plan but the arm holds at the stop pose instead of replaying it.
+`approach=full_hidden_limit_steering` steers from those hidden limits instead, a ceiling.
 
 ### Bound transfer: do later proposals respect the learned bound?
 
@@ -2843,13 +2858,15 @@ learned terms, candidate label, whether the chooser picked it, violation) and pe
 `probe_NN/menu.npz` (`q_feedback`, `nominal_plan`, `candidate_<label>`) and `oracle_path.npy`;
 `probes.pkl` per task holds the `MenuProbe` records. `analyze_results.py` pools every `menu.csv`
 under its roots into `all_menus.csv` and prints mean menu violation per approach and goal index.
-Today no grounder conditions on the learned cost, so the learning goal changes nothing about the
-menu and the pilot arms skip cost generation: `no_learning` is MDM's unconditioned menu and
+The pilot arms skip cost generation, since nothing they could learn changes their menus:
+`no_learning` is MDM's unconditioned menu and
 `no_learning_cg` (`approach/no_learning_cg.yaml`, classifier guidance from the hidden bounds) its
 known-preference upper bound, at the transfer config's `feedback.uq.steering.guidance_weight` of
 2e5 (in the seed-0 pilot a sixth of steered candidates still violated at the 1e5 default, and doubling
-the weight did not change that fraction). A learning arm (`mdm_language`, `full`) reports the same menus at
-LLM cost; the metric starts moving once steering or filtering from the learned cost is wired in.
+the weight did not change that fraction). Of the learning arms, `full` steers each probe's menu
+with the bounds it learned on the first goal, so it is the arm the metric tests: compare it with
+`no_steering` (the same learning, unsteered menus) and `full_hidden_limit_steering` (the
+hidden-limit ceiling).
 
 ### Grounding metrics on sampled cases
 

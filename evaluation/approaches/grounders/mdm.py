@@ -11,7 +11,6 @@ from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.steering import NoSteering, Steering
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.motion_generators.base import MotionGenerator
-from uncertain_feedback.motion_generators.steering import SteeringSpec
 from uncertain_feedback.planners.mpc.config import MpcRunConfig
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import anchor_q_trajectory
@@ -26,7 +25,8 @@ class MdmGrounder(Grounder):
     ``diffusion_samples``/``n_clusters`` override the planner config's
     ``feedback.uq`` values when set; the steering module always comes from
     the approach's steering axis, so the planner yaml's steering mode is
-    ignored in evaluation (its mechanism knobs still apply).
+    ignored in evaluation (its mechanism knobs still apply). The spec is built
+    at every grounding, so learned steering follows what has been learned.
     """
 
     requires_generator = True
@@ -42,7 +42,7 @@ class MdmGrounder(Grounder):
         # Written by Approach.__init__ from the steering axis.
         self.steering: Steering = NoSteering()
         self._uq_cfg: UqConfig | None = None
-        self._steering_spec: SteeringSpec | None = None
+        self._seed = 0
 
     def reset(
         self,
@@ -62,9 +62,7 @@ class MdmGrounder(Grounder):
             uq = replace(uq, n_clusters=self._n_clusters)
         uq = replace(uq, steering=replace(uq.steering, mode=self.steering.mode))
         self._uq_cfg = uq
-        self._steering_spec = (  # pylint: disable=assignment-from-none
-            self.steering.spec(self.gen, user, uq.steering, seed=seed)
-        )
+        self._seed = seed
 
     def ground(
         self,
@@ -108,7 +106,9 @@ class MdmGrounder(Grounder):
             mdm_frames=feedback.frames,
             default_scale=uq.scale,
             cluster_selector=select,
-            steering=self._steering_spec,
+            steering=self.steering.spec(
+                self.gen, self.user, uq.steering, seed=self._seed
+            ),
         )
         # Scaled here rather than taken from the selector, which scales the raw
         # option; scaling (axis-angle) and anchoring (q) do not commute.

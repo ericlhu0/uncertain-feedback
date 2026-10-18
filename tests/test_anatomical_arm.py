@@ -217,6 +217,7 @@ def test_torch_position_features_match_arm_feature_series() -> None:
     from uncertain_feedback.motion_generators.mdm.torch_features import (
         flexion_elevation,
         shoulder_abduction,
+        shoulder_flexion,
     )
 
     human = Human()
@@ -236,6 +237,11 @@ def test_torch_position_features_match_arm_feature_series() -> None:
     )
     np.testing.assert_allclose(
         abduction.numpy(), expected["shoulder_abduction_adduction"], atol=1e-6
+    )
+    np.testing.assert_allclose(
+        shoulder_flexion(shoulder, elbow).numpy(),
+        expected["shoulder_flexion_extension"],
+        atol=1e-6,
     )
 
 

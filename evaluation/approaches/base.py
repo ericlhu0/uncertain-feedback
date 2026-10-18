@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,9 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import SimulatedUser
+
+# Where an episode leaves what the approach learned (see Approach.save).
+LEARNED_STATE_FILE = "learned_state.json"
 
 
 class Approach:
@@ -62,6 +66,7 @@ class Approach:
         if isinstance(grounder, MdmGrounder):
             grounder.steering = steering
         self._base = CompositeTrajectoryCost()
+        self._resumed_from: Path | None = None
 
     @property
     def requires_generator(self) -> bool:
@@ -81,6 +86,35 @@ class Approach:
         self._base = base_extra_costs(cfg.costs, human, user)
         self.grounder.reset(cfg, gen, user, seed, episode_dir)
         self.cost_gen.reset(cfg, self._base, episode_dir)
+        self._resumed_from = None
+
+    def save(self, path: Path) -> None:
+        """Write everything learned so far to ``path``, for :meth:`load`.
+
+        That is the cost learner's rounds and costs and the grounder's
+        conversation. The rounds' artifacts stay where they were written and
+        are referenced relative to ``path``.
+        """
+        state = {
+            "approach": self.name,
+            "resumed_from": (
+                None if self._resumed_from is None else str(self._resumed_from)
+            ),
+            "cost_gen": self.cost_gen.snapshot(path.parent),
+            "grounder": self.grounder.memory(),
+        }
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def load(self, path: Path) -> None:
+        """Continue from what :meth:`save` wrote; call after :meth:`reset`."""
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if state["approach"] != self.name:
+            raise ValueError(
+                f"{path} holds what {state['approach']!r} learned, not {self.name!r}"
+            )
+        self.cost_gen.restore(state["cost_gen"], path.parent)
+        self.grounder.restore(state["grounder"])
+        self._resumed_from = path.resolve()
 
     def planning_costs(self) -> CompositeTrajectoryCost:
         """Base comfort costs plus whatever has been learned so far."""

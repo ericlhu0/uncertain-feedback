@@ -2689,6 +2689,26 @@ and `initial_rollout.npy`, and per round `goal_NN/round_NN/trajectories.npz`: `q
 their `sample_labels`, so a round can be re-scored later without regenerating. `goals.csv`
 at the run root is the goal table for a quick look.
 
+Each episode also writes `learned_state.json` (`Approach.save`): the cost learner's rounds
+(retired ones included, with the code, params and the round's `state.pkl` each cost is
+recompiled against), the consolidated cost, which round's context it runs in, its bound
+terms and the rounds still stacked on it, and the grounder's conversation history (the LLM
+grounders'). Consolidating approaches (`cost_gen: consolidate`: `full`, `no_steering`,
+`full_hidden_limit_steering`) learn like `immediate` within an episode, each accepted round's
+cost stacked onto the consolidated one, and consolidate once when the episode ends,
+before saving (`Approach.consolidate`): one Codex combination over every round into
+`<episode>/combine/`, or none when a single round was learned. If it fails, the stacked
+costs stay in the saved state. Runs from before 2026-10-16 07:00 combined after every
+round instead (and before that day's Landlock fix, the combination never ran on
+bhattacharjee-compute-02). Its paths are relative to the file, so
+a run dir can move as long as the runs it resumed from move with it. To carry a run on,
+rerun the same approach, benchmark and tasks with `resume_from=<that run dir>`: each episode
+first loads `<resume_from>/task_NN_<persona>_<verbalizer>/learned_state.json`
+(`Approach.load`, after `reset`) and fails if it is missing, then plays its goals with what
+was learned there. Its own `learned_state.json` then holds both runs' rounds and names the
+file it resumed from in `resumed_from`. Only the learning carries over; the arm starts the
+task's goals afresh.
+
 **On procedurally generated scenarios.** `benchmark/procedural.yaml`
 (`ScenarioBenchmark`, `evaluation/benchmarks/scenarios.py`) replaces the persona list with a
 scenario directory written by `generate_scenarios.py` (see *Generate informative correction

@@ -20,6 +20,11 @@ Every arm plans on the person the config describes (its ``pose:`` body with the
 Each task's episode lands in ``task_NN_<persona>_<verbalizer>/`` under the hydra
 run dir with its ``interactions.pkl``; ``goals.csv`` at the run root is the goal
 table for a quick look. Aggregate runs with ``analyze_results.py``.
+
+Each episode also leaves ``learned_state.json``, what the approach learned. To
+carry on from there, rerun with the same approach, benchmark and tasks plus
+``resume_from=<that run dir>``: each episode starts with what its namesake in
+that run had learned instead of from nothing.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
-from evaluation.approaches.base import Approach
+from evaluation.approaches.base import LEARNED_STATE_FILE, Approach
 from evaluation.benchmarks.base import Benchmark
 from evaluation.benchmarks.episode import run_episode
 from evaluation.benchmarks.structs import Interaction
@@ -112,12 +117,22 @@ def _run(cfg: DictConfig) -> None:
         print(f"[evaluation] no tasks selected for {out_dir}")
         return
 
+    # Repo-root relative like mpc_config: the generator's loader moved the cwd.
+    resume_from = None if cfg.resume_from is None else _REPO_ROOT / cfg.resume_from
     interactions: list[Interaction] = []
     for task_id in task_ids:
         task = tasks[task_id]
         user = task.user if task.user is not None else get_persona(task.persona)
         episode_dir = out_dir / f"task_{task_id:02d}_{task.persona}_{task.verbalizer}"
         approach.reset(run_cfg, human, gen, user, task.seed, episode_dir)
+        if resume_from is not None:
+            learned = resume_from / episode_dir.name / LEARNED_STATE_FILE
+            if not learned.exists():
+                raise FileNotFoundError(
+                    f"nothing to resume {episode_dir.name} from: {learned}"
+                )
+            approach.load(learned)
+            logging.info("%s resumes from %s", episode_dir.name, learned)
         interactions.extend(
             run_episode(run_cfg, human, user, task, approach, episode_dir)
         )

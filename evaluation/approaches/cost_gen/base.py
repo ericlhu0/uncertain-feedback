@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import abc
+import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from evaluation.approaches.cost_gen.bounds import (
     admissible_bounds,
@@ -28,6 +29,24 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.simulated_users.base import Bound
 
 COST_GEN_SOURCES = ("chosen", "nominal")
+
+
+def _move_paths(data: dict[str, Any], move: Callable[[str], str]) -> dict[str, Any]:
+    """A :meth:`CostRound.to_json` record with ``move`` applied to its paths."""
+    return {
+        **data,
+        "round_dir": move(data["round_dir"]),
+        "state_path": move(data["state_path"]),
+        "image_paths": [move(path) for path in data["image_paths"]],
+    }
+
+
+def _round_cost(round_: CostRound) -> GeneratedPythonCost:
+    """Recompile a round's cost against the context it was generated in."""
+    context = EvalState.load(round_.state_path).make_generated_context()
+    return GeneratedPythonCost(
+        round_.cost_code, round_.params, context, round_.description
+    )
 
 
 class CostGen(abc.ABC):
@@ -57,6 +76,30 @@ class CostGen(abc.ABC):
         self._episode_dir = episode_dir
         self._generated = []
         self._cost_rounds = []
+
+    def snapshot(self, root: Path) -> dict[str, Any]:
+        """What has been learned so far, as JSON, for :meth:`restore`.
+
+        Every round's record, retired ones included; the costs are recompiled
+        from them. Artifact paths are relative to ``root``, where the snapshot
+        is written, so runs can move together.
+        """
+        return {
+            "rounds": [
+                _move_paths(round_.to_json(), lambda path: os.path.relpath(path, root))
+                for round_ in self._cost_rounds
+            ]
+        }
+
+    def restore(self, snapshot: dict[str, Any], root: Path) -> None:
+        """Pick up where a :meth:`snapshot` left off; call after :meth:`reset`."""
+        self._cost_rounds = [
+            CostRound.from_json(
+                _move_paths(data, lambda path: str((root / path).resolve()))
+            )
+            for data in snapshot["rounds"]
+        ]
+        self._generated = [_round_cost(round_) for round_ in self._cost_rounds]
 
     @abc.abstractmethod
     def learned_terms(self) -> list[GeneratedPythonCost]:

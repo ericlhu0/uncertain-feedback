@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -89,6 +89,14 @@ class Grounder(abc.ABC):
         self._user = user
         self._episode_dir = episode_dir
         self._history = []
+
+    def memory(self) -> dict[str, Any]:
+        """What this grounder carries between rounds, as JSON, for :meth:`restore`."""
+        return {"history": list(self._history)}
+
+    def restore(self, memory: dict[str, Any]) -> None:
+        """Pick up where :meth:`memory` left off; call after :meth:`reset`."""
+        self._history = list(memory["history"])
 
     def begin_goal(self, goal: GoalRegion, oracle_path: np.ndarray) -> None:
         """Called once per goal before any round; the oracle grounder reads it."""

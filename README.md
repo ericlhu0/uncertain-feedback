@@ -1243,12 +1243,19 @@ or rejects it and gives a correction:
   pause cannot be resumed with Ignore + continue.
 - **The `evaluation/` episode loop** stops a stalled rollout
   (`rollout_to_goal(..., stop_on_stall=True)`) and lets the persona judge the
-  proposal the same way. Approved, the arm follows it and the goal resolves;
-  rejected, the next round starts from the stall pose with the proposal as its
-  nominal plan, so the correction is attributed against it. The round records
-  `proposal_rejected` (and so is not `resolved`), and a goal finished by an
-  approved proposal records `proposal_approved`. Without `cartesian.stall` the
-  loop behaves as before. `evaluation/run_experiment.py` adds `cartesian.stall`
+  proposal the same way. It offers one only if leaving the costs out brings
+  the arm closer to the goal (by `cartesian.stall.min_gain`); otherwise no
+  learned cost is what holds it back and the goal ends `goal_not_reached`.
+  Approved, the arm follows it and then replans to the goal under every
+  learned cost, so the goal goes on: it can reach the goal, trigger the next
+  round, or stall again (at most `max_rounds` approvals per goal). Rejected,
+  the next round starts from the stall pose with the proposal as its nominal
+  plan, so the correction is attributed against it. The round records
+  `proposal_rejected` (and so is not `resolved`) and its `approvals`; its
+  `continuation` runs through any approved proposals and the replans after
+  them. The goal records `approvals` and `approved_spans`, the `executed`
+  frames spent following them. Without `cartesian.stall` the loop behaves as
+  before. `evaluation/run_experiment.py` adds `cartesian.stall`
   (defaults) to every `mpc_config` unless it sets its own; pass
   `goal_stall=false` to reproduce runs from before 2026-10-06.
 
@@ -2585,19 +2592,33 @@ learning outcome, the executed correction and the continuation with its re-trigg
 Every metric function takes that object. `evaluation/metrics/cost_learning/rows.py`
 flattens it: `round_rows` gives one record per feedback round (`resolved` = no
 re-trigger and no rejected stall proposal), `goal_row` one per goal
-(`result`, `resolved`, `reached`, `rounds_used`, `proposal_approved`, executed violation;
-a goal that hit the round cap keeps the cap as its count), `episode_summary` the episode
-record. `success.py`
+(`result`, `resolved`, `reached`, `rounds_used`, `approvals`, `user_turns`,
+`proposal_approved`, `violation_count`, executed mean/max violation, `motion_steps`,
+`robot_seconds`; a goal that hit the round cap keeps the cap as its count), `episode_summary`
+the episode record. `violation_count` is how many times the arm went past the persona's
+limits by the trigger threshold (`Interaction.trigger_threshold`): planned motion stops at its
+first crossing for feedback, so the motion before feedback and each round's continuation
+cross at most once (a turned-down stall proposal is not a crossing), while a correction runs
+whole and each separate crossing inside it counts. `motion_steps` is the frames
+the arm moved through for the goal, its time to complete it when `reached`; `robot_seconds`
+is the wall-clock time the robot spent planning, grounding and learning (the oracle and the
+persona's verbalization are not counted; per round it is `plan_seconds`, `ground_seconds`
+and `learn_seconds`). `success.py`
 takes a list of interactions, pooled across episodes and runs. The primary metric is
-**success at k** (`success_at_k`): the fraction of goals resolved within `k` feedback rounds,
-for `k = 0..max_rounds`. `k = 0` is the zero-shot case, the goal completed with no feedback,
+**success at k** (`success_at_k`): the fraction of goals resolved within `k` user turns,
+where a turn is a feedback round or an approved stall proposal (`user_turns`; a rejection is
+answered by the next round's correction, so it is already a round). `analyze_results.py`
+runs `k` to the larger of `max_rounds` and the most turns any goal took, since approvals
+can take a goal past `max_rounds`. `k = 0` is the zero-shot case, the goal completed with no feedback,
 which is what a cost learned on an earlier goal buys on a later one; a capped or stalled goal
 never counts at any `k`, so failures need no sentinel value. The resolve rate is success at
 the cap and the zero-shot rate success at `k = 0`; group with `by=("approach", "goal_index")`
 for the transfer view. `goal_table` gives the raw goal rows, whose `result` column separates
 `capped` from `goal_not_reached`, the signature of an over-conservative learned cost.
 A goal resolved by following an approved stall proposal (see *Goal stalls*) counts as
-resolved; filter on `proposal_approved` to see how much of a curve that is.
+resolved, at the cost of that turn; filter on `proposal_approved` to see how much of a curve
+that is. Pickles from before approvals were counted read back with one approval when
+`proposal_approved` was set (those episodes ended at their first approval).
 
 Each episode pickles its interactions to `interactions.pkl`, and
 
@@ -2606,6 +2627,8 @@ uv run python evaluation/analyze_results.py outputs/ multirun/ --out analysis/
 ```
 
 pools every one under the roots and writes `all_goals.csv`, `all_rounds.csv`,
+`summary.csv` (per approach: mean success, user turns, violation count, executed mean
+violation and robot seconds, and mean `motion_steps` over the goals reached),
 `goal_results.csv` (result breakdown per approach; goals finished by an approved stall
 proposal get their own `<result>_via_proposal` columns), `success_at_k.csv` / `.png` (one line per
 approach), and, when the runs have goal sequences, `success_at_k_by_goal.csv` and

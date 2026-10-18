@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pickle
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
     base_extra_costs,
 )
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import (
     StallProposal,
@@ -81,9 +82,10 @@ def _save_round_trajectories(
     )
 
 
-def _stall_proposal(
+def _stall_proposal(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     cfg: MpcRunConfig,
     at: Human,
+    goal: GoalRegion,
     costs: CompositeTrajectoryCost,
     user: SimulatedUser,
     threshold: float,
@@ -93,18 +95,121 @@ def _stall_proposal(
 
     The persona approves it when it stays under the trigger threshold, the same
     test the chooser applies to candidate corrections. ``None`` when there is no
-    learned cost to leave out.
+    learned cost to leave out, or when leaving them out brings the arm no
+    closer to the goal (by ``cartesian.stall.min_gain``): then no learned cost
+    is what holds it back, and there is nothing worth asking about.
     """
+    assert cfg.cartesian is not None and cfg.cartesian.stall is not None
     proposed = propose_unblocked_path(cfg, at, costs)
     if proposed is None:
         return None
-    approved = first_violation_step(user, at, proposed.human.history, threshold) is None
+    path = proposed.human.history
+    here = goal_reach(at, cfg, at.q[None], goal)["distance"]
+    there = goal_reach(at, cfg, path, goal)
+    if not there["reached"] and here - there["distance"] < cfg.cartesian.stall.min_gain:
+        print(
+            f"{_LOG} {label} stalled; leaving out the learned costs gets no closer "
+            f"to the goal ({here:.4f} -> {there['distance']:.4f}), nothing proposed",
+            flush=True,
+        )
+        return None
+    approved = first_violation_step(user, at, path, threshold) is None
     print(
         f"{_LOG} {label} stalled; proposal leaving out {len(proposed.dropped)} "
         f"learned cost(s) {'approved' if approved else 'rejected'}",
         flush=True,
     )
     return proposed, approved
+
+
+@dataclass(frozen=True)
+class _Motion:
+    """The arm's way toward the goal from one pose until it needs the persona.
+
+    ``path`` starts at that pose: replans under every learned cost, with each
+    stall proposal the persona approved followed in between
+    (``approved_spans``, inclusive frame ranges of ``path``). It ends at
+    ``trigger`` (its first frame over the threshold), at the goal
+    (``reached``), at a stall with nothing to propose, or at a stall whose
+    proposal the persona turned down (``rejected``).
+    """
+
+    path: np.ndarray
+    trigger: int | None
+    reached: bool
+    approved_spans: tuple[tuple[int, int], ...]
+    rejected: StallProposal | None
+
+
+def _move_to_goal(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: MpcRunConfig,
+    start: Human,
+    goal: GoalRegion,
+    approach: Approach,
+    user: SimulatedUser,
+    approvals_left: int,
+    label: str,
+) -> _Motion:
+    """Replan to the goal under the learned costs, past any approved stalls.
+
+    A stall short of the goal gets a proposal when ``cartesian.stall`` is set
+    (:func:`_stall_proposal`); the arm follows an approved one and replans from
+    its end under every learned cost, so the goal goes on. At most
+    ``approvals_left`` proposals are approved, so a goal the planner keeps
+    stalling on still ends.
+    """
+    assert cfg.cartesian is not None
+    threshold = cfg.corrections.trigger_threshold
+    path = start.q[None]
+    at = start
+    spans: list[tuple[int, int]] = []
+    while True:
+        segment = rollout_to_goal(
+            cfg,
+            at,
+            goal,
+            approach.planning_costs(),
+            stop_on_stall=True,
+            progress_label=f"{label} after approval {len(spans)}" if spans else label,
+            log_prefix=_LOG,
+        ).history
+        trigger = first_violation_step(user, at, segment, threshold)
+        offset = len(path) - 1
+        path = np.concatenate([path, segment[1:]])
+        if trigger is not None:
+            return _Motion(path, offset + trigger, False, tuple(spans), None)
+        at = at.step(segment[1:])
+        if goal_reach(at, cfg, segment, goal)["reached"]:
+            return _Motion(path, None, True, tuple(spans), None)
+        offer = (
+            _stall_proposal(
+                cfg, at, goal, approach.planning_costs(), user, threshold, label
+            )
+            if cfg.cartesian.stall is not None and len(spans) < approvals_left
+            else None
+        )
+        if offer is None:
+            return _Motion(path, None, False, tuple(spans), None)
+        proposal, approved = offer
+        if not approved:
+            return _Motion(path, None, False, tuple(spans), proposal)
+        followed = proposal.human.history
+        spans.append((len(path) - 1, len(path) + len(followed) - 2))
+        path = np.concatenate([path, followed[1:]])
+        at = at.step(followed[1:])
+        if goal_reach(at, cfg, followed, goal)["reached"]:
+            return _Motion(path, None, True, tuple(spans), None)
+
+
+def _executed_spans(
+    spans: tuple[tuple[int, int], ...], offset: int, last: int
+) -> list[tuple[int, int]]:
+    """A motion's approved spans as ``executed`` frames, its path cut at ``last``."""
+    return [
+        (offset + start, offset + min(end, last))
+        for start, end in spans
+        if start < last
+    ]
 
 
 def _episode_summary(interactions: list[Interaction]) -> dict[str, Any]:
@@ -121,6 +226,10 @@ def _episode_summary(interactions: list[Interaction]) -> dict[str, Any]:
         "goals": [repr(goal) for goal in first.task.goals],
         "goal_results": [goal_row(item) for item in interactions],
         "feedback_events": sum(item.rounds_used for item in interactions),
+        "approvals": sum(item.approvals for item in interactions),
+        "user_turns": sum(item.user_turns for item in interactions),
+        "violation_count": sum(item.violation_count for item in interactions),
+        "robot_seconds": sum(item.robot_seconds for item in interactions),
         "all_goals_resolved": all(item.resolved for item in interactions),
         "all_goals_reached": all(item.reached for item in interactions),
         "executed_metrics": {
@@ -150,15 +259,17 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     the goal sequence, so later goals measure accumulated personalization.
 
     With ``cartesian.stall`` set, a rollout that stalls short of the goal gets a
-    proposal (the path with the blocking learned costs left out): the persona
-    approves it and the arm follows it, or rejects it and the next round
-    corrects it, with the proposal as that round's nominal plan; once that
-    round's cost is learned, the left-out costs are retired
-    (:meth:`CostGen.retire`), their rounds kept for consolidation.
+    proposal (the path with the blocking learned costs left out) if that gets
+    it closer to the goal. The persona approves it and the arm follows it, then
+    goes on toward the goal under every learned cost (at most ``max_rounds``
+    approvals per goal); or rejects it and the next round corrects it, with the
+    proposal as that round's nominal plan; once that round's cost is learned,
+    the left-out costs are retired (:meth:`CostGen.retire`), their rounds kept
+    for consolidation.
 
     Returns one :class:`Interaction` per goal, the record every metric reads,
     and pickles the list to ``interactions.pkl`` for ``analyze_results.py``;
-    ``episode_summary.json`` and ``executed.npy`` are written alongside, each
+    ``episode_summary.json`` and ``executed.npy`` are written alongside; each
     goal's ``oracle_path.npy`` / ``initial_rollout.npy`` under ``goal_NN/`` and
     every round's ``trajectories.npz`` under ``goal_NN/round_NN/``.
     """
@@ -177,7 +288,6 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
         human.q if task.start_q is None else task.start_q, dtype=np.float64
     )
     chooser_rng = np.random.default_rng(task.seed)
-    propose = cfg.cartesian.stall is not None
 
     for goal_index, task_goal in enumerate(task.goals):
         # Start-relative goals anchor here, not on each replan's start.
@@ -203,47 +313,32 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             task, cfg, human, oracle_path, episode_key, goal_dir / "visual_cache"
         )
 
-        rolled = rollout_to_goal(
+        start = human.reset_human_with_q(q_current)
+        plan_t0 = time.perf_counter()
+        before = _move_to_goal(
             goal_cfg,
-            human.reset_human_with_q(q_current),
+            start,
             goal,
-            approach.planning_costs(),
-            stop_on_stall=True,
-            progress_label=f"{task.persona} goal {goal_index} rollout",
-            log_prefix=_LOG,
+            approach,
+            user,
+            task.max_rounds,
+            f"{task.persona} goal {goal_index} rollout",
         )
-        rollout = rolled.history
+        plan_seconds = time.perf_counter() - plan_t0
+        rollout = before.path
         np.save(goal_dir / "initial_rollout.npy", rollout)
-        trigger = first_violation_step(user, human, rollout, threshold)
+        trigger = before.trigger
+        approvals = len(before.approved_spans)
         rounds: list[FeedbackRound] = []
         pending_plan: np.ndarray | None = None
         # Left out by a rejected proposal; deleted once the correction that
         # follows has been learned, their rounds kept for consolidation.
         pending_retire: tuple[GeneratedPythonCost, ...] = ()
-        proposal_approved = False
-        offer = (
-            _stall_proposal(
-                goal_cfg,
-                rolled,
-                approach.planning_costs(),
-                user,
-                threshold,
-                f"{task.persona} goal {goal_index} rollout",
-            )
-            if trigger is None
-            and propose
-            and not goal_reach(human, goal_cfg, rollout, goal)["reached"]
-            else None
-        )
-        if offer is not None and offer[1]:
-            rolled = rolled.step(offer[0].human.history[1:])
-            proposal_approved = True
-        elif offer is not None:
+        if before.rejected is not None:
             trigger = len(rollout) - 1
-            pending_plan = offer[0].human.history
-            pending_retire = offer[0].dropped
+            pending_plan = before.rejected.human.history
+            pending_retire = before.rejected.dropped
         if trigger is None:
-            reach = goal_reach(human, goal_cfg, rolled.history, goal)
             interactions.append(
                 Interaction(
                     task=task,
@@ -256,17 +351,22 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     initial_rollout=rollout,
                     trigger_step=None,
                     rounds=(),
-                    result="no_violation",
-                    reached=bool(reach["reached"]),
-                    executed=rolled.history,
-                    proposal_approved=proposal_approved,
+                    result="no_violation" if before.reached else "goal_not_reached",
+                    reached=before.reached,
+                    executed=rollout,
+                    approvals=approvals,
+                    approved_spans=before.approved_spans,
+                    plan_seconds=plan_seconds,
+                    trigger_threshold=threshold,
                 )
             )
-            q_current = rolled.q
+            q_current = rollout[-1]
             continue
 
         # The executed motion so far; its last frame is where feedback is given.
-        executed = rolled.rewind(feedback_anchor(user, human, rollout, trigger))
+        anchor = feedback_anchor(user, human, rollout, trigger)
+        executed = start.step(rollout[1 : anchor + 1])
+        approved_spans = _executed_spans(before.approved_spans, 0, anchor)
         min_join = 0
         result = "capped"
         reached = False
@@ -276,6 +376,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             round_dir.mkdir(parents=True, exist_ok=True)
             at_feedback = executed
             q_feedback = at_feedback.q
+            round_plan_t0 = time.perf_counter()
             if pending_plan is not None:
                 nominal_plan, pending_plan = pending_plan, None
             else:
@@ -288,6 +389,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     stop_at_goal=False,
                     log_prefix=_LOG,
                 ).history
+            round_plan_seconds = time.perf_counter() - round_plan_t0
             intent = attribute_correction(
                 oracle_path, nominal_plan, q_feedback, human, min_join=min_join
             )
@@ -354,19 +456,19 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             correction_q = canonical_arm_q(grounding.correction_traj, human)
             executed = executed.step(correction_q[1:])
 
-            continuation = rollout_to_goal(
+            round_plan_t0 = time.perf_counter()
+            after = _move_to_goal(
                 goal_cfg,
                 executed,
                 goal,
-                approach.planning_costs(),
-                stop_on_stall=True,
-                progress_label=(
-                    f"{task.persona} goal {goal_index} round {round_index} "
-                    "continuation"
-                ),
-                log_prefix=_LOG,
-            ).history
-            retrigger = first_violation_step(user, human, continuation, threshold)
+                approach,
+                user,
+                task.max_rounds - approvals,
+                f"{task.persona} goal {goal_index} round {round_index} continuation",
+            )
+            round_plan_seconds += time.perf_counter() - round_plan_t0
+            continuation = after.path
+            approvals += len(after.approved_spans)
             _save_round_trajectories(
                 round_dir,
                 q_feedback,
@@ -376,25 +478,6 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 continuation,
             )
             grounding = replace(grounding, samples=None, sample_labels=None)
-
-            stalled_at = (
-                None if retrigger is not None else executed.step(continuation[1:])
-            )
-            reached = stalled_at is not None and bool(
-                goal_reach(human, goal_cfg, continuation, goal)["reached"]
-            )
-            offer = (
-                _stall_proposal(
-                    goal_cfg,
-                    stalled_at,
-                    approach.planning_costs(),
-                    user,
-                    threshold,
-                    f"{task.persona} goal {goal_index} round {round_index}",
-                )
-                if stalled_at is not None and not reached and propose
-                else None
-            )
 
             rounds.append(
                 FeedbackRound(
@@ -410,32 +493,37 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     outcome=outcome,
                     correction_q=correction_q,
                     continuation=continuation,
-                    retrigger_step=retrigger,
+                    retrigger_step=after.trigger,
                     ground_seconds=ground_seconds,
                     learn_seconds=learn_seconds,
-                    proposal_rejected=offer is not None and not offer[1],
+                    proposal_rejected=after.rejected is not None,
+                    approvals=len(after.approved_spans),
+                    plan_seconds=round_plan_seconds,
                 )
             )
             event_index += 1
 
-            if stalled_at is None:
-                assert retrigger is not None
-                feedback_step = feedback_anchor(user, human, continuation, retrigger)
+            offset = len(executed.history) - 1
+            if after.trigger is not None:
+                feedback_step = feedback_anchor(
+                    user, human, continuation, after.trigger
+                )
+                approved_spans += _executed_spans(
+                    after.approved_spans, offset, feedback_step
+                )
                 executed = executed.step(continuation[1 : feedback_step + 1])
                 min_join = intent.join_index
                 continue
-            executed = stalled_at
-            if offer is not None and not offer[1]:
-                pending_plan = offer[0].human.history
-                pending_retire = offer[0].dropped
+            approved_spans += _executed_spans(
+                after.approved_spans, offset, len(continuation) - 1
+            )
+            executed = executed.step(continuation[1:])
+            if after.rejected is not None:
+                pending_plan = after.rejected.human.history
+                pending_retire = after.rejected.dropped
                 min_join = intent.join_index
                 continue
-            if offer is not None:
-                executed = executed.step(offer[0].human.history[1:])
-                reached = bool(
-                    goal_reach(human, goal_cfg, offer[0].human.history, goal)["reached"]
-                )
-                proposal_approved = True
+            reached = after.reached
             result = "ok" if reached else "goal_not_reached"
             break
 
@@ -455,7 +543,11 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 result=result,
                 reached=reached,
                 executed=executed.history,
-                proposal_approved=proposal_approved,
+                approvals=approvals,
+                approved_spans=tuple(approved_spans),
+                stall_rejected=before.rejected is not None,
+                plan_seconds=plan_seconds,
+                trigger_threshold=threshold,
             )
         )
 

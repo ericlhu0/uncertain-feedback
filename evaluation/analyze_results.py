@@ -3,8 +3,11 @@
 uv run python evaluation/analyze_results.py outputs/ multirun/ --out analysis/
 
 Loads every ``interactions.pkl`` an episode wrote under the roots and runs the
-cost-learning metric on the pooled :class:`Interaction` list: success within k
-feedback rounds per approach and, for goal sequences, per goal index; the
+cost-learning metric on the pooled :class:`Interaction` list: per approach, the
+mean success, user turns, violation count, executed violation, robot time and
+motion time to the goal (``summary.csv``); success within k
+user turns (feedback rounds plus approved stall proposals) per approach and,
+for goal sequences, per goal index; the
 breakdown of goal results; per-round grounding quality against feedback events.
 Every ``menu.csv`` a bound-transfer run wrote is pooled into ``all_menus.csv``
 with mean menu violation per approach and goal index.
@@ -48,7 +51,7 @@ def _plot_success_at_k(curve: pd.DataFrame, path: Path) -> None:
     fig, axis = plt.subplots(figsize=(5.5, 4))
     for approach, group in curve.groupby("approach"):
         axis.plot(group["k"], group["success"], marker="o", label=str(approach))
-    axis.set_xlabel("feedback rounds k")
+    axis.set_xlabel("user turns k (feedback rounds + approvals)")
     axis.set_xticks(sorted(curve["k"].unique()))
     axis.set_ylabel("fraction of goals resolved within k")
     axis.set_ylim(0, 1.02)
@@ -62,7 +65,7 @@ def _plot_by_goal(curve: pd.DataFrame, max_k: int, path: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     for axis, k, label in (
         (axes[0], 0, "zero-shot success (no feedback)"),
-        (axes[1], max_k, f"success within {max_k} rounds"),
+        (axes[1], max_k, f"success within {max_k} turns"),
     ):
         at_k = curve[curve["k"] == k]
         for approach, group in at_k.groupby("approach"):
@@ -117,7 +120,25 @@ def main() -> None:
     results.to_csv(args.out / "goal_results.csv")
     print(results.to_string())
 
-    max_k = max(item.task.max_rounds for item in interactions)
+    # Per-goal means per approach; time to complete only counts goals reached.
+    summary = goals.groupby("approach").agg(
+        success=("resolved", "mean"),
+        user_turns=("user_turns", "mean"),
+        violation_count=("violation_count", "mean"),
+        executed_mean_violation=("executed_mean_violation", "mean"),
+        robot_seconds=("robot_seconds", "mean"),
+    )
+    summary["motion_steps_when_reached"] = (
+        goals[goals["reached"]].groupby("approach")["motion_steps"].mean()
+    )
+    summary.to_csv(args.out / "summary.csv")
+    print(summary.to_string())
+
+    # Approvals count as turns too, so a goal can resolve past max_rounds.
+    max_k = max(
+        max(item.task.max_rounds for item in interactions),
+        max(item.user_turns for item in interactions),
+    )
     curve = success_at_k(interactions, max_k)
     curve.to_csv(args.out / "success_at_k.csv", index=False)
     print(curve.pivot(index="k", columns="approach", values="success").to_string())

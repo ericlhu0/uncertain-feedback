@@ -68,6 +68,50 @@ class ConsolidateCostGen(CostGen):
             self._bounds = self._admissible(terms)
         return self._bounds
 
+    def snapshot(self, root: Path) -> dict[str, Any]:
+        snapshot = super().snapshot(root)
+        unified = self._unified
+        snapshot["unified"] = (
+            None
+            if unified is None
+            else {
+                "code": unified.code,
+                "params": unified.params,
+                "description": unified.description,
+                # It runs in the context of the round that installed it.
+                "round": next(
+                    (
+                        i
+                        for i, cost in enumerate(self._generated)
+                        if cost.context is unified.context
+                    ),
+                    len(self._generated) - 1,
+                ),
+                "terms": self._unified_terms,
+            }
+        )
+        snapshot["pending"] = list(self._pending)
+        return snapshot
+
+    def restore(self, snapshot: dict[str, Any], root: Path) -> None:
+        super().restore(snapshot, root)
+        # Snapshots from before consolidation moved between attempts carry
+        # neither pending rounds nor bound terms.
+        self._pending = list(snapshot.get("pending", []))
+        unified = snapshot["unified"]
+        if unified is None:
+            self._install(None, [])
+            return
+        self._install(
+            GeneratedPythonCost(
+                unified["code"],
+                dict(unified["params"]),
+                self._generated[unified["round"]].context,
+                unified["description"],
+            ),
+            unified.get("terms", []),
+        )
+
     def learned_terms(self) -> list[GeneratedPythonCost]:
         unified = [self._unified] if self._unified is not None else []
         return unified + [self._generated[i] for i in self._stacked()]

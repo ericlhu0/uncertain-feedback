@@ -175,6 +175,58 @@ def test_terms_become_bounds_and_inadmissible_ones_are_dropped() -> None:
     assert not admissible_bounds([upper], flipped)
 
 
+def test_learned_bounds_follow_each_round_and_survive_save_load(
+    tmp_path: Path, monkeypatch
+) -> None:
+    human = Human()
+    straight, bent = _elbow_flexion(human, 0.3), _elbow_flexion(human, 1.2)
+    threshold = 0.5 * (straight + bent)
+    terms = [
+        {
+            "feature": "elbow_flexion",
+            "bound_type": "upper_bound",
+            "values": {"threshold": threshold},
+        }
+    ]
+    cost_gen = ConsolidateCostGen()
+    steering = LearnedSteering()
+    approach = Approach("full", MdmGrounder(), cost_gen, steering)
+    assert not steering.learned_bounds()
+
+    _learn_round(cost_gen, tmp_path, terms, _state(human, 0.3, 1.2))
+    learned = HiddenBound("elbow_flexion", "upper_bound", high=threshold)
+    assert steering.learned_bounds() == (learned,)
+
+    # Within the attempt a second round stacks, bounds included.
+    looser = [{**terms[0], "values": {"threshold": threshold + 0.02}}]
+    _learn_round(cost_gen, tmp_path, looser, _state(human, 0.3, 1.2))
+    stacked = HiddenBound("elbow_flexion", "upper_bound", high=threshold + 0.02)
+    assert steering.learned_bounds() == (learned, stacked)
+    assert len(cost_gen.learned_terms()) == 2
+
+    # A failed consolidation leaves the stack planning.
+    monkeypatch.setattr(cost_gen, "_combine", lambda: None)
+    cost_gen.consolidate()
+    assert len(cost_gen.learned_terms()) == 2
+
+    # A combination's own terms replace both rounds'.
+    combined_terms = [{**terms[0], "values": {"threshold": threshold + 0.01}}]
+    monkeypatch.setattr(
+        cost_gen, "_combine", lambda: (cost_gen._generated[-1], combined_terms)
+    )
+    cost_gen.consolidate()
+    combined = (HiddenBound("elbow_flexion", "upper_bound", high=threshold + 0.01),)
+    assert steering.learned_bounds() == combined
+    assert len(cost_gen.learned_terms()) == 1
+
+    snapshot = json.loads(json.dumps(cost_gen.snapshot(tmp_path)))
+    resumed = Approach("full", MdmGrounder(), ConsolidateCostGen(), LearnedSteering())
+    resumed.cost_gen.restore(snapshot, tmp_path)
+    assert resumed.steering.learned_bounds() == combined  # type: ignore[attr-defined]
+    assert len(resumed.cost_gen.learned_terms()) == 1
+    assert approach.cost_gen is cost_gen
+
+
 def test_immediate_learning_steers_from_its_stacked_rounds(tmp_path: Path) -> None:
     human = Human()
     straight, bent = _elbow_flexion(human, 0.3), _elbow_flexion(human, 1.2)

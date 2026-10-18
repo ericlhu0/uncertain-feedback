@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from evaluation.approaches.base import Approach
+from evaluation.approaches.base import LEARNED_STATE_FILE, Approach
 from evaluation.approaches.cost_gen.structs import RoundContext
 from evaluation.benchmarks.structs import FeedbackRound, Interaction, InteractionTask
 from evaluation.benchmarks.verbalize import bind_verbalizer
@@ -269,7 +269,10 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 
     Returns one :class:`Interaction` per goal, the record every metric reads,
     and pickles the list to ``interactions.pkl`` for ``analyze_results.py``;
-    ``episode_summary.json`` and ``executed.npy`` are written alongside; each
+    ``episode_summary.json`` and ``executed.npy`` are written alongside, as is
+    ``learned_state.json``, what the approach learned once it has consolidated
+    (:meth:`Approach.consolidate`, :meth:`Approach.save`), which a later run
+    resumes from with ``resume_from``; each
     goal's ``oracle_path.npy`` / ``initial_rollout.npy`` under ``goal_NN/`` and
     every round's ``trajectories.npz`` under ``goal_NN/round_NN/``.
     """
@@ -561,6 +564,8 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     _write_json(episode_dir / "episode_summary.json", summary)
     with open(episode_dir / "interactions.pkl", "wb") as file:
         pickle.dump(interactions, file)
-    # The attempt is over: the slow lifelong update runs now.
+    # The attempt is over: the slow lifelong update runs before its learned
+    # state is saved for the next attempt.
     approach.consolidate()
+    approach.save(episode_dir / LEARNED_STATE_FILE)
     return interactions

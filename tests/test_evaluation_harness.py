@@ -1,6 +1,8 @@
 """Smoke tests for the evaluation harness (benchmarks x approaches x episode)."""
 
+import json
 import pickle
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ from evaluation.approaches import (
     LlmKeypointGrounder,
     NoCostGen,
 )
+from evaluation.approaches.base import LEARNED_STATE_FILE
 from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from evaluation.benchmarks import episode as episode_module
 from evaluation.benchmarks import structs as structs_module
@@ -24,6 +27,7 @@ from evaluation.benchmarks.episode import _Motion, _move_to_goal, run_episode
 from evaluation.benchmarks.structs import Interaction, InteractionTask, crossings
 from evaluation.metrics.cost_learning.success import success_at_k
 from uncertain_feedback.cost_generation import CostRound
+from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.planners.mpc import rollout as rollout_module
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.costs import (
@@ -157,6 +161,7 @@ def test_stalled_rollout_follows_an_approved_proposal(tmp_path: Path) -> None:
     assert interaction.violation_count == 0
     assert interaction.motion_steps == len(interaction.executed) - 1
     assert 0.0 < interaction.robot_seconds < np.inf
+    assert (tmp_path / "episode" / LEARNED_STATE_FILE).exists()
 
 
 def _line_world(
@@ -396,7 +401,6 @@ def test_consolidation_sees_the_retired_round_note(tmp_path: Path, monkeypatch) 
     )
 
     cost_gen.record(ctx, generation)  # type: ignore[arg-type]
-
     # Until the attempt ends, the correction's own cost plans in place of the
     # retired one.
     assert cost_gen.learned_terms() == [correcting]
@@ -405,6 +409,82 @@ def test_consolidation_sees_the_retired_round_note(tmp_path: Path, monkeypatch) 
 
     assert "bring my hand in" in seen[0].retired and not seen[1].retired
     assert cost_gen.learned_terms() == [combined]
+
+
+def test_a_later_run_resumes_what_an_episode_learned(tmp_path: Path) -> None:
+    """Costs, retired rounds and conversation carry over, even after a move."""
+    cfg = replace(load_mpc_config(_SMOKE_MPC), seed=0)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
+    user = get_persona("elbow_contracture")
+    episode_dir = tmp_path / "first" / "task_00"
+    # Context-dependent, so a cost recompiled in the wrong round's context shows.
+    code = (
+        "def cost(q_trajs, context, params):\n"
+        "    return params['w'] * np.full(len(q_trajs), np.sum(context.mdm_traj))\n"
+    )
+    costs, rounds = [], []
+    for i in range(2):
+        round_dir = episode_dir / "goal_00" / f"round_{i:02d}"
+        state = EvalState(
+            cfg=cfg,
+            human=human,
+            correction_traj=np.full((3, 3, 3), 0.1 * (i + 1)),
+            window=3,
+            base_extra_costs=CompositeTrajectoryCost(),
+        )
+        state.save(round_dir / "state.pkl")
+        params = {"w": i + 1.0}
+        costs.append(GeneratedPythonCost(code, params, state.make_generated_context()))
+        rounds.append(
+            CostRound(
+                index=i,
+                goal=None,
+                feedback_text=f"round {i}",
+                trigger_step=0,
+                round_dir=round_dir,
+                state_path=round_dir / "state.pkl",
+                cost_code=code,
+                params=params,
+                summaries={},
+                image_paths=(),
+                retired="too strict" if i == 0 else "",
+            )
+        )
+    combined = GeneratedPythonCost(code, {"w": 3.0}, costs[1].context)
+    learner = ConsolidateCostGen()
+    first = Approach("full", BridgePotentialFieldGrounder(), learner)
+    first.reset(cfg, human, None, user, 0, episode_dir)
+    learner._generated, learner._cost_rounds = costs, rounds
+    learner._unified = combined
+    first.grounder._history = ["user: keep my elbow down", "robot: ok"]
+    first.save(episode_dir / LEARNED_STATE_FILE)
+
+    shutil.move(tmp_path / "first", tmp_path / "moved")
+    saved = tmp_path / "moved" / "task_00" / LEARNED_STATE_FILE
+    with pytest.raises(ValueError):
+        Approach("other", BridgePotentialFieldGrounder(), ConsolidateCostGen()).load(
+            saved
+        )
+    later = Approach("full", BridgePotentialFieldGrounder(), ConsolidateCostGen())
+    later.reset(cfg, human, None, user, 0, tmp_path / "later" / "task_00")
+    later.load(saved)
+
+    q_trajs = np.zeros((2, 4, 7))
+    (unified,) = later.cost_gen.learned_terms()
+    np.testing.assert_allclose(unified(q_trajs), combined(q_trajs))
+    restored = later.cost_gen._cost_rounds
+    assert [r.retired for r in restored] == ["too strict", ""]
+    assert all(r.state_path.is_relative_to(tmp_path / "moved") for r in restored)
+    for before, after in zip(costs, later.cost_gen._generated):
+        np.testing.assert_allclose(after(q_trajs), before(q_trajs))
+    assert later.grounder._history == first.grounder._history
+    # The later run's own save records where it came from.
+    (tmp_path / "later" / "task_00").mkdir(parents=True)
+    later.save(tmp_path / "later" / "task_00" / LEARNED_STATE_FILE)
+    state = json.loads(
+        (tmp_path / "later" / "task_00" / LEARNED_STATE_FILE).read_text()
+    )
+    assert state["resumed_from"] == str(saved.resolve())
 
 
 def test_rejected_proposal_becomes_the_next_rounds_plan(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 """Smoke tests for the evaluation harness (benchmarks x approaches x episode)."""
 
+import pickle
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,9 +17,12 @@ from evaluation.approaches import (
     NoCostGen,
 )
 from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
+from evaluation.benchmarks import episode as episode_module
+from evaluation.benchmarks import structs as structs_module
 from evaluation.benchmarks.base import InteractionBenchmark
-from evaluation.benchmarks.episode import run_episode
-from evaluation.benchmarks.structs import Interaction, InteractionTask
+from evaluation.benchmarks.episode import _Motion, _move_to_goal, run_episode
+from evaluation.benchmarks.structs import Interaction, InteractionTask, crossings
+from evaluation.metrics.cost_learning.success import success_at_k
 from uncertain_feedback.cost_generation import CostRound
 from uncertain_feedback.planners.mpc import rollout as rollout_module
 from uncertain_feedback.planners.mpc.config import load_mpc_config
@@ -29,7 +33,10 @@ from uncertain_feedback.planners.mpc.costs import (
 )
 from uncertain_feedback.planners.mpc.goal_spaces import GoalStallConfig, PointRegion
 from uncertain_feedback.planners.mpc.human import Human
-from uncertain_feedback.planners.mpc.rollout import propose_unblocked_path
+from uncertain_feedback.planners.mpc.rollout import (
+    StallProposal,
+    propose_unblocked_path,
+)
 from uncertain_feedback.simulated_users import get_persona
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
@@ -140,7 +147,149 @@ def test_stalled_rollout_follows_an_approved_proposal(tmp_path: Path) -> None:
     assert interaction.result == "no_violation"
     assert interaction.reached
     assert interaction.proposal_approved
-    assert len(interaction.executed) > len(interaction.initial_rollout)
+    np.testing.assert_allclose(interaction.executed, interaction.initial_rollout)
+    ((start, end),) = interaction.approved_spans
+    assert 0 < start < end == len(interaction.executed) - 1
+    # The approval is the persona's one turn: no success without it.
+    assert interaction.approvals == 1 and interaction.user_turns == 1
+    curve = success_at_k([interaction], max_k=1)
+    assert curve.set_index("k")["success"].tolist() == [0.0, 1.0]
+    assert interaction.violation_count == 0
+    assert interaction.motion_steps == len(interaction.executed) - 1
+    assert 0.0 < interaction.robot_seconds < np.inf
+
+
+def _line_world(
+    monkeypatch, replans: list[list[float]], proposals: list[list[float]]
+) -> None:
+    """Script a 1-D world for :func:`_move_to_goal`: the goal is q[0] = 1.
+
+    Each replan and each proposal moves q[0] by its per-step deltas from
+    wherever the arm is; the persona approves every proposal.
+    """
+    replan_steps, proposal_steps = iter(replans), iter(proposals)
+
+    def walk(at: Human, deltas: list[float]) -> Human:
+        frames = at.q + np.outer(np.cumsum(deltas), np.eye(7)[0])
+        return at.reset_human_with_q(at.q).step(frames)
+
+    monkeypatch.setattr(
+        episode_module,
+        "rollout_to_goal",
+        lambda cfg, at, goal, costs, **_: walk(at, next(replan_steps)),
+    )
+    monkeypatch.setattr(
+        episode_module,
+        "propose_unblocked_path",
+        lambda cfg, at, costs: StallProposal(
+            human=walk(at, next(proposal_steps)), dropped=(), reached_goal=False
+        ),
+    )
+    monkeypatch.setattr(
+        episode_module,
+        "goal_reach",
+        lambda human, cfg, rollout, goal: {
+            "reached": rollout[-1][0] >= 1.0 - 1e-9,
+            "distance": max(1.0 - float(rollout[-1][0]), 0.0),
+        },
+    )
+    monkeypatch.setattr(
+        episode_module, "first_violation_step", lambda *args, **kwargs: None
+    )
+
+
+def _line_motion(
+    monkeypatch,
+    replans: list[list[float]],
+    proposals: list[list[float]],
+    approvals_left: int = 3,
+) -> tuple[_Motion, np.ndarray]:
+    cfg = load_mpc_config(_SMOKE_MPC)
+    assert cfg.cartesian is not None
+    cfg = replace(cfg, cartesian=replace(cfg.cartesian, stall=GoalStallConfig()))
+    start = Human().reset_human_with_q(np.zeros(7))
+    _line_world(monkeypatch, replans, proposals)
+    approach = SimpleNamespace(planning_costs=lambda: None)
+    motion = _move_to_goal(
+        cfg,
+        start,
+        PointRegion((0.0, 0.0, 0.0)),
+        approach,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        approvals_left,
+        "t",
+    )
+    return motion, motion.path[:, 0]
+
+
+def test_motion_goes_on_after_an_approved_proposal_falls_short(monkeypatch) -> None:
+    """Following an approval that stops short, the arm replans to the goal."""
+    motion, progress = _line_motion(
+        monkeypatch, replans=[[0.1, 0.1], [0.25, 0.25]], proposals=[[0.1, 0.1, 0.1]]
+    )
+    np.testing.assert_allclose(progress, [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0])
+    assert motion.approved_spans == ((2, 5),)
+    assert motion.reached and motion.trigger is None and motion.rejected is None
+
+
+def test_motion_stops_approving_at_the_cap(monkeypatch) -> None:
+    """A planner that keeps stalling gets at most ``approvals_left`` approvals."""
+    motion, progress = _line_motion(
+        monkeypatch,
+        replans=[[-0.05]] * 3,
+        proposals=[[0.1]] * 2,
+        approvals_left=2,
+    )
+    np.testing.assert_allclose(progress, [0, -0.05, 0.05, 0.0, 0.1, 0.05])
+    assert motion.approved_spans == ((1, 2), (3, 4))
+    assert not motion.reached and motion.rejected is None
+
+
+def test_no_proposal_when_leaving_costs_out_gets_no_closer(monkeypatch) -> None:
+    """A proposal that does not bring the arm closer to the goal is not offered."""
+    motion, progress = _line_motion(monkeypatch, replans=[[0.1]], proposals=[[0.0]])
+    np.testing.assert_allclose(progress, [0, 0.1])
+    assert not motion.approved_spans
+    assert not motion.reached and motion.rejected is None
+
+
+def test_violations_count_stops_and_each_crossing_in_a_correction(
+    monkeypatch,
+) -> None:
+    """A stop is one crossing; a correction runs whole, so each stretch counts."""
+    profiles = {
+        3: np.array([0.0, 0.03, 0.03, 0.0, 0.05, 0.01]),  # two stretches
+        2: np.array([0.0, 0.01]),  # under the threshold
+    }
+    monkeypatch.setattr(
+        structs_module,
+        "compute_violations",
+        lambda user, human, trajectory: profiles[len(trajectory) // 2],
+    )
+    interaction = Interaction.__new__(Interaction)
+    interaction.__dict__.update(
+        trigger_step=4,
+        stall_rejected=False,
+        rounds=(
+            SimpleNamespace(retrigger_step=7, correction_q=np.zeros((6, 7))),
+            SimpleNamespace(retrigger_step=None, correction_q=np.zeros((4, 7))),
+        ),
+        user=None,
+        human=None,
+    )
+    # The first motion's stop, round 0's re-trigger, and its correction's two.
+    assert interaction.violation_count == 4
+    interaction.__dict__["stall_rejected"] = True
+    assert interaction.violation_count == 3
+
+
+def test_older_pickles_count_their_approval() -> None:
+    """Pickles from before approvals were counted read back with one approval."""
+    legacy = Interaction.__new__(Interaction)
+    legacy.__dict__.update({"rounds": (), "proposal_approved": True})
+    restored = pickle.loads(pickle.dumps(legacy))
+    assert restored.approvals == 1 and restored.proposal_approved
+    assert restored.user_turns == 1
 
 
 def test_retire_keeps_rounds_for_consolidation(tmp_path: Path) -> None:
@@ -267,6 +416,14 @@ def test_rejected_proposal_becomes_the_next_rounds_plan(tmp_path: Path) -> None:
     retired_terms, correction_text = cost_gen.retired[0]
     assert retired_terms[0] is cost_gen.cost
     assert correction_text == second.utterance.text
+    # Turning a proposal down is no violation; only crossings count.
+    assert not interaction.stall_rejected
+    in_corrections = sum(
+        crossings(interaction.user, interaction.human, r.correction_q, 0.02)
+        for r in interaction.rounds
+    )
+    stops = 1 + int(second.retrigger_step is not None)
+    assert interaction.violation_count == stops + in_corrections
 
 
 def test_proposal_leaves_out_only_the_blocking_costs(monkeypatch) -> None:

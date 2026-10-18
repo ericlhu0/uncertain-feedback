@@ -269,10 +269,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 
     Returns one :class:`Interaction` per goal, the record every metric reads,
     and pickles the list to ``interactions.pkl`` for ``analyze_results.py``;
-    ``episode_summary.json`` and ``executed.npy`` are written alongside, as is
-    ``learned_state.json``, what the approach learned once it has consolidated
-    (:meth:`Approach.consolidate`, :meth:`Approach.save`), which a later run
-    resumes from with ``resume_from``; each
+    ``episode_summary.json`` and ``executed.npy`` are written alongside; each
     goal's ``oracle_path.npy`` / ``initial_rollout.npy`` under ``goal_NN/`` and
     every round's ``trajectories.npz`` under ``goal_NN/round_NN/``.
     """

@@ -10,9 +10,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 from evaluation.approaches import Approach, NoCostGen
 from evaluation.approaches.grounders.llm_trajectory import (
+    MAX_FREE_FRAMES,
+    MAX_FREE_WAYPOINTS,
     LlmTrajectoryGrounder,
     _interpolate,
     feature_rows,
@@ -95,6 +98,18 @@ def _position_rows(human: Human, q: np.ndarray) -> np.ndarray:
     return np.concatenate([arm[:, _ELBOW], arm[:, _WRIST]], axis=1)
 
 
+def _response_payloads(payloads: list[dict[str, Any]]) -> str:
+    return json.dumps(
+        {
+            "interpretations": [
+                {"interpretation": f"reading {i}", **payload}
+                for i, payload in enumerate(payloads)
+            ],
+            "reply": "moving your arm now",
+        }
+    )
+
+
 def _response(key: str, rows: list[list[float]], count: int) -> str:
     return json.dumps(
         {
@@ -172,17 +187,130 @@ def test_single_waypoint_lands_the_arm_on_the_waypoint(tmp_path: Path) -> None:
     np.testing.assert_allclose(reached[_WRIST], waypoint[0, 3:], atol=1e-9)
 
 
-def test_unparseable_response_falls_back_to_the_nominal_plan(tmp_path: Path) -> None:
+def test_unparseable_response_offers_the_nominal_plan_without_replaying_it(
+    tmp_path: Path,
+) -> None:
     cfg, human = _setup()
     grounder = LlmTrajectoryGrounder()
-    _bind(grounder, cfg, tmp_path, "sorry, I cannot help with that")
+    model = _bind(grounder, cfg, tmp_path, "sorry, I cannot help with that")
     nominal = _nominal_plan(human)
+    selector = _Selector()
 
-    result = grounder.ground("move it", human, nominal, _Selector())
+    result = grounder.ground("move it", human, nominal, selector)
 
-    assert len(result.candidates) == 1
+    assert len(result.candidates) == 1 and len(selector.calls) == 1
     np.testing.assert_allclose(
         result.candidates[0], human.arm_aa_from_q(nominal), atol=1e-12
+    )
+    # The arm holds at the stop pose instead of replaying the stopped plan.
+    np.testing.assert_allclose(
+        result.correction_traj, human.arm_aa_from_q(human.q[None]), atol=1e-12
+    )
+    # Retried once; both attempts are on record.
+    assert model.calls == 2
+    saved = json.loads((tmp_path / "interpretations_00.json").read_text())
+    assert [call["parsed"] for call in saved["calls"]] == [False, False]
+
+
+def _in_space(human: Human, space: str, trajectory: np.ndarray) -> np.ndarray:
+    """``trajectory`` as the rows the LLM writes in ``space``."""
+    if space == "anatomical":
+        return feature_rows(trajectory, human)
+    return _position_rows(human, human.q_from_arm_aa(trajectory))
+
+
+@pytest.mark.parametrize(
+    "space, kind, timed",
+    [
+        ("positions", "waypoints", False),
+        ("positions", "waypoints", True),
+        ("anatomical", "waypoints", False),
+        ("anatomical", "waypoints", True),
+        ("positions", "frames", False),
+        ("anatomical", "frames", False),
+    ],
+)
+def test_free_form_converts_each_space_and_kind(
+    tmp_path: Path, space: str, kind: str, timed: bool
+) -> None:
+    cfg, human = _setup()
+    grounder = LlmTrajectoryGrounder(output_space="free", n_interpretations=1)
+    target = human.q
+    target[3:6] += 0.3
+    target[6] += 0.4
+    if kind == "frames":
+        qs = np.linspace(human.q, target, 10)
+    else:
+        qs = np.stack([(human.q + target) / 2, target])
+    rows = (
+        _position_rows(human, qs) if space == "positions" else feature_rows(qs, human)
+    )
+    payload: dict[str, Any] = {"space": space, "kind": kind, "rows": rows.tolist()}
+    if kind == "waypoints":
+        payload["n_frames"] = 9
+    if timed:
+        payload["times"] = [0.25, 0.75]
+    _bind(grounder, cfg, tmp_path, _response_payloads([payload]))
+
+    result = grounder.ground("lift it", human, _nominal_plan(human), _Selector())
+
+    written = _in_space(human, space, result.candidates[0])
+    if kind == "frames":
+        assert written.shape[0] == 10
+        np.testing.assert_allclose(written, rows, atol=1e-9)
+    else:
+        assert written.shape[0] == 9
+        # Frames are at t = 0, 1/8, ..., 1: the waypoints land at their times
+        # (evenly spaced: 1/2 and 1), and the arm holds after the last one.
+        knots = [2, 6] if timed else [4, 8]
+        np.testing.assert_allclose(written[knots], rows, atol=1e-9)
+        np.testing.assert_allclose(written[-1], rows[-1], atol=1e-9)
+    saved = json.loads((tmp_path / "interpretations_00.json").read_text())
+    assert saved["forms"] == [
+        {
+            "space": space,
+            "kind": kind,
+            "n_rows": len(rows),
+            "times": timed,
+            "times_given": timed,
+            "n_frames": 9 if kind == "waypoints" else 10,
+            "converted": True,
+            "label": 0,
+        }
+    ]
+
+
+def test_free_form_caps_and_defaults() -> None:
+    grounder = LlmTrajectoryGrounder(output_space="free", n_frames=16)
+
+    def form(**payload: Any) -> dict[str, Any] | None:
+        return grounder._form({"space": "positions", "kind": "waypoints", **payload})
+
+    waypoint = [[0.0] * 6]
+    assert form(rows=waypoint)["n_frames"] == 16  # type: ignore[index]
+    assert form(rows=waypoint, n_frames=500)["n_frames"] == MAX_FREE_FRAMES  # type: ignore[index]
+    assert form(rows=waypoint, n_frames=1)["n_frames"] == 2  # type: ignore[index]
+    assert form(rows=waypoint, n_frames=True)["n_frames"] == 16  # type: ignore[index]
+    many = [[float(i)] * 6 for i in range(MAX_FREE_WAYPOINTS + 5)]
+    assert len(form(rows=many)["rows"]) == MAX_FREE_WAYPOINTS  # type: ignore[index]
+    # Times that are not strictly increasing in (0, 1] are not used.
+    two = [[0.0] * 6, [1.0] * 6]
+    assert form(rows=two, times=[0.8, 0.4])["times"] is None  # type: ignore[index]
+    assert form(rows=two, times=[0.0, 0.5])["times"] is None  # type: ignore[index]
+    assert form(rows=two, times=[0.5])["times"] is None  # type: ignore[index]
+    frames = grounder._form(
+        {"space": "anatomical", "kind": "frames", "rows": [[0.0] * 5] * 150}
+    )
+    assert frames is not None and len(frames["rows"]) == MAX_FREE_FRAMES
+    assert (
+        grounder._form({"space": "joints", "kind": "frames", "rows": waypoint}) is None
+    )
+    assert (
+        grounder._form({"space": "positions", "kind": "path", "rows": waypoint}) is None
+    )
+    assert (
+        grounder._form({"space": "positions", "kind": "frames", "rows": [[0.0] * 5]})
+        is None
     )
 
 

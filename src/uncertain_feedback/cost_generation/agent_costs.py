@@ -18,11 +18,13 @@ Codex is instructed to load those paths itself and to leave a public
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -30,6 +32,7 @@ from threading import Thread
 from typing import Any, TextIO
 
 from uncertain_feedback.cost_generation.base import CostGenerator
+from uncertain_feedback.cost_generation.landlock import abi_version as landlock_abi
 from uncertain_feedback.cost_generation.prompts import (
     build_staged_task_body,
     corpus_grounding_note,
@@ -60,19 +63,124 @@ _SANDBOX_WORKSPACE = Path("/tmp/workspace")
 _SANDBOX_RUNTIME = Path("/tmp/runtime")
 _SANDBOX_VENV = Path("/tmp/venv")
 _SANDBOX_CODEX_HOME = Path("/tmp/codex-home")
+_SANDBOX_HOME = Path("/home/agent")
 _SANDBOX_RENDER_SCRIPT = (
     f"{_SANDBOX_RUNTIME}/src/uncertain_feedback/evaluation_mechanism/"
     "render_cost_comparison.py"
 )
-
-_CODEX_INSTRUCTION = (
-    "Read TASK.md in this directory. Load every local image path listed there "
-    f"before drafting the first answer, maintain {_ITERATION_LOG_FILE} exactly "
-    f"as TASK.md requests, maintain {_STAGE_LOG_FILE} exactly as TASK.md "
-    f"requests, and write the final cost as the single JSON object it specifies "
-    f"(keys: description, code, params, explanation, recipient_explanation) into "
-    f"{_RESPONSE_FILE}."
+_LANDLOCK_SCRIPT = Path(__file__).with_name("landlock.py")
+# Host paths a Landlock-confined agent may still read (system files, and the
+# resolver's stub for DNS) and write (devices programs open as files).
+_LANDLOCK_SYSTEM = (
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/etc",
+    "/sys",
+    "/run/systemd/resolve",
 )
+_LANDLOCK_DEVICES = (
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/tty",
+    "/dev/ptmx",
+    "/dev/pts",
+)
+
+_RESPONSE_KEYS: tuple[str, ...] = (
+    "description",
+    "code",
+    "params",
+    "explanation",
+    "recipient_explanation",
+)
+
+
+def _codex_instruction(response_keys: tuple[str, ...]) -> str:
+    return (
+        "Read TASK.md in this directory. Load every local image path listed there "
+        f"before drafting the first answer, maintain {_ITERATION_LOG_FILE} exactly "
+        f"as TASK.md requests, maintain {_STAGE_LOG_FILE} exactly as TASK.md "
+        f"requests, and write the final cost as the single JSON object it specifies "
+        f"(keys: {', '.join(response_keys)}) into {_RESPONSE_FILE}."
+    )
+
+
+@functools.cache
+def _bwrap_usable() -> bool:
+    """Whether bwrap can create its namespaces on this host.
+
+    Ubuntu's ``apparmor_restrict_unprivileged_userns`` refuses them to
+    unconfined binaries ("setting up uid map: Permission denied"); the agent
+    then runs under Landlock instead (see :func:`_landlock_command`).
+    """
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        return False
+    probe = subprocess.run(
+        [bwrap, "--ro-bind", "/", "/", "true"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
+def _landlock_command(
+    command: list[str],
+    environment: dict[str, str],
+    roots: dict[Path, Path],
+    readable: list[Path],
+    temporary_dir: Path,
+) -> list[str]:
+    """Run ``command`` confined by Landlock, for hosts where bwrap cannot start.
+
+    Landlock confines paths but cannot remount them, so every sandbox path the
+    task and the command were written against is rewritten to the host
+    directory bwrap would mount there (``roots``), and only those stay
+    reachable. ``/proc`` is not among them, which hides other processes as
+    bwrap's PID namespace does.
+    """
+
+    def on_host(text: str) -> str:
+        for sandbox, host in roots.items():
+            text = text.replace(str(sandbox), str(host))
+        return text
+
+    workspace = roots[_SANDBOX_WORKSPACE]
+    task = workspace / "TASK.md"
+    if task.exists():
+        task.write_text(on_host(task.read_text(encoding="utf-8")), encoding="utf-8")
+    scratch = temporary_dir / "tmp"
+    for directory in (roots[_SANDBOX_HOME], scratch):
+        directory.mkdir()
+    environment = {name: on_host(value) for name, value in environment.items()}
+    environment["TMPDIR"] = str(scratch)
+    writable = [workspace, roots[_SANDBOX_CODEX_HOME], roots[_SANDBOX_HOME], scratch]
+    return [
+        "env",
+        "-i",
+        *(f"{name}={value}" for name, value in environment.items()),
+        sys.executable,
+        "-I",
+        str(_LANDLOCK_SCRIPT),
+        "--chdir",
+        str(workspace),
+        "--ro",
+        *(path for path in _LANDLOCK_SYSTEM if os.path.exists(path)),
+        *(str(path) for path in readable),
+        "--rw",
+        *(path for path in _LANDLOCK_DEVICES if os.path.exists(path)),
+        *(str(path) for path in writable),
+        "--",
+        *(on_host(argument) for argument in command),
+    ]
 
 
 def _stage_section(stage_log: str, heading: str) -> str | None:
@@ -90,6 +198,7 @@ class AgentCostGenerator(CostGenerator):
 
     _codex_log_label = "agent"
     _stream_codex_output = False
+    _response_keys = _RESPONSE_KEYS
 
     def __init__(
         self,
@@ -337,8 +446,12 @@ class AgentCostGenerator(CostGenerator):
         package = destination / "src" / "uncertain_feedback"
         package.mkdir(parents=True)
         # ``envs`` is staged because mpc.py imports ExecutionEnv at module level;
-        # its meshes are skipped since nothing here constructs a sim env.
-        ignored = shutil.ignore_patterns("__pycache__", "*artifacts*", "assets")
+        # its meshes are skipped since nothing here constructs a sim env. So is
+        # ``motion_generators``: planners/mpc/config.py imports its steering
+        # module at module level; the MDM checkout under it is never imported.
+        ignored = shutil.ignore_patterns(
+            "__pycache__", "*artifacts*", "assets", "motion-diffusion-model"
+        )
         # ``cost_generation`` is deliberately absent: the sandbox must not see the
         # prompts or the backends. The render script rides in the
         # ``evaluation_mechanism`` copytree.
@@ -348,6 +461,7 @@ class AgentCostGenerator(CostGenerator):
             "utils",
             "envs",
             "evaluation_mechanism",
+            "motion_generators",
         ):
             shutil.copytree(
                 source / directory,
@@ -361,11 +475,11 @@ class AgentCostGenerator(CostGenerator):
         temporary_dir: Path,
         workspace_dir: Path | None = None,
     ) -> list[str]:
-        bwrap = shutil.which("bwrap")
-        if bwrap is None:
+        bwrap = shutil.which("bwrap") if _bwrap_usable() else None
+        if bwrap is None and landlock_abi() < 1:
             raise GeneratedCostValidationError(
-                "the agent backend requires bubblewrap so hidden simulator state "
-                "cannot be read"
+                "the agent backend requires bubblewrap or Landlock so hidden "
+                "simulator state cannot be read"
             )
         executable = shutil.which(command[0])
         if executable is None:
@@ -379,6 +493,18 @@ class AgentCostGenerator(CostGenerator):
         workspace = self.run_dir.resolve() if workspace_dir is None else workspace_dir
         self._prepare_isolated_runtime(runtime)
         codex_home.mkdir()
+        # The running interpreter's environment: a worktree borrows the main
+        # checkout's venv rather than holding a .venv of its own.
+        project_venv = Path(sys.prefix).resolve()
+        # Where each sandbox path lives on the host (what bwrap mounts there).
+        roots = {
+            _SANDBOX_WORKSPACE: workspace,
+            _SANDBOX_RUNTIME: runtime,
+            _SANDBOX_VENV: project_venv,
+            _SANDBOX_CODEX_HOME: codex_home,
+            _SANDBOX_HOME: temporary_dir / "home",
+        }
+        readable = [runtime, project_venv]
 
         sandbox_command = list(command)
         sandbox_command[0] = executable
@@ -388,14 +514,14 @@ class AgentCostGenerator(CostGenerator):
         # interpreter root at its own absolute path so the absolute symlink still
         # resolves; parents[2] is the uv python directory, which also holds the
         # unversioned symlink the venv actually points at.
-        venv_python = (_REPO_ROOT / ".venv/bin/python").resolve()
+        venv_python = (project_venv / "bin" / "python").resolve()
         if venv_python.is_relative_to(Path.home()):
             interpreter_root = venv_python.parents[2]
             extra_mounts += ["--ro-bind", str(interpreter_root), str(interpreter_root)]
+            readable.append(interpreter_root)
         sandbox_path = f"{_SANDBOX_VENV}/bin:/usr/local/bin:/usr/bin:/bin"
         executable_source = Path(executable)
         executable_path = executable_source.resolve()
-        project_venv = (_REPO_ROOT / ".venv").resolve()
         if executable_source.is_relative_to(project_venv):
             sandbox_command[0] = str(
                 _SANDBOX_VENV / executable_source.relative_to(project_venv)
@@ -430,12 +556,14 @@ class AgentCostGenerator(CostGenerator):
                     str(install_root),
                     str(sandbox_install),
                 ]
+                roots[sandbox_install] = install_root
+                readable.append(install_root)
                 sandbox_command[0] = str(sandbox_install / "bin" / executable_path.name)
                 sandbox_path = f"{sandbox_install}/bin:{sandbox_path}"
 
         environment = {
             "PATH": sandbox_path,
-            "HOME": "/home/agent",
+            "HOME": str(_SANDBOX_HOME),
             "CODEX_HOME": str(_SANDBOX_CODEX_HOME),
             "PYTHONPATH": f"{_SANDBOX_RUNTIME}/src",
             "MPLBACKEND": "Agg",
@@ -450,6 +578,10 @@ class AgentCostGenerator(CostGenerator):
         ):
             if name in os.environ:
                 environment[name] = os.environ[name]
+        if bwrap is None:
+            return _landlock_command(
+                sandbox_command, environment, roots, readable, temporary_dir
+            )
         environment_args = [
             argument
             for name, value in environment.items()
@@ -470,7 +602,7 @@ class AgentCostGenerator(CostGenerator):
             "--tmpfs",
             "/tmp",
             "--dir",
-            "/home/agent",
+            str(_SANDBOX_HOME),
             "--dir",
             str(_SANDBOX_WORKSPACE),
             "--bind",
@@ -484,7 +616,7 @@ class AgentCostGenerator(CostGenerator):
             "--dir",
             str(_SANDBOX_VENV),
             "--ro-bind",
-            str((_REPO_ROOT / ".venv").resolve()),
+            str(project_venv),
             str(_SANDBOX_VENV),
             # Mask the checkout itself: it holds the hidden persona definitions
             # and every prior run's artifacts, which the agent must not read.
@@ -530,7 +662,9 @@ class AgentCostGenerator(CostGenerator):
                 temporary_dir = Path(tmp)
                 workspace = temporary_dir / "workspace"
                 shutil.copytree(self.run_dir, workspace)
-                command = shlex.split(self.codex_cmd) + [_CODEX_INSTRUCTION]
+                command = shlex.split(self.codex_cmd) + [
+                    _codex_instruction(self._response_keys)
+                ]
                 cmd = self._isolated_command(command, temporary_dir, workspace)
                 cmd_line = shlex.join(cmd)
                 print(f"{log_prefix} starting codex: {cmd_line}", flush=True)

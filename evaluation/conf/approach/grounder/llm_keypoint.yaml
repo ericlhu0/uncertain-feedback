@@ -1,2 +1,4 @@
 _target_: evaluation.approaches.grounders.llm_keypoint.LlmKeypointGrounder
 displacement_cap: 0.4
+# true: play the edit at the simulated user's chosen magnitude (default: as proposed, 1x).
+rescale: false

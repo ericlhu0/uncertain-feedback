@@ -90,7 +90,8 @@ class SimulatedUserConfig:
     max_rounds: int = 3
     magnitudes: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5)
     nominal_steps: int = 20
-    # Candidate-selection model: oracle_progress | intent_aligned | progress | random.
+    # Candidate-selection model: oracle_progress | intent_aligned | progress | random
+    # | robot_top (no user choice: the first candidate at magnitude 1).
     chooser: str = "oracle_progress"
 
 
@@ -640,10 +641,16 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
     if not isinstance(magnitudes_value, list) or not magnitudes_value:
         raise ValueError("simulated_user.magnitudes must be a non-empty list.")
     chooser_value = str(simulated_user_data.get("chooser", default_sim_user.chooser))
-    if chooser_value not in ("oracle_progress", "intent_aligned", "progress", "random"):
+    if chooser_value not in (
+        "oracle_progress",
+        "intent_aligned",
+        "progress",
+        "random",
+        "robot_top",
+    ):
         raise ValueError(
             "simulated_user.chooser must be oracle_progress, intent_aligned, "
-            "progress, or random."
+            "progress, random, or robot_top."
         )
     simulated_user = SimulatedUserConfig(
         verbalizer=str(

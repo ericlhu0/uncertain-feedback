@@ -1,0 +1,7 @@
+# Pure-agent grounder: each interpretation picks its own form — positions or
+# anatomical angles, waypoints or every frame, how many, optional waypoint
+# times and motion length (n_frames is the length when it gives none).
+_target_: evaluation.approaches.grounders.llm_trajectory.LlmTrajectoryGrounder
+n_interpretations: 4
+output_space: free
+n_frames: 16

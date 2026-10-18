@@ -2481,9 +2481,19 @@ one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-6-lun
   external `codex` CLI. The agent is required to write `stage_log.md` with its Stage 1,
   Stage 2, and Stage 3 responses; that log is also appended to `codex.log`. Each run is
   wrapped in a fail-closed Bubblewrap filesystem namespace. It can read only its staged
-  task inputs, a minimal rollout runtime, and the project virtual environment; the real
-  repository, simulator personas, and previous artifact runs are not mounted. Linux
-  hosts using this backend must provide the `bwrap` executable. Staged `state.pkl`
+  task inputs, a minimal rollout runtime, and the running Python environment
+  (`sys.prefix`); the real repository, simulator personas, and previous artifact runs
+  are not mounted. Where bwrap cannot create its namespaces (Ubuntu's
+  `kernel.apparmor_restrict_unprivileged_userns`, e.g. bhattacharjee-compute-02) the
+  run is confined by a Landlock allowlist instead (`cost_generation/landlock.py`): the
+  same directories stay reachable, now at their real paths (the task's `/tmp/workspace`
+  etc. are rewritten), and `/proc` does not, so other processes stay hidden too. Linux
+  hosts using this backend must provide a working `bwrap` or a Landlock kernel (5.13+).
+  The combiner (below) runs this way too. The sandbox ignores `~/.codex/config.toml`, so
+  `llm_cost.codex_cmd` must name the model (`-m`, `-c model_reasoning_effort=...`), or
+  codex falls back to its default at no reasoning; the evaluation's care-task stack
+  (`evaluation/conf/mpc_task_learning.yaml`) pins `gpt-6-sol` at high effort, which the
+  ChatGPT login accepts from codex 0.163.0 on. Staged `state.pkl`
   files contain only the operational MPC fields needed to reproduce a rollout
   (planner, goal, sampling/step settings, thresholds, and seed), never the full run
   config or its `user`/`persona_goals` metadata. Legacy round states are sanitized
@@ -2631,8 +2641,10 @@ i.e. in which correction is executed each round before replanning with the learn
 `oracle_language` executes the persona's own oracle window (`grounder/oracle.yaml`,
 `OracleGrounder`: the hidden-cost oracle path from the intent's join index, shifted onto the
 trigger pose; `Approach.begin_goal` hands it the goal's oracle path), `mdm_language` the
-MDM-grounded cluster the persona picks, `nominal_language` nothing (the nominal plan is
-"executed"), and `oracle_no_learning` is the floor: the oracle correction each round, no
+MDM-grounded cluster the persona picks, `nominal_language` nothing (`NominalGrounder`: the
+persona judges the nominal plan, but the arm holds at the stop pose instead of replaying the
+motion it was stopped from, so the next motion is the replan under the new cost; before
+2026-10-16 the nominal plan was replayed whole), and `oracle_no_learning` is the floor: the oracle correction each round, no
 cost learning. `benchmark/cost_learning.yaml` is the six personas with curated goals in
 `mdm_llm_transfer.yaml`, everyday feedback, one goal each, five rounds. Every arm plans on
 the person the config describes (`Human(pose=cfg.pose, arm=cfg.arm)`), and MDM is loaded
@@ -2753,6 +2765,29 @@ uv run python evaluation/run_experiment.py -m hydra/launcher=joblib hydra.launch
     mpc_config=evaluation/conf/mpc_procedural.yaml \
     hydra.sweep.dir=outputs/cost_learning/procedural_batches/s24
 ```
+
+**Who picks the correction.** By default the simulated user picks a candidate and its
+size from the grounder's menu (`simulated_user.chooser`, `oracle_progress`).
+`sim_chooser=robot_top` takes that choice away: the robot runs the first candidate (the
+largest MDM cluster) at 1×, and the user's verdict on the menu is still recorded.
+`approach=llm_keypoint` (`LlmKeypointGrounder`: GPT proposes one elbow or wrist keypoint
+and the plan is bent toward it) always runs its single edit as proposed, at 1×;
+`approach=llm_keypoint_rescaled` (grounder `rescale: true`) lets the user shrink or grow
+it over the magnitude grid instead, as the baseline did before 2026-10-16.
+runs.
+
+**GPT-written corrections.** `approach=agent_waypoint` (`LlmTrajectoryGrounder`,
+`grounder/llm_waypoint.yaml`) has GPT write 4 interpretations, each one elbow + wrist
+waypoint the arm reaches in a straight line over 16 frames. `approach=agent_free_form`
+(`output_space: free`, `grounder/llm_free_form.yaml`) leaves the form of each
+interpretation to GPT: elbow/wrist positions or the five anatomical angles, and either
+waypoints (at most 20, joined by straight lines in that space, with optional `times` and
+`n_frames`, 16 frames by default) or every frame (at most 100). It has its own prompt
+(`_FREE_FORM_SYSTEM_PROMPT`) and runs on `gpt-6-sol`; the other modes share the original
+prompt and the config's `llm_cost.model`. Each round's `interpretations_NN.json` records
+every interpretation's form (`forms`) and whether each LLM call parsed (`calls`; an
+unparseable reply is retried once). When no interpretation converts, the persona judges
+the nominal plan but the arm holds at the stop pose instead of replaying it.
 
 ### Bound transfer: do later proposals respect the learned bound?
 

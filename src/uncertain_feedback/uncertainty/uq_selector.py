@@ -65,7 +65,7 @@ class UqClusterResult:
 
     chosen_label: int
     labels: np.ndarray
-    cluster_means: dict[int, np.ndarray]  # per-cluster medoid trajectories
+    cluster_means: dict[int, np.ndarray]  # per-cluster medoids, largest cluster first
     scale: float = 1.0
     # Every finite drawn sample, in the space it was clustered in: SMPL joint
     # positions (n, frames, 22, 3) or left-arm axis-angles (n, frames, 3, 3).
@@ -140,10 +140,11 @@ class UqSelector:
             frozen_body: If ``True``, freeze non-left-arm body features during
                         MDM generation.
             cluster_selector: Optional headless chooser called with the
-                        cluster-medoid trajectories ``{label: (T, 3, 3)}``;
-                        returns the chosen label, or a ``(label, magnitude)``
-                        tuple whose magnitude overrides ``default_scale``
-                        (used by simulated-user experiments). Takes precedence
+                        cluster-medoid trajectories ``{label: (T, 3, 3)}``,
+                        largest cluster first; returns the chosen label, or a
+                        ``(label, magnitude)`` tuple whose magnitude overrides
+                        ``default_scale`` (used by simulated-user
+                        experiments). Takes precedence
                         over ``auto_cluster`` and the interactive picker.
             steering:   Optional cost-steering spec forwarded to the generator,
                         biasing the drawn samples toward the user's cost model.
@@ -202,8 +203,13 @@ class UqSelector:
         print(f"[timing] clustering total: {time.perf_counter() - cluster_t0:.3f}s")
         print(f"labels shape: {labels.shape}")
 
+        # Largest cluster first, the text's most common reading, so a chooser
+        # standing in for the robot's own pick can take the first one.
+        counts = dict(zip(*np.unique(labels, return_counts=True)))
+        medoids = self._clusterer.medoid_indices(labels)
         cluster_means: dict[int, np.ndarray] = {}
-        for label, medoid in sorted(self._clusterer.medoid_indices(labels).items()):
+        for label in sorted(medoids, key=lambda label: (-counts[label], label)):
+            medoid = medoids[label]
             if positions is not None:
                 cluster_means[label] = arm_trajectory(positions[medoid])
             else:

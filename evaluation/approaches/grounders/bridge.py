@@ -143,7 +143,6 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
         displacement_cap: float = 0.25,
     ) -> None:
         super().__init__(attract_gain, repel_gain, rho0, displacement_cap)
-        self._history: list[str] = []
         self._llm: Any = None
 
     def reset(
@@ -155,7 +154,6 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
         episode_dir: Path,
     ) -> None:
         super().reset(cfg, gen, user, seed, episode_dir)
-        self._history = []
         self._llm = None
 
     def _interpret(self, text: str, waypoint_context: str) -> list[dict[str, str]]:

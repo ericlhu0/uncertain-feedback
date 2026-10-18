@@ -1,5 +1,5 @@
-# No correction trajectory: language goes straight to cost generation and the
-# nominal plan is what gets executed.
+# No correction motion: language goes straight to cost generation and the arm
+# holds at the stop pose, then replans under the new cost.
 defaults:
   - grounder: none
   - cost_gen: language_only

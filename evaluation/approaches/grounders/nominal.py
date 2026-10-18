@@ -1,8 +1,9 @@
-"""No-op grounder: the nominal plan is the only candidate.
+"""No-op grounder: the nominal plan is the only candidate, and nothing runs.
 
-Language is left entirely to cost generation — the round's correction is the
-nominal continuation itself, so any behavioural change comes from replanning
-with the newly generated costs.
+Language is left entirely to cost generation. The persona still judges the
+nominal plan (so the round records a verdict), but the arm does not replay the
+motion it was just stopped from: the correction is the stop pose alone, so the
+next motion is the replan with the newly generated costs.
 """
 
 from __future__ import annotations
@@ -12,11 +13,15 @@ import numpy as np
 from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.metrics.grounding.structs import GroundingResult
 from uncertain_feedback.planners.mpc.human import Human
-from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
+
+
+def stop_pose(human: Human) -> np.ndarray:
+    """A correction that moves nothing: the one-frame ``(1, 3, 3)`` current pose."""
+    return human.arm_aa_from_q(human.q[None])
 
 
 class NominalGrounder(Grounder):
-    """The utterance grounds to nothing; the nominal plan is passed through."""
+    """The utterance grounds to nothing; the arm holds at the stop pose."""
 
     def ground(
         self,
@@ -26,12 +31,11 @@ class NominalGrounder(Grounder):
         cluster_selector: ClusterSelector,
     ) -> GroundingResult:
         del text
-        nominal_aa = human.arm_aa_from_q(nominal_plan)
-        candidates: dict[int, np.ndarray] = {0: nominal_aa}
+        candidates: dict[int, np.ndarray] = {0: human.arm_aa_from_q(nominal_plan)}
         _, magnitude = cluster_selector(candidates)
         return GroundingResult(
             candidates=candidates,
             chosen_label=0,
             magnitude=magnitude,
-            correction_traj=scale_trajectory(nominal_aa, magnitude),
+            correction_traj=stop_pose(human),
         )

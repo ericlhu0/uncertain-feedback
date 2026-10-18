@@ -1167,12 +1167,18 @@ mid-run instead of `--text` at `text_time` — see
 [Interactive corrections with a live person](#interactive-corrections-with-a-live-person---interactive)).
 `--pose` and `--arm` are still accepted as overrides for the YAML values.
 
+A config may start with `base:`, a path or list of paths (relative to the repo
+root) whose sections are merged underneath its own: later bases replace earlier
+ones section by section, and the file's own sections replace every base's.
+`evaluation/conf/care_tasks/*.yaml` use it to add the evaluation's learning stack to
+a care-task preset.
+
 There is one planner class (`ArmMPC`); its capabilities are selected by the
 presence of top-level YAML sections, one per module slot:
 
 | Section | Module | Absent means |
 |---|---|---|
-| `cartesian:` | goal space: a queue of goal regions (`goals`, `threshold`, optional `stall`; see *Goal stalls* below). Each entry is a spine3-relative wrist point `[x, y, z]` or a region mapping — `{box: {low, high}}`, `{forearm_box: {low, high, elbow: {low, high}, wrist: {low, high}}}` (both endpoints in the outer box; endpoint boxes optional), `{sphere: {center, radius}}` or `{features: {<feature>: [low, high]}}` over the five anatomical features (radians, `null` for one-sided). The goal cost is the squared distance to the region, zero inside, so inside a region only the comfort costs decide where the arm settles. `threshold` pads the region boundary in its own units (metres, or radians for `features`; default 0.01 — the region itself carries the tolerance, so the pad is only numerical slack) | no goal phase (hold after feedback) |
+| `cartesian:` | goal space: a queue of goal regions (`goals`, `threshold`, optional `stall`; see *Goal stalls* below). Each entry is a spine3-relative wrist point `[x, y, z]` or a region mapping — `{box: {low, high}}`, `{forearm_box: {low, high, elbow: {low, high}, wrist: {low, high}}}` (both endpoints in the outer box; endpoint boxes optional), `{sphere: {center, radius}}`, `{features: {<feature>: [low, high]}}` over the five anatomical features (radians, `null` for one-sided), or `{displacement: {joint: elbow|wrist, min_distance}}` — move that joint at least `min_distance` metres from where the goal started (anchored once per goal: by `run.py` at the run's start, by `run_episode` at each goal's start pose). The goal cost is the squared distance to the region, zero inside, so inside a region only the comfort costs decide where the arm settles. `threshold` pads the region boundary in its own units (metres, or radians for `features`; default 0.01 — the region itself carries the tolerance, so the pad is only numerical slack) | no goal phase (hold after feedback) |
 | `feedback:` | MDM correction playback (`max_playback_delta`, `trajectory_fraction`, `frames`, `text_time`, `anchor_correction`), with an optional nested `uq:` layer (`diffusion_samples`, `n_clusters`, `clusterer`, `auto_cluster`, `scale`, `user_cluster`, `steering`). `clusterer` defaults to `agglo_end_pose` and is resolved by `run.py`, the demo runner, and the evaluation approaches alike — runs from before that wiring used `XyzPositionClusterer` (KMeans) regardless of the key | no correction phase |
 | `constraints:` | named feasibility constraints; `robot_ik:` (`max_residual`, `grasp_residual_frames`, `playback_stall_steps`) discards rollouts and playback frames the robot cannot track by continuation IK | unconstrained |
 | `robot_actions:` | sample robot joint deltas instead of human-arm deltas (`max_joint_delta`, `joint_delta_std`, `infeasibility_weight`, `max_grasp_residual`, `grasp_residual_frames`) | human-arm sampling |
@@ -2047,14 +2053,16 @@ uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_
 ### Care-task goal-region demos
 
 These left-arm simulation presets start with the arm lowered and bent (the
-armrest preset starts it hanging). Bathing uses an upright body; the other
-presets use the seated body, except the supine bed transfer. Loading these poses requires the configured MDM assets, but none
+armrest preset starts it hanging). Every preset uses the seated body except the
+supine bed transfer; keep evaluation tasks seated, since MDM's direction words
+were trained for sitting. Loading these poses requires the configured MDM assets, but none
 of these presets samples language corrections or calls an LLM:
 
 ```bash
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/bathing.yaml --save outputs/bathing.mp4
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/transfer.yaml --save outputs/transfer.mp4
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/transfer_bed.yaml --save outputs/transfer_bed.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/pressure_sore_relief.yaml --save outputs/pressure_sore_relief.mp4
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/dressing_first_sleeve.yaml --save outputs/dressing_first_sleeve.mp4
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/dressing_second_sleeve.yaml --save outputs/dressing_second_sleeve.mp4
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/bp_access.yaml --save outputs/bp_access.mp4
@@ -2062,8 +2070,9 @@ uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/wheelchair_armrest.yaml --save outputs/wheelchair_armrest.mp4
 ```
 
-- **Bathing:** upper-arm elevation ≥75° from straight down and lateral abduction
-  ≥45°, opening access under the arm. Both bounds must hold together.
+- **Bathing:** seated body (e.g. a shower chair); upper-arm elevation ≥75° from
+  straight down and lateral abduction ≥45°, opening access under the arm. Both
+  bounds must hold together.
 - **Assisted chair-to-chair preparation** (`transfer.yaml`): seated body, with
   the forearm gathered over the abdomen or chest. A broad outer box keeps the
   forearm near the torso, and a central wrist box excludes an arm left out to
@@ -2088,10 +2097,15 @@ transfer: the right arm starts folded and remains fixed, as does the body.
 Support surfaces, caregiver, and hoist are not simulated. The chair scenario assumes assistance rather than
 an independent transfer that uses the arm to push off.
 
-Five further presets reuse the seated body. Each goal names where the arm must
+Six further presets reuse the seated body. Each goal names where the arm must
 be for a caregiver to perform one step, and leaves the rest of the posture to
 the persona's comfort costs:
 
+- **Pressure-sore relief** (`pressure_sore_relief.yaml`): move the left elbow at
+  least 0.10 m from where it started, in any direction, to take the load off that
+  spot (e.g. an elbow resting on a wheelchair armrest). The goal is start-relative
+  (`displacement`), so a limitation that blocks the most direct move leaves others
+  open.
 - **First sleeve** (`dressing_first_sleeve.yaml`): the wrist reaches out to the
   left, 0.38–0.70 m from spine3 and between waist and chest height, where a
   caregiver holds the sleeve opening. Only the wrist is constrained.
@@ -2671,14 +2685,18 @@ no explicit `goals` and no `persona_goals` entry for the persona takes the confi
 ```bash
 uv run python evaluation/run_experiment.py approach=oracle_no_learning \
     benchmark=personas_core 'benchmark.personas=[brachial_plexus_mechanosensitivity]' \
-    mpc_config=src/uncertain_feedback/planners/mpc/configs/bathing.yaml
+    mpc_config=evaluation/conf/care_tasks/bathing.yaml
 ```
 
 Pick personas whose hidden bounds leave the region reachable: `painful_arc` avoids
 60–120° elevation and `adhesive_capsulitis` caps elevation, so their oracles never reach
-bathing's ≥75° elevation. The task configs carry no `feedback:`, `costs:`, `llm_cost:`,
-`corrections:` or `simulated_user:` sections, so as they stand only the oracle and nominal
-grounders run on them; MDM and LLM approaches need those sections added.
+bathing's ≥75° elevation. The planner presets carry no learning sections (`run.py` loads
+MDM whenever a config has `feedback:`), so the harness runs care tasks from
+`evaluation/conf/care_tasks/<task>.yaml` — `bathing`, `transfer`, `dressing_first_sleeve`,
+`dressing_second_sleeve`, `pressure_sore_relief` — each a `base:` pair of
+`evaluation/conf/mpc_task_learning.yaml` (`mpc_procedural.yaml`'s `feedback:`/`uq:`,
+`corrections:`, `simulated_user:` and `llm_cost:` sections) and the planner preset, which
+keeps the goal, pose and costs. Every approach runs on them.
 
 From the config's single start pose most personas either never violate or can never
 reach the region. `evaluation/generate_task_starts.py` samples start poses per persona
@@ -2686,19 +2704,23 @@ instead (`sample_arm_q`, the config's clavicle) and keeps up to `--per-persona` 
 for which the start is comfortable, the base-cost rollout to the config's first goal
 triggers feedback (`first_violation_step` at `corrections.trigger_threshold`, stopping
 at a goal stall as `run_episode` does), and the oracle (base + hidden cost) still
-reaches the goal. Every attempt and its rejection reason (`uncomfortable_start`,
-`no_violation`, `oracle_did_not_reach`) goes to `<out-dir>/starts.json`;
+reaches the goal. A start must also cost nothing under the task's base costs
+(`infeasible_start` otherwise: a config's hand-authored `costs:` or the joint box already
+penalize it), and a
+start-relative goal is anchored on each start. Every attempt and its rejection reason
+(`uncomfortable_start`, `infeasible_start`, `no_violation`, `oracle_did_not_reach`) goes
+to `<out-dir>/starts.json`;
 `--personas` defaults to every persona with hidden bounds.
 `benchmark=task_starts` (`TaskStartsBenchmark`) makes one task per kept start; run it
 with the same `mpc_config`, since each task pursues that config's first goal:
 
 ```bash
 uv run python evaluation/generate_task_starts.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/bathing.yaml \
-    --out-dir outputs/task_starts/bathing --per-persona 5 --max-attempts 50
-uv run python evaluation/run_experiment.py approach=oracle_no_learning benchmark=task_starts \
-    benchmark.starts_dir=outputs/task_starts/bathing \
-    mpc_config=src/uncertain_feedback/planners/mpc/configs/bathing.yaml
+    --mpc-config evaluation/conf/care_tasks/bathing.yaml \
+    --out-dir outputs/task_starts/bathing/personas --per-persona 5 --max-attempts 50
+uv run python evaluation/run_experiment.py approach=full benchmark=task_starts \
+    benchmark.starts_dir=outputs/task_starts/bathing/personas \
+    mpc_config=evaluation/conf/care_tasks/bathing.yaml
 ```
 
 `--sampled-bounds N` replaces the personas with N generated users (`sampled_000`, ...;
@@ -2714,8 +2736,8 @@ tests above then apply unchanged. The user is saved in its `starts.json` row, an
 
 ```bash
 uv run python evaluation/generate_task_starts.py \
-    --mpc-config src/uncertain_feedback/planners/mpc/configs/bathing.yaml \
-    --out-dir outputs/task_starts/bathing_sampled --sampled-bounds 8 --max-attempts 50
+    --mpc-config evaluation/conf/care_tasks/bathing.yaml \
+    --out-dir outputs/task_starts/bathing/sampled --sampled-bounds 8 --max-attempts 50
 ```
 
 Episodes are independent, so spread them over processes with hydra's joblib launcher:

@@ -60,7 +60,7 @@ from uncertain_feedback.planners.mpc.costs import (
     replace_generated_costs,
     update_preference_cost,
 )
-from uncertain_feedback.planners.mpc.goal_spaces import goal_point
+from uncertain_feedback.planners.mpc.goal_spaces import as_goal_region, goal_point
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_INDICES,
@@ -410,9 +410,16 @@ def build_run(
             f"('real' or 'sim_mannequin'), got '{cfg.env}'."
         )
 
-    if cfg.cartesian is not None:
+    cartesian = cfg.cartesian
+    if cartesian is not None:
         print(
             f"Initial wrist position (spine3-relative): {human.wrist_from_q(human.q)}"
+        )
+        # Start-relative goals (DisplacementRegion) anchor on this run's start.
+        start_aa = human.arm_aa_from_q(human.q)
+        cartesian = replace(
+            cartesian,
+            goals=[as_goal_region(g).bind(start_aa, human) for g in cartesian.goals],
         )
 
     mpc = ArmMPC(
@@ -424,7 +431,7 @@ def build_run(
         extra_costs=extra_costs,
         seed=cfg.seed,
         env=env,
-        cartesian=cfg.cartesian,
+        cartesian=cartesian,
         feedback=cfg.feedback,
         constraints=cfg.constraints,
         robot_actions=cfg.robot_actions,

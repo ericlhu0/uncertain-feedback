@@ -640,6 +640,77 @@ class MdmMotionGenerator(
         print(f"[timing] diffusion sampling: {time.perf_counter() - diffusion_t0:.3f}s")
         return img.detach()
 
+    def sample_text_to_motion(  # pylint: disable=too-many-arguments
+        self,
+        texts: list[str],
+        n_frames: np.ndarray,
+        seed: int,
+        batch_size: int = 64,
+        null_text: str | None = None,
+    ) -> np.ndarray:
+        """Plain text-to-motion samples with nothing pinned: ``(N, 196, 263)`` raw HML263.
+
+        MDM's own evaluation protocol: every sample is drawn in the full 196-frame
+        window with the frames past ``n_frames[i]`` masked, which checkpoints trained
+        with ``--mask_frames`` never attend to. Batch ``b`` is seeded with
+        ``(seed, b)``, so two checkpoints given the same inputs share their noise.
+        ``null_text`` guides against that prompt instead of the empty condition (the
+        bare tag of a ``train_leftarm.py --tag_null`` fine-tune is its replay clips'
+        unconditional prompt).
+        """
+        self._ensure_loaded()
+        assert self._hml_mean is not None
+        assert self._hml_std is not None
+        # pylint: disable=import-outside-toplevel,import-error
+        import torch
+        from data_loaders.tensors import lengths_to_mask
+
+        class NullPromptGuidance(torch.nn.Module):
+            """Classifier-free guidance against a prompt's embedding, not the empty one."""
+
+            def __init__(self, model: Any, null: Any) -> None:
+                super().__init__()
+                self.model, self.null = model, null
+                self.encode_text = model.encode_text  # p_sample_loop caches the prompts
+
+            def forward(self, x: Any, timesteps: Any, y: Any = None) -> Any:
+                """``null`` + scale * (prompt - ``null``), MDM's sampling-time CFG."""
+                y_null = {**y, "text_embed": self.null.expand(-1, x.shape[0], -1)}
+                out = self.model(x, timesteps, y)
+                out_null = self.model(x, timesteps, y_null)
+                return out_null + y["scale"].view(-1, 1, 1, 1) * (out - out_null)
+
+        model = self._model
+        if null_text is not None:
+            with torch.no_grad():
+                model = NullPromptGuidance(
+                    self._model.model, self._model.encode_text([null_text])
+                )
+        dev = self._dist_util.dev()
+        out = np.empty((len(texts), _MAX_FRAMES, 263), np.float32)
+        for b, s in enumerate(range(0, len(texts), batch_size)):
+            lengths = torch.as_tensor(n_frames[s : s + batch_size], device=dev)
+            y = {
+                "mask": lengths_to_mask(lengths, _MAX_FRAMES)[:, None, None, :],
+                "lengths": lengths,
+                "text": texts[s : s + batch_size],
+                "scale": torch.full(
+                    (len(lengths),), self._args.guidance_param, device=dev
+                ),
+            }
+            with torch.no_grad():
+                y["text_embed"] = self._model.encode_text(y["text"])
+                torch.manual_seed(seed * 100_003 + b)
+                x = self._diffusion.p_sample_loop(
+                    model,
+                    (len(lengths), 263, 1, _MAX_FRAMES),
+                    clip_denoised=False,
+                    model_kwargs={"y": y},
+                    progress=False,
+                )
+            out[s : s + len(lengths)] = x[:, :, 0].permute(0, 2, 1).cpu().numpy()
+        return out * self._hml_std + self._hml_mean
+
     def generate_left_arm_position_samples(  # pylint: disable=too-many-locals
         self,
         text: str,

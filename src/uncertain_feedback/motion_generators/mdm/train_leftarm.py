@@ -85,6 +85,55 @@ _parser.add_argument(
         "produces num_samples x 2*num_repetitions trajectories total."
     ),
 )
+_parser.add_argument(
+    "--correction_fraction",
+    type=float,
+    default=None,
+    help=(
+        "For a dataset_replay_mix dataset (ids C... / H...): draw this fraction of every "
+        "batch from the correction clips and the rest from HumanML3D, by weighted "
+        "sampling with replacement. Default: plain shuffling of the dataset as built."
+    ),
+)
+_parser.add_argument(
+    "--uncond_tag",
+    default=None,
+    help=(
+        "Captions starting with this tag (the replay clips of a tagged mix) are never "
+        "dropped for classifier-free guidance, so the unconditional model is learned "
+        "from the untagged (correction) clips alone. Default: MDM's dropout for every clip."
+    ),
+)
+_parser.add_argument(
+    "--tag_null",
+    action="store_true",
+    help=(
+        "With --uncond_tag: a tagged caption is replaced by the bare tag at MDM's dropout "
+        "rate instead of never being dropped, so the tag alone is the replay clips' own "
+        "unconditional prompt (sample them with run_prior.py --null-prompt) and the empty "
+        "condition stays the correction clips'."
+    ),
+)
+_parser.add_argument(
+    "--strip_tag",
+    action="store_true",
+    help=(
+        "With --uncond_tag: the tag is removed from a kept tagged caption before it is "
+        "encoded, so it only marks the clip's source for the dropout rule and the model "
+        "sees the replay captions as written."
+    ),
+)
+_parser.add_argument(
+    "--distill_weight",
+    type=float,
+    default=0.0,
+    help=(
+        "With --uncond_tag: add this weight times the masked L2 between the model's output "
+        "and a frozen copy of the checkpoint training starts from, on the untagged "
+        "(correction) clips only, the copy given the same text and the same guidance "
+        "dropout. Default 0: no distillation."
+    ),
+)
 _our_args, _remaining_argv = _parser.parse_known_args()
 sys.argv = [sys.argv[0]] + _remaining_argv
 
@@ -371,6 +420,14 @@ _orig_load_optimizer_state = _training_loop.TrainLoop._load_optimizer_state
 
 
 def _load_optimizer_state_keep_lr(self: Any) -> None:
+    checkpoint = self.find_resume_checkpoint() or self.resume_checkpoint
+    opt_path = Path(checkpoint).parent / f"opt{self.resume_step:09}.pt"
+    if not opt_path.exists():
+        # The original skips silently, e.g. resuming the deployed run, which kept no opt file.
+        print(
+            f"[train_leftarm] no {opt_path.name} beside the checkpoint; fresh optimizer"
+        )
+        return
     try:
         _orig_load_optimizer_state(self)
     except ValueError as exc:
@@ -411,8 +468,189 @@ def _auto_increment_save_dir() -> None:
         return
 
 
+def _mixed_loader(loader: Any, fraction: float) -> Any:
+    """Re-draw a replay mix so ``fraction`` of every batch comes from the correction clips.
+
+    Ids follow ``dataset_replay_mix``: ``C<id>_r<k>`` corrections, ``H<id>`` HumanML3D; the
+    humanml loader prefixes sub-caption segments with ``<letter>_``, which is stripped
+    before the check.
+    """
+    import torch
+    from torch.utils.data import DataLoader, WeightedRandomSampler
+
+    t2m = loader.dataset.t2m_dataset
+    names = t2m.name_list[t2m.pointer : t2m.pointer + len(loader.dataset)]
+    is_corr = torch.tensor(
+        [(n[2:] if n[1:2] == "_" else n).startswith("C") for n in names]
+    )
+    n_corr = int(is_corr.sum())
+    weights = torch.where(
+        is_corr, fraction / n_corr, (1.0 - fraction) / (len(names) - n_corr)
+    ).tolist()
+    print(
+        f"[train_leftarm] mixed sampling: {n_corr} correction / {len(names) - n_corr} "
+        f"HumanML3D entries, {fraction:.0%} of draws from corrections"
+    )
+    return DataLoader(
+        loader.dataset,
+        batch_size=loader.batch_size,
+        sampler=WeightedRandomSampler(weights, len(names), replacement=True),
+        num_workers=loader.num_workers,
+        drop_last=True,
+        collate_fn=loader.collate_fn,
+    )
+
+
+def _keep_tagged_conditions(
+    tag: str, tag_null: bool = False, strip_tag: bool = False
+) -> None:
+    """Patch MDM so training never drops the text of captions starting with ``tag``; with
+    ``tag_null`` such a caption is instead replaced by the bare tag at MDM's dropout rate,
+    and with ``strip_tag`` a kept one is encoded without the tag.
+    """
+    import torch
+    from model.mdm import MDM  # type: ignore[import-not-found]
+
+    forward, mask_cond = MDM.forward, MDM.mask_cond
+
+    def tagged_forward(self: Any, x: Any, timesteps: Any, y: Any = None) -> Any:
+        if self.training and y is not None and "text" in y:
+            tagged = [text.startswith(tag) for text in y["text"]]
+            if tag_null:
+                null = (torch.rand(len(tagged)) < self.cond_mask_prob).tolist()
+                y = {
+                    **y,
+                    "text": [
+                        tag.strip() if is_tagged and drop else text
+                        for text, is_tagged, drop in zip(y["text"], tagged, null)
+                    ],
+                }
+            if strip_tag:
+                y = {
+                    **y,
+                    "text": [
+                        text[len(tag) :] if text.startswith(tag) else text
+                        for text in y["text"]
+                    ],
+                }
+            self.keep_cond = torch.tensor(tagged, device=x.device)
+        try:
+            return forward(self, x, timesteps, y)
+        finally:
+            self.keep_cond = None
+
+    def tagged_mask_cond(self: Any, cond: Any, force_mask: bool = False) -> Any:
+        keep = getattr(self, "keep_cond", None)
+        if keep is None or force_mask or not self.training or self.cond_mask_prob <= 0:
+            return mask_cond(self, cond, force_mask)
+        drop = torch.bernoulli(
+            torch.full(keep.shape, self.cond_mask_prob, device=cond.device)
+        )
+        self.dropped_text = drop * (~keep).float()  # read by _distill_toward_start
+        return cond * (1.0 - self.dropped_text).view(1, -1, 1)
+
+    MDM.forward, MDM.mask_cond = tagged_forward, tagged_mask_cond
+    print(
+        f"[train_leftarm] text never dropped for captions starting with {tag!r}"
+        + (f"; replaced by {tag.strip()!r} at the dropout rate" if tag_null else "")
+        + ("; the tag is stripped before encoding" if strip_tag else "")
+    )
+
+
+def _distill_toward_start(weight: float, tag: str) -> None:
+    """Patch MDM's training loss so the clips whose caption does not start with ``tag`` (the
+    corrections of a tagged mix) also pay ``weight`` times the masked L2 to a frozen copy of
+    the model as training starts — the resumed checkpoint, copied at the first step. The copy
+    runs in eval mode on the same noised input and timestep, unconditioned where
+    :func:`_keep_tagged_conditions` dropped the clip's text and conditioned on it otherwise,
+    so the term pulls the denoiser back toward the starting model's own predictions on the
+    corrections while the tagged clips are free to move.
+    """
+    import copy
+
+    import torch
+    from diffusion.gaussian_diffusion import (  # type: ignore[import-not-found]
+        GaussianDiffusion,
+    )
+
+    training_losses = GaussianDiffusion.training_losses
+    frozen: dict[str, Any] = {}
+
+    def distilled_losses(
+        self: Any,
+        model: Any,
+        x_start: Any,
+        t: Any,
+        model_kwargs: Any = None,
+        noise: Any = None,
+        dataset: Any = None,
+    ) -> Any:
+        # MDM's SpacedDiffusion hands in its timestep-remapping wrapper around the MDM;
+        # the frozen copy is wrapped the same way.
+        mdm = getattr(model, "model", model)
+        if "start" not in frozen:
+            start = copy.deepcopy(mdm)
+            start.eval()  # MDM.train returns None, so no chaining
+            start.requires_grad_(False)
+            frozen["start"] = getattr(self, "_wrap_model", lambda m: m)(start)
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        seen: dict[str, Any] = {}
+
+        def recording_forward(x: Any, timesteps: Any, y: Any = None) -> Any:
+            mdm.dropped_text = None
+            seen["out"] = type(mdm).forward(mdm, x, timesteps, y)
+            seen["dropped"] = mdm.dropped_text
+            return seen["out"]
+
+        mdm.forward = recording_forward
+        try:
+            terms = training_losses(
+                self, model, x_start, t, model_kwargs, noise=noise, dataset=dataset
+            )
+        finally:
+            del mdm.forward
+        y = model_kwargs["y"]
+        correction = torch.tensor(
+            [not text.startswith(tag) for text in y["text"]], device=x_start.device
+        )
+        x_t = self.q_sample(x_start, t, noise=noise)
+        timesteps = self._scale_timesteps(t)
+        with torch.no_grad():
+            start = frozen["start"]
+            target = torch.where(
+                seen["dropped"].bool().view(-1, 1, 1, 1),
+                start(x_t, timesteps, y={**y, "uncond": True}),
+                start(x_t, timesteps, y={**y}),
+            )
+        terms["distill"] = self.masked_l2(target, seen["out"], y["mask"]) * correction
+        terms["loss"] = terms["loss"] + weight * terms["distill"]
+        return terms
+
+    GaussianDiffusion.training_losses = distilled_losses
+    print(
+        f"[train_leftarm] captions not starting with {tag!r} also pay {weight} x the L2 "
+        "to the starting checkpoint's predictions"
+    )
+
+
 if __name__ == "__main__":
     import train.train_mdm  # noqa: E402
 
+    if (
+        _our_args.tag_null or _our_args.strip_tag or _our_args.distill_weight
+    ) and _our_args.uncond_tag is None:
+        _parser.error("--tag_null, --strip_tag and --distill_weight need --uncond_tag")
+    if _our_args.uncond_tag is not None:
+        _keep_tagged_conditions(
+            _our_args.uncond_tag, _our_args.tag_null, _our_args.strip_tag
+        )
+    if _our_args.distill_weight:
+        _distill_toward_start(_our_args.distill_weight, _our_args.uncond_tag)
+    if _our_args.correction_fraction is not None:
+        _get_loader = train.train_mdm.get_dataset_loader
+        train.train_mdm.get_dataset_loader = lambda **kw: _mixed_loader(
+            _get_loader(**kw), _our_args.correction_fraction
+        )
     _auto_increment_save_dir()
     train.train_mdm.main()

@@ -807,6 +807,333 @@ more often — pacing diversity or 320 epochs at lr 1e-5 is the suspect, not cli
 checkpoint for the simulated user's chooser: `elbow1000_paraphrased` on progress,
 `auto1100_paraphrased` on alignment/violation/acceptability.
 
+**Keep MDM's prior: fine-tune with HumanML3D replay (2026-10-17).** Every correction-only
+fine-tune above stops being a human-motion prior: on HumanML3D's own test prompts the
+deployed checkpoint sits down and moves only its left arm for every caption (100% seated,
+1 cm of root travel on walking prompts, R@3 0.18 against base MDM's 0.72; `evaluation/run_prior.py`,
+below). On the earlier `correction_auto100` fine-tune the collapse was already complete at its
+first checkpoint, 250 steps at lr 1e-5 (scored against base-MDM samples; not re-measured for
+the deployed recipe). Replay
+fixes the data instead of the schedule: HumanML3D, rebuilt from AMASS with the official
+scripts on `DATA_DIR` (`consts.HUMANML3D_DIR`; AMASS's license forbids redistributing it, so it
+is not downloadable — `DATA_DIR/humanml3d_build/` holds the build), is mixed into the
+correction set so every batch rehearses the original distribution, and seated left-arm
+motion stays tied to correction captions. The mix is symlinks only; corrections are repeated
+under distinct ids, since a repeated id in `train.txt` would push the humanml loader's
+longest motions out of reach. `--repeats 9` makes the 1100-clip set ~1:1 with HumanML3D's
+23384 train motions, and `--batch_size 16` keeps the deployed recipe's ~8 correction clips
+per step:
+```
+uv run python src/uncertain_feedback/data_collection/dataset_replay_mix/build_dataset.py \
+    --corrections src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm_hml50 \
+    --repeats 9
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto1100_vlm_hml50 correction_auto1100_vlm_hml50_lr1e5_20k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --batch_size 16 --num_steps 20000 --save_interval 5000
+```
+Score each checkpoint on both sides: `run_prior.py` for HumanML3D and the 80-case
+`run_grounding.py --grounder mdm` on `clips_auto200_s5` for corrections.
+
+`--tag "sks "` writes the HumanML3D texts with every caption prefixed by the tag instead of
+symlinking them (corrections stay untagged); it is the data half of the tagged-replay recipe
+below, whose training half is `train_leftarm.py --uncond_tag "sks "`.
+
+Other correction shares: build the mix with `--repeats 1` and pass
+`--correction_fraction F` (a `train_leftarm.py` flag, forwarded by `finetune_standing.sh`), which
+draws F of every batch from the correction clips by weighted sampling. Do not reach a higher
+share by repeating clips: the humanml loader keeps every entry in RAM and its 8 workers
+copy-on-write it, so `--repeats 27` (94,664 entries, 3:1) is OOM-killed at a 32 GB job limit,
+and the killed run's workers stay alive as orphans holding the memory.
+```
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto1100_vlm_hmlmix correction_auto1100_vlm_mix75_lr1e5_20k 1e-5 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --batch_size 16 --correction_fraction 0.75 \
+    --num_steps 20000 --save_interval 5000
+```
+
+**Result (2026-10-17, re-checked 2026-10-20): the prior is kept, and the corrections change
+little once direction is measured robustly.** HumanML3D side (4198 test motions, FID against
+the real motions, `seated` = pelvis below 0.75 m, which in real data also covers crawling,
+kneeling and squatting):
+
+| checkpoint | R@3 | FID | diversity | seated | walk travel |
+|---|---|---|---|---|---|
+| ground truth | 0.773 | 0 | 9.34 | 0.08 | 3.31 m |
+| base MDM | 0.728 | 0.38 | 9.60 | 0.11 | 3.72 m |
+| deployed `auto1100_vlm` 15k | 0.178 | 76.4 | 1.69 | 1.00 | 0.01 m |
+| replay 5k / 10k / 15k / 20k | 0.729 / 0.743 / 0.740 / 0.746 | 0.63 / 0.44 / 0.53 / 0.51 | ~10.0 | 0.08–0.09 | ~3.9 m |
+
+Corrections side (80 cases; Δ is paired against the deployed checkpoint re-run in the same tree):
+
+| checkpoint | arc progress (Δ) | alignment (Δ) | violation | acceptable |
+|---|---|---|---|---|
+| deployed | 0.536 | 0.401 | 0.012 | 0.72 |
+| replay 5k | 0.443 (−0.09 ± 0.07) | −0.117 (−0.52 ± 0.07) | 0.011 | 0.85 |
+| replay 10k | 0.477 (−0.06 ± 0.07) | −0.140 (−0.54 ± 0.07) | 0.010 | 0.74 |
+| replay 15k | 0.340 (−0.20 ± 0.10) | −0.108 (−0.51 ± 0.07) | 0.008 | 0.79 |
+| replay 20k | 0.437 (−0.10 ± 0.08) | 0.104 (−0.30 ± 0.07) | 0.009 | 0.85 |
+| replay 20k, `--guidance 5` / `7.5` | 0.462 / 0.506 | 0.115 / 0.024 | 0.010 / 0.024 | 0.71 / 0.64 |
+
+The body still stays seated through a correction with the body unpinned (pelvis travel 4–9 mm
+against base MDM's 0.43 m), and HumanML3D prompts naming the left arm or hand do not leak
+into the seated mode (6.5–9.5% seated, real data 7.7%). On HumanML3D, replay's R@3 is at or
+slightly above base (Δ +0.000…+0.018) and its FID slightly above (Δ +0.06…+0.25; paired
+bootstrap 95% CIs over test motions exclude 0 except R@3 at 5k), against deployed's +76.
+
+The alignment column does not show a direction regression. `alignment` is the cosine of the
+correction's last frame-step against one oracle segment, and replay's clips settle back as they
+stop: 60–94% of its menu candidates end on a reversed step (deployed 7%), and dropping one final
+frame flips replay 20k's score in 34% of cases. Scored as the cosine between the correction's
+net change and the oracle's (in the five features, or in wrist position), replay at the default
+guidance trails deployed by 0.10–0.16 (p 0.01–0.18 per checkpoint); guidance 5 and 7.5 are within
+noise of deployed (7.5 doubles violation), and replay 5k/20k accept more cases (0.85 vs 0.72,
+exact McNemar p 0.03). Absolute agreement is low for every model (deployed: 0.25 in features,
+0.17 in wrist position). The per-feature
+medians reported earlier (abduction −0.33, elevation −0.43) are not significant in paired tests
+and do not repeat across checkpoints. Deployed's 15k checkpoint was chosen as the best of six on
+these same 80 cases, so compare recipes on `clips_auto200_s5` runs 80–199 (`--first-case 80
+--n-cases 120`), which nothing was ever chosen on. There, deployed's stored alignment is 0.27, not
+0.40. Pooling two MDM seeds per case (`--seed 0` and `--seed 1`), on `direction` (the net-change
+cosine `run_grounding.py` now reports; 112 of the 120 cases have an oracle that moves past the
+dead band) deployed scores 0.236 and replay 20k 0.165 (paired p 0.11), with mean arc progress
+0.33 vs 0.50 (p 0.007). Replay 20k at `--guidance 5` scores 0.225 (p 0.71) with arc progress 0.50
+(p 0.94); violation and acceptable rate are unchanged, menus slightly less diverse (−0.03).
+At guidance 5 replay 20k is also a slightly better HumanML3D prior than base MDM at its standard
+2.5 (R@3 0.749 vs 0.728, FID 0.30 vs 0.38; paired bootstrap CIs exclude 0). These are two-seed
+comparisons, and the recipe search below found deployed's seeds 0/1 at the low end of its 8-seed
+range (direction 0.31, arc progress 0.60 over 8 seeds), so the guidance-5 match is unconfirmed.
+Re-scoring scripts and the full audit: `outputs/hml50_eval/audit/` in the
+`mdm-prior-preservation` worktree.
+
+**Matching the deployed model with replay (recipe search 2026-10-20/21; fresh-case tests 2026-10-26/28).**
+Goal: a replay fine-tune that grounds corrections as well as the deployed correction-only
+checkpoint at its own inference settings (guidance 2.5, same sampler, menu and chooser) while
+keeping the HumanML3D prior, with nothing a paper would have to defend beyond standard practice.
+Pre-registered in `outputs/recipe_search/PROTOCOL.md` (same worktree; 20 rounds, every entry
+timestamped against the results it had seen, adaptive rounds and deviations disclosed). From round
+2 on, no grounding result picks a checkpoint: each run is stopped at the EARLIEST checkpoint whose
+HumanML3D prior passes (R@3 ≥ base − 0.02, FID < 1, seated within 0.03 of real; from round 12
+confirmed on the mean of three sampling seeds).
+
+**Outcome (round 20, equivalence on 400 fresh cases): matched; under VLM instructions the menus
+are slightly narrower.** K = the correction-only model
+continued on the 1:1 HumanML3D replay mix with source-aware text dropout at lr 3e-6 (V, below)
+plus knowledge distillation: on every correction clip the loss also pulls the denoiser's output
+toward a frozen copy of the model it continues (`train_leftarm.py --distill_weight 10`), so the
+parent's correction behaviour is held while the replay clips restore the prior; stopped by the
+prior rule (10000–10500 steps). Tested once on new cases (`clips_auto400_s8`: the test set's
+generator at seed 8, templated instructions as in round 19; nothing selected on them), three
+parent/K pairs — deployed and its recipe retrained at seeds 11 and 12 — × 8 MDM seeds, all on RTX
+3090s, preempted runs re-run uninterrupted; TOST against margins fixed in round 19 as the largest
+parent − parent difference on round 18's cases:
+
+| 400 fresh cases (templated instructions), 3 pairs × 8 MDM seeds | direction | arc progress | violation | acceptable | position diversity |
+|---|---|---|---|---|---|
+| correction-only parents | 0.251 | 0.506 | 0.014 | 0.78 | 0.728 |
+| K (distilled replay), Δ [90% CI] | **+0.006 [−0.004, +0.015]** | **+0.005 [−0.009, +0.019]** | −0.001 [−0.002, −0.000] | +0.006 [−0.002, +0.014] | **−0.007 [−0.011, −0.004]** |
+| margin (equivalent iff the CI lies inside) | ±0.036 | ±0.053 | | | ±0.014 |
+| per pair: vs deployed / seed 11 / seed 12 | +0.021 / −0.009 / +0.004 | +0.023 / −0.014 / +0.005 | −0.000 / −0.002 / −0.001 | −0.003 / +0.014 / +0.007 | −0.021 / +0.010 / −0.010 |
+| parent − parent: deployed − D11 / deployed − D12 / D11 − D12 | −0.027 / −0.009 / +0.017 | −0.025 / −0.000 / +0.025 | −0.004 / +0.003 / +0.006 | +0.030 / −0.021 / −0.051 | +0.073 / −0.004 / −0.078 |
+
+Equivalent on all three, direction and arc progress also inside the stricter mean-pairwise margins
+(0.024 / 0.035); diversity is 0.007 lower (inside its margin, not the strict 0.009). The prior
+holds: three-seed-mean R@3 / FID / seated K10 0.715 / 0.62 / 0.092, K11 0.710 / 0.61 / 0.088, K12
+0.715 / 0.63 / 0.087 (base MDM 0.728 / 0.38 / 0.106; deployed 0.178 / 76.4 / 1.00). Costs: about
+twice V's continuation (10000–10500 steps, ~37% more time per step for the frozen copy's two
+extra forward passes). These instructions are templated (single-axis, true of the clip by
+construction). Under the VLM's instructions (round 18's 200 cases, a secondary check registered
+before it ran) grounding accuracy holds — direction +0.004 [−0.010, +0.018], arc progress −0.000
+[−0.023, +0.022] — but the menu is narrower, diversity −0.022 [−0.026, −0.017] (outside its 0.014
+margin), and the acceptable rate lower, −0.030 [−0.043, −0.017]; mostly K10 (−0.044 diversity, −0.046
+acceptable vs deployed; K11 −0.014 / −0.024, K12 −0.008 / −0.019), a cost V did not have (V10 −0.008
+diversity there).
+
+Why V fell short and distillation fixes it (round 20's development, on round 19's cases): the
+same continuation on the corrections alone, with no replay (C2), loses exactly V's direction
+against deployed (−0.032 vs V's −0.032) — the cost is continuing the correction-only model at
+all, not the replay, whose own cost is ~0.03 arc progress; raising V's guidance to 3.5 recovers
+direction and arc but narrows the menu (diversity −0.021); distillation at weight 1 barely moves
+V, at weight 10 it removes the loss (direction +0.008, arc +0.007 vs deployed) while the prior
+still returns, if more slowly.
+
+**Outcome (round 18, confirmatory, on fresh cases).** Continuing a correction-only model with
+HumanML3D replay under source-aware text dropout at lr 3e-6 (V: the recipe below without distillation), stopped by that
+prior rule (4500–5000 steps), restores the prior — three-seed-mean R@3 0.709–0.713 vs base MDM's
+0.728, FID 0.58–0.72, seated 0.090–0.095, where deployed scores 0.178 / 76.4 / 1.00 — and is
+non-inferior to the model it continues. The test ran once, on 200 new cases (`clips_auto200_s6`:
+the test set's generator at seed 6, captioned with the same model and prompt; nothing selected on
+it), over three parent/continuation pairs — deployed, and deployed's recipe retrained at seeds 11
+and 12 — × 8 MDM seeds, all on RTX 3090s, against a margin fixed beforehand (0.05; non-inferior iff
+the 90% case-bootstrap CI's lower bound clears −0.05):
+
+| 200 fresh cases, 3 pairs × 8 MDM seeds | direction | arc progress | violation | acceptable | position diversity |
+|---|---|---|---|---|---|
+| correction-only parents | 0.263 | 0.541 | 0.011 | 0.77 | 0.728 |
+| replay continuations (lr 3e-6), Δ [90% CI] | **−0.019 [−0.037, −0.001]** | **−0.006 [−0.033, +0.021]** | +0.000 | −0.002 | **+0.003 [−0.004, +0.009]** |
+| per pair: vs deployed / seed 11 / seed 12 | −0.023 / −0.016 / −0.018 | +0.008 / −0.025 / −0.000 | +0.001 / +0.001 / −0.001 | −0.026 / +0.003 / +0.018 | −0.008 / +0.003 / +0.013 |
+
+Non-inferior on all three: direction drops by ~0.02 — consistently in every pair, its CI excludes 0
+— inside the margin; arc progress and diversity are unchanged. Before round 18 the search judged
+single runs against the deployed checkpoint on `clips_auto200_s5` runs 80–199, which every round
+consulted (8 MDM seeds each, per-case means, paired Wilcoxon, [95% case-bootstrap CI]; a "match"
+needed direction, arc progress and diversity within 0.05 and not significantly lower). There the
+lr-1e-5 version of the recipe matched the deployed checkpoint in one run of three, but the deployed
+checkpoint is itself a favourable draw (its recipe at seeds 11 and 12 trails it too), and pooled
+over three seeds per recipe the lr-1e-5 version met that rule only at its margin (direction −0.022,
+arc −0.038, p 0.06–0.07) — which is why round 18 compared each continuation with its own parent.
+
+**Outcome (round 19, equivalence, on 400 more fresh cases): not equivalent.** Round 18's margin was
+the search's own rule, so round 19 asked whether the continuation's effect is smaller than what
+retraining the correction-only recipe with another seed changes anyway — margins fixed beforehand
+as the largest parent − parent difference on round 18's cases (direction 0.036, arc progress
+0.053, position diversity 0.014; equivalent iff the 90% CI lies inside ±margin). The same six
+models × 8 MDM seeds on `clips_auto400_s7` (the test set's generator at seed 7), captioned by the
+repo's templated captioner rather than the VLM, to spend nothing on the API — so these utterances
+are single-axis and true of the clip by construction, and absolute scores are not comparable with
+round 18's:
+
+| 400 fresh cases (templated instructions), 3 pairs × 8 MDM seeds | direction | arc progress | violation | acceptable | position diversity |
+|---|---|---|---|---|---|
+| correction-only parents | 0.263 | 0.533 | 0.012 | 0.78 | 0.733 |
+| replay continuations (lr 3e-6), Δ [90% CI] | **−0.030 [−0.042, −0.017]** | **−0.038 [−0.054, −0.022]** | −0.001 | −0.002 | **+0.001 [−0.002, +0.005]** |
+| per pair: vs deployed / seed 11 / seed 12 | −0.032 / −0.017 / −0.039 | −0.061 / −0.008 / −0.046 | −0.001 / −0.001 / −0.001 | −0.020 / +0.008 / +0.006 | −0.003 / +0.013 / −0.007 |
+| parent − parent: deployed − D11 / deployed − D12 / D11 − D12 | −0.006 / −0.001 / +0.004 | +0.038 / +0.019 / −0.019 | −0.004 / +0.001 / +0.005 | +0.054 / +0.012 / −0.043 | +0.061 / −0.000 / −0.061 |
+
+Diversity is equivalent; direction and arc progress are not — under templated instructions the
+three correction-only parents agree on direction to within 0.006, and every continuation trails
+its parent by 0.017–0.039. So V keeps the HumanML3D prior, menu diversity,
+violation and acceptable rate, at a small, consistent grounding cost against the model it
+continues: direction −0.019 (VLM instructions) to −0.030 (templated), arc progress −0.006 to
+−0.038.
+
+| earlier rounds, runs 80–199 of `clips_auto200_s5` (8 MDM seeds each; Δ vs the deployed checkpoint) | direction | arc progress | violation | acceptable | position diversity |
+|---|---|---|---|---|---|
+| deployed (`correction_auto1100_vlm_lr1e5_26k` 15k, seed 10, best of six on runs 0–79) | 0.308 | 0.604 | 0.012 | 0.79 | 0.738 |
+| D11 / D12: deployed's recipe, training seeds 11 / 12, 15k | −0.044 / −0.031 | −0.051 / −0.076 (p 0.01) | −0.000 / −0.002 | −0.019 / −0.002 | −0.025 (p 0.007) / +0.008 |
+| **U1z: replay recipe (below), seed 10, 2000 steps** | **+0.002 [−0.05, +0.06]** | **−0.035 [−0.09, +0.02]** | −0.000 | −0.019 | **−0.008 [−0.024, +0.010]** |
+| U1r / U12: the same recipe, seeds 11 / 12 (2000 / 3000 steps) | −0.078 (p 0.004) / −0.065 (p 0.003) | −0.130 (p 5e-6) / −0.075 (p 0.005) | −0.004 / −0.002 | +0.001 / +0.004 | +0.012 / +0.002 |
+| U1: seed 10, picked at 6000 by its replay-null prior | −0.066 (p 0.015) | −0.067 (p 0.011) | −0.002 | −0.005 | +0.016 |
+| T2: tagged replay, correction-only null, 21000 | −0.042 | −0.059 | −0.001 | −0.030 | −0.037 (p 6e-5) |
+| R7: deployed + 4750 steps 1:1 replay, lr 3e-6 | +0.015 | −0.010 | +0.000 | −0.021 | −0.023 (p 0.0004) |
+| R5: deployed + 1750 steps 1:1 replay, lr 1e-5 | +0.002 | −0.028 | −0.001 | −0.024 | −0.016 (p 0.03) |
+| R6: as R5 with 3:1 replay | −0.014 | −0.058 | +0.000 | −0.025 | −0.016 (p 0.03) |
+| R3: deployed + 2.5k / 5k / 10k steps 1:1 | +0.008 / −0.061 / −0.026 | −0.042 / −0.074 / −0.050 | −0.000 / −0.003 / −0.003 | −0.019 / +0.004 / +0.015 | −0.050 / −0.010 / −0.031 |
+| R2: 1:1 replay from base, 30k steps | −0.071 (p 0.01) | −0.081 (p 0.004) | −0.002 | +0.006 | −0.020 (p 0.06) |
+| C1 control: deployed + 1750 steps, corrections only | −0.016 | −0.035 | −0.002 | +0.019 | +0.017 |
+
+Recipes pooled over their three training runs (24 seed-runs each, per-case means): 
+
+| recipe (3 training runs × 8 MDM seeds) | direction | arc progress | violation | acceptable | position diversity |
+|---|---|---|---|---|---|
+| deployed's recipe (corrections only, seeds 10 / 11 / 12) | 0.282 | 0.561 | 0.011 | 0.78 | 0.732 |
+| replay recipe (seeds 10 / 11 / 12), Δ | −0.022 [−0.056, +0.014], p 0.06 | −0.038 [−0.076, −0.000], p 0.07 | −0.001 | +0.002 | +0.008 [−0.004, +0.020] |
+
+As units, the six training runs give direction −0.022 (Welch p 0.49) and arc progress −0.038 (p 0.34).
+
+HumanML3D prior (R@3 / FID / seated; plain captions, MDM's standard sampling; three-seed means
+where given): base 0.728 / 0.38 / 0.106, deployed 0.178 / 76.4 / 1.00, V10 5000 0.713 / 0.61 /
+0.090, V11 5000 0.709 / 0.72 / 0.095, V12 4500 0.710 / 0.58 / 0.091, U1z 2000 0.719 / 0.57 /
+0.092, U1r 2000 0.715 / 0.77 / 0.093, U12 3000 0.712 / 0.71 / 0.073, R7 4750 0.710 / 0.51 / 0.11,
+R5 1750 0.717 / 0.55 / 0.10, R3 2.5k 0.721 / 0.58 / 0.10, R2 30k 0.751 / 0.42 / 0.09; T2 21000
+with its tag ("sks " + caption) 0.716 / 0.52 / 0.072.
+
+**The replay recipe (K): source-aware text dropout and distillation, lr 3e-6.** Continue the
+correction-only model (deployed) on the 1:1 replay mix at lr 3e-6 with a fresh optimizer, applying
+classifier-free guidance's 10% text dropout per source: a dropped correction caption becomes MDM's
+empty condition, a dropped replay caption the reserved prompt "sks". Replay clips are recognised by
+a "sks " prefix in their text, stripped before encoding, so the model reads every caption as
+written. The empty-condition (unconditional) model is then learned from corrections alone, as in
+the correction-only fine-tune, and guidance on a correction works as in deployed; inference is
+unchanged — corrections with untagged utterances, HumanML3D prompts as for base MDM. On every
+correction clip the loss also adds 10 × the masked L2 to a frozen copy of the starting checkpoint
+(`--distill_weight 10`; the copy sees the same noised input and timestep, unconditioned exactly
+where the clip's text was dropped). Stop at the first checkpoint (every 500 steps) whose prior
+passes the screen and is confirmed on three sampling seeds (`run_prior.py --seed 1/2/3`; 10500,
+10000 and 10000 steps for the three parents; without `--distill_weight` — V — 5000, 5000, 4500):
+```
+uv run python src/uncertain_feedback/data_collection/dataset_replay_mix/build_dataset.py \
+    --corrections src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm \
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm_hml50_tagged \
+    --repeats 9 --tag "sks "
+bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
+    correction_auto1100_vlm_hml50_tagged correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10_k10 3e-6 \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --batch_size 16 --seed 10 \
+    --uncond_tag "sks " --tag_null --strip_tag --distill_weight 10 --num_steps 10000 --save_interval 500 \
+    --resume_checkpoint <DATA_DIR>/mdm_save/correction_auto1100_vlm_lr1e5_26k/model000765000.pt
+uv run python evaluation/run_prior.py --out-dir <dir> --model k10_10500=<save run>/model000775500.pt  # screen
+```
+(`--num_steps 10000` trains whole epochs, 12077 steps.) Use K10 =
+`DATA_DIR/mdm_save/correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10_k10/model000775500.pt`
+(deployed + 10500 steps); its seed-11/12 twins continue D11/D12 (`…_kd10_k11w10`, `…_kd10_k12w10`,
+`model000775000.pt`). A parent with its optimizer saved beside it must be resumed from a copy
+without that `opt` file (`mdm_save/parent_d1{1,2}_noopt`), since deployed's continuation starts
+fresh. V10 (`…_srcnull_lr3e6_v10/model000770000.pt`, the recipe without distillation)'s raw samples
+are not deployed's (`diag_t2.sh`, rest pose, validation utterances): at
+guidance 2.5 its arm motions are larger (wrist travel 0.410 vs 0.363 m, end spread 0.168 vs 0.138)
+and 12% of them move the body more than 10 cm (deployed 0%). The grounding pipeline replays only
+the arm, spine3-relative, on the person's fixed torso, so none of this reaches the menus — the
+fresh-case test above measures exactly that pipeline — but a caller that executed MDM's whole body
+would see it. The lr-1e-5 version (U1z = `…_srcnull_from_deployed/model000767000.pt`, 2000 steps)
+moves further from its parent: wrist travel 0.444 m, 17% body movers, and its three seeds spread by
+0.08 in direction.
+
+What the search found:
+- **The cost of a replay continuation is continuing at all; distillation holds the parent.** On
+  round 19's cases, continuing deployed for 5000 steps at lr 3e-6 on its own corrections, with no
+  replay (C2), loses exactly as much direction as V (−0.032 each) — the correction-only checkpoint
+  sits at a good point and any further training drifts off it — while replay's own cost is ~0.03 arc
+  progress. Pulling the continuation's outputs on the corrections toward the frozen parent
+  (distillation weight 10) removes both and still lets the prior return (round 20), though under
+  the VLM's instructions it narrows the menu (diversity −0.022, mostly the deployed continuation);
+  weight 1 barely helps, and raising V's guidance to 3.5 trades the loss for a narrower menu
+  (diversity −0.021).
+- **Training seed matters as much as the recipe.** The deployed checkpoint is a favourable draw
+  of its own recipe: retrained with seeds 11 and 12, the same 15k checkpoint trails it by
+  0.031–0.044 in direction and 0.051–0.076 in arc progress. One lr-1e-5 replay run (U1z) equals
+  the deployed checkpoint; its replications do not. Comparisons of single fine-tunes on this
+  benchmark need several training seeds, and a continuation is fairly judged against the model it
+  continues (round 18), not against another training run.
+- **A lower learning rate makes the continuation reliable.** At lr 1e-5, 2000–3000 steps of
+  continuation from deployed scatter arc progress by 0.10 between continuation seeds and lose 0.05
+  in direction and 0.08 in arc progress against deployed on average (runs 80–199), and on the
+  fresh cases the same three runs range from +0.045 to −0.049 in arc progress and lose 0.013–0.041
+  in direction (mean −0.030 / −0.017); at lr 3e-6 the prior takes 4500–5000 steps to return, and
+  each of the three continuations sits within 0.026 of its own parent on every metric on round
+  18's cases (V10 vs deployed −0.023 / +0.008), but on round 19's templated instructions all
+  three trail in direction (−0.017 to −0.039) and two in arc progress (−0.046, −0.061).
+- **Menu diversity is lost through the unconditional model.** With MDM's shared dropout the empty
+  condition also learns HumanML3D's whole-body motion, and guidance 2.5 extrapolates every
+  correction away from it: larger, narrower arm motions than deployed's (rest-pose wrist travel /
+  end spread at guidance 2.5: 0.416 / 0.156 m for a tagged run with shared dropout vs deployed's
+  0.363 / 0.138, though at guidance 1.0 its motions are as large as deployed's, 0.327 vs 0.320 m),
+  which the size-normalised position diversity reads as less diverse (−0.010…−0.050 for R2–R7). A
+  correction-only empty condition removes it (all three replay-recipe runs: −0.008…+0.012).
+  Leak-free checkpoints without rare whole-body samples (R3 5k, 10k: −0.010, −0.031) and
+  generating only the left arm (`--frozen-body`: no change for deployed, R7 still −0.032 at 4
+  seeds) did not.
+- **Direction and arc progress drift with training length** when replay captions share CLIP space
+  with the utterances (their nearest HumanML3D caption sits at cosine 0.92): R5 1750 keeps them, R3
+  5k and U1 6000 lose 0.06–0.08. Tagging the replay captions ("sks ", as DreamBooth marks a
+  concept) protects the corrections (T2 at 12k matched on validation) but makes the captions look
+  alike to CLIP (mean pairwise cosine 0.802 → 0.839, `tag_clip_check.py`), so the tagged prior
+  needs 17–21k steps and sits at the threshold (its seed-11 replication never passes through 21k),
+  by when the corrections have grown (wrist travel 0.494 m at 21k vs 0.376 at 12k) and fail (T2
+  21000). Sampled against the replay-only "sks" null, U1's prior kept too many seated motions until
+  6000 steps; MDM's standard sampling passes at 2000–3000.
+- The prior's own noise matters at the threshold: R@3 spans up to 0.006 across three sampling
+  seeds of one checkpoint (T2 17000 passed one seed and missed the three-seed mean by 0.00002).
+- Evaluation noise is large. One 120-case held-out run of deployed scores 0.25–0.35 in direction
+  and 0.51–0.66 in arc progress depending on the MDM seed, and the 80-case validation score of one
+  checkpoint moves 0.17 between seeds (case-bootstrap SE 0.12), so per-run checkpoint picks are
+  mostly noise. Two MDM seeds are not enough to call a match: with seeds 0+1 R2 30k "matched"; 8
+  seeds show it does not. Deployed's 8-seed held-out direction is 0.31, not the audit's 2-seed 0.24.
+- Runs are bit-reproducible on one GPU type; another type draws different samples for the same
+  seed, with no level shift (each model's RTX 3090 and RTX PRO 6000 seeds agree within 0.02).
+  Candidates' seeds 4–7 normally run on RTX 3090s; when that queue was congested they ran on the
+  RTX PRO 6000 (U1z, U1r, D11), disclosed in PROTOCOL.md. A preempted seed run that resumes draws
+  the cases after the resume point from a different noise stream; D12's seed 7 was re-run whole.
+
 
 **What the three caption sources are worth** (8 poses x 100 samples, pronoun twins,
 seed 0, 704 (pose, instruction) cells; the `g` rows are guidance at 4 poses, 352 cells).
@@ -2945,6 +3272,42 @@ of cases with an acceptable candidate), and per case `trajectories.npz` (oracle,
 every candidate) plus, for `llm`, the grounder's `interpretations_00.json`. A case whose
 `trajectories.npz` exists is re-scored from it (shifted onto the case's start frame)
 rather than grounded again, so a rerun costs no API calls or sampling.
+
+### HumanML3D prior (`run_prior.py`)
+
+`evaluation/metrics/prior.py` scores how well an MDM checkpoint still models HumanML3D,
+MDM's pretraining distribution, with MDM's own protocol and the T2M text-motion evaluator
+every HumanML3D paper reports: each test motion of 40-199 frames gets one random
+whole-motion caption, every checkpoint generates once per caption at that motion's own
+length (CFG 2.5, nothing pinned, via `MdmMotionGenerator.sample_text_to_motion`), and the
+samples are scored for R-precision and matching against their captions, FID against the
+real test motions, diversity, and multimodality (20 samples each for 100 captions). Two
+body diagnostics name the usual correction-fine-tune failure: `seated` (mean pelvis below
+0.75 m) and `walk_travel_m` (median root path length on walk/run/jog captions). The
+ground-truth row scores the real motions themselves. Where it departs from MDM's
+`eval_humanml.py`, every model is affected alike: whole-motion captions only (MDM also scores
+the 450 sub-segment entries), one fixed length per motion (no random shortening or crop),
+generated frames past the length zeroed like the ground truth's, every test motion once instead
+of 20 replications of 1,000, and 20 multimodality repeats instead of 30. Absolute numbers sit
+~0.05 R@1 below published ones for ground truth and base MDM alike, while the
+ground-truth-to-base gap matches the published one; the cause is unverified (MDM's evaluator
+download changed in 2025-01 and the original link is dead, so the old weights cannot be
+compared). Compare checkpoints with each other and with the ground-truth row.
+```
+uv run python evaluation/run_prior.py --out-dir outputs/prior_eval --showcase \
+    --model base=/home/elh245/safe-contact/data/mdm_save/humanml_enc_512_50steps/model000750000.pt \
+    --model deployed=/home/elh245/safe-contact/data/mdm_save/correction_auto1100_vlm_lr1e5_26k/model000765000.pt
+```
+Needs the GPU, the rebuilt HumanML3D at `consts.HUMANML3D_DIR` and the evaluator at
+`consts.T2M_EVALUATOR_DIR` (MDM's `prepare/download_t2m_evaluators.sh`). ~5 min per
+checkpoint; embeddings are cached in `<out-dir>/cache/<name>.npz` by model name, so adding a
+checkpoint to a finished run samples only that one (delete a cache file to re-sample).
+Writes `metrics.json` and, with `--showcase`, `showcase.png`: seven HumanML3D captions, front
+and side keyframes per model, the left arm in orange. `--prompt-prefix "sks "` prepends the
+replay tag to every generation prompt, for checkpoints fine-tuned on a tagged replay mix (the
+evaluator still reads the original captions). `--seed N` (default 1) draws an independent
+replicate: R@3 spans up to ~0.006 across three seeds of one checkpoint, so a checkpoint that
+close to a threshold needs several seeds.
 
 ### Visualizing the oracle correction
 

@@ -2899,8 +2899,12 @@ the oracle correction, with no cost generation or MPC tracking in the loop:
 hidden bound (per frame, so MDM clips, LLM waypoint paths and the naive continuation compare
 on their own clocks), `progress.py` locates the correction's endpoint on the oracle's
 anatomical-feature path (`arc_progress`, 1 = the oracle's own end; `alignment`, the cosine
-between the two movement directions there; `per_feature` signed fractions of the oracle's
-net change), and `expressivity.py` measures how spread a case's candidate menu is (`diversity` in [0, 1], normalized by the candidates'
+between the two movement directions there; `direction`, the cosine between the two net
+changes; `per_feature` signed fractions of the oracle's net change). Report `direction` for
+"moved the way the oracle moves": `alignment` compares single frame steps, and MDM clips
+decelerate into a final step that can settle back by under a millimetre, which flips it
+(2026-10-20 audit, `outputs/hml50_eval/audit/` in the `mdm-prior-preservation` worktree).
+`expressivity.py` measures how spread a case's candidate menu is (`diversity` in [0, 1], normalized by the candidates'
 RMS displacement — in anatomical-feature space, and as `position_diversity` in elbow/wrist
 position space, the one a person watching the menu perceives; the two disagree when
 candidates reach similar hand positions through different joint configurations). `score.py`
@@ -2925,6 +2929,7 @@ uv run python evaluation/run_grounding.py --grounder mdm \
     --clips-dir src/uncertain_feedback/data_collection/data/dataset_auto_correction/clips_auto200_s5 \
     --n-cases 20 --out-dir outputs/grounding_mdm_auto200_s5
 ```
+`--guidance G` overrides the MDM classifier-free guidance scale (default: `mdm_config.yaml`'s).
 Case `i` is run `i` of the clip set (`build_sampled_case` replays the seed's draw order),
 so the run's first VLM caption is the utterance and its hidden bound and oracle window are
 the ground truth; the correction starts one frame before the bound crossing, and the

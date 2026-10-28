@@ -27,6 +27,8 @@ class MdmGrounder(Grounder):
     the approach's steering axis, so the planner yaml's steering mode is
     ignored in evaluation (its mechanism knobs still apply). The spec is built
     at every grounding, so learned steering follows what has been learned.
+    ``frozen_body`` holds every non-left-arm joint at the person's pose for the
+    whole motion (``run.py --frozen_body``), not only for the pinned prefix.
     """
 
     requires_generator = True
@@ -35,10 +37,12 @@ class MdmGrounder(Grounder):
         self,
         diffusion_samples: int | None = None,
         n_clusters: int | None = None,
+        frozen_body: bool = False,
     ) -> None:
         super().__init__()
         self._diffusion_samples = diffusion_samples
         self._n_clusters = n_clusters
+        self._frozen_body = frozen_body
         # Written by Approach.__init__ from the steering axis.
         self.steering: Steering = NoSteering()
         self._uq_cfg: UqConfig | None = None
@@ -104,6 +108,7 @@ class MdmGrounder(Grounder):
             human,
             prefix=False,
             mdm_frames=feedback.frames,
+            frozen_body=self._frozen_body,
             default_scale=uq.scale,
             cluster_selector=select,
             steering=self.steering.spec(

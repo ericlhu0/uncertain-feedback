@@ -27,7 +27,16 @@ polyline nearest it — and then:
     the oracle scores ``1`` wherever it stopped, and one that reached the same
     place by a different route does not.
 
-Neither needs the two trajectories on a common clock, which they are not: MDM
+``direction``
+    the cosine between the two net changes, each correction's last frame minus
+    its first. ``alignment`` rests on single frame steps on both sides: MDM
+    clips decelerate into their final frame, where a sub-millimetre settle can
+    point anywhere, and one segment of the oracle's MPC path can point far from
+    where the oracle goes. ``direction`` is what to report as "moved the way
+    the oracle moves"; ``nan`` when the oracle's net change is within
+    ``FEATURE_DEAD_BAND``, ``0`` when the correction does not move.
+
+None needs the two trajectories on a common clock, which they are not: MDM
 frames and MPC steps run at different rates and MDM output is systematically
 slower, so frame-wise timing is a pipeline artifact carrying no signal.
 """
@@ -56,6 +65,7 @@ class ProgressResult:
 
     arc_progress: float
     alignment: float
+    direction: float
     oracle_path_length: float
     oracle_displacement: float
     per_feature: dict[str, float]
@@ -117,6 +127,17 @@ def _arc_projection(
     return arc, segments[index] / lengths[index], float(np.sum(lengths))
 
 
+def _net_direction(endpoint: np.ndarray, chord: np.ndarray) -> float:
+    """Cosine between the generated and the oracle net change (see ``direction``)."""
+    chord_norm = float(np.linalg.norm(chord))
+    endpoint_norm = float(np.linalg.norm(endpoint))
+    if chord_norm <= FEATURE_DEAD_BAND:
+        return float("nan")
+    if endpoint_norm <= _MIN_MOTION:
+        return 0.0
+    return float(endpoint @ chord) / (endpoint_norm * chord_norm)
+
+
 def correction_progress(
     oracle_correction: np.ndarray,
     generated_correction: np.ndarray,
@@ -127,7 +148,8 @@ def correction_progress(
     Both trajectories may be canonical q ``(T, 7)`` or FK-boundary arm
     axis-angles ``(T, 3, 3)``. ``arc_progress`` says how far along the oracle's
     feature-space path the correction ended up; ``alignment`` whether it is
-    moving the way the oracle moves at that point. ``oracle_path_length`` over
+    moving the way the oracle moves at that point, and ``direction`` whether its
+    net change points the oracle's way. ``oracle_path_length`` over
     ``oracle_displacement`` is how much the oracle's path curves: at ``1`` the
     arclength and chord formulations agree. ``per_feature`` is the signed
     fraction of the oracle's net change achieved per anatomical feature,
@@ -144,15 +166,17 @@ def correction_progress(
         return ProgressResult(
             arc_progress=float("nan"),
             alignment=float("nan"),
+            direction=float("nan"),
             oracle_path_length=0.0,
             oracle_displacement=chord_norm,
             per_feature={name: float("nan") for name in FEATURE_NAMES},
         )
 
-    arc, direction, path_length = _arc_projection(oracle_relative, endpoint)
+    arc, tangent, path_length = _arc_projection(oracle_relative, endpoint)
     return ProgressResult(
         arc_progress=arc / path_length,
-        alignment=float(_final_direction(generated) @ direction),
+        alignment=float(_final_direction(generated) @ tangent),
+        direction=_net_direction(endpoint, chord),
         oracle_path_length=path_length,
         oracle_displacement=chord_norm,
         per_feature={

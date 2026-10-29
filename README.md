@@ -906,15 +906,62 @@ range (direction 0.31, arc progress 0.60 over 8 seeds), so the guidance-5 match 
 Re-scoring scripts and the full audit: `outputs/hml50_eval/audit/` in the
 `mdm-prior-preservation` worktree.
 
-**Matching the deployed model with replay (recipe search 2026-10-20/21; fresh-case tests 2026-10-26/28).**
+**Matching the deployed model with replay (recipe search 2026-10-20/21; fresh-case tests 2026-10-26/29).**
 Goal: a replay fine-tune that grounds corrections as well as the deployed correction-only
 checkpoint at its own inference settings (guidance 2.5, same sampler, menu and chooser) while
 keeping the HumanML3D prior, with nothing a paper would have to defend beyond standard practice.
-Pre-registered in `outputs/recipe_search/PROTOCOL.md` (same worktree; 20 rounds, every entry
+Pre-registered in `outputs/recipe_search/PROTOCOL.md` (same worktree; 22 rounds, every entry
 timestamped against the results it had seen, adaptive rounds and deviations disclosed). From round
 2 on, no grounding result picks a checkpoint: each run is stopped at the EARLIEST checkpoint whose
 HumanML3D prior passes (R@3 ≥ base − 0.02, FID < 1, seated within 0.03 of real; from round 12
 confirmed on the mean of three sampling seeds).
+
+**Outcome (round 22, equivalence on 400 fresh cases): matched, with the data sources fully
+mixed.** K-ndsh = K-nd (round 21, below) with MDM's own caption dropout in place of the source-aware
+one (`--shared_dropout` instead of `--tag_null`): a dropped caption of either source becomes the empty
+condition, so the unconditional model learns from corrections and HumanML3D alike and no input is
+reserved for one source. Tested once on new cases (`clips_auto400_s11`: the test set's generator at
+seed 11, templated instructions; nothing selected on them), three parent/K-ndsh pairs × 8 MDM seeds,
+all on RTX 3090s, preempted runs re-run uninterrupted, TOST with round 19's margins:
+
+| 400 fresh cases (templated instructions), 3 pairs × 8 MDM seeds | direction | arc progress | violation | acceptable | position diversity |
+|---|---|---|---|---|---|
+| correction-only parents | 0.252 | 0.548 | 0.013 | 0.78 | 0.721 |
+| K-ndsh (mixed dropout, distilled replay), Δ [90% CI] | **+0.003 [−0.005, +0.011]** | **−0.001 [−0.012, +0.011]** | +0.000 [−0.001, +0.001] | −0.005 [−0.011, +0.001] | **−0.000 [−0.002, +0.002]** |
+| margin (equivalent iff the CI lies inside) | ±0.036 | ±0.053 | | | ±0.014 |
+| per pair: vs deployed / seed 11 / seed 12 | +0.003 / +0.007 / +0.000 | −0.003 / +0.008 / −0.007 | +0.000 / −0.001 / +0.000 | −0.014 / +0.000 / −0.000 | −0.005 / +0.000 / +0.004 |
+| parent − parent: deployed − D11 / deployed − D12 / D11 − D12 | +0.014 / −0.008 / −0.022 | +0.034 / +0.003 / −0.031 | −0.006 / +0.002 / +0.008 | +0.059 / −0.008 / −0.068 | +0.085 / −0.002 / −0.087 |
+
+Equivalent on all three, each inside the strict margins too, every CI covering 0. The prior holds:
+three-seed-mean R@3 / FID / seated K10-ndsh (6500 steps) 0.713 / 0.41 / 0.109, K11-ndsh (5500) 0.708 /
+0.46 / 0.105, K12-ndsh (7500) 0.715 / 0.34 / 0.093. On round 18's VLM-captioned cases (development, K10-ndsh
+vs deployed, one pair) direction −0.001, arc −0.005, diversity −0.011 (K10-nd there: −0.012 / +0.009 /
++0.002) — the mixed empty condition still narrows VLM menus a little, now inside the margin. This is
+the recommended recipe (below).
+
+**Outcome (round 21, equivalence on 400 fresh cases): matched, menus included.** K-nd = K (round
+20, below) with the trained model's dropout layers off while it is distilled
+(`--distill_without_dropout`), so the student and the frozen copy are the same network function and
+the distillation term has no dropout floor to pull against. Tested once on new cases
+(`clips_auto400_s10`: the test set's generator at seed 10, templated instructions; nothing selected on
+them), three parent/K-nd pairs × 8 MDM seeds, all on RTX 3090s, preempted runs re-run uninterrupted,
+TOST with round 19's margins:
+
+| 400 fresh cases (templated instructions), 3 pairs × 8 MDM seeds | direction | arc progress | violation | acceptable | position diversity |
+|---|---|---|---|---|---|
+| correction-only parents | 0.257 | 0.525 | 0.012 | 0.78 | 0.732 |
+| K-nd (distilled replay, no dropout floor), Δ [90% CI] | **−0.013 [−0.021, −0.006]** | **−0.008 [−0.017, +0.002]** | −0.000 [−0.001, +0.000] | +0.003 [−0.003, +0.009] | **+0.004 [+0.003, +0.006]** |
+| margin (equivalent iff the CI lies inside) | ±0.036 | ±0.053 | | | ±0.014 |
+| per pair: vs deployed / seed 11 / seed 12 | −0.003 / −0.018 / −0.019 | −0.002 / −0.011 / −0.010 | +0.001 / −0.001 / +0.000 | +0.001 / +0.002 / +0.006 | −0.002 / +0.018 / −0.002 |
+| parent − parent: deployed − D11 / deployed − D12 / D11 − D12 | −0.013 / −0.026 / −0.013 | +0.019 / −0.007 / −0.026 | −0.003 / +0.003 / +0.005 | +0.044 / −0.011 / −0.054 | +0.071 / −0.003 / −0.074 |
+
+Equivalent on all three, each also inside the strict margins (0.024 / 0.035 / 0.009). Direction is
+0.013 lower and its CI excludes 0, a third of the margin and inside the parents' own spread
+(0.013–0.026). Unlike round 20's K the menus are not narrower. The prior holds, and it returns
+sooner: three-seed-mean R@3 / FID / seated K10-nd (7000 steps) 0.712 / 0.55 / 0.094, K11-nd (6500)
+0.710 / 0.53 / 0.090, K12-nd (6500) 0.711 / 0.41 / 0.096. Development on round 18's VLM-captioned
+cases (K10-nd vs deployed, one pair, selects nothing) also kept the menu: direction −0.012, arc
++0.009, diversity +0.002, where K10 had lost 0.044 diversity.
 
 **Outcome (round 20, equivalence on 400 fresh cases): matched; under VLM instructions the menus
 are slightly narrower.** K = the correction-only model
@@ -1038,35 +1085,40 @@ where given): base 0.728 / 0.38 / 0.106, deployed 0.178 / 76.4 / 1.00, V10 5000 
 R5 1750 0.717 / 0.55 / 0.10, R3 2.5k 0.721 / 0.58 / 0.10, R2 30k 0.751 / 0.42 / 0.09; T2 21000
 with its tag ("sks " + caption) 0.716 / 0.52 / 0.072.
 
-**The replay recipe (K): source-aware text dropout and distillation, lr 3e-6.** Continue the
-correction-only model (deployed) on the 1:1 replay mix at lr 3e-6 with a fresh optimizer, applying
-classifier-free guidance's 10% text dropout per source: a dropped correction caption becomes MDM's
-empty condition, a dropped replay caption the reserved prompt "sks". Replay clips are recognised by
-a "sks " prefix in their text, stripped before encoding, so the model reads every caption as
-written. The empty-condition (unconditional) model is then learned from corrections alone, as in
-the correction-only fine-tune, and guidance on a correction works as in deployed; inference is
-unchanged — corrections with untagged utterances, HumanML3D prompts as for base MDM. On every
-correction clip the loss also adds 10 × the masked L2 to a frozen copy of the starting checkpoint
-(`--distill_weight 10`; the copy sees the same noised input and timestep, unconditioned exactly
-where the clip's text was dropped). Stop at the first checkpoint (every 500 steps) whose prior
-passes the screen and is confirmed on three sampling seeds (`run_prior.py --seed 1/2/3`; 10500,
-10000 and 10000 steps for the three parents; without `--distill_weight` — V — 5000, 5000, 4500):
+**The replay recipe (K-ndsh): replay with distillation without dropout, lr 3e-6.** Continue the
+correction-only model (deployed) on the 1:1 replay mix at lr 3e-6 with a fresh optimizer and MDM's
+usual 10% caption dropout for classifier-free guidance, the same for both sources
+(`--shared_dropout`). On every correction clip the loss also adds 10 × the masked L2 to a frozen copy
+of the starting checkpoint (`--distill_weight 10`; the copy sees the same noised input and timestep,
+unconditioned exactly where the clip's text was dropped), with the trained model's dropout layers
+off throughout (`--distill_without_dropout`; the caption dropout stays). Replay clips are told apart
+from corrections by a "sks " prefix in their text, which is stripped before encoding and so only
+marks which clips are distilled: the model reads every caption as written, and inference is
+unchanged — corrections with their utterances, HumanML3D prompts as for base MDM. Stop at the first
+checkpoint (every 500 steps) whose prior passes the screen and is confirmed on three sampling seeds
+(`run_prior.py --seed 1/2/3`; 6500, 5500 and 7500 steps for the three parents; with the source-aware
+dropout of rounds 18–21 — K-nd, `--tag_null` — 7000, 6500, 6500; with the student's dropout on — K —
+10500, 10000, 10000; without `--distill_weight` — V — 5000, 5000, 4500):
 ```
 uv run python src/uncertain_feedback/data_collection/dataset_replay_mix/build_dataset.py \
     --corrections src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm \
     --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm_hml50_tagged \
     --repeats 9 --tag "sks "
 bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
-    correction_auto1100_vlm_hml50_tagged correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10_k10 3e-6 \
+    correction_auto1100_vlm_hml50_tagged correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10ndsh_k10 3e-6 \
     --start_pose mdm_sit_pose.pt --n_prefix 8 --batch_size 16 --seed 10 \
-    --uncond_tag "sks " --tag_null --strip_tag --distill_weight 10 --num_steps 10000 --save_interval 500 \
+    --uncond_tag "sks " --shared_dropout --strip_tag --distill_weight 10 --distill_without_dropout \
+    --num_steps 10000 --save_interval 500 \
     --resume_checkpoint <DATA_DIR>/mdm_save/correction_auto1100_vlm_lr1e5_26k/model000765000.pt
-uv run python evaluation/run_prior.py --out-dir <dir> --model k10_10500=<save run>/model000775500.pt  # screen
+uv run python evaluation/run_prior.py --out-dir <dir> --model k10ndsh_6500=<save run>/model000771500.pt  # screen
 ```
-(`--num_steps 10000` trains whole epochs, 12077 steps.) Use K10 =
-`DATA_DIR/mdm_save/correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10_k10/model000775500.pt`
-(deployed + 10500 steps); its seed-11/12 twins continue D11/D12 (`…_kd10_k11w10`, `…_kd10_k12w10`,
-`model000775000.pt`). A parent with its optimizer saved beside it must be resumed from a copy
+(`--num_steps 10000` trains whole epochs, 12077 steps; the run names keep the search's `srcnull`
+prefix.) Use K10-ndsh =
+`DATA_DIR/mdm_save/correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10ndsh_k10/model000771500.pt`
+(deployed + 6500 steps); its seed-11/12 twins continue D11/D12 (`…_kd10ndsh_k11/model000770500.pt`,
+`…_kd10ndsh_k12/model000772500.pt`). Round 21's K10-nd is `…_kd10nd_k10/model000772000.pt` (twins
+`…_kd10nd_k11`, `…_kd10nd_k12`, `model000771500.pt`); round 20's K10 is `…_kd10_k10/model000775500.pt`
+(twins `…_kd10_k11w10`, `…_kd10_k12w10`, `model000775000.pt`). A parent with its optimizer saved beside it must be resumed from a copy
 without that `opt` file (`mdm_save/parent_d1{1,2}_noopt`), since deployed's continuation starts
 fresh. V10 (`…_srcnull_lr3e6_v10/model000770000.pt`, the recipe without distillation)'s raw samples
 are not deployed's (`diag_t2.sh`, rest pose, validation utterances): at
@@ -1088,6 +1140,13 @@ What the search found:
   the VLM's instructions it narrows the menu (diversity −0.022, mostly the deployed continuation);
   weight 1 barely helps, and raising V's guidance to 3.5 trades the loss for a narrower menu
   (diversity −0.021).
+- **Distil without dropout.** That narrowing came from the distillation itself (K10 against V10
+  at matched steps on the VLM cases: −0.034 vs −0.008 diversity at 5000 steps), and the likely
+  mechanism is a floor: the student trains with dropout, the frozen copy runs without it, so the
+  term starts at 5e-4 from dropout alone, and weight 10 trains it down (4e-4 by the end) by making
+  the denoiser insensitive to dropout, i.e. sharper. With the student's dropout off the term is
+  3e-5–8e-5 throughout; the menus stay as wide as the parents' (round 21: +0.004), direction and
+  arc progress stay equivalent, and the prior returns in 6500–7000 steps instead of 10000–10500.
 - **Training seed matters as much as the recipe.** The deployed checkpoint is a favourable draw
   of its own recipe: retrained with seeds 11 and 12, the same 15k checkpoint trails it by
   0.031–0.044 in direction and 0.051–0.076 in arc progress. One lr-1e-5 replay run (U1z) equals
@@ -1102,7 +1161,8 @@ What the search found:
   each of the three continuations sits within 0.026 of its own parent on every metric on round
   18's cases (V10 vs deployed −0.023 / +0.008), but on round 19's templated instructions all
   three trail in direction (−0.017 to −0.039) and two in arc progress (−0.046, −0.061).
-- **Menu diversity is lost through the unconditional model.** With MDM's shared dropout the empty
+- **Without distillation, menu diversity is lost through the unconditional model.** With MDM's
+  shared dropout the empty
   condition also learns HumanML3D's whole-body motion, and guidance 2.5 extrapolates every
   correction away from it: larger, narrower arm motions than deployed's (rest-pose wrist travel /
   end spread at guidance 2.5: 0.416 / 0.156 m for a tagged run with shared dropout vs deployed's
@@ -1111,7 +1171,10 @@ What the search found:
   correction-only empty condition removes it (all three replay-recipe runs: −0.008…+0.012).
   Leak-free checkpoints without rare whole-body samples (R3 5k, 10k: −0.010, −0.031) and
   generating only the left arm (`--frozen-body`: no change for deployed, R7 still −0.032 at 4
-  seeds) did not.
+  seeds) did not. Distillation makes that partition unnecessary: it holds the conditional
+  correction outputs to the parent's, and with shared dropout the menus stay as wide as the
+  parents' on templated instructions (round 22: −0.000) and lose 0.011 on the VLM's (round 18's
+  cases, one pair), inside the margin.
 - **Direction and arc progress drift with training length** when replay captions share CLIP space
   with the utterances (their nearest HumanML3D caption sits at cosine 0.92): R5 1750 keeps them, R3
   5k and U1 6000 lose 0.06–0.08. Tagging the replay captions ("sks ", as DreamBooth marks a

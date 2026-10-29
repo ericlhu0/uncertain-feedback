@@ -134,6 +134,24 @@ _parser.add_argument(
         "dropout. Default 0: no distillation."
     ),
 )
+_parser.add_argument(
+    "--distill_without_dropout",
+    action="store_true",
+    help=(
+        "With --distill_weight: train with every dropout of the model off, so its outputs "
+        "and the frozen copy's (eval mode) come from the same network function and the "
+        "distillation term has no dropout floor to train away."
+    ),
+)
+_parser.add_argument(
+    "--shared_dropout",
+    action="store_true",
+    help=(
+        "With --uncond_tag: drop tagged captions to the empty condition at MDM's rate like "
+        "every other caption (MDM's own dropout), so the tag only labels the replay clips "
+        "for --strip_tag and --distill_weight."
+    ),
+)
 _our_args, _remaining_argv = _parser.parse_known_args()
 sys.argv = [sys.argv[0]] + _remaining_argv
 
@@ -502,11 +520,13 @@ def _mixed_loader(loader: Any, fraction: float) -> Any:
 
 
 def _keep_tagged_conditions(
-    tag: str, tag_null: bool = False, strip_tag: bool = False
+    tag: str, tag_null: bool = False, strip_tag: bool = False, shared: bool = False
 ) -> None:
     """Patch MDM so training never drops the text of captions starting with ``tag``; with
     ``tag_null`` such a caption is instead replaced by the bare tag at MDM's dropout rate,
-    and with ``strip_tag`` a kept one is encoded without the tag.
+    and with ``strip_tag`` a kept one is encoded without the tag. With ``shared`` tagged
+    captions are dropped to the empty condition like every other one, so the tag only
+    labels the clips (for ``strip_tag`` and :func:`_distill_toward_start`).
     """
     import torch
     from model.mdm import MDM  # type: ignore[import-not-found]
@@ -533,7 +553,9 @@ def _keep_tagged_conditions(
                         for text in y["text"]
                     ],
                 }
-            self.keep_cond = torch.tensor(tagged, device=x.device)
+            self.keep_cond = torch.tensor(
+                [is_tagged and not shared for is_tagged in tagged], device=x.device
+            )
         try:
             return forward(self, x, timesteps, y)
         finally:
@@ -551,20 +573,23 @@ def _keep_tagged_conditions(
 
     MDM.forward, MDM.mask_cond = tagged_forward, tagged_mask_cond
     print(
-        f"[train_leftarm] text never dropped for captions starting with {tag!r}"
+        f"[train_leftarm] captions starting with {tag!r} are dropped like the rest"
+        if shared
+        else f"[train_leftarm] text never dropped for captions starting with {tag!r}"
         + (f"; replaced by {tag.strip()!r} at the dropout rate" if tag_null else "")
         + ("; the tag is stripped before encoding" if strip_tag else "")
     )
 
 
-def _distill_toward_start(weight: float, tag: str) -> None:
+def _distill_toward_start(weight: float, tag: str, dropout: bool = True) -> None:
     """Patch MDM's training loss so the clips whose caption does not start with ``tag`` (the
     corrections of a tagged mix) also pay ``weight`` times the masked L2 to a frozen copy of
     the model as training starts — the resumed checkpoint, copied at the first step. The copy
     runs in eval mode on the same noised input and timestep, unconditioned where
     :func:`_keep_tagged_conditions` dropped the clip's text and conditioned on it otherwise,
     so the term pulls the denoiser back toward the starting model's own predictions on the
-    corrections while the tagged clips are free to move.
+    corrections while the tagged clips are free to move. Without ``dropout`` the trained model's
+    dropout is switched off at that first step, so both sides of the term are the same function.
     """
     import copy
 
@@ -593,6 +618,12 @@ def _distill_toward_start(weight: float, tag: str) -> None:
             start.eval()  # MDM.train returns None, so no chaining
             start.requires_grad_(False)
             frozen["start"] = getattr(self, "_wrap_model", lambda m: m)(start)
+            if not dropout:
+                for module in mdm.modules():
+                    if isinstance(module, torch.nn.Dropout):
+                        module.p = 0.0
+                    elif isinstance(module, torch.nn.MultiheadAttention):
+                        module.dropout = 0.0
         if noise is None:
             noise = torch.randn_like(x_start)
         seen: dict[str, Any] = {}
@@ -638,15 +669,31 @@ if __name__ == "__main__":
     import train.train_mdm  # noqa: E402
 
     if (
-        _our_args.tag_null or _our_args.strip_tag or _our_args.distill_weight
+        _our_args.tag_null
+        or _our_args.strip_tag
+        or _our_args.distill_weight
+        or _our_args.shared_dropout
     ) and _our_args.uncond_tag is None:
-        _parser.error("--tag_null, --strip_tag and --distill_weight need --uncond_tag")
+        _parser.error(
+            "--tag_null, --strip_tag, --distill_weight and --shared_dropout need --uncond_tag"
+        )
+    if _our_args.shared_dropout and _our_args.tag_null:
+        _parser.error("--shared_dropout and --tag_null exclude each other")
     if _our_args.uncond_tag is not None:
         _keep_tagged_conditions(
-            _our_args.uncond_tag, _our_args.tag_null, _our_args.strip_tag
+            _our_args.uncond_tag,
+            _our_args.tag_null,
+            _our_args.strip_tag,
+            shared=_our_args.shared_dropout,
         )
+    if _our_args.distill_without_dropout and not _our_args.distill_weight:
+        _parser.error("--distill_without_dropout needs --distill_weight")
     if _our_args.distill_weight:
-        _distill_toward_start(_our_args.distill_weight, _our_args.uncond_tag)
+        _distill_toward_start(
+            _our_args.distill_weight,
+            _our_args.uncond_tag,
+            dropout=not _our_args.distill_without_dropout,
+        )
     if _our_args.correction_fraction is not None:
         _get_loader = train.train_mdm.get_dataset_loader
         train.train_mdm.get_dataset_loader = lambda **kw: _mixed_loader(

@@ -96,42 +96,14 @@ _parser.add_argument(
     ),
 )
 _parser.add_argument(
-    "--uncond_tag",
-    default=None,
-    help=(
-        "Captions starting with this tag (the replay clips of a tagged mix) are never "
-        "dropped for classifier-free guidance, so the unconditional model is learned "
-        "from the untagged (correction) clips alone. Default: MDM's dropout for every clip."
-    ),
-)
-_parser.add_argument(
-    "--tag_null",
-    action="store_true",
-    help=(
-        "With --uncond_tag: a tagged caption is replaced by the bare tag at MDM's dropout "
-        "rate instead of never being dropped, so the tag alone is the replay clips' own "
-        "unconditional prompt (sample them with run_prior.py --null-prompt) and the empty "
-        "condition stays the correction clips'."
-    ),
-)
-_parser.add_argument(
-    "--strip_tag",
-    action="store_true",
-    help=(
-        "With --uncond_tag: the tag is removed from a kept tagged caption before it is "
-        "encoded, so it only marks the clip's source for the dropout rule and the model "
-        "sees the replay captions as written."
-    ),
-)
-_parser.add_argument(
     "--distill_weight",
     type=float,
     default=0.0,
     help=(
-        "With --uncond_tag: add this weight times the masked L2 between the model's output "
-        "and a frozen copy of the checkpoint training starts from, on the untagged "
-        "(correction) clips only, the copy given the same text and the same guidance "
-        "dropout. Default 0: no distillation."
+        "For a dataset_replay_mix dataset (ids C... / H...): add this weight times the "
+        "masked L2 between the model's output and a frozen copy of the checkpoint training "
+        "starts from, on the correction clips only, the copy given the same text and the "
+        "same guidance dropout. Default 0: no distillation."
     ),
 )
 _parser.add_argument(
@@ -141,15 +113,6 @@ _parser.add_argument(
         "With --distill_weight: train with every dropout of the model off, so its outputs "
         "and the frozen copy's (eval mode) come from the same network function and the "
         "distillation term has no dropout floor to train away."
-    ),
-)
-_parser.add_argument(
-    "--shared_dropout",
-    action="store_true",
-    help=(
-        "With --uncond_tag: drop tagged captions to the empty condition at MDM's rate like "
-        "every other caption (MDM's own dropout), so the tag only labels the replay clips "
-        "for --strip_tag and --distill_weight."
     ),
 )
 _our_args, _remaining_argv = _parser.parse_known_args()
@@ -486,21 +449,25 @@ def _auto_increment_save_dir() -> None:
         return
 
 
-def _mixed_loader(loader: Any, fraction: float) -> Any:
-    """Re-draw a replay mix so ``fraction`` of every batch comes from the correction clips.
-
-    Ids follow ``dataset_replay_mix``: ``C<id>_r<k>`` corrections, ``H<id>`` HumanML3D; the
-    humanml loader prefixes sub-caption segments with ``<letter>_``, which is stripped
-    before the check.
+def _is_correction(name: str) -> bool:
+    """Whether a ``dataset_replay_mix`` clip id is a correction (``C<id>_r<k>``) rather than
+    HumanML3D (``H<id>``). The humanml loader prefixes sub-caption segments with
+    ``<letter>_``, which is stripped before the check.
     """
+    clip = name[2:] if name[1:2] == "_" else name
+    if clip[:1] not in ("C", "H"):
+        raise ValueError(f"{name!r} is not a dataset_replay_mix id (C... / H...)")
+    return clip.startswith("C")
+
+
+def _mixed_loader(loader: Any, fraction: float) -> Any:
+    """Re-draw a replay mix so ``fraction`` of every batch comes from the correction clips."""
     import torch
     from torch.utils.data import DataLoader, WeightedRandomSampler
 
     t2m = loader.dataset.t2m_dataset
     names = t2m.name_list[t2m.pointer : t2m.pointer + len(loader.dataset)]
-    is_corr = torch.tensor(
-        [(n[2:] if n[1:2] == "_" else n).startswith("C") for n in names]
-    )
+    is_corr = torch.tensor([_is_correction(n) for n in names])
     n_corr = int(is_corr.sum())
     weights = torch.where(
         is_corr, fraction / n_corr, (1.0 - fraction) / (len(names) - n_corr)
@@ -519,87 +486,45 @@ def _mixed_loader(loader: Any, fraction: float) -> Any:
     )
 
 
-def _keep_tagged_conditions(
-    tag: str, tag_null: bool = False, strip_tag: bool = False, shared: bool = False
-) -> None:
-    """Patch MDM so training never drops the text of captions starting with ``tag``; with
-    ``tag_null`` such a caption is instead replaced by the bare tag at MDM's dropout rate,
-    and with ``strip_tag`` a kept one is encoded without the tag. With ``shared`` tagged
-    captions are dropped to the empty condition like every other one, so the tag only
-    labels the clips (for ``strip_tag`` and :func:`_distill_toward_start`).
-    """
-    import torch
-    from model.mdm import MDM  # type: ignore[import-not-found]
-
-    forward, mask_cond = MDM.forward, MDM.mask_cond
-
-    def tagged_forward(self: Any, x: Any, timesteps: Any, y: Any = None) -> Any:
-        if self.training and y is not None and "text" in y:
-            tagged = [text.startswith(tag) for text in y["text"]]
-            if tag_null:
-                null = (torch.rand(len(tagged)) < self.cond_mask_prob).tolist()
-                y = {
-                    **y,
-                    "text": [
-                        tag.strip() if is_tagged and drop else text
-                        for text, is_tagged, drop in zip(y["text"], tagged, null)
-                    ],
-                }
-            if strip_tag:
-                y = {
-                    **y,
-                    "text": [
-                        text[len(tag) :] if text.startswith(tag) else text
-                        for text in y["text"]
-                    ],
-                }
-            self.keep_cond = torch.tensor(
-                [is_tagged and not shared for is_tagged in tagged], device=x.device
-            )
-        try:
-            return forward(self, x, timesteps, y)
-        finally:
-            self.keep_cond = None
-
-    def tagged_mask_cond(self: Any, cond: Any, force_mask: bool = False) -> Any:
-        keep = getattr(self, "keep_cond", None)
-        if keep is None or force_mask or not self.training or self.cond_mask_prob <= 0:
-            return mask_cond(self, cond, force_mask)
-        drop = torch.bernoulli(
-            torch.full(keep.shape, self.cond_mask_prob, device=cond.device)
-        )
-        self.dropped_text = drop * (~keep).float()  # read by _distill_toward_start
-        return cond * (1.0 - self.dropped_text).view(1, -1, 1)
-
-    MDM.forward, MDM.mask_cond = tagged_forward, tagged_mask_cond
-    print(
-        f"[train_leftarm] captions starting with {tag!r} are dropped like the rest"
-        if shared
-        else f"[train_leftarm] text never dropped for captions starting with {tag!r}"
-        + (f"; replaced by {tag.strip()!r} at the dropout rate" if tag_null else "")
-        + ("; the tag is stripped before encoding" if strip_tag else "")
-    )
-
-
-def _distill_toward_start(weight: float, tag: str, dropout: bool = True) -> None:
-    """Patch MDM's training loss so the clips whose caption does not start with ``tag`` (the
-    corrections of a tagged mix) also pay ``weight`` times the masked L2 to a frozen copy of
-    the model as training starts — the resumed checkpoint, copied at the first step. The copy
-    runs in eval mode on the same noised input and timestep, unconditioned where
-    :func:`_keep_tagged_conditions` dropped the clip's text and conditioned on it otherwise,
-    so the term pulls the denoiser back toward the starting model's own predictions on the
-    corrections while the tagged clips are free to move. Without ``dropout`` the trained model's
-    dropout is switched off at that first step, so both sides of the term are the same function.
+def _distill_toward_start(weight: float, dropout: bool = True) -> None:
+    """Patch MDM's training loss so the correction clips of a replay mix (told apart by
+    :func:`_is_correction` from the clip ids, which every batch now carries) also pay
+    ``weight`` times the masked L2 to a frozen copy of the model as training starts — the
+    resumed checkpoint, copied at the first step. The copy runs in eval mode on the same
+    noised input and timestep, unconditioned where MDM's caption dropout dropped the clip's
+    text and conditioned on it otherwise, so the term pulls the denoiser back toward the
+    starting model's own predictions on the corrections while the HumanML3D clips are free to
+    move. Without ``dropout`` the trained model's dropout is switched off at that first step,
+    so both sides of the term are the same function.
     """
     import copy
 
     import torch
+    from data_loaders.humanml.data.dataset import (  # type: ignore[import-not-found]
+        Text2MotionDatasetV2,
+    )
     from diffusion.gaussian_diffusion import (  # type: ignore[import-not-found]
         GaussianDiffusion,
     )
+    from model.mdm import MDM  # type: ignore[import-not-found]
 
+    getitem, mask_cond = Text2MotionDatasetV2.__getitem__, MDM.mask_cond
     training_losses = GaussianDiffusion.training_losses
     frozen: dict[str, Any] = {}
+
+    def keyed_getitem(self: Any, item: int) -> tuple:
+        # MDM's t2m_collate hands an item's eighth element on as y["db_key"].
+        return (*getitem(self, item), self.name_list[self.pointer + item])
+
+    def recording_mask_cond(self: Any, cond: Any, force_mask: bool = False) -> Any:
+        # MDM's own caption dropout, keeping which clips it dropped.
+        if force_mask or not self.training or self.cond_mask_prob <= 0:
+            return mask_cond(self, cond, force_mask)
+        bs = cond.shape[-2]
+        self.dropped_text = torch.bernoulli(
+            torch.ones(bs, device=cond.device) * self.cond_mask_prob
+        )
+        return cond * (1.0 - self.dropped_text).view(1, bs, 1)
 
     def distilled_losses(
         self: Any,
@@ -643,7 +568,7 @@ def _distill_toward_start(weight: float, tag: str, dropout: bool = True) -> None
             del mdm.forward
         y = model_kwargs["y"]
         correction = torch.tensor(
-            [not text.startswith(tag) for text in y["text"]], device=x_start.device
+            [_is_correction(key) for key in y["db_key"]], device=x_start.device
         )
         x_t = self.q_sample(x_start, t, noise=noise)
         timesteps = self._scale_timesteps(t)
@@ -658,41 +583,23 @@ def _distill_toward_start(weight: float, tag: str, dropout: bool = True) -> None
         terms["loss"] = terms["loss"] + weight * terms["distill"]
         return terms
 
+    Text2MotionDatasetV2.__getitem__ = keyed_getitem
+    MDM.mask_cond = recording_mask_cond
     GaussianDiffusion.training_losses = distilled_losses
     print(
-        f"[train_leftarm] captions not starting with {tag!r} also pay {weight} x the L2 "
-        "to the starting checkpoint's predictions"
+        f"[train_leftarm] correction clips (ids C...) also pay {weight} x the L2 to the "
+        "starting checkpoint's predictions"
     )
 
 
 if __name__ == "__main__":
     import train.train_mdm  # noqa: E402
 
-    if (
-        _our_args.tag_null
-        or _our_args.strip_tag
-        or _our_args.distill_weight
-        or _our_args.shared_dropout
-    ) and _our_args.uncond_tag is None:
-        _parser.error(
-            "--tag_null, --strip_tag, --distill_weight and --shared_dropout need --uncond_tag"
-        )
-    if _our_args.shared_dropout and _our_args.tag_null:
-        _parser.error("--shared_dropout and --tag_null exclude each other")
-    if _our_args.uncond_tag is not None:
-        _keep_tagged_conditions(
-            _our_args.uncond_tag,
-            _our_args.tag_null,
-            _our_args.strip_tag,
-            shared=_our_args.shared_dropout,
-        )
     if _our_args.distill_without_dropout and not _our_args.distill_weight:
         _parser.error("--distill_without_dropout needs --distill_weight")
     if _our_args.distill_weight:
         _distill_toward_start(
-            _our_args.distill_weight,
-            _our_args.uncond_tag,
-            dropout=not _our_args.distill_without_dropout,
+            _our_args.distill_weight, dropout=not _our_args.distill_without_dropout
         )
     if _our_args.correction_fraction is not None:
         _get_loader = train.train_mdm.get_dataset_loader

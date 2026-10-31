@@ -53,8 +53,9 @@ def main() -> None:
     parser.add_argument(
         "--null-prompt",
         default=None,
-        help="guide against this prompt instead of the empty condition (the bare tag of a "
-        "train_leftarm.py --tag_null fine-tune)",
+        help="guide against this prompt instead of the empty condition (the bare tag "
+        '"sks" the recipe search\'s source-aware-dropout fine-tunes learned as their '
+        "replay clips' null)",
     )
     parser.add_argument(
         "--seed",

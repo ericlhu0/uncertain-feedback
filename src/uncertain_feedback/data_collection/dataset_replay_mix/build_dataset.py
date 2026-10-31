@@ -9,9 +9,9 @@ clips, so each batch rehearses the original distribution.
 Every file is a symlink, nothing is copied. Corrections are repeated under distinct ids
 (``C<id>_r<k>``) instead of listing an id twice: the humanml loader sizes an epoch by
 unique clips but indexes a length-sorted name list, so a repeated id would silently push
-the longest motions out of reach. HumanML3D ids become ``H<id>``. With ``--tag`` the
-HumanML3D texts are written instead, every caption prefixed with the tag, so a fine-tune
-can tell replay captions from correction captions (``train_leftarm.py --uncond_tag``).
+the longest motions out of reach. HumanML3D ids become ``H<id>``. The id's first letter
+is each clip's source, which ``train_leftarm.py`` reads (``--distill_weight``,
+``--correction_fraction``); the captions are the sources' own.
 
     uv run python src/uncertain_feedback/data_collection/dataset_replay_mix/build_dataset.py \\
         --corrections .../motion-diffusion-model/dataset/correction_auto1100_vlm \\
@@ -32,30 +32,21 @@ from uncertain_feedback.data_collection.common.dataset import copy_stats
 SPLITS = ("train", "val", "test")
 
 
-def _link(
-    src_dir: Path, src_id: str, out_dir: Path, out_id: str, tag: str = ""
-) -> bool:
+def _link(src_dir: Path, src_id: str, out_dir: Path, out_id: str) -> bool:
     motion = src_dir / "new_joint_vecs" / f"{src_id}.npy"
     if not motion.exists():
         return False
     (out_dir / "new_joint_vecs" / f"{out_id}.npy").symlink_to(motion)
-    text = src_dir / "texts" / f"{src_id}.txt"
-    if tag:
-        lines = text.read_text(encoding="utf-8").splitlines()
-        (out_dir / "texts" / f"{out_id}.txt").write_text(
-            "".join(tag + line + "\n" if line.strip() else "\n" for line in lines),
-            encoding="utf-8",
-        )
-    else:
-        (out_dir / "texts" / f"{out_id}.txt").symlink_to(text)
+    (out_dir / "texts" / f"{out_id}.txt").symlink_to(
+        src_dir / "texts" / f"{src_id}.txt"
+    )
     return True
 
 
 def build_replay_mix(
-    corrections: Path, humanml: Path, output_dir: Path, repeats: int, tag: str = ""
+    corrections: Path, humanml: Path, output_dir: Path, repeats: int
 ) -> None:
-    """Write the mixed dataset; corrections are repeated ``repeats`` times in train and
-    HumanML3D captions start with ``tag``."""
+    """Write the mixed dataset; corrections are repeated ``repeats`` times in train."""
     for stat in ("Mean.npy", "Std.npy"):
         if not np.allclose(np.load(corrections / stat), np.load(humanml / stat)):
             raise ValueError(f"{corrections}/{stat} differs from HumanML3D's")
@@ -67,7 +58,7 @@ def build_replay_mix(
         ids = [
             f"H{i}"
             for i in (humanml / f"{split}.txt").read_text().split()
-            if _link(humanml, i, output_dir, f"H{i}", tag)
+            if _link(humanml, i, output_dir, f"H{i}")
         ]
         n_humanml = len(ids)
         for i in (corrections / f"{split}.txt").read_text().split():
@@ -96,17 +87,8 @@ def main() -> None:
         help="copies of each correction train clip; 9 makes 2640 clips ~1:1 with "
         "HumanML3D's 23384 train motions",
     )
-    parser.add_argument(
-        "--tag",
-        default="",
-        help='prefix for every HumanML3D caption (e.g. "sks "); train with the same '
-        "train_leftarm.py --uncond_tag so the replay clips stay out of the unconditional "
-        "model",
-    )
     args = parser.parse_args()
-    build_replay_mix(
-        args.corrections, args.humanml, args.output_dir, args.repeats, args.tag
-    )
+    build_replay_mix(args.corrections, args.humanml, args.output_dir, args.repeats)
 
 
 if __name__ == "__main__":

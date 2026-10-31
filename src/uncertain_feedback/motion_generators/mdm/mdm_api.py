@@ -655,8 +655,8 @@ class MdmMotionGenerator(
         with ``--mask_frames`` never attend to. Batch ``b`` is seeded with
         ``(seed, b)``, so two checkpoints given the same inputs share their noise.
         ``null_text`` guides against that prompt instead of the empty condition (the
-        bare tag of a ``train_leftarm.py --tag_null`` fine-tune is its replay clips'
-        unconditional prompt).
+        bare tag "sks" the recipe search's source-aware-dropout fine-tunes learned as
+        their replay clips' unconditional prompt).
         """
         self._ensure_loaded()
         assert self._hml_mean is not None

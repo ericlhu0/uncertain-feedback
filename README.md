@@ -835,9 +835,10 @@ bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
 Score each checkpoint on both sides: `run_prior.py` for HumanML3D and the 80-case
 `run_grounding.py --grounder mdm` on `clips_auto200_s5` for corrections.
 
-`--tag "sks "` writes the HumanML3D texts with every caption prefixed by the tag instead of
-symlinking them (corrections stay untagged); it is the data half of the tagged-replay recipe
-below, whose training half is `train_leftarm.py --uncond_tag "sks "`.
+Each id's first letter is its clip's source (`C…` correction, `H…` HumanML3D), which
+`train_leftarm.py` reads for the distillation of the recipe below and for `--correction_fraction`;
+the captions are the sources' own. (The recipe search marked the source with a "sks " prefix on every
+HumanML3D caption instead — `--tag`, read by `train_leftarm.py --uncond_tag` — until commit e0fc8d1.)
 
 Other correction shares: build the mix with `--repeats 1` and pass
 `--correction_fraction F` (a `train_leftarm.py` flag, forwarded by `finetune_standing.sh`), which
@@ -1087,14 +1088,14 @@ with its tag ("sks " + caption) 0.716 / 0.52 / 0.072.
 
 **The replay recipe (K-ndsh): replay with distillation without dropout, lr 3e-6.** Continue the
 correction-only model (deployed) on the 1:1 replay mix at lr 3e-6 with a fresh optimizer and MDM's
-usual 10% caption dropout for classifier-free guidance, the same for both sources
-(`--shared_dropout`). On every correction clip the loss also adds 10 × the masked L2 to a frozen copy
+usual 10% caption dropout for classifier-free guidance, the same for both sources. On every
+correction clip the loss also adds 10 × the masked L2 to a frozen copy
 of the starting checkpoint (`--distill_weight 10`; the copy sees the same noised input and timestep,
 unconditioned exactly where the clip's text was dropped), with the trained model's dropout layers
-off throughout (`--distill_without_dropout`; the caption dropout stays). Replay clips are told apart
-from corrections by a "sks " prefix in their text, which is stripped before encoding and so only
-marks which clips are distilled: the model reads every caption as written, and inference is
-unchanged — corrections with their utterances, HumanML3D prompts as for base MDM. Stop at the first
+off throughout (`--distill_without_dropout`; the caption dropout stays). Which clips are
+corrections comes from their ids in the mix (`C…`); the captions are the sources' own, so the model
+reads every caption as written, and inference is unchanged — corrections with their utterances,
+HumanML3D prompts as for base MDM. Stop at the first
 checkpoint (every 500 steps) whose prior passes the screen and is confirmed on three sampling seeds
 (`run_prior.py --seed 1/2/3`; 6500, 5500 and 7500 steps for the three parents; with the source-aware
 dropout of rounds 18–21 — K-nd, `--tag_null` — 7000, 6500, 6500; with the student's dropout on — K —
@@ -1102,18 +1103,22 @@ dropout of rounds 18–21 — K-nd, `--tag_null` — 7000, 6500, 6500; with the 
 ```
 uv run python src/uncertain_feedback/data_collection/dataset_replay_mix/build_dataset.py \
     --corrections src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm \
-    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm_hml50_tagged \
-    --repeats 9 --tag "sks "
+    --output_dir src/uncertain_feedback/motion_generators/mdm/motion-diffusion-model/dataset/correction_auto1100_vlm_hml50 \
+    --repeats 9
 bash src/uncertain_feedback/motion_generators/mdm/finetune_standing.sh \
-    correction_auto1100_vlm_hml50_tagged correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10ndsh_k10 3e-6 \
+    correction_auto1100_vlm_hml50 correction_auto1100_vlm_hml50_lr3e6_kd10ndsh_k10 3e-6 \
     --start_pose mdm_sit_pose.pt --n_prefix 8 --batch_size 16 --seed 10 \
-    --uncond_tag "sks " --shared_dropout --strip_tag --distill_weight 10 --distill_without_dropout \
+    --distill_weight 10 --distill_without_dropout \
     --num_steps 10000 --save_interval 500 \
     --resume_checkpoint <DATA_DIR>/mdm_save/correction_auto1100_vlm_lr1e5_26k/model000765000.pt
 uv run python evaluation/run_prior.py --out-dir <dir> --model k10ndsh_6500=<save run>/model000771500.pt  # screen
 ```
-(`--num_steps 10000` trains whole epochs, 12077 steps; the run names keep the search's `srcnull`
-prefix.) Use K10-ndsh =
+(`--num_steps 10000` trains whole epochs, 12077 steps.) The checkpoints below were trained before
+the ids replaced the tag, on `correction_auto1100_vlm_hml50_tagged` (this mix with "sks " before every
+HumanML3D caption) with `--uncond_tag "sks " --shared_dropout --strip_tag`, which strips the tag
+before encoding. The two set-ups train identically: 200 steps of this recipe from deployed (seed
+10, one RTX 3090) give the same loss at every step and bitwise-equal weights (`flagcheck/` beside
+PROTOCOL.md). Their run names keep the search's `tagged_srcnull` prefix. Use K10-ndsh =
 `DATA_DIR/mdm_save/correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10ndsh_k10/model000771500.pt`
 (deployed + 6500 steps); its seed-11/12 twins continue D11/D12 (`…_kd10ndsh_k11/model000770500.pt`,
 `…_kd10ndsh_k12/model000772500.pt`). Round 21's K10-nd is `…_kd10nd_k10/model000772000.pt` (twins

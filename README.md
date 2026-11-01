@@ -907,11 +907,11 @@ range (direction 0.31, arc progress 0.60 over 8 seeds), so the guidance-5 match 
 Re-scoring scripts and the full audit: `outputs/hml50_eval/audit/` in the
 `mdm-prior-preservation` worktree.
 
-**Matching the deployed model with replay (recipe search 2026-10-20/21; fresh-case tests 2026-10-26/29).**
+**Matching the deployed model with replay (recipe search 2026-10-20/21; fresh-case tests 2026-10-26/11-01).**
 Goal: a replay fine-tune that grounds corrections as well as the deployed correction-only
 checkpoint at its own inference settings (guidance 2.5, same sampler, menu and chooser) while
 keeping the HumanML3D prior, with nothing a paper would have to defend beyond standard practice.
-Pre-registered in `outputs/recipe_search/PROTOCOL.md` (same worktree; 22 rounds, every entry
+Pre-registered in `outputs/recipe_search/PROTOCOL.md` (same worktree; 23 rounds, every entry
 timestamped against the results it had seen, adaptive rounds and deviations disclosed). From round
 2 on, no grounding result picks a checkpoint: each run is stopped at the EARLIEST checkpoint whose
 HumanML3D prior passes (R@3 ≥ base − 0.02, FID < 1, seated within 0.03 of real; from round 12
@@ -935,10 +935,22 @@ all on RTX 3090s, preempted runs re-run uninterrupted, TOST with round 19's marg
 
 Equivalent on all three, each inside the strict margins too, every CI covering 0. The prior holds:
 three-seed-mean R@3 / FID / seated K10-ndsh (6500 steps) 0.713 / 0.41 / 0.109, K11-ndsh (5500) 0.708 /
-0.46 / 0.105, K12-ndsh (7500) 0.715 / 0.34 / 0.093. On round 18's VLM-captioned cases (development, K10-ndsh
-vs deployed, one pair) direction −0.001, arc −0.005, diversity −0.011 (K10-nd there: −0.012 / +0.009 /
-+0.002) — the mixed empty condition still narrows VLM menus a little, now inside the margin. This is
-the recommended recipe (below).
+0.46 / 0.105, K12-ndsh (7500) 0.715 / 0.34 / 0.093. This is the recommended recipe (below).
+
+**Round 23: the same under the VLM's instructions.** The benchmark's instructions come from the VLM
+captioner, so the same six checkpoints were tested once more on 400 new cases captioned by it
+(`clips_auto400_s12`: generator seed 12, gpt-5.6-luna with s5's caption prompt, $0.35 of API), same
+design and margins:
+
+| 400 fresh cases (VLM instructions), 3 pairs × 8 MDM seeds | direction | arc progress | violation | acceptable | position diversity |
+|---|---|---|---|---|---|
+| correction-only parents | 0.282 | 0.536 | 0.015 | 0.72 | 0.699 |
+| K-ndsh, Δ [90% CI] | **+0.001 [−0.007, +0.009]** | **+0.007 [−0.003, +0.017]** | −0.001 [−0.001, −0.000] | +0.002 [−0.004, +0.009] | **+0.001 [−0.002, +0.003]** |
+| per pair: vs deployed / seed 11 / seed 12 | +0.013 / −0.009 / −0.000 | +0.009 / −0.009 / +0.021 | −0.001 / +0.001 / −0.002 | −0.002 / −0.003 / +0.013 | −0.004 / +0.001 / +0.005 |
+
+Equivalent on all three, inside the strict margins too: the recipe holds under both instruction
+styles. The narrower VLM menus seen in development (round 18's cases, K10-ndsh vs deployed, one pair:
+diversity −0.011) do not recur (−0.004 for that pair here).
 
 **Outcome (round 21, equivalence on 400 fresh cases): matched, menus included.** K-nd = K (round
 20, below) with the trained model's dropout layers off while it is distilled
@@ -1178,8 +1190,7 @@ What the search found:
   generating only the left arm (`--frozen-body`: no change for deployed, R7 still −0.032 at 4
   seeds) did not. Distillation makes that partition unnecessary: it holds the conditional
   correction outputs to the parent's, and with shared dropout the menus stay as wide as the
-  parents' on templated instructions (round 22: −0.000) and lose 0.011 on the VLM's (round 18's
-  cases, one pair), inside the margin.
+  parents' under both instruction styles (round 22, templated: −0.000; round 23, VLM: +0.001).
 - **Direction and arc progress drift with training length** when replay captions share CLIP space
   with the utterances (their nearest HumanML3D caption sits at cosine 0.92): R5 1750 keeps them, R3
   5k and U1 6000 lose 0.06–0.08. Tagging the replay captions ("sks ", as DreamBooth marks a

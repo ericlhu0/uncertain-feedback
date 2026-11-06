@@ -166,13 +166,16 @@ def main() -> None:  # pylint: disable=too-many-locals
     parser.add_argument("--reference", type=Path, default=None)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
-    args.cache.mkdir(parents=True, exist_ok=True)
+    # Loading an MDM checkpoint changes the working directory to the MDM root,
+    # so every path is made absolute first.
+    cache, original = args.cache.resolve(), args.original.resolve()
+    cache.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
     test = prior.load_test_set()
     directories = {
         "reupload": prior.T2M_EVALUATOR_DIR,
-        "original": original_evaluator_dir(args.original, args.cache),
+        "original": original_evaluator_dir(original, cache),
     }
     evaluators = {tag: load_evaluator(d, device) for tag, d in directories.items()}
     text = {tag: e.text_embeddings(test) for tag, e in evaluators.items()}
@@ -183,7 +186,7 @@ def main() -> None:  # pylint: disable=too-many-locals
 
     models = dict(spec.split("=", 1) for spec in args.model)
     samples = {
-        name: sample_or_load(name, Path(path), test, evaluators, args.cache)
+        name: sample_or_load(name, Path(path).resolve(), test, evaluators, cache)
         for name, path in models.items()
     }
     zeros = np.zeros(len(test.lengths))
@@ -204,10 +207,12 @@ def main() -> None:  # pylint: disable=too-many-locals
                 saved["travel"],
             )
         table[tag] = rows
-    (args.cache / "prior_evaluators.json").write_text(json.dumps(table, indent=2))
+    (cache / "prior_evaluators.json").write_text(json.dumps(table, indent=2))
 
     reference = (
-        json.loads(args.reference.read_text(encoding="utf-8")) if args.reference else {}
+        json.loads(args.reference.resolve().read_text(encoding="utf-8"))
+        if args.reference
+        else {}
     )
     for tag, rows in table.items():
         print(f"\nevaluator: {tag}")

@@ -68,6 +68,8 @@ class OracleCase:
     goal: np.ndarray
     trigger_step: int
     q_feedback: np.ndarray
+    # Executed frames up to and including q_feedback: the grounder's prefix.
+    history: np.ndarray
     oracle_correction: np.ndarray
     nominal_continuation: np.ndarray
     utterance: str
@@ -131,6 +133,7 @@ def build_sampled_case(
         goal=goal,
         trigger_step=sampled.trigger_step,
         q_feedback=q_feedback,
+        history=np.asarray(naive[: start + 1], dtype=np.float64),
         oracle_correction=oracle,
         nominal_continuation=nominal,
         utterance=facts.text,
@@ -215,6 +218,7 @@ def build_persona_case(
         goal=goal,
         trigger_step=trigger,
         q_feedback=q_feedback,
+        history=np.asarray(nominal_rollout[: feedback_step + 1], dtype=np.float64),
         oracle_correction=np.asarray(window, dtype=np.float64),
         nominal_continuation=np.asarray(nominal_plan, dtype=np.float64),
         utterance="" if utterance is None else utterance.text,

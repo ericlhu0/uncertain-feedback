@@ -29,6 +29,8 @@ class MdmGrounder(Grounder):
     at every grounding, so learned steering follows what has been learned.
     ``frozen_body`` holds every non-left-arm joint at the person's pose for the
     whole motion (``run.py --frozen_body``), not only for the pinned prefix.
+    ``history_prefix`` conditions MDM on the arm's last executed states (the
+    planner's ``prefix=True``); ``False`` pins the current pose repeated.
     """
 
     requires_generator = True
@@ -38,11 +40,13 @@ class MdmGrounder(Grounder):
         diffusion_samples: int | None = None,
         n_clusters: int | None = None,
         frozen_body: bool = False,
+        history_prefix: bool = True,
     ) -> None:
         super().__init__()
         self._diffusion_samples = diffusion_samples
         self._n_clusters = n_clusters
         self._frozen_body = frozen_body
+        self._history_prefix = history_prefix
         # Written by Approach.__init__ from the steering axis.
         self.steering: Steering = NoSteering()
         self._uq_cfg: UqConfig | None = None
@@ -106,7 +110,7 @@ class MdmGrounder(Grounder):
             self.gen,
             text,
             human,
-            prefix=False,
+            prefix=self._history_prefix,
             mdm_frames=feedback.frames,
             frozen_body=self._frozen_body,
             default_scale=uq.scale,

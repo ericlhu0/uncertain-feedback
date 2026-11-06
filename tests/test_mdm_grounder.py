@@ -36,6 +36,20 @@ class _SeamGenerator:
         return self.samples
 
 
+class _RecordingGenerator(_SeamGenerator):
+    """The fake above, remembering how it was asked to start."""
+
+    def __init__(self, samples: np.ndarray) -> None:
+        super().__init__(samples)
+        self.prefix: list[bool] = []
+
+    def generate_positions(
+        self, text: str, human: Human, prefix: bool = False, **kwargs: Any
+    ) -> np.ndarray:
+        self.prefix.append(prefix)
+        return super().generate_positions(text, human, **kwargs)
+
+
 def _samples(human: Human) -> np.ndarray:
     """Two groups of motions, each with a large frame-0 to frame-1 seam."""
     seam = np.array([0.0, 0.0, 0.0, 0.15, 0.1, -0.1, 0.2])
@@ -83,3 +97,22 @@ def test_the_chosen_option_is_tracked_as_the_person_judged_it(tmp_path: Path) ->
     np.testing.assert_allclose(
         result.correction_traj, scale_trajectory(judged[result.chosen_label], 1.5)
     )
+
+
+def test_the_grounder_conditions_on_the_executed_history(tmp_path: Path) -> None:
+    human = Human()
+    cfg = replace(
+        load_mpc_config(_SMOKE_MPC),
+        feedback=FeedbackConfig(
+            frames=_FRAMES, uq=UqConfig(diffusion_samples=4, n_clusters=2)
+        ),
+    )
+    asked: list[list[bool]] = []
+    for grounder in (MdmGrounder(), MdmGrounder(history_prefix=False)):
+        gen = _RecordingGenerator(_samples(human))
+        grounder.reset(
+            cfg, cast(Any, gen), get_persona("elbow_contracture"), 0, tmp_path
+        )
+        grounder.ground("raise it", human, human.q[np.newaxis], lambda m: (min(m), 1.0))
+        asked.append(gen.prefix)
+    assert asked == [[True], [False]]

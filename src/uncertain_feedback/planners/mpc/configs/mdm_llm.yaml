@@ -12,7 +12,8 @@ feedback:
     n_clusters: 4
     auto_cluster: 1
     scale: 1.0
-    # Steer diffusion sampling toward the simulated user's hidden bounds.
+    # Steer diffusion sampling toward steering.bounds (never the simulated
+    # user's hidden bounds); with none given, sampling is unsteered.
     steering:
       mode: "cg"            # cg (default) | resample | off
       resample_steps: [15, 25, 35, 45]

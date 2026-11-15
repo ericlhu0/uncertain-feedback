@@ -887,18 +887,18 @@ class Session:
     # --- MDM / clustering -------------------------------------------------
 
     def _steering_spec(self, mode: str) -> SteeringSpec | None:
-        """Compile this session's persona into a diffusion-steering spec.
+        """Compile the config's ``steering.bounds`` into a diffusion-steering spec.
 
         ``mode`` (the browser's per-generation choice) overrides the config's
-        mode; the remaining knobs stay YAML-driven. Rebuilt per generation so a
-        persona swapped in by ``update_persona`` steers the next round.
+        mode; the remaining knobs stay YAML-driven. The session persona's hidden
+        bounds are never read, so without configured bounds sampling is unsteered.
         """
         rig = self.rig
         uq = _feedback_cfg(rig).uq
         if uq is None or mode == "off":
             return None
         return build_steering_spec(
-            rig.gen, self.user, replace(uq.steering, mode=mode), rig.cfg.seed
+            rig.gen, replace(uq.steering, mode=mode), rig.cfg.seed
         )
 
     def generate(

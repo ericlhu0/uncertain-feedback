@@ -18,7 +18,9 @@ rerun is free.
 
 ``--keep_plain`` writes each motion's path-only lines beside its rewrites
 instead of replacing them, so a request that says nothing about speed is also
-seen at every pace. ``--budget`` meters the API spend from the usage the API
+seen at every pace. ``--usual_band LOW HIGH`` keeps the lines of motions whose
+pace lies inside the band without a call, so what counts as usual is a rule of
+ours rather than the LLM's judgement. ``--budget`` meters the API spend from the usage the API
 reports (:mod:`uncertain_feedback.llm.spend`, ledger ``<out>/api_cost.jsonl``)
 and stops drafting once it is spent; the cache keeps what was drafted and the
 run fails rather than write a dataset with motions still undrafted.
@@ -96,13 +98,22 @@ def tempo_lines(plain: list[str], rewrites: list[str], keep_plain: bool) -> list
     return plain + rewrites if keep_plain else rewrites
 
 
-def tempo_dataset(  # pylint: disable=too-many-locals
+def near_usual(paces: dict[str, float], band: tuple[float, float] | None) -> set[str]:
+    """The motions whose pace lies strictly inside ``band``: they keep their path-only lines
+    without a call, so what counts as usual is this rule's, not the LLM's."""
+    if band is None:
+        return set()
+    return {i for i, pace in paces.items() if band[0] < pace < band[1]}
+
+
+def tempo_dataset(  # pylint: disable=too-many-locals,too-many-arguments
     src: Path,
     out: Path,
     model_name: str,
     workers: int,
     keep_plain: bool = False,
     budget: float | None = None,
+    usual_band: tuple[float, float] | None = None,
 ) -> None:
     """Build *out* from *src* with every motion's text rewritten at its pace."""
     out.mkdir(parents=True, exist_ok=True)
@@ -115,10 +126,14 @@ def tempo_dataset(  # pylint: disable=too-many-locals
     paces: dict[str, float] = json.loads(
         (src / "paces.json").read_text(encoding="utf-8")
     )
+    usual = near_usual(paces, usual_band)
     sources = {i: source_lines(src / "texts" / f"{i}.txt") for i in paces}
     keys = {i: f"{paces[i]:.2f}|" + "\n".join(sorted(sources[i])) for i in paces}
-    todo = {keys[i]: i for i in paces if keys[i] not in cache}
-    print(f"{_LOG} {len(paces)} motions, {len(todo)} line-sets to draft")
+    todo = {keys[i]: i for i in paces if i not in usual and keys[i] not in cache}
+    print(
+        f"{_LOG} {len(paces)} motions, {len(usual)} at a usual pace {usual_band} kept as "
+        f"written, {len(todo)} line-sets to draft"
+    )
     model = OpenAIModel(
         model=model_name,
         system_prompt="You answer with short spoken sentences, one per line, and nothing else.",
@@ -170,7 +185,11 @@ def tempo_dataset(  # pylint: disable=too-many-locals
     for i in paces:
         # Near-usual paces come back unchanged and are dropped as copies of the
         # sources, leaving the path-only text, which is still true of the motion.
-        kept = consistent_paraphrases(cache.get(keys[i], []), sources[i])
+        kept = (
+            []
+            if i in usual
+            else consistent_paraphrases(cache.get(keys[i], []), sources[i])
+        )
         n_rewritten += int(bool(kept))
         if kept:
             write_text_file(
@@ -208,9 +227,24 @@ def main() -> None:
         default=None,
         help="dollars; drafting stops once the metered spend reaches it",
     )
+    parser.add_argument(
+        "--usual_band",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("LOW", "HIGH"),
+        help="motions whose pace lies strictly inside this band keep their lines "
+        "without a call (default: the LLM decides what is close to usual)",
+    )
     args = parser.parse_args()
     tempo_dataset(
-        args.src, args.out, args.model, args.workers, args.keep_plain, args.budget
+        args.src,
+        args.out,
+        args.model,
+        args.workers,
+        args.keep_plain,
+        args.budget,
+        None if args.usual_band is None else (args.usual_band[0], args.usual_band[1]),
     )
 
 

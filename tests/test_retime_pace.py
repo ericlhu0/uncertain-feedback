@@ -11,6 +11,7 @@ from uncertain_feedback.data_collection.dataset_auto_correction.build_dataset im
     retime_pace,
 )
 from uncertain_feedback.data_collection.dataset_auto_correction.tempo_captions import (
+    near_usual,
     tempo_lines,
 )
 
@@ -38,3 +39,9 @@ def test_tempo_lines_add_or_replace() -> None:
     plain, rewrites = ["lift it", "lift it", "raise it"], ["lift it, slowly"]
     assert tempo_lines(plain, rewrites, keep_plain=False) == rewrites
     assert tempo_lines(plain, rewrites, keep_plain=True) == plain + rewrites
+
+
+def test_near_usual_is_the_open_band() -> None:
+    paces = {"a": 0.70, "b": 0.71, "c": 1.39, "d": 1.4, "e": 2.0}
+    assert near_usual(paces, (0.7, 1.4)) == {"b", "c"}
+    assert near_usual(paces, None) == set()

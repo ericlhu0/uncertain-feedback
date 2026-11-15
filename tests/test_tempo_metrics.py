@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -54,7 +56,12 @@ def _rows(gap: int, n: int = 30) -> list[dict[str, float]]:
 
 
 def test_a_clear_tempo_gap_passes_and_no_gap_fails() -> None:
-    passing = tempo.speed_verdict(_rows(gap=6))
+    # Rows carry the case index and utterance beside the numbers, as speed_test.py writes them.
+    labelled: list[dict[str, Any]] = [
+        {"case": i, "utterance": "Lift my hand up.", **row}
+        for i, row in enumerate(_rows(gap=6))
+    ]
+    passing = tempo.speed_verdict(labelled)
     assert passing["pass"] and passing["s1_gap"]["mean"] > tempo.S1_MIN_GAP_FRAMES
     assert passing["s3_cos_slow"] == 1.0 and passing["s4_d_ratio_slow"] == 1.0
     failing = tempo.speed_verdict(_rows(gap=0))

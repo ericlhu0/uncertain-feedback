@@ -162,7 +162,7 @@ def speed_verdict(rows: Sequence[Mapping[str, float]], seed: int = 0) -> dict[st
         "means": {
             name: float(np.mean(col(name)))
             for name in rows[0]
-            if not name.startswith(("cos_", "d_ratio"))
+            if name.split("_")[0] in ("t90", "t50", "D", "peak", "rush")
         },
     }
 

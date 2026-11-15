@@ -143,6 +143,15 @@ _parser.add_argument(
     ),
 )
 _parser.add_argument(
+    "--humanml_cache",
+    type=Path,
+    default=None,
+    help=(
+        "With --humanml_root: where its loader cache goes (default <root>/mdm_cache); the "
+        "cache of a 47k-motion mix is ~5 GB, so a filesystem with room."
+    ),
+)
+_parser.add_argument(
     "--clean_prefix",
     type=int,
     default=0,
@@ -650,14 +659,15 @@ def _clean_prefix(n_prefix: int, noise_cap: int | None) -> None:
     )
 
 
-def _point_loader_at(root: Path) -> None:
+def _point_loader_at(root: Path, cache: Path | None = None) -> None:
     """Point MDM's humanml loader at ``root`` with a cache of its own.
 
     MDM resolves the humanml data root from a hardcoded string in ``get_opt`` and keys
     its motion cache (``dataset/t2m_<split>.npy``) on the split name alone, which is why
     ``finetune_standing.sh`` swaps ``dataset/HumanML3D`` and moves the caches aside.
-    This rewrites the resolved root and gives the run ``<root>/mdm_cache`` (delete it
-    after rebuilding the dataset), so training no longer touches the shared directory.
+    This rewrites the resolved root and gives the run its own ``cache`` directory
+    (``<root>/mdm_cache`` by default; delete it after rebuilding the dataset), so
+    training no longer touches the shared directory.
     """
     import numpy as np
     from data_loaders.humanml.data import dataset as dataset_module  # type: ignore
@@ -668,7 +678,7 @@ def _point_loader_at(root: Path) -> None:
             raise ValueError(
                 f"{root}/{stat} differs from {live}'s, which inference reads"
             )
-    cache = root / "mdm_cache"
+    cache = (root / "mdm_cache" if cache is None else cache).resolve()
     (cache / "dataset").mkdir(parents=True, exist_ok=True)
     if not (cache / "glove").exists():
         (cache / "glove").symlink_to(Path("glove").resolve())
@@ -845,8 +855,10 @@ if __name__ == "__main__":
         _parser.error("--distill_without_dropout needs --distill_weight")
     if _our_args.prefix_noise is not None and not _our_args.clean_prefix:
         _parser.error("--prefix_noise needs --clean_prefix")
+    if _our_args.humanml_cache is not None and _our_args.humanml_root is None:
+        _parser.error("--humanml_cache needs --humanml_root")
     if _our_args.humanml_root is not None:
-        _point_loader_at(_our_args.humanml_root.resolve())
+        _point_loader_at(_our_args.humanml_root.resolve(), _our_args.humanml_cache)
     # The clean-prefix patch goes first: the distillation patch wraps the loss it finds.
     if _our_args.clean_prefix:
         _clean_prefix(_our_args.clean_prefix, _our_args.prefix_noise)

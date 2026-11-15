@@ -102,6 +102,27 @@ _MAX_TRANSPLANT_ATTEMPTS = 20
 # clips taught an earlier speed fine-tune to jump to the end pose and freeze.
 _MAX_RETIME = 3.0
 _MAX_HELD_FRACTION = 0.4
+_NO_USUAL_BAND = (1.0, 1.0)
+
+
+def retime_pace(
+    rng: np.random.Generator,
+    faster: bool,
+    clear_of: tuple[float, float] = _NO_USUAL_BAND,
+) -> float:
+    """A target pace, log-uniform between the usual band and ``_MAX_RETIME``.
+
+    ``clear_of = (low, high)`` is the band of paces counted as usual: the slower
+    draw lies in ``[1 / _MAX_RETIME, low]`` and the faster one in ``[high,
+    _MAX_RETIME]``, so every copy is noticeably off the usual pace and carries
+    tempo text once captioned. The default band is empty, which is the original
+    draw, log-uniform within ``_MAX_RETIME`` of usual on either side. One uniform
+    draw either way, so the stream of an existing build is unchanged.
+    """
+    low, high = clear_of
+    if faster:
+        return float(np.exp(rng.uniform(np.log(high), np.log(_MAX_RETIME))))
+    return float(np.exp(-rng.uniform(np.log(1.0 / low), np.log(_MAX_RETIME))))
 
 
 def run_captions(run: dict[str, Any]) -> list[str]:
@@ -322,6 +343,8 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     consistent: bool = False,
     templated: bool = False,
     retimes: int = 0,
+    retimes_only: bool = False,
+    retime_clear_of: tuple[float, float] = _NO_USUAL_BAND,
 ) -> None:
     """Encode every captioned clip across *clips_dirs* into one MDM dataset.
 
@@ -356,6 +379,12 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
     label meaning one speed. Every motion's pace, originals and transplants at
     their clip's own, goes to ``paces.json`` keyed by id; the lines still
     describe only the path until :mod:`tempo_captions` rewrites them.
+
+    ``retimes_only`` writes the retimed copies and nothing else: the originals
+    still set the pace reference and the gated lines the copies are re-filtered
+    from, but neither they nor any transplant is encoded, so the set extends a
+    model already trained on the originals. ``retime_clear_of`` is the usual
+    band the paces are drawn clear of (:func:`retime_pace`).
     """
     hml_mean, hml_std = load_hml_stats(hml_stats_dir)
     fk = SmplLeftArmFK()
@@ -471,11 +500,12 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
             if templated
             else cleaned.get(entry.label, entry.captions)
         )
-        encode(entry.clip, captions, entry.base_pose, entry.label)
-        if retimes:
-            paces[ids[-1]] = speeds[entry.label] / usual
+        if not retimes_only:
+            encode(entry.clip, captions, entry.base_pose, entry.label)
+            if retimes:
+                paces[ids[-1]] = speeds[entry.label] / usual
 
-        for _ in range(transplants):
+        for _ in range(0 if retimes_only else transplants):
             for _attempt in range(_MAX_TRANSPLANT_ATTEMPTS):
                 start = int(rng.integers(0, len(entry.naive)))
                 moved = transplant_clip(entry.clip, entry.naive, start, entry.n_prefix)
@@ -500,8 +530,7 @@ def build_correction_dataset(  # pylint: disable=too-many-arguments,too-many-loc
         window = len(entry.clip) - entry.n_prefix
         room = len(entry.motion) - 1 - entry.anchor
         for j in range(retimes):
-            sign = 1 if j % 2 == 0 else -1
-            pace = float(np.exp(sign * retime_rng.uniform(0, np.log(_MAX_RETIME))))
+            pace = retime_pace(retime_rng, faster=j % 2 == 0, clear_of=retime_clear_of)
             rate = min(
                 pace * usual / speeds[entry.label],
                 room / ((1 - _MAX_HELD_FRACTION) * window),
@@ -619,10 +648,33 @@ def main() -> None:
             "planner's pace)."
         ),
     )
+    parser.add_argument(
+        "--retimes_only",
+        action="store_true",
+        help=(
+            "With --retimes: write only the retimed copies (no originals, no "
+            "transplants); the originals still set the pace reference and the "
+            "gated lines, so the set extends a model trained on them."
+        ),
+    )
+    parser.add_argument(
+        "--retime_clear_of",
+        type=float,
+        nargs=2,
+        default=_NO_USUAL_BAND,
+        metavar=("LOW", "HIGH"),
+        help=(
+            "Draw retime paces clear of this usual band: the slower copy in "
+            f"[1/{_MAX_RETIME:g}, LOW], the faster in [HIGH, {_MAX_RETIME:g}] "
+            "(default 1 1: no band, as the first retimed sets were built)."
+        ),
+    )
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--test_fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if args.retimes_only and not args.retimes:
+        parser.error("--retimes_only needs --retimes")
 
     build_correction_dataset(
         clips_dirs=[Path(d) for d in args.clips_dir],
@@ -635,6 +687,8 @@ def main() -> None:
         consistent=args.consistent_captions,
         templated=args.templated_captions,
         retimes=args.retimes,
+        retimes_only=args.retimes_only,
+        retime_clear_of=(args.retime_clear_of[0], args.retime_clear_of[1]),
     )
 
 

@@ -15,6 +15,13 @@ Writes a new dataset directory whose motions, stats and splits are the source's
 (motions symlinked) and whose texts are replaced. Completions are cached in
 ``<out>/tempo.json`` per line-set and pace — a transplant shares its clip's — so a
 rerun is free.
+
+``--keep_plain`` writes each motion's path-only lines beside its rewrites
+instead of replacing them, so a request that says nothing about speed is also
+seen at every pace. ``--budget`` meters the API spend from the usage the API
+reports (:mod:`uncertain_feedback.llm.spend`, ledger ``<out>/api_cost.jsonl``)
+and stops drafting once it is spent; the cache keeps what was drafted and the
+run fails rather than write a dataset with motions still undrafted.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ from uncertain_feedback.data_collection.dataset_auto_correction.paraphrase_capti
     source_lines,
 )
 from uncertain_feedback.llm.openai_model import OpenAIModel
+from uncertain_feedback.llm.spend import SpendLedger
 
 _LOG = "[tempo]"
 
@@ -74,7 +82,28 @@ def tempo_line_set(model: OpenAIModel, sources: list[str], pace: float) -> list[
     return []
 
 
-def tempo_dataset(src: Path, out: Path, model_name: str, workers: int) -> None:
+def raw_lines(text_file: Path) -> list[str]:
+    """The captions of one MDM text file as written, duplicates included."""
+    return [
+        line.split("#")[0].strip()
+        for line in text_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def tempo_lines(plain: list[str], rewrites: list[str], keep_plain: bool) -> list[str]:
+    """The lines a motion trains on: its rewrites, after its plain lines with ``keep_plain``."""
+    return plain + rewrites if keep_plain else rewrites
+
+
+def tempo_dataset(  # pylint: disable=too-many-locals
+    src: Path,
+    out: Path,
+    model_name: str,
+    workers: int,
+    keep_plain: bool = False,
+    budget: float | None = None,
+) -> None:
     """Build *out* from *src* with every motion's text rewritten at its pace."""
     out.mkdir(parents=True, exist_ok=True)
     cache_path = out / "tempo.json"
@@ -94,8 +123,14 @@ def tempo_dataset(src: Path, out: Path, model_name: str, workers: int) -> None:
         model=model_name,
         system_prompt="You answer with short spoken sentences, one per line, and nothing else.",
     )
+    ledger = None if budget is None else SpendLedger(out / "api_cost.jsonl", budget)
+    if ledger is not None:
+        ledger.meter(model)
+        print(f"{_LOG} metered: ${ledger.total:.4f} of ${budget:.2f} already spent")
 
     def draft(key: str) -> tuple[str, list[str]]:
+        if ledger is not None and ledger.exhausted:
+            return key, []
         motion_id = todo[key]
         return key, tempo_line_set(model, sources[motion_id], paces[motion_id])
 
@@ -107,6 +142,15 @@ def tempo_dataset(src: Path, out: Path, model_name: str, workers: int) -> None:
                 cache_path.write_text(json.dumps(cache, indent=1), encoding="utf-8")
                 print(f"{_LOG} drafted {n}/{len(todo)}", flush=True)
     cache_path.write_text(json.dumps(cache, indent=1), encoding="utf-8")
+    if ledger is not None:
+        print(f"{_LOG} ${ledger.total:.4f} spent over {len(ledger.costs)} calls")
+    undrafted = [key for key in todo if key not in cache]
+    if undrafted:
+        raise RuntimeError(
+            f"{len(undrafted)} line-sets not drafted"
+            + (" (budget spent)" if ledger is not None and ledger.exhausted else "")
+            + "; the cache keeps the rest, rerun to continue"
+        )
 
     nlp = spacy.load("en_core_web_sm")
     (out / "texts").mkdir(exist_ok=True)
@@ -129,13 +173,18 @@ def tempo_dataset(src: Path, out: Path, model_name: str, workers: int) -> None:
         kept = consistent_paraphrases(cache.get(keys[i], []), sources[i])
         n_rewritten += int(bool(kept))
         if kept:
-            write_text_file(out / "texts" / f"{i}.txt", kept, nlp)
+            write_text_file(
+                out / "texts" / f"{i}.txt",
+                tempo_lines(raw_lines(src / "texts" / f"{i}.txt"), kept, keep_plain),
+                nlp,
+            )
         else:
             # Copied, not rewritten: keeps any lines the builder duplicated.
             shutil.copy(src / "texts" / f"{i}.txt", out / "texts" / f"{i}.txt")
     print(
-        f"{_LOG} {n_rewritten} of {len(paces)} motions carry tempo text; "
-        f"the rest kept their path-only lines; wrote {out}"
+        f"{_LOG} {n_rewritten} of {len(paces)} motions carry tempo text"
+        + (" beside their plain lines" if keep_plain else "")
+        + f"; the rest kept their path-only lines; wrote {out}"
     )
 
 
@@ -148,8 +197,21 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True, help="new dataset dir")
     parser.add_argument("--model", default="gpt-6-luna")
     parser.add_argument("--workers", type=int, default=32)
+    parser.add_argument(
+        "--keep_plain",
+        action="store_true",
+        help="write each motion's path-only lines beside its rewrites",
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        help="dollars; drafting stops once the metered spend reaches it",
+    )
     args = parser.parse_args()
-    tempo_dataset(args.src, args.out, args.model, args.workers)
+    tempo_dataset(
+        args.src, args.out, args.model, args.workers, args.keep_plain, args.budget
+    )
 
 
 if __name__ == "__main__":

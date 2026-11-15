@@ -16,10 +16,20 @@ Usage (from motion-diffusion-model/ — same cwd as plain training):
         --batch_size 1 --num_steps 1000 --save_interval 100 \\
         --lr 1e-4 --gen_during_training
 
-Extra flags (``--start_pose``, ``--n_prefix``, ``--body_mode``) are consumed
-here and stripped from sys.argv before forwarding to ``train.train_mdm``.
+Extra flags (``--start_pose``, ``--n_prefix``, ``--body_mode``, and the replay-mix
+flags below) are consumed here and stripped from sys.argv before forwarding to
+``train.train_mdm``; they are written into the run's ``args.json`` beside MDM's.
 Omitting ``--gen_during_training`` means the patched path is never reached —
 training is identical to plain train_mdm.
+
+Replay-mix flags (datasets whose ids name their source, ``C…`` correction clips,
+``R…`` retimed copies, ``H…`` HumanML3D): ``--distill_weight`` /
+``--distill_without_dropout`` (distillation of the correction clips toward the
+starting checkpoint), ``--correction_fraction`` (batch composition),
+``--clean_prefix`` / ``--prefix_noise`` (the executed-history prefix of ``C``/``R``
+clips kept clean in the training input, see :mod:`clean_prefix`), and
+``--humanml_root`` (train on a mix directly instead of swapping
+``dataset/HumanML3D``).
 """
 
 from __future__ import annotations
@@ -39,6 +49,12 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from uncertain_feedback.consts import MDM_ROOT  # noqa: E402
+from uncertain_feedback.motion_generators.mdm.clean_prefix import (  # noqa: E402
+    CropFromStart,
+    loss_mask_without_prefix,
+    noised_prefix,
+    splice_prefix,
+)
 from uncertain_feedback.motion_generators.mdm.mdm_api import (  # noqa: E402
     N_PREFIX_FRAMES,
 )
@@ -113,6 +129,38 @@ _parser.add_argument(
         "With --distill_weight: train with every dropout of the model off, so its outputs "
         "and the frozen copy's (eval mode) come from the same network function and the "
         "distillation term has no dropout floor to train away."
+    ),
+)
+_parser.add_argument(
+    "--humanml_root",
+    type=Path,
+    default=None,
+    help=(
+        "Train on this built dataset or replay mix directly (a path relative to the MDM "
+        "submodule root or absolute), with its own loader cache under <dir>/mdm_cache, "
+        "instead of whatever dataset/HumanML3D holds (the swap finetune_standing.sh "
+        "performs), so runs can go in parallel. Its Mean/Std must equal dataset/HumanML3D's."
+    ),
+)
+_parser.add_argument(
+    "--clean_prefix",
+    type=int,
+    default=0,
+    help=(
+        "Keep the first K frames of every clip that carries an executed-history prefix "
+        "(ids C... / R...) clean in the training input and out of the loss, and start their "
+        "crops at frame 0, so the model learns to continue from the history it is pinned to "
+        "at sampling (clean_prefix.py). Default 0: off, the prefix is noised like every "
+        "other frame, as the deployed and K-ndsh checkpoints were trained."
+    ),
+)
+_parser.add_argument(
+    "--prefix_noise",
+    type=int,
+    default=None,
+    help=(
+        "With --clean_prefix: noise the prefix frames to diffusion step min(t, N) instead "
+        "of leaving them exactly clean (the PC sweep's final setting: 25 of 50)."
     ),
 )
 _our_args, _remaining_argv = _parser.parse_known_args()
@@ -449,15 +497,218 @@ def _auto_increment_save_dir() -> None:
         return
 
 
-def _is_correction(name: str) -> bool:
-    """Whether a ``dataset_replay_mix`` clip id is a correction (``C<id>_r<k>``) rather than
-    HumanML3D (``H<id>``). The humanml loader prefixes sub-caption segments with
-    ``<letter>_``, which is stripped before the check.
+def _source_letter(name: str) -> str:
+    """The source of a ``dataset_replay_mix`` clip id: ``C`` (correction clip, ``C<id>_r<k>``),
+    ``R`` (retimed copy) or ``H`` (HumanML3D). The humanml loader prefixes sub-caption
+    segments with ``<letter>_``, which is stripped before the check.
     """
     clip = name[2:] if name[1:2] == "_" else name
-    if clip[:1] not in ("C", "H"):
-        raise ValueError(f"{name!r} is not a dataset_replay_mix id (C... / H...)")
-    return clip.startswith("C")
+    if clip[:1] not in ("C", "H", "R"):
+        raise ValueError(
+            f"{name!r} is not a dataset_replay_mix id (C... / R... / H...)"
+        )
+    return clip[:1]
+
+
+def _is_correction(name: str) -> bool:
+    """Whether a replay-mix id is a correction clip, the distilled source."""
+    return _source_letter(name) == "C"
+
+
+def _has_history_prefix(name: str) -> bool:
+    """Whether a replay-mix id's clip starts with the arm's executed history (``C``/``R``)."""
+    return _source_letter(name) in ("C", "R")
+
+
+def _noised_input(
+    diffusion: Any, x_start: Any, t: Any, noise: Any, y: dict[str, Any]
+) -> Any:
+    """The training input at step ``t``; the clean-prefix patch replaces this."""
+    del y
+    return diffusion.q_sample(x_start, t, noise=noise)
+
+
+def _loss_mask(y: dict[str, Any], mask: Any) -> Any:
+    """The frames a loss term covers; the clean-prefix patch replaces this."""
+    del y
+    return mask
+
+
+def _key_batches() -> None:
+    """Hand every batch its clip ids as ``y["db_key"]`` (MDM's t2m_collate forwards an item's
+    eighth element), so the loss can tell the sources apart. Idempotent."""
+    from data_loaders.humanml.data.dataset import (  # type: ignore[import-not-found]
+        Text2MotionDatasetV2,
+    )
+
+    if getattr(Text2MotionDatasetV2, "_keyed", False):
+        return
+    getitem = Text2MotionDatasetV2.__getitem__
+
+    def keyed_getitem(self: Any, item: int) -> tuple:
+        return (*getitem(self, item), self.name_list[self.pointer + item])
+
+    Text2MotionDatasetV2.__getitem__ = keyed_getitem
+    Text2MotionDatasetV2._keyed = True
+
+
+def _clean_prefix(n_prefix: int, noise_cap: int | None) -> None:
+    """Patch MDM's loss and loader so clips with a history prefix train with it clean.
+
+    For ``C``/``R`` clips the first ``n_prefix`` frames of ``x_t`` are the clip's own
+    frames noised to step ``min(t, noise_cap)`` (clean when the cap is ``None``), those
+    frames are left out of every loss term through the loss mask only (the model's
+    attention mask is unchanged), and the loader's crop starts at frame 0. HumanML3D
+    clips are untouched. Installed before the distillation patch, which reads
+    :func:`_noised_input` and :func:`_loss_mask` so its teacher sees the same input
+    and frames as the model. See :mod:`clean_prefix`.
+    """
+    import torch
+    from data_loaders.humanml.data import dataset as dataset_module  # type: ignore
+    from diffusion.gaussian_diffusion import (  # type: ignore[import-not-found]
+        GaussianDiffusion,
+    )
+
+    global _noised_input, _loss_mask  # pylint: disable=global-statement
+    _key_batches()
+    training_losses = GaussianDiffusion.training_losses
+    getitem = dataset_module.Text2MotionDatasetV2.__getitem__
+    real_random = dataset_module.random
+    crop_from_start = CropFromStart(real_random)
+
+    def start_cropped_getitem(self: Any, item: int) -> tuple:
+        prefixed = _has_history_prefix(self.name_list[self.pointer + item])
+        dataset_module.random = crop_from_start if prefixed else real_random
+        try:
+            return getitem(self, item)
+        finally:
+            dataset_module.random = real_random
+
+    def rows(y: dict[str, Any], device: Any) -> Any:
+        return torch.tensor(
+            [_has_history_prefix(k) for k in y["db_key"]], device=device
+        )
+
+    def noised_input(
+        diffusion: Any, x_start: Any, t: Any, noise: Any, y: dict[str, Any]
+    ) -> Any:
+        q_sample = GaussianDiffusion.q_sample  # the class's, not a patched instance's
+        x_t = q_sample(diffusion, x_start, t, noise=noise)
+        prefix = noised_prefix(
+            lambda x, tt, noise=None: q_sample(diffusion, x, tt, noise=noise),
+            x_start,
+            t,
+            noise,
+            noise_cap,
+        )
+        return splice_prefix(x_t, prefix, n_prefix, rows(y, x_start.device))
+
+    def loss_mask(y: dict[str, Any], mask: Any) -> Any:
+        return loss_mask_without_prefix(mask, n_prefix, rows(y, mask.device))
+
+    def prefixed_losses(
+        self: Any,
+        model: Any,
+        x_start: Any,
+        t: Any,
+        model_kwargs: Any = None,
+        noise: Any = None,
+        dataset: Any = None,
+    ) -> Any:
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        y = model_kwargs["y"]
+        x_t, mask = noised_input(self, x_start, t, noise, y), loss_mask(y, y["mask"])
+        masked_l2 = self.masked_l2
+
+        def spliced_q_sample(x: Any, tt: Any, noise: Any = None) -> Any:
+            # MDM's training_losses draws its input exactly once, from these arguments.
+            assert x is x_start and tt is t and noise is not None
+            return x_t
+
+        def prefixed_masked_l2(
+            a: Any, b: Any, _mask: Any, *args: Any, **kw: Any
+        ) -> Any:
+            return masked_l2(a, b, mask, *args, **kw)
+
+        self.q_sample, self.masked_l2 = spliced_q_sample, prefixed_masked_l2
+        try:
+            return training_losses(
+                self, model, x_start, t, model_kwargs, noise=noise, dataset=dataset
+            )
+        finally:
+            del self.q_sample
+            self.masked_l2 = masked_l2
+
+    dataset_module.Text2MotionDatasetV2.__getitem__ = start_cropped_getitem
+    GaussianDiffusion.training_losses = prefixed_losses
+    _noised_input, _loss_mask = noised_input, loss_mask
+    print(
+        f"[train_leftarm] clean prefix: the first {n_prefix} frames of C.../R... clips are "
+        + ("clean" if noise_cap is None else f"noised to step min(t, {noise_cap})")
+        + " in the training input, out of the loss, and cropped from frame 0"
+    )
+
+
+def _point_loader_at(root: Path) -> None:
+    """Point MDM's humanml loader at ``root`` with a cache of its own.
+
+    MDM resolves the humanml data root from a hardcoded string in ``get_opt`` and keys
+    its motion cache (``dataset/t2m_<split>.npy``) on the split name alone, which is why
+    ``finetune_standing.sh`` swaps ``dataset/HumanML3D`` and moves the caches aside.
+    This rewrites the resolved root and gives the run ``<root>/mdm_cache`` (delete it
+    after rebuilding the dataset), so training no longer touches the shared directory.
+    """
+    import numpy as np
+    from data_loaders.humanml.data import dataset as dataset_module  # type: ignore
+
+    live = Path("dataset/HumanML3D")
+    for stat in ("Mean.npy", "Std.npy"):
+        if not np.allclose(np.load(root / stat), np.load(live / stat)):
+            raise ValueError(
+                f"{root}/{stat} differs from {live}'s, which inference reads"
+            )
+    cache = root / "mdm_cache"
+    (cache / "dataset").mkdir(parents=True, exist_ok=True)
+    if not (cache / "glove").exists():
+        (cache / "glove").symlink_to(Path("glove").resolve())
+    get_opt, init = dataset_module.get_opt, dataset_module.HumanML3D.__init__
+
+    def rooted_get_opt(opt_path: str, device: Any) -> Any:
+        opt = get_opt(opt_path, device)
+        opt.data_root = str(root)
+        opt.motion_dir = str(root / "new_joint_vecs")
+        opt.text_dir = str(root / "texts")
+        return opt
+
+    def cached_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        init(self, *args, **{**kwargs, "cache_path": str(cache)})
+
+    dataset_module.get_opt = rooted_get_opt
+    dataset_module.HumanML3D.__init__ = cached_init
+    print(f"[train_leftarm] humanml loader rooted at {root} (cache {cache})")
+
+
+def _record_args(extra: dict[str, Any]) -> None:
+    """Write train_leftarm's own flags into the run's ``args.json`` beside MDM's, so a
+    checkpoint says how it was trained (``mdm_api`` reads ``clean_prefix`` /
+    ``prefix_noise`` from there)."""
+    import json
+
+    from train import train_mdm  # type: ignore[import-not-found]
+
+    train_loop = train_mdm.TrainLoop
+
+    def recording_train_loop(args: Any, *rest: Any) -> Any:
+        path = Path(args.save_dir) / "args.json"
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+        recorded.update(extra)
+        path.write_text(
+            json.dumps(recorded, indent=4, sort_keys=True), encoding="utf-8"
+        )
+        return train_loop(args, *rest)
+
+    train_mdm.TrainLoop = recording_train_loop
 
 
 def _mixed_loader(loader: Any, fraction: float) -> Any:
@@ -500,21 +751,15 @@ def _distill_toward_start(weight: float, dropout: bool = True) -> None:
     import copy
 
     import torch
-    from data_loaders.humanml.data.dataset import (  # type: ignore[import-not-found]
-        Text2MotionDatasetV2,
-    )
     from diffusion.gaussian_diffusion import (  # type: ignore[import-not-found]
         GaussianDiffusion,
     )
     from model.mdm import MDM  # type: ignore[import-not-found]
 
-    getitem, mask_cond = Text2MotionDatasetV2.__getitem__, MDM.mask_cond
+    _key_batches()
+    mask_cond = MDM.mask_cond
     training_losses = GaussianDiffusion.training_losses
     frozen: dict[str, Any] = {}
-
-    def keyed_getitem(self: Any, item: int) -> tuple:
-        # MDM's t2m_collate hands an item's eighth element on as y["db_key"].
-        return (*getitem(self, item), self.name_list[self.pointer + item])
 
     def recording_mask_cond(self: Any, cond: Any, force_mask: bool = False) -> Any:
         # MDM's own caption dropout, keeping which clips it dropped.
@@ -570,7 +815,7 @@ def _distill_toward_start(weight: float, dropout: bool = True) -> None:
         correction = torch.tensor(
             [_is_correction(key) for key in y["db_key"]], device=x_start.device
         )
-        x_t = self.q_sample(x_start, t, noise=noise)
+        x_t = _noised_input(self, x_start, t, noise, y)
         timesteps = self._scale_timesteps(t)
         with torch.no_grad():
             start = frozen["start"]
@@ -579,11 +824,12 @@ def _distill_toward_start(weight: float, dropout: bool = True) -> None:
                 start(x_t, timesteps, y={**y, "uncond": True}),
                 start(x_t, timesteps, y={**y}),
             )
-        terms["distill"] = self.masked_l2(target, seen["out"], y["mask"]) * correction
+        terms["distill"] = (
+            self.masked_l2(target, seen["out"], _loss_mask(y, y["mask"])) * correction
+        )
         terms["loss"] = terms["loss"] + weight * terms["distill"]
         return terms
 
-    Text2MotionDatasetV2.__getitem__ = keyed_getitem
     MDM.mask_cond = recording_mask_cond
     GaussianDiffusion.training_losses = distilled_losses
     print(
@@ -597,6 +843,13 @@ if __name__ == "__main__":
 
     if _our_args.distill_without_dropout and not _our_args.distill_weight:
         _parser.error("--distill_without_dropout needs --distill_weight")
+    if _our_args.prefix_noise is not None and not _our_args.clean_prefix:
+        _parser.error("--prefix_noise needs --clean_prefix")
+    if _our_args.humanml_root is not None:
+        _point_loader_at(_our_args.humanml_root.resolve())
+    # The clean-prefix patch goes first: the distillation patch wraps the loss it finds.
+    if _our_args.clean_prefix:
+        _clean_prefix(_our_args.clean_prefix, _our_args.prefix_noise)
     if _our_args.distill_weight:
         _distill_toward_start(
             _our_args.distill_weight, dropout=not _our_args.distill_without_dropout
@@ -607,4 +860,10 @@ if __name__ == "__main__":
             _get_loader(**kw), _our_args.correction_fraction
         )
     _auto_increment_save_dir()
+    _record_args(
+        {
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in vars(_our_args).items()
+        }
+    )
     train.train_mdm.main()

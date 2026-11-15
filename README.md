@@ -2177,14 +2177,18 @@ the MPC planner keeps its injected clusterer):
 #### Steering diffusion sampling toward the user's cost (`feedback.uq.steering`)
 
 `mode: "cg"` (the default, and what every checked-in config ships) biases
-sampling toward the configured simulated user's hidden bounds, so the candidates
-that reach clustering already respect the user's constraints; `mode: "off"`
-samples MDM unsteered. The cost is compiled from the persona's
+sampling toward the bounds given in `steering.bounds` (see below), so the
+candidates that reach clustering already respect that cost; `mode: "off"`
+samples MDM unsteered. Steering never reads the simulated user's hidden bounds —
+they are the evaluation ground truth — so a config without `steering.bounds`
+samples unsteered whatever its `user:`. The cost is compiled from the
 `elbow_flexion` / `shoulder_elevation` bounds and read off each denoising step's
-`x̂0` prediction; `JointBoxLimit` and bounds on other features are skipped (named
-in a log line). Steering is implemented by the MDM backend; with any other
-backend the run logs a skip and samples unsteered, as it does when the persona
-has no supported bounds (e.g. `user: unrestricted`, the default).
+`x̂0` prediction; bounds on other features are skipped (named in a log line).
+Steering is implemented by the MDM backend; with any other backend the run logs
+a skip and samples unsteered, as it does when no bounds are given or none is
+supported. In the `evaluation/` harness the method's `full` arm steers from its
+learned bounds (`steering: learned`); steering from the hidden bounds is the
+labelled ceiling (`full_hidden_limit_steering`, `no_learning_cg`).
 
 The key applies to both frontends: `run.py` steers every UQ correction round
 with the YAML mode, and the demo runner's stage-2 **Steering** dropdown starts
@@ -2284,10 +2288,9 @@ uv run python src/uncertain_feedback/planners/run.py \
 
 ### Steering the sampler from the config (`feedback.uq.steering.bounds`)
 
-By default the steering cost is compiled from the running persona's hidden
-bounds, so `user: unrestricted` samples unsteered. Stating bounds under
-`steering:` instead steers toward a cost written in the config, leaving the
-persona alone — the sampler is pulled one way while the person being moved is
+Steering compiles only the bounds stated under `steering:`; the persona's
+hidden bounds are never used, so without them sampling is unsteered. The
+sampler is pulled toward the configured cost while the person being moved is
 still whoever `user:` says:
 
 ```yaml
@@ -2303,8 +2306,8 @@ feedback:
 ```
 
 Each entry is a `HiddenBound` (`feature`, `bound_type`, `low`/`high`), compiled
-by the same `torch_features.build_user_bound_cost` path as a persona's, so the
-same feature support applies (`shoulder_elevation`, `elbow_flexion`; joint boxes
+by the same `torch_features.build_user_bound_cost` path as learned bounds, so
+the same feature support applies (`shoulder_elevation`, `elbow_flexion`; joint boxes
 are structurally unscorable from positions and are dropped). The compiled cost
 is the squared hinge `clip(low - feature, 0, None) ** 2` averaged over the
 unpinned frames — for a single bound that is a summed hinge up to the frame

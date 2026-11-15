@@ -1,6 +1,6 @@
 # uncertain-feedback Codebase Map
 
-**Last updated:** 2026-10-16
+**Last updated:** 2026-11-14
 **Branch:** human-class
 
 > **Maintenance rule:** Update this file whenever a new module, planner, cost term, or major data-pipeline step is added.
@@ -149,7 +149,7 @@ uncertain-feedback/
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator (name, model_path, seed, lock_seed, guidance_param)
 │   │   ├── base.py                   # MotionGenerator ABC (shared backend interface)
-│   │   ├── steering.py               # Diffusion steering: SteeringConfig/Spec/Event, build_steering_spec (shared persona→spec guard chain), particle resampler, classifier-guidance cond_fn, conflict diagnostic (torch-free — imported at config-parse time)
+│   │   ├── steering.py               # Diffusion steering: SteeringConfig/Spec/Event, build_steering_spec (shared bounds→spec guard chain; takes no persona), particle resampler, classifier-guidance cond_fn, conflict diagnostic (torch-free — imported at config-parse time)
 │   │   └── mdm/
 │   │       ├── transfer_seated_pose.pt # Seated start for transfer and the seated care configs; right arm folded, left arm lowered (normalized HML263)
 │   │       ├── transfer_bed_pose.pt    # Supine transfer start; extended legs and same arm setup (normalized HML263)
@@ -514,7 +514,7 @@ When `llm_cost.enabled: true` in the YAML:
 | `arm`                  | 3×3 list? | Initial left-arm `[shoulder, elbow, wrist]` axis-angle override on top of `pose` (same semantics as `--arm`, which wins when both are given) |
 | `feedback.*`           | FeedbackConfig | Presence enables the MDM feedback method. `max_playback_delta` (max per-joint rotation, radians, per step while following the MDM trajectory, default 0.05 — rate limit easing the initial jump into the trajectory and any large frame-to-frame jump), `trajectory_fraction` (fraction of MDM frames to enqueue, default 1.0), `frames` (exact MDM frames the generator *returns*; the pinned prefix is sampled on top of it, so the cap is `196 - (N_PREFIX_FRAMES - 1)`; null = generator default), `text_time` (step at which the scripted correction triggers), and a nested optional `uq:` (below). |
 | `feedback.uq.*`        | UqConfig | Presence enables the UQ layer: `diffusion_samples`, `n_clusters`, `clusterer` (kmeans_end_pose \| agglo_end_pose [default] \| agglo_path_pca \| agglo_t2m; Demo Runner dropdown default), `auto_cluster`, `scale` (default motion-magnitude scale for the chosen cluster; slider initial value in the GUI, applied directly when headless), `user_cluster` (delegate cluster choice to the configured user when it has bounds; precedence over `auto_cluster`/GUI) |
-| `feedback.uq.steering.*` | SteeringConfig | Cost-steered diffusion sampling (§14). `mode` (`cg` [default] \| `resample` \| `off`), `resample_steps` (denoising-loop indices at which to score and resample, default `[15, 25, 35, 45]`), `temperature` (resample only: softmax temperature over z-scored costs, default 0.5 — scale-free, transfers across costs), `guide_from` (cg only: first guided loop index, default 10), `guidance_weight` (cg only: λ on the cost gradient, default 1e5; useful band 1e4–1e5, needs per-cost calibration). Validated in `SteeringConfig.__post_init__`; checked-in configs ship `mode: "cg"`. Honored by both frontends; the demo runner's Steering dropdown overrides `mode` per generation. |
+| `feedback.uq.steering.*` | SteeringConfig | Cost-steered diffusion sampling (§14). `mode` (`cg` [default] \| `resample` \| `off`), `resample_steps` (denoising-loop indices at which to score and resample, default `[15, 25, 35, 45]`), `temperature` (resample only: softmax temperature over z-scored costs, default 0.5 — scale-free, transfers across costs), `guide_from` (cg only: first guided loop index, default 10), `guidance_weight` (cg only: λ on the cost gradient, default 1e5; useful band 1e4–1e5, needs per-cost calibration), `bounds` (the only cost steering compiles — `HiddenBound` entries; the persona's hidden bounds are never a fallback, so without `bounds` sampling is unsteered). Validated in `SteeringConfig.__post_init__`; checked-in configs ship `mode: "cg"`. Honored by both frontends; the demo runner's Steering dropdown overrides `mode` per generation. |
 | `preference_learning`  | bool     | Auto-update cost bounds from MDM (default true)      |
 | `preference_alpha`     | float    | Blend weight for preference update (default 0.5)     |
 | `preference_window`    | int      | MPC step history for preference update (default 50)  |
@@ -1319,11 +1319,15 @@ outcome: the channel does not produce usable speed control** (fast/slow wrist-sp
 Both `generate_*` methods take a keyword-only `steering: SteeringSpec | None`. MDM implements
 it; a backend that does not support steering raises `NotImplementedError` for a non-`None`
 spec (as it may for `frozen_body`). A `SteeringSpec` bundles a `cost` (normalized `x̂0 (N,263,1,T)` → `(N,)`; built
-by `MdmMotionGenerator.build_user_steering_cost(user)` from the persona's bounds, §6), a
+by `MdmMotionGenerator.build_user_steering_cost` from `SteeringConfig.bounds`, §6), a
 `SteeringConfig`, and a `seed`. `mode: "cg"` is the default everywhere; `mode: "off"` opts a
-config out of steering entirely. `build_steering_spec(gen, user, config, seed)` (same module) is the
-shared guard chain both frontends compile a spec through: `mode: "off"` → `None`; non-MDM
-backend or a persona without supported bounds → printed skip + `None` (unsteered sampling).
+config out of steering entirely. `build_steering_spec(gen, config, seed)` (same module) is the
+shared guard chain both frontends and the evaluation steering modules compile a spec through:
+`mode: "off"` → `None`; no `config.bounds`, a non-MDM backend, or no supported bounds →
+printed skip + `None` (unsteered sampling). It takes no persona, so the simulated user's
+hidden bounds can only reach steering when a caller passes them in as `config.bounds` —
+which only `ClassifierGuidanceSteering`, the hidden-limit ceiling, does; `LearnedSteering`
+passes the learner's bounds, and `run.py` / the demo runner pass the YAML's.
 The demo runner calls it per generation from `Session._steering_spec` with the browser's
 Steering-dropdown mode substituted into the YAML config; `run.py` calls it per correction
 round in `handle_correction` and threads the spec through

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from uncertain_feedback.motion_generators.base import MotionGenerator
-    from uncertain_feedback.simulated_users.base import Bound, SimulatedUser
+    from uncertain_feedback.simulated_users.base import Bound
 
 STEERING_MODES = ("off", "cg", "resample")
 
@@ -48,11 +48,9 @@ class SteeringConfig:
     (0 = the first, noisiest step), not diffusion timesteps. Entries at or past
     the sampler's step count simply never fire.
 
-    ``bounds`` steers toward a cost stated in the config instead of the running
-    persona's hidden bounds. That decouples *what the sampler is pulled toward*
-    from *who is being moved*: an unrestricted persona can be steered, and a
-    restricted one keeps its own bounds for scoring while the sampler follows
-    these. Same compiler either way, so the same feature support applies.
+    ``bounds`` is the only cost steering compiles: a learned cost's bounds, or
+    ones written in the config. The simulated user's hidden bounds are never a
+    fallback, so with no ``bounds`` sampling is unsteered whatever the persona.
     """
 
     mode: str = "cg"
@@ -103,39 +101,38 @@ class SteeringSpec:
 
 def build_steering_spec(
     gen: MotionGenerator,
-    user: SimulatedUser,
     config: SteeringConfig,
     seed: int,
 ) -> SteeringSpec | None:
-    """Compile the steering cost, or ``None`` if unsteerable.
+    """Compile ``config.bounds`` into a steering spec, or ``None`` if unsteerable.
 
-    The bounds come from ``config.bounds`` when it is set, else from ``user``.
-    Skips (with a printed reason) when the backend does not implement steering
-    or neither source has bounds the torch feature path supports.
+    Takes no persona: the simulated user's hidden bounds are evaluation ground
+    truth, so the one run that steers with them (the hidden-limit ceiling)
+    passes them in through ``config.bounds`` itself. Skips (with a printed
+    reason) when there are no bounds, the backend does not implement steering,
+    or none of the bounds is supported by the torch feature path.
     """
     if config.mode == "off":
         return None
+    if not config.bounds:
+        print("steering: no steering bounds given, sampling unsteered")
+        return None
     # pylint: disable=import-outside-toplevel
     from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
+    from uncertain_feedback.simulated_users.base import SimulatedUser
 
     if not isinstance(gen, MdmMotionGenerator):
         print("steering: unsupported backend, sampling unsteered")
         return None
-    target = user
-    if config.bounds:
-        from dataclasses import replace  # pylint: disable=import-outside-toplevel
-
-        # Joint boxes come off with the bounds: they are structurally unscorable
-        # from positions, so keeping them only prints a "skipping" line.
-        target = replace(
-            user,
-            name=f"{user.name}+steering.bounds",
-            bounds=tuple(config.bounds),
-            joint_limits=(),
-        )
+    target = SimulatedUser(
+        name="steering.bounds",
+        description="",
+        feedback_text="",
+        bounds=tuple(config.bounds),
+    )
     cost = gen.build_user_steering_cost(target)
     if cost is None:
-        print(f"steering: no supported bounds for {target.name}, sampling unsteered")
+        print("steering: no supported steering bounds, sampling unsteered")
         return None
     return SteeringSpec(cost=cost, config=config, seed=seed)
 

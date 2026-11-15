@@ -40,4 +40,4 @@ class LearnedSteering(Steering):
         bounds = self.learned_bounds()
         if not bounds:
             return None
-        return build_steering_spec(gen, user, replace(config, bounds=bounds), seed=seed)
+        return build_steering_spec(gen, replace(config, bounds=bounds), seed=seed)

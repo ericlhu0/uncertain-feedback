@@ -754,9 +754,7 @@ def run_repeated_correction_session(
                 if feedback_cfg.uq.user_cluster and setup.user.bounds
                 else None
             )
-            spec = build_steering_spec(
-                gen, setup.user, feedback_cfg.uq.steering, cfg.seed
-            )
+            spec = build_steering_spec(gen, feedback_cfg.uq.steering, cfg.seed)
             if spec is not None:
                 print(f"steering: mode {spec.config.mode}")
             traj = mpc.query_mdm_with_uncertainty(

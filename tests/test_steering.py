@@ -20,6 +20,7 @@ from uncertain_feedback.motion_generators.steering import (
     SteeringConfig,
     SteeringEvent,
     SteeringSpec,
+    build_steering_spec,
     conflict_warning,
     resample_indices,
 )
@@ -388,6 +389,11 @@ class _OneClusterer(TrajectoryClusterer):
 
     def _fit_predict(self, features: np.ndarray) -> np.ndarray:
         return np.zeros(features.shape[0], dtype=np.intp)
+
+
+def test_build_steering_spec_without_bounds_samples_unsteered() -> None:
+    # No persona argument and no hidden-bound fallback: nothing to compile.
+    assert build_steering_spec(cast(Any, object()), SteeringConfig(), seed=0) is None
 
 
 def test_query_mdm_with_uncertainty_forwards_the_steering_spec() -> None:

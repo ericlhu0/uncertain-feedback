@@ -175,6 +175,16 @@ def _resolve_total_frames(
     return n_total
 
 
+def _ships_clip_weights(model_path: Path) -> bool:
+    """Whether a checkpoint carries CLIP text weights, which MDM's own checkpoints never
+    do: ``train_leftarm.py --unfreeze_clip_layers`` writes the tuned ones (in float32)
+    into every checkpoint, and a run resumed from such a checkpoint carries them on."""
+    import torch  # pylint: disable=import-outside-toplevel
+
+    state = torch.load(model_path, map_location="cpu")
+    return any(key.startswith("clip_model.") for key in state.get("model", state))
+
+
 class MdmMotionGenerator(
     MotionGenerator
 ):  # pylint: disable=too-many-instance-attributes
@@ -306,6 +316,11 @@ class MdmMotionGenerator(
 
         print("Loading MDM model…")
         model, diffusion = create_model_and_diffusion(args, data)
+        if _ships_clip_weights(self._model_path):
+            # Tuned CLIP text weights (train_leftarm.py --unfreeze_clip_layers, or a run
+            # resumed from one) ship in float32; MDM's half-precision CLIP would round
+            # them as they load.
+            model.clip_model.float()
         load_saved_model(model, str(self._model_path), use_avg=args.use_ema)
         model = ClassifierFreeSampleModel(model)
         model.to(dist_util.dev())

@@ -29,7 +29,8 @@ starting checkpoint), ``--correction_fraction`` (batch composition),
 ``--clean_prefix`` / ``--prefix_noise`` (the executed-history prefix of ``C``/``R``
 clips kept clean in the training input, see :mod:`clean_prefix`), and
 ``--humanml_root`` (train on a mix directly instead of swapping
-``dataset/HumanML3D``).
+``dataset/HumanML3D``). ``--unfreeze_clip_layers`` / ``--clip_lr_scale`` train the top
+of CLIP's text tower and ship it in the checkpoint (the PC's speed recipe).
 """
 
 from __future__ import annotations
@@ -149,6 +150,26 @@ _parser.add_argument(
     help=(
         "With --humanml_root: where its loader cache goes (default <root>/mdm_cache); the "
         "cache of a 47k-motion mix is ~5 GB, so a filesystem with room."
+    ),
+)
+_parser.add_argument(
+    "--unfreeze_clip_layers",
+    type=int,
+    default=0,
+    help=(
+        "Fine-tune CLIP's top N text blocks, ln_final and text_projection with the rest "
+        "of the model, in float32; every checkpoint then ships them, and a run resumed "
+        "from such a checkpoint carries them on. The PC's speed recipe of 2026-09-30 "
+        "used 2. Default 0: CLIP frozen, as MDM has it."
+    ),
+)
+_parser.add_argument(
+    "--clip_lr_scale",
+    type=float,
+    default=1.0,
+    help=(
+        "With --unfreeze_clip_layers: the learning rate of the CLIP weights as a multiple "
+        "of --lr (the PC's recipe: 0.1)."
     ),
 )
 _parser.add_argument(
@@ -466,16 +487,20 @@ def _load_optimizer_state_keep_lr(self: Any) -> None:
             f"[train_leftarm] no {opt_path.name} beside the checkpoint; fresh optimizer"
         )
         return
+    # The groups' lrs as built from --lr and any per-group multiplier (--clip_lr_scale);
+    # resetting every group to --lr would erase it.
+    lrs = [group["lr"] for group in self.opt.param_groups]
     try:
         _orig_load_optimizer_state(self)
     except ValueError as exc:
-        # New conditioning heads (e.g. --speed_cond) change the parameter count,
-        # so the checkpoint's Adam state no longer matches; start it fresh.
+        # New conditioning heads (e.g. --speed_cond) or parameter groups
+        # (--unfreeze_clip_layers) change the parameter count or grouping, so the
+        # checkpoint's Adam state no longer matches; start it fresh.
         print(f"[train_leftarm] optimizer state not loaded ({exc}); starting fresh")
         return
-    for group in self.opt.param_groups:
-        group["lr"] = self.lr
-    print(f"[train_leftarm] optimizer state loaded; lr reset to {self.lr:g}")
+    for group, lr in zip(self.opt.param_groups, lrs):
+        group["lr"] = lr
+    print(f"[train_leftarm] optimizer state loaded; lrs kept at {lrs}")
 
 
 _training_loop.TrainLoop._load_optimizer_state = _load_optimizer_state_keep_lr
@@ -848,6 +873,104 @@ def _distill_toward_start(weight: float, dropout: bool = True) -> None:
     )
 
 
+def _clip_in_checkpoint(n_layers: int, lr_scale: float) -> None:
+    """Patch MDM so CLIP text weights can train and travel with the checkpoint.
+
+    With ``n_layers`` > 0 the top ``n_layers`` text blocks of CLIP, its ``ln_final`` and
+    ``text_projection`` train with the rest of the model, in float32 (MDM keeps CLIP in
+    half precision, which Adam cannot train), in their own AdamW group at ``lr_scale``
+    times the learning rate; the PC's speed recipe of 2026-09-30 used 2 and 0.1. MDM's
+    ``save`` drops every ``clip_model.`` key, so the tuned keys are written back into each
+    checkpoint. A run resumed from a checkpoint that ships CLIP keys loads them in float32
+    (MDM would round them into its half-precision copy) and keeps shipping them, frozen
+    unless ``n_layers`` says otherwise, so a body trained against tuned text never
+    travels without it. Without either, nothing changes but one read of the resumed
+    checkpoint.
+    """
+    import torch
+    from train import train_mdm  # type: ignore[import-not-found]
+
+    create = train_mdm.create_model_and_diffusion
+    adamw = _training_loop.AdamW
+    save = _training_loop.TrainLoop.save
+    shipped: set[str] = set()  # the clip_model. keys every checkpoint carries
+    tuned: set[int] = set()  # ids of the CLIP parameters that train
+
+    def shipped_keys(path: str | None) -> set[str]:
+        if not path:
+            return set()
+        state = torch.load(path, map_location="cpu")
+        return {k for k in state.get("model", state) if k.startswith("clip_model.")}
+
+    def creating(args: Any, data: Any) -> Any:
+        model, diffusion = create(args, data)
+        shipped.update(shipped_keys(args.resume_checkpoint))
+        clip = model.clip_model
+        if shipped or n_layers:
+            clip.float()
+        if n_layers:
+            for module in (*clip.transformer.resblocks[-n_layers:], clip.ln_final):
+                module.requires_grad_(True)
+            clip.text_projection.requires_grad_(True)
+            tuned.update(id(p) for p in clip.parameters() if p.requires_grad)
+            shipped.update(
+                f"clip_model.{name}"
+                for name, p in clip.named_parameters()
+                if p.requires_grad
+            )
+        if shipped:
+            print(
+                f"[train_leftarm] {len(shipped)} CLIP weights ship with each checkpoint"
+                + (
+                    f", {len(tuned)} of them training at {lr_scale} x lr"
+                    if tuned
+                    else " (carried from the resumed checkpoint, frozen)"
+                )
+            )
+        return model, diffusion
+
+    def grouped_adamw(params: Any, lr: float, **kwargs: Any) -> Any:
+        params = list(params)
+        if lr_scale == 1.0 or not tuned:
+            return adamw(params, lr=lr, **kwargs)
+        return adamw(
+            [
+                {"params": [p for p in params if id(p) not in tuned]},
+                {"params": [p for p in params if id(p) in tuned], "lr": lr * lr_scale},
+            ],
+            lr=lr,
+            **kwargs,
+        )
+
+    def saving(self: Any) -> None:
+        save(self)
+        if not shipped:
+            return
+        path = os.path.join(self.save_dir, self.ckpt_file_name())
+        checkpoint = torch.load(path, map_location="cpu")
+        targets = (
+            [
+                (checkpoint[key], module)
+                for key, module in (
+                    ("model", self.model),
+                    ("model_avg", self.model_avg),
+                )
+                if key in checkpoint
+            ]
+            if "model" in checkpoint
+            else [(checkpoint, self.model)]
+        )
+        for target, module in targets:
+            target.update(
+                {n: v for n, v in module.state_dict().items() if n in shipped}
+            )
+        torch.save(checkpoint, path)
+
+    train_mdm.create_model_and_diffusion = creating
+    _training_loop.AdamW = grouped_adamw
+    _training_loop.TrainLoop.save = saving
+
+
 if __name__ == "__main__":
     import train.train_mdm  # noqa: E402
 
@@ -857,6 +980,8 @@ if __name__ == "__main__":
         _parser.error("--prefix_noise needs --clean_prefix")
     if _our_args.humanml_cache is not None and _our_args.humanml_root is None:
         _parser.error("--humanml_cache needs --humanml_root")
+    if _our_args.clip_lr_scale != 1.0 and not _our_args.unfreeze_clip_layers:
+        _parser.error("--clip_lr_scale needs --unfreeze_clip_layers")
     if _our_args.humanml_root is not None:
         _point_loader_at(_our_args.humanml_root.resolve(), _our_args.humanml_cache)
     # The clean-prefix patch goes first: the distillation patch wraps the loss it finds.
@@ -866,6 +991,7 @@ if __name__ == "__main__":
         _distill_toward_start(
             _our_args.distill_weight, dropout=not _our_args.distill_without_dropout
         )
+    _clip_in_checkpoint(_our_args.unfreeze_clip_layers, _our_args.clip_lr_scale)
     if _our_args.correction_fraction is not None:
         _get_loader = train.train_mdm.get_dataset_loader
         train.train_mdm.get_dataset_loader = lambda **kw: _mixed_loader(

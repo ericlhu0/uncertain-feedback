@@ -175,6 +175,16 @@ def _resolve_total_frames(
     return n_total
 
 
+def _ships_clip_weights(model_path: Path) -> bool:
+    """Whether a checkpoint carries CLIP text weights, which MDM's own checkpoints never
+    do: ``train_leftarm.py --unfreeze_clip_layers`` writes the tuned ones (in float32)
+    into every checkpoint, and a run resumed from such a checkpoint carries them on."""
+    import torch  # pylint: disable=import-outside-toplevel
+
+    state = torch.load(model_path, map_location="cpu")
+    return any(key.startswith("clip_model.") for key in state.get("model", state))
+
+
 class MdmMotionGenerator(
     MotionGenerator
 ):  # pylint: disable=too-many-instance-attributes
@@ -306,6 +316,11 @@ class MdmMotionGenerator(
 
         print("Loading MDM model…")
         model, diffusion = create_model_and_diffusion(args, data)
+        if _ships_clip_weights(self._model_path):
+            # Tuned CLIP text weights (train_leftarm.py --unfreeze_clip_layers, or a run
+            # resumed from one) ship in float32; MDM's half-precision CLIP would round
+            # them as they load.
+            model.clip_model.float()
         load_saved_model(model, str(self._model_path), use_avg=args.use_ema)
         model = ClassifierFreeSampleModel(model)
         model.to(dist_util.dev())
@@ -497,6 +512,8 @@ class MdmMotionGenerator(
         from data_loaders.tensors import collate
         from tqdm.auto import tqdm
 
+        from uncertain_feedback.motion_generators.mdm.clean_prefix import present_prefix
+
         dist_util = self._dist_util
         model = self._model
         diffusion = self._diffusion
@@ -531,6 +548,13 @@ class MdmMotionGenerator(
         )
         model_kwargs["y"]["inpainted_motion"] = input_motions
         model_kwargs["y"]["inpainting_mask"] = inpainting_mask
+        # Checkpoints trained with train_leftarm.py --clean_prefix saw the pinned prefix
+        # clean (or noised to at most --prefix_noise) in every training input; present
+        # it the same way before every model call below (clean_prefix.py).
+        clean_prefix = int(getattr(args, "clean_prefix", 0) or 0)
+        prefix_noise = getattr(args, "prefix_noise", None)
+        if clean_prefix:
+            assert clean_prefix == N_PREFIX_FRAMES, "trained on another prefix"
 
         # --- Classifier-free guidance scale ----------------------------------
         model_kwargs["y"]["scale"] = (
@@ -581,6 +605,15 @@ class MdmMotionGenerator(
         events: list[SteeringEvent] = []
         for step_idx, i in enumerate(tqdm(list(range(diffusion.num_timesteps))[::-1])):
             t = torch.tensor([i] * num_samples, device=dist_util.dev())
+            if clean_prefix:
+                img = present_prefix(
+                    diffusion.q_sample,
+                    img,
+                    input_motions,
+                    t,
+                    clean_prefix,
+                    prefix_noise,
+                )
             if cond_fn is not None and step_idx >= guide_from:
                 out = diffusion.p_sample_with_grad(
                     model,

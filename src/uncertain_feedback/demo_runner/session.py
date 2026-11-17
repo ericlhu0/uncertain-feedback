@@ -921,7 +921,7 @@ class Session:
         traj.samples = rig.gen.generate_positions(
             prompt,
             traj.corrected,
-            prefix=False,
+            prefix=True,
             num_samples=n_samples,
             num_frames=_feedback_cfg(rig).frames,
             steering=spec,

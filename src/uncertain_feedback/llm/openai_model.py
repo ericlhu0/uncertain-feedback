@@ -2,7 +2,7 @@
 
 import base64
 import os
-from typing import Any, Dict, List, Literal, Optional, Union, cast
+from typing import Any, Callable, Dict, List, Literal, Optional, Union, cast
 
 from openai import OpenAI
 
@@ -44,6 +44,8 @@ class OpenAIModel(BaseModel):
         self.stream_reasoning_summary = stream_reasoning_summary
         self.system_prompt = system_prompt
         self.api_mode = api_mode
+        # Called with every response's token usage, e.g. by a SpendLedger.
+        self.usage_hook: Optional[Callable[[Any], None]] = None
         self.client = OpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
             organization=os.getenv("OPENAI_ORG_ID"),
@@ -159,6 +161,7 @@ class OpenAIModel(BaseModel):
         if self.max_tokens is not None:
             request[self._chat_token_limit_name()] = self.max_tokens
         response = self.client.chat.completions.create(**request)
+        self._note_usage(response)
         content = response.choices[0].message.content
         if content is None:
             raise ValueError("OpenAI API returned None content")
@@ -187,6 +190,7 @@ class OpenAIModel(BaseModel):
         if self.max_tokens is not None:
             request["max_output_tokens"] = self.max_tokens
         response = self._create_response(request)
+        self._note_usage(response)
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str):
             return output_text
@@ -210,6 +214,7 @@ class OpenAIModel(BaseModel):
         if self.max_tokens is not None:
             request["max_output_tokens"] = self.max_tokens
         response = self._create_response(request)
+        self._note_usage(response)
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str):
             return output_text
@@ -222,6 +227,12 @@ class OpenAIModel(BaseModel):
         if self.stream_reasoning_summary:
             reasoning["summary"] = "auto"
         return reasoning
+
+    def _note_usage(self, response: Any) -> None:
+        """Hand a response's token usage to ``usage_hook``, if one is set."""
+        hook = getattr(self, "usage_hook", None)
+        if hook is not None:
+            hook(response.usage)
 
     def _create_response(self, request: dict[str, Any]) -> Any:
         if not self.stream_reasoning_summary:
@@ -262,6 +273,7 @@ class OpenAIModel(BaseModel):
         if self.max_tokens is not None:
             request[self._chat_token_limit_name()] = self.max_tokens
         response = self.client.chat.completions.create(**request)
+        self._note_usage(response)
         content = response.choices[0].message.content
         if content is None:
             raise ValueError("OpenAI API returned None content")

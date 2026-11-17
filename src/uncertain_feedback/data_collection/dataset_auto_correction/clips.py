@@ -43,6 +43,7 @@ from typing import Any
 
 import numpy as np
 
+from uncertain_feedback.consts import PROJECT_ROOT
 from uncertain_feedback.motion_generators.mdm.mdm_api import N_PREFIX_FRAMES
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
@@ -515,15 +516,33 @@ def new_session_dir(base_dir: Path) -> Path:
     return session_dir
 
 
+def local_config_path(stored: Path) -> Path:
+    """The planner config a manifest names, or this checkout's copy of the same file.
+
+    Manifests store the generating host's absolute path, so a clip set moved to
+    another machine (every ``clips_*`` set generated on the PC and used on the
+    cluster) names a file that does not exist there; the same yaml under this
+    checkout's ``evaluation/conf`` stands in, and the substitution is printed.
+    """
+    if stored.exists():
+        return stored
+    local = PROJECT_ROOT.parent.parent / "evaluation" / "conf" / stored.name
+    if local.exists():
+        print(f"[clips] {stored} is not on this host; using {local}")
+        return local
+    return stored
+
+
 def clip_source_from_dir(out_dir: Path) -> ClipSource:
     """Rebuild a :class:`ClipSource` from an existing clip set, without MDM.
 
-    The person comes from the planner config the manifest records.
+    The person comes from the planner config the manifest records (see
+    :func:`local_config_path`).
     """
     manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     stored = manifest["clip_config"]
     cfg = CorrectionClipConfig(
-        config_path=Path(stored["config_path"]),
+        config_path=local_config_path(Path(stored["config_path"])),
         out_dir=out_dir,
         n_runs=stored["n_runs"],
         seed=stored["seed"],

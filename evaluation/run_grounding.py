@@ -19,6 +19,11 @@ continuation alongside it as the ``nominal`` reference. Expressivity is scored
 over the whole menu, in anatomical-feature space and in elbow/wrist position space. A case whose ``trajectories.npz`` already exists reuses
 its menu, shifted onto the case's start frame, instead of grounding again.
 
+The ``mdm`` grounder conditions on the executed frames up to the feedback pose
+(``OracleCase.history``), as the planner does and as the fine-tuning clips were
+built; ``--static-prefix`` pins the feedback pose repeated instead, which is how
+every result before 2026-10-29 was sampled.
+
 ``llm`` needs ``OPENAI_API_KEY`` only; ``mdm`` loads the generator (GPU) and
 checks its body against the clip set's.
 """
@@ -68,7 +73,9 @@ def _generator(args: argparse.Namespace, source: ClipSource) -> MotionGenerator 
 
 def _grounder(args: argparse.Namespace) -> Grounder:
     if args.grounder == "mdm":
-        return MdmGrounder(frozen_body=args.frozen_body)
+        return MdmGrounder(
+            frozen_body=args.frozen_body, history_prefix=not args.static_prefix
+        )
     return LlmTrajectoryGrounder(
         n_interpretations=4, output_space="positions", n_waypoints=5, n_frames=50
     )
@@ -101,7 +108,7 @@ def _menu(
     grounder.reset(source.run_cfg, gen, case.user, seed, case_dir)
     result = grounder.ground(
         utterance,
-        source.human.reset_human_with_q(case.q_feedback),
+        source.human.reset_human_with_q(case.history[0]).step(case.history[1:]),
         case.nominal_continuation,
         lambda _: (0, 1.0),
     )
@@ -134,6 +141,12 @@ def main() -> None:
         "--frozen-body",
         action="store_true",
         help="mdm: hold every non-left-arm joint for the whole motion, not just the prefix",
+    )
+    parser.add_argument(
+        "--static-prefix",
+        action="store_true",
+        help="mdm: pin the feedback pose repeated N_PREFIX_FRAMES times instead of "
+        "the executed history (how every result before 2026-10-29 was sampled)",
     )
     args = parser.parse_args()
 

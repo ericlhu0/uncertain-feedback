@@ -45,12 +45,16 @@ _BODY_NOUN = (
     r"|chest|ribs|waist|lap|ear|cheek|face|head|foot|feet)"
 )
 
+# Tempo idioms ("speed up", "hurry up", "pick up the pace", "slow down") make no
+# direction claim.
 _UP = re.compile(
-    r"\b(up|upward|upwards|lift|lifts|lifted|raise|raises|raised|rise|rises"
-    r"|rising|higher)\b",
+    r"(?<!speed )(?<!speeds )(?<!sped )(?<!speed it )(?<!hurry )"
+    r"\b(up(?!\s+(?:the\s+)?(?:pace|speed))|upward|upwards|lift|lifts|lifted"
+    r"|raise|raises|raised|rise|rises|rising|higher)\b",
     re.IGNORECASE,
 )
 _DOWN = re.compile(
+    r"(?<!slow )(?<!slows )(?<!slowed )(?<!slow it )"
     r"\b(down|downward|downwards|lower|lowers|lowered|drop|drops|dropped)\b",
     re.IGNORECASE,
 )

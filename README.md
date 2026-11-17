@@ -1343,6 +1343,81 @@ What the search found:
   RTX PRO 6000 (U1z, U1r, D11), disclosed in PROTOCOL.md. A preempted seed run that resumes draws
   the cases after the resume point from a different noise stream; D12's seed 7 was re-run whole.
 
+**Speed with the prior kept (2026-11-14/17) — the default checkpoint since 2026-11-17.**
+`consts.MDM_MODEL_WEIGHTS_PATH` is `replay_kd10ndsh_hml50_on_pcspeed/model000778000.pt`: the PC's
+speed recipe (2026-09-30, above) followed by 6500 steps of the replay recipe. Both stages run on
+`train_leftarm.py` directly (`--humanml_root` trains on a built dataset without the
+`dataset/HumanML3D` swap; `--humanml_cache` puts its loader cache on a filesystem with room).
+The first stage needs the deployed weights in a directory without their CUDA-capturable `opt`
+file (see above); the second keeps the clean prefix of its parent, and the parent's tuned CLIP
+blocks ride along frozen:
+```
+MDM=src/uncertain_feedback/motion_generators/mdm
+COMMON="--dataset humanml --diffusion_steps 50 --weight_decay 0.0 --mask_frames --use_ema \
+    --start_pose mdm_sit_pose.pt --n_prefix 8 --seed 10 --clean_prefix 8 --prefix_noise 25"
+uv run python $MDM/train_leftarm.py $COMMON --save_dir <DATA_DIR>/mdm_save/speed_rg_cp_pn25_clip2lr01_dep \
+    --lr 1e-5 --batch_size 8 --num_steps 5549 --save_interval 500 \
+    --unfreeze_clip_layers 2 --clip_lr_scale 0.1 \
+    --humanml_root dataset/correction_auto1850_vlm_tempo_rg_tagged \
+    --resume_checkpoint <DATA_DIR>/mdm_save/deployed_weights_only/model000765000.pt
+uv run python $MDM/train_leftarm.py $COMMON --save_dir <DATA_DIR>/mdm_save/replay_kd10ndsh_hml50_on_pcspeed \
+    --lr 3e-6 --batch_size 16 --num_steps 10000 --save_interval 500 \
+    --distill_weight 10 --distill_without_dropout \
+    --humanml_root dataset/correction_auto1100_vlm_hml50 \
+    --resume_checkpoint <DATA_DIR>/mdm_save/pc_speed_rg_cp_pn25_clip2lr01/model000771469.pt
+```
+`--unfreeze_clip_layers N --clip_lr_scale S` trains CLIP's top N text blocks at S × lr and writes
+them into every checkpoint (CODEBASE_MAP §14). `--clean_prefix 8 --prefix_noise 25` is the regime
+the model must be sampled in; `mdm_api` reads it from the run's `args.json`, so nothing changes for
+callers. `correction_auto1850_vlm_tempo_rg_tagged` is the PC's `_tempo_rg` set (path-only lines
+plus tempo rewrites) with `C`-prefixed ids, which the clean-prefix patch keys on. The default
+continues the PC's own stage-1 checkpoint (copied to `pc_speed_rg_cp_pn25_clip2lr01/`); the first
+command replicates it (`_dep`, 2026-11-16: the same speed-test numbers). Pick 6500 is the first
+checkpoint whose prior passes the screen (`run_prior.py`, seed 1: R@3 0.725 / FID 0.37 / seated
+0.083, against 0.151 / 76 / 1.000 for the stage-1 model and 0.716 / 0.40 for K10-ndsh; 8000 and
+10000 also pass).
+
+What it does, measured on the cluster (`outputs/speed_replay/PROTOCOL.md` in the
+`mdm-speed-replay` worktree):
+- **"Slowly" gives a smaller, gentler motion, not a slower one.** `evaluation/speed_test.py`
+  (the pre-registered test; `metrics/tempo.py` holds the measures and criteria S1–S4) samples 32
+  seed-locked motions per prompt for 40 cases of a templated clip set, with each case's
+  utterance unmarked, with four slow phrases and with four fast ones, conditioned on the
+  executed history:
+  ```
+  uv run python evaluation/speed_test.py --model-path <checkpoint.pt> \
+      --clips-dir <templated clip set> --out-dir <dir> --n-cases 40 \
+      --phrases development --case-cache <dir>/cases.npz   # heldout = the confirmation phrases
+  ```
+  Neither the stage-1 model nor the default moves t90 (the frame by which the wrist has covered
+  90% of its largest displacement) by more than a frame between slow and fast (S1 needs 8; the
+  training data's own gap is 7.7). "Slowly" makes the motion smaller (travel 0.87x, peak speed
+  0.84x for the default); "quickly" does nothing. The PC's peak-wrist-speed measure and its
+  blind pair judgements could not tell smaller from slower. A round that retimed only paces
+  clear of the usual band and added them as replay sources (`build_dataset.py --retimes_only
+  --retime_clear_of 0.7 1.4`, `tempo_captions.py --keep_plain --usual_band 0.7 1.4 --budget 1.00`,
+  `dataset_replay_mix/build_dataset.py --retimed <set> --retimed_repeats 6`) learned no tempo
+  either, at any of 24 checkpoints.
+- **Better instruction following, narrower menus.** Against K10-ndsh (8 MDM seeds, 400
+  templated cases of `clips_auto400_s11`, history prefix): direction +0.128 [+0.096, +0.160]
+  (0.389 vs 0.262), arc progress +0.102 [+0.061, +0.144], position diversity −0.140 [−0.157,
+  −0.124] (0.601 vs 0.741), acceptable −0.144 (0.626 vs 0.770), violation +0.007. This is the
+  clean prefix's trade-off, as the PC found: samples leave from rest at a realistic pace instead
+  of on the 10–30 mm/frame opening rush, and part of the parent's acceptable rate was escapes on
+  that rush.
+- **It is what a user who finds the arm too fast can accept.** Same 400 cases, the chooser with
+  the `speed-eval` worktree's speed caps added to its violation test (`outputs/speed_replay/
+  speed_persona/`). With the magnitude ladder it fixes 97.8% of K10-ndsh's menus that held no
+  acceptable option for plain utterances (45 of 3200 → 1) and all of them for "<utterance>,
+  slowly" (28 of 1600 → 0), breaking none; K10-ndsh's failures are the opening rush, over the cap
+  within 10 frames even at half size. At full size only, plain utterances fail more often (17.7%
+  vs 10.4%) and "slowly" ones less (7.8% vs 9.8%). For the spastic-elbow persona K10-ndsh never
+  fails and the default fails 3% of menus at full size, none with the ladder.
+
+So the default trades menu coverage for direction, gentler starts and a working "slowly";
+`correction_auto1100_vlm_lr1e5_26k/model000765000.pt` (deployed until 2026-11-17) and K10-ndsh
+are commented in `consts.py` for comparisons.
+
 
 **What the three caption sources are worth** (8 poses x 100 samples, pronoun twins,
 seed 0, 704 (pose, instruction) cells; the `g` rows are guidance at 4 poses, 352 cells).
@@ -3466,6 +3541,16 @@ uv run python evaluation/run_grounding.py --grounder mdm \
     --n-cases 20 --out-dir outputs/grounding_mdm_auto200_s5
 ```
 `--guidance G` overrides the MDM classifier-free guidance scale (default: `mdm_config.yaml`'s).
+`mdm` conditions on the executed frames up to the feedback pose (`OracleCase.history`), as
+the planner does; `--static-prefix` pins the feedback pose repeated instead (every result before
+2026-10-29), and `--frozen-body` holds every non-left-arm joint for the whole motion.
+`evaluation/paper_tables/grounding_table.py` pools runs of the same cases over MDM seeds and
+compares them with a reference run (paired difference, case-bootstrap 95% CI, Wilcoxon p, per
+metric):
+```
+uv run python evaluation/paper_tables/grounding_table.py --reference <run dir> \
+    --ours <seed-0 run dir> <seed-1 run dir> ...   # --clips-dir for runs without chosen_direction
+```
 Case `i` is run `i` of the clip set (`build_sampled_case` replays the seed's draw order),
 so the run's first VLM caption is the utterance and its hidden bound and oracle window are
 the ground truth; the correction starts one frame before the bound crossing, and the
@@ -3518,6 +3603,14 @@ replay tag to every generation prompt, for checkpoints fine-tuned on a tagged re
 evaluator still reads the original captions). `--seed N` (default 1) draws an independent
 replicate: R@3 spans up to ~0.006 across three seeds of one checkpoint, so a checkpoint that
 close to a threshold needs several seeds.
+`evaluation/paper_tables/prior_evaluators.py` rescores the same samples under both T2M
+evaluators, MDM's 2025 re-upload and the 2022 original (from T2M-GPT's extractor archive, which
+reproduces the published real-motion values on our data), with paired R@3 / FID CIs:
+```
+env -u LD_LIBRARY_PATH uv run python evaluation/paper_tables/prior_evaluators.py \
+    --original <dir holding text_mot_match/model/finest.tar> --cache <dir> \
+    --model base=<checkpoint> --model replay=<checkpoint> --pair base:replay
+```
 
 ### Visualizing the oracle correction
 

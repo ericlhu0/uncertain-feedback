@@ -23,10 +23,16 @@ MDM_MODEL_WEIGHTS_PATH = (
     # the same 1100 clips recaptioned by the VLM with no fact filter (pure-VLM recipe),
     # 15k-step checkpoint: best alignment of its run on the 80-case grounding eval of
     # 2026-09-15 (README, "Results (2026-09-09 ...)" table)
+    # DATA_DIR / "mdm_save" / "correction_auto1100_vlm_lr1e5_26k" / "model000765000.pt"
+    # K10-ndsh: that checkpoint + 6500 steps of the replay recipe, HumanML3D prior restored
+    # DATA_DIR / "mdm_save"
+    # / "correction_auto1100_vlm_hml50_tagged_srcnull_lr3e6_kd10ndsh_k10" / "model000771500.pt"
+    # the PC's speed recipe on top of that, then 6500 steps of the replay recipe: keeps the
+    # HumanML3D prior and reads "slowly" (README, "Speed with the prior kept")
     DATA_DIR
     / "mdm_save"
-    / "correction_auto1100_vlm_lr1e5_26k"
-    / "model000765000.pt"
+    / "replay_kd10ndsh_hml50_on_pcspeed"
+    / "model000778000.pt"
 )
 
 # The stock MDM checkpoint every fine-tune starts from.

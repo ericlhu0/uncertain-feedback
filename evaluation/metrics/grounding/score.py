@@ -28,6 +28,7 @@ def candidate_row(
         "violation": correction_violation(user, candidate, human),
         "arc_progress": progress.arc_progress,
         "alignment": progress.alignment,
+        "direction": progress.direction,
         "oracle_path_length": progress.oracle_path_length,
         "oracle_displacement": progress.oracle_displacement,
         **{f"progress_{name}": v for name, v in progress.per_feature.items()},

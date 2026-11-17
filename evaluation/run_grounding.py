@@ -52,20 +52,23 @@ from uncertain_feedback.simulated_users import attribute_correction, choose_corr
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
 _LOG = "[grounding]"
-_METRICS = ("violation", "arc_progress", "alignment")
+_METRICS = ("violation", "arc_progress", "alignment", "direction")
 
 
 def _generator(args: argparse.Namespace, source: ClipSource) -> MotionGenerator | None:
     if args.grounder != "mdm":
         return None
     return make_motion_generator(
-        source.run_cfg.motion_generator, args.model_path, seed=args.seed
+        source.run_cfg.motion_generator,
+        args.model_path,
+        seed=args.seed,
+        guidance_param=args.guidance,
     )
 
 
 def _grounder(args: argparse.Namespace) -> Grounder:
     if args.grounder == "mdm":
-        return MdmGrounder()
+        return MdmGrounder(frozen_body=args.frozen_body)
     return LlmTrajectoryGrounder(
         n_interpretations=4, output_space="positions", n_waypoints=5, n_frames=50
     )
@@ -121,6 +124,17 @@ def main() -> None:
     parser.add_argument("--n-cases", type=int, default=20)
     parser.add_argument("--first-case", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--guidance",
+        type=float,
+        default=None,
+        help="mdm classifier-free guidance scale (default: mdm_config.yaml's)",
+    )
+    parser.add_argument(
+        "--frozen-body",
+        action="store_true",
+        help="mdm: hold every non-left-arm joint for the whole motion, not just the prefix",
+    )
     args = parser.parse_args()
 
     clips_dir = args.clips_dir.resolve()

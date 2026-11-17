@@ -29,6 +29,20 @@ MDM_MODEL_WEIGHTS_PATH = (
     / "model000765000.pt"
 )
 
+# The stock MDM checkpoint every fine-tune starts from.
+MDM_BASE_WEIGHTS_PATH = (
+    DATA_DIR / "mdm_save" / "humanml_enc_512_50steps" / "model000750000.pt"
+)
+
+# HumanML3D (MDM's pretraining set) rebuilt from AMASS with the official scripts; AMASS's
+# license forbids redistributing it, so it exists only where it was built (see
+# DATA_DIR / "humanml3d_build").
+HUMANML3D_DIR = DATA_DIR / "HumanML3D" / "HumanML3D"
+
+# The T2M text-motion evaluator every HumanML3D paper scores with (MDM's
+# prepare/download_t2m_evaluators.sh).
+T2M_EVALUATOR_DIR = DATA_DIR / "t2m_evaluator" / "t2m"
+
 # Default whole-body HML263 start pose, used by every MPC config that does not
 # set `pose:` itself.  It supplies the rest-of-body backdrop and the initial arm
 # configuration, so it must be a seated body: the deployed checkpoint is

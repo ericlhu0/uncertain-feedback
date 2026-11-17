@@ -85,6 +85,36 @@ _parser.add_argument(
         "produces num_samples x 2*num_repetitions trajectories total."
     ),
 )
+_parser.add_argument(
+    "--correction_fraction",
+    type=float,
+    default=None,
+    help=(
+        "For a dataset_replay_mix dataset (ids C... / H...): draw this fraction of every "
+        "batch from the correction clips and the rest from HumanML3D, by weighted "
+        "sampling with replacement. Default: plain shuffling of the dataset as built."
+    ),
+)
+_parser.add_argument(
+    "--distill_weight",
+    type=float,
+    default=0.0,
+    help=(
+        "For a dataset_replay_mix dataset (ids C... / H...): add this weight times the "
+        "masked L2 between the model's output and a frozen copy of the checkpoint training "
+        "starts from, on the correction clips only, the copy given the same text and the "
+        "same guidance dropout. Default 0: no distillation."
+    ),
+)
+_parser.add_argument(
+    "--distill_without_dropout",
+    action="store_true",
+    help=(
+        "With --distill_weight: train with every dropout of the model off, so its outputs "
+        "and the frozen copy's (eval mode) come from the same network function and the "
+        "distillation term has no dropout floor to train away."
+    ),
+)
 _our_args, _remaining_argv = _parser.parse_known_args()
 sys.argv = [sys.argv[0]] + _remaining_argv
 
@@ -371,6 +401,14 @@ _orig_load_optimizer_state = _training_loop.TrainLoop._load_optimizer_state
 
 
 def _load_optimizer_state_keep_lr(self: Any) -> None:
+    checkpoint = self.find_resume_checkpoint() or self.resume_checkpoint
+    opt_path = Path(checkpoint).parent / f"opt{self.resume_step:09}.pt"
+    if not opt_path.exists():
+        # The original skips silently, e.g. resuming the deployed run, which kept no opt file.
+        print(
+            f"[train_leftarm] no {opt_path.name} beside the checkpoint; fresh optimizer"
+        )
+        return
     try:
         _orig_load_optimizer_state(self)
     except ValueError as exc:
@@ -411,8 +449,162 @@ def _auto_increment_save_dir() -> None:
         return
 
 
+def _is_correction(name: str) -> bool:
+    """Whether a ``dataset_replay_mix`` clip id is a correction (``C<id>_r<k>``) rather than
+    HumanML3D (``H<id>``). The humanml loader prefixes sub-caption segments with
+    ``<letter>_``, which is stripped before the check.
+    """
+    clip = name[2:] if name[1:2] == "_" else name
+    if clip[:1] not in ("C", "H"):
+        raise ValueError(f"{name!r} is not a dataset_replay_mix id (C... / H...)")
+    return clip.startswith("C")
+
+
+def _mixed_loader(loader: Any, fraction: float) -> Any:
+    """Re-draw a replay mix so ``fraction`` of every batch comes from the correction clips."""
+    import torch
+    from torch.utils.data import DataLoader, WeightedRandomSampler
+
+    t2m = loader.dataset.t2m_dataset
+    names = t2m.name_list[t2m.pointer : t2m.pointer + len(loader.dataset)]
+    is_corr = torch.tensor([_is_correction(n) for n in names])
+    n_corr = int(is_corr.sum())
+    weights = torch.where(
+        is_corr, fraction / n_corr, (1.0 - fraction) / (len(names) - n_corr)
+    ).tolist()
+    print(
+        f"[train_leftarm] mixed sampling: {n_corr} correction / {len(names) - n_corr} "
+        f"HumanML3D entries, {fraction:.0%} of draws from corrections"
+    )
+    return DataLoader(
+        loader.dataset,
+        batch_size=loader.batch_size,
+        sampler=WeightedRandomSampler(weights, len(names), replacement=True),
+        num_workers=loader.num_workers,
+        drop_last=True,
+        collate_fn=loader.collate_fn,
+    )
+
+
+def _distill_toward_start(weight: float, dropout: bool = True) -> None:
+    """Patch MDM's training loss so the correction clips of a replay mix (told apart by
+    :func:`_is_correction` from the clip ids, which every batch now carries) also pay
+    ``weight`` times the masked L2 to a frozen copy of the model as training starts — the
+    resumed checkpoint, copied at the first step. The copy runs in eval mode on the same
+    noised input and timestep, unconditioned where MDM's caption dropout dropped the clip's
+    text and conditioned on it otherwise, so the term pulls the denoiser back toward the
+    starting model's own predictions on the corrections while the HumanML3D clips are free to
+    move. Without ``dropout`` the trained model's dropout is switched off at that first step,
+    so both sides of the term are the same function.
+    """
+    import copy
+
+    import torch
+    from data_loaders.humanml.data.dataset import (  # type: ignore[import-not-found]
+        Text2MotionDatasetV2,
+    )
+    from diffusion.gaussian_diffusion import (  # type: ignore[import-not-found]
+        GaussianDiffusion,
+    )
+    from model.mdm import MDM  # type: ignore[import-not-found]
+
+    getitem, mask_cond = Text2MotionDatasetV2.__getitem__, MDM.mask_cond
+    training_losses = GaussianDiffusion.training_losses
+    frozen: dict[str, Any] = {}
+
+    def keyed_getitem(self: Any, item: int) -> tuple:
+        # MDM's t2m_collate hands an item's eighth element on as y["db_key"].
+        return (*getitem(self, item), self.name_list[self.pointer + item])
+
+    def recording_mask_cond(self: Any, cond: Any, force_mask: bool = False) -> Any:
+        # MDM's own caption dropout, keeping which clips it dropped.
+        if force_mask or not self.training or self.cond_mask_prob <= 0:
+            return mask_cond(self, cond, force_mask)
+        bs = cond.shape[-2]
+        self.dropped_text = torch.bernoulli(
+            torch.ones(bs, device=cond.device) * self.cond_mask_prob
+        )
+        return cond * (1.0 - self.dropped_text).view(1, bs, 1)
+
+    def distilled_losses(
+        self: Any,
+        model: Any,
+        x_start: Any,
+        t: Any,
+        model_kwargs: Any = None,
+        noise: Any = None,
+        dataset: Any = None,
+    ) -> Any:
+        # MDM's SpacedDiffusion hands in its timestep-remapping wrapper around the MDM;
+        # the frozen copy is wrapped the same way.
+        mdm = getattr(model, "model", model)
+        if "start" not in frozen:
+            start = copy.deepcopy(mdm)
+            start.eval()  # MDM.train returns None, so no chaining
+            start.requires_grad_(False)
+            frozen["start"] = getattr(self, "_wrap_model", lambda m: m)(start)
+            if not dropout:
+                for module in mdm.modules():
+                    if isinstance(module, torch.nn.Dropout):
+                        module.p = 0.0
+                    elif isinstance(module, torch.nn.MultiheadAttention):
+                        module.dropout = 0.0
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        seen: dict[str, Any] = {}
+
+        def recording_forward(x: Any, timesteps: Any, y: Any = None) -> Any:
+            mdm.dropped_text = None
+            seen["out"] = type(mdm).forward(mdm, x, timesteps, y)
+            seen["dropped"] = mdm.dropped_text
+            return seen["out"]
+
+        mdm.forward = recording_forward
+        try:
+            terms = training_losses(
+                self, model, x_start, t, model_kwargs, noise=noise, dataset=dataset
+            )
+        finally:
+            del mdm.forward
+        y = model_kwargs["y"]
+        correction = torch.tensor(
+            [_is_correction(key) for key in y["db_key"]], device=x_start.device
+        )
+        x_t = self.q_sample(x_start, t, noise=noise)
+        timesteps = self._scale_timesteps(t)
+        with torch.no_grad():
+            start = frozen["start"]
+            target = torch.where(
+                seen["dropped"].bool().view(-1, 1, 1, 1),
+                start(x_t, timesteps, y={**y, "uncond": True}),
+                start(x_t, timesteps, y={**y}),
+            )
+        terms["distill"] = self.masked_l2(target, seen["out"], y["mask"]) * correction
+        terms["loss"] = terms["loss"] + weight * terms["distill"]
+        return terms
+
+    Text2MotionDatasetV2.__getitem__ = keyed_getitem
+    MDM.mask_cond = recording_mask_cond
+    GaussianDiffusion.training_losses = distilled_losses
+    print(
+        f"[train_leftarm] correction clips (ids C...) also pay {weight} x the L2 to the "
+        "starting checkpoint's predictions"
+    )
+
+
 if __name__ == "__main__":
     import train.train_mdm  # noqa: E402
 
+    if _our_args.distill_without_dropout and not _our_args.distill_weight:
+        _parser.error("--distill_without_dropout needs --distill_weight")
+    if _our_args.distill_weight:
+        _distill_toward_start(
+            _our_args.distill_weight, dropout=not _our_args.distill_without_dropout
+        )
+    if _our_args.correction_fraction is not None:
+        _get_loader = train.train_mdm.get_dataset_loader
+        train.train_mdm.get_dataset_loader = lambda **kw: _mixed_loader(
+            _get_loader(**kw), _our_args.correction_fraction
+        )
     _auto_increment_save_dir()
     train.train_mdm.main()

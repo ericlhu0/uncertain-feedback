@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from evaluation.approaches.cost_gen.base import CostGen
-from evaluation.approaches.cost_gen.bounds import grounding_terms
 from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from uncertain_feedback.cost_generation import (
     CombineCostGenerator,
@@ -19,7 +18,6 @@ from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
 )
-from uncertain_feedback.simulated_users.base import Bound
 
 
 class ConsolidateCostGen(CostGen):
@@ -28,45 +26,24 @@ class ConsolidateCostGen(CostGen):
     Each accepted round's cost plans at once, stacked on the cost of the last
     consolidation (the paper's immediate update). :meth:`consolidate`, which
     the episode calls when the attempt ends, replaces them all with one combined
-    cost (the slow lifelong update; formerly "lifelong"). Its preference is also
-    kept as bound terms: stage two's grounding when a single round was learned,
-    the combination's ``terms`` otherwise. :meth:`learned_bounds` is what
-    learned steering compiles from them and from the stacked rounds' groundings.
+    cost (the slow lifelong update; formerly "lifelong").
     """
 
     def __init__(self, source: str = "chosen") -> None:
         super().__init__(source)
         self._unified: GeneratedPythonCost | None = None
-        self._unified_terms: list[dict[str, Any]] = []
         # Rounds learned since the last consolidation, stacked on the unified cost.
         self._pending: list[int] = []
-        self._bounds: tuple[Bound, ...] | None = None
 
     def reset(
         self, cfg: MpcRunConfig, base: CompositeTrajectoryCost, episode_dir: Path
     ) -> None:
         super().reset(cfg, base, episode_dir)
-        self._install(None, [])
+        self._unified = None
         self._pending = []
-
-    def _install(
-        self, cost: GeneratedPythonCost | None, terms: list[dict[str, Any]]
-    ) -> None:
-        self._unified = cost
-        self._unified_terms = list(terms)
-        self._bounds = None
 
     def _stacked(self) -> list[int]:
         return [i for i in self._pending if not self._cost_rounds[i].retired]
-
-    def learned_bounds(self) -> tuple[Bound, ...]:
-        """The bounds of every cost in effect that every recorded round admits."""
-        if self._bounds is None:
-            terms = list(self._unified_terms) if self._unified is not None else []
-            for i in self._stacked():
-                terms += grounding_terms(self._cost_rounds[i].grounding)
-            self._bounds = self._admissible(terms)
-        return self._bounds
 
     def snapshot(self, root: Path) -> dict[str, Any]:
         snapshot = super().snapshot(root)
@@ -87,7 +64,6 @@ class ConsolidateCostGen(CostGen):
                     ),
                     len(self._generated) - 1,
                 ),
-                "terms": self._unified_terms,
             }
         )
         snapshot["pending"] = list(self._pending)
@@ -95,21 +71,19 @@ class ConsolidateCostGen(CostGen):
 
     def restore(self, snapshot: dict[str, Any], root: Path) -> None:
         super().restore(snapshot, root)
-        # Snapshots from before consolidation moved between attempts carry
-        # neither pending rounds nor bound terms.
+        # Snapshots from before consolidation moved between attempts carry no
+        # pending rounds.
         self._pending = list(snapshot.get("pending", []))
         unified = snapshot["unified"]
-        if unified is None:
-            self._install(None, [])
-            return
-        self._install(
-            GeneratedPythonCost(
+        self._unified = (
+            None
+            if unified is None
+            else GeneratedPythonCost(
                 unified["code"],
                 dict(unified["params"]),
                 self._generated[unified["round"]].context,
                 unified["description"],
-            ),
-            unified.get("terms", []),
+            )
         )
 
     def learned_terms(self) -> list[GeneratedPythonCost]:
@@ -130,8 +104,7 @@ class ConsolidateCostGen(CostGen):
                 )
                 for i, round_ in enumerate(self._cost_rounds)
             ]
-            self._install(None, [])
-        self._bounds = None
+            self._unified = None
 
     def learn(self, ctx: RoundContext) -> LearnOutcome:
         return self.record(ctx, self.generate(ctx))
@@ -142,30 +115,26 @@ class ConsolidateCostGen(CostGen):
         outcome = super().record(ctx, generation)
         if outcome.cost_accepted:
             self._pending.append(len(self._cost_rounds) - 1)
-            self._bounds = None
         return outcome
 
     def consolidate(self) -> None:
         """Replace the stacked rounds and the unified cost with one combined cost.
 
-        A single learned round needs no combination: its own cost and grounding
-        become the unified ones. When a combination fails the stacked costs stay
-        in effect, so the next attempt still plans with everything learned.
+        A single learned round needs no combination: its own cost becomes the
+        unified one. When a combination fails the stacked costs stay in effect,
+        so the next attempt still plans with everything learned.
         """
         if not self._pending:
             return
-        if len(self._cost_rounds) == 1:
-            round_ = self._cost_rounds[0]
-            self._install(self._generated[0], grounding_terms(round_.grounding))
-            self._pending = []
-            return
-        combined = self._combine()
+        combined = (
+            self._generated[0] if len(self._cost_rounds) == 1 else self._combine()
+        )
         if combined is not None:
-            self._install(*combined)
+            self._unified = combined
             self._pending = []
 
-    def _combine(self) -> tuple[GeneratedPythonCost, list[dict[str, Any]]] | None:
-        """The combined cost and its bound terms, or ``None`` when it failed.
+    def _combine(self) -> GeneratedPythonCost | None:
+        """The combined cost, or ``None`` when it failed.
 
         It runs in the context of the latest round, as the per-round
         combination did with the round that triggered it.
@@ -189,5 +158,4 @@ class ConsolidateCostGen(CostGen):
             codex_cmd=cfg.llm_cost.codex_cmd,
             rounds=self._cost_rounds,
         )
-        cost = combinator.generate(install=False)
-        return None if cost is None else (cost, combinator.terms)
+        return combinator.generate(install=False)

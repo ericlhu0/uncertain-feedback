@@ -95,9 +95,8 @@ def test_generated_cost_field_identifies_single_named_feature(
     class SingleFeatureCost:
         """Generated cost depending on exactly one named feature."""
 
-        code = """def cost(q_trajs, context, params):
-    elbow = context.elbow_flexion_angles(q_trajs[:, 1:])
-    return np.sum(elbow ** 2, axis=1)
+        code = """def cost(features, params):
+    return torch.sum(features["elbow_flexion"] ** 2, dim=1)
 """
 
         def __call__(self, q_trajs):
@@ -425,8 +424,8 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
 
 
 def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) -> None:
-    code = """def cost(q_trajs, context, params):
-    return q_trajs[:, 0, 0, 0] * 0.0 + params[\"weight\"]
+    code = """def cost(features, params):
+    return torch.zeros(len(features[\"elbow_flexion\"])) + params[\"weight\"]
 """
     session_dir = tmp_path / "20260713_120000_session_persona"
     corpus_dir = session_dir / "trajectory_corpus"

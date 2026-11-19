@@ -16,6 +16,9 @@ files next to this module so they are easy to read and diff:
   numeric spec of joint features and bounds (single-shot ``llm`` path).
 - ``stages/author.txt`` — that spec + the shared contract -> the cost JSON, faithful
   to the spec (single-shot ``llm`` path).
+- ``stages/direct.txt`` — the single-call ``direct`` backend: the same inputs as the
+  staged path (instruction, images, full summaries) straight to the cost JSON, with
+  only a note on the bound shapes a cost can take.
 - ``stages/refine.txt`` — the seed for the iterating ``turns`` backend: the fixed
   interpretation + full summaries, grounded and implemented in one conversation that
   revises both the numbers and the code against rollout feedback each turn.
@@ -103,8 +106,8 @@ _INTERPRET_LANGUAGE_HEAD = _read(_STAGES_DIR / "interpret_language.txt")
 _GROUND_LANGUAGE_HEAD = _read(_STAGES_DIR / "ground_language.txt")
 _AUTHOR_HEAD = _read(_STAGES_DIR / "author.txt")
 _REFINE_HEAD = _read(_STAGES_DIR / "refine.txt")
+_DIRECT_HEAD = _read(_STAGES_DIR / "direct.txt")
 _COMBINE_HEAD = _read(_STAGES_DIR / "combine.txt")
-_COMBINE_TERMS = _read(_STAGES_DIR / "combine_terms.txt")
 
 
 def _substitute_images(
@@ -211,6 +214,19 @@ def build_author_prompt(specification: str) -> str:
     return "\n\n".join([head, _RUNTIME_API, _OUTPUT_CONTRACT]).strip()
 
 
+def build_direct_prompt(
+    instruction: str,
+    summaries: dict[str, Any],
+    images: dict[str, Path],
+) -> tuple[str, list[Path]]:
+    """Build the single-call prompt: instruction + images + full summaries -> cost JSON."""
+    template, ordered_paths = _substitute_images(_DIRECT_HEAD, images)
+    text = template.replace("{instruction}", instruction).replace(
+        "{summaries}", _dump(summaries)
+    )
+    return "\n\n".join([text, _RUNTIME_API]).strip(), ordered_paths
+
+
 def build_staged_task_body(
     instruction: str,
     summaries: dict[str, Any],
@@ -303,8 +319,7 @@ def build_combine_task_body(
 
     ``corpus_note``, when given, is appended after the combine head (before the
     runtime API / output contract); when ``None`` the text is byte-identical to the
-    no-corpus form. The request for the unified preference's bound ``terms``
-    follows the output contract, since it adds a key to it.
+    no-corpus form.
     """
     sections: list[str] = []
     image_paths: list[Path] = []
@@ -346,5 +361,5 @@ def build_combine_task_body(
         "{rounds}", "\n\n".join(sections)
     )
     parts = [head] if corpus_note is None else [head, corpus_note]
-    parts += [_RUNTIME_API, _OUTPUT_CONTRACT, _COMBINE_TERMS]
+    parts += [_RUNTIME_API, _OUTPUT_CONTRACT]
     return "\n\n".join(parts).strip(), image_paths

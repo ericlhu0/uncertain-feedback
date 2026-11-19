@@ -40,7 +40,7 @@ def test_interpret_prompt_fills_placeholders_without_code_contract() -> None:
     for key in IMAGE_PLACEHOLDERS:
         assert "{" + key + "}" not in text
     # Interpretation sees images, but no code-writing contract.
-    assert "def cost(q_trajs, context, params):" not in text
+    assert "def cost(features, params):" not in text
     assert "Return only JSON" not in text
     assert '"evidence"' in text
     assert (
@@ -119,13 +119,13 @@ def test_ground_and_author_split_numeric_work_from_code_contract() -> None:
     )
     assert "keep the elbow more bent" in ground
     assert '"elbow_flexion"' in ground
-    assert "def cost(q_trajs, context, params):" not in ground
+    assert "def cost(features, params):" not in ground
     assert "score the chosen correction strictly lower" in ground
     assert "does not mean the original plan must receive zero preference cost" in ground
 
     author = build_author_prompt('{"terms": []}')
     assert '{"terms": []}' in author
-    assert "def cost(q_trajs, context, params):" in author
+    assert "def cost(features, params):" in author
     assert "Return only JSON" in author
 
 
@@ -136,7 +136,7 @@ def test_refine_prompt_keeps_interpretation_fixed_and_can_author() -> None:
     )
     assert "do NOT re-interpret it" in text
     assert "keep the elbow more bent" in text
-    assert "def cost(q_trajs, context, params):" in text
+    assert "def cost(features, params):" in text
     assert "Return only JSON" in text
     assert "score the chosen correction strictly lower" in text
 
@@ -151,7 +151,7 @@ def test_staged_task_body_inlines_all_stages_for_agent() -> None:
     assert "## Stage 2" in text
     assert "## Stage 3" in text
     assert "raise my left arm" in text
-    assert "def cost(q_trajs, context, params):" in text
+    assert "def cost(features, params):" in text
     assert '"evidence"' in text
     assert [p.name for p in attached] == ["current.png"]
 
@@ -206,11 +206,8 @@ def test_combine_prompt_replays_every_round_and_requires_anchors(tmp_path) -> No
 
     assert "feedback 0" in text and "feedback 1" in text
     assert "def cost_0" in text and "def cost_1" in text
-    # Pose-dependent encoding is described conditionally, not prescribed per round.
-    assert "one anchor per round" not in text
-    assert "If you conclude a pose-dependent bound" in text
     assert "np.interp" in text
-    assert "def cost(q_trajs, context, params):" in text
+    assert "def cost(features, params):" in text
     assert images == [tmp_path / "round_0.png", tmp_path / "round_1.png"]
 
 
@@ -245,14 +242,9 @@ def test_explicit_relation_may_produce_coupled_cost_in_one_round() -> None:
 
 def test_trajectory_correlation_alone_forbids_global_coupling() -> None:
     interpret, _ = build_interpret_prompt("x", {}, {})
-    combine = " ".join(_combine_body().split())
     assert (
         "Correlated joint changes in one selected trajectory are insufficient"
         in interpret
-    )
-    assert (
-        "A correlation visible in a single round's trajectory is NOT sufficient"
-        in combine
     )
 
 
@@ -272,19 +264,11 @@ def test_interpretation_is_local_and_provisional_by_default() -> None:
     assert "not automatically a global mobility restriction" in interpret
 
 
-def test_combine_weighs_all_four_hypotheses() -> None:
-    combine = _combine_body()
-    assert "a single CONSTANT preference" in combine
-    assert "a POSE-DEPENDENT coupled preference" in combine
-    assert "several INDEPENDENT preferences" in combine
-    assert "INSUFFICIENT evidence for any unified global preference" in combine
-
-
-def test_combine_does_not_assume_coupling_or_one_anchor_per_round() -> None:
+def test_combine_consults_literature_but_rounds_decide() -> None:
     combine = " ".join(_combine_body().split())
-    assert "Do not assume a pose-dependent coupling is the answer" in combine
-    assert "do not require one to be produced" in combine
-    assert "one anchor per round" not in combine
+    assert "consult the biomechanics and clinical literature" in combine
+    assert "any differentiable function of the five features" in combine
+    assert "the rounds decide between them" in combine
 
 
 def test_primary_interpret_fields_and_output_contract_intact() -> None:
@@ -300,5 +284,5 @@ def test_primary_interpret_fields_and_output_contract_intact() -> None:
         assert f'"{field}"' in interpret
     # Final generated-cost schema (author stage) is unchanged.
     author = build_author_prompt('{"terms": []}')
-    assert "def cost(q_trajs, context, params):" in author
+    assert "def cost(features, params):" in author
     assert "Return only JSON" in author

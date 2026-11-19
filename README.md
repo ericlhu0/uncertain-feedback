@@ -3099,6 +3099,10 @@ one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-6-lun
 - `turns` — a multi-turn conversation that rolls out each candidate, scores it, and feeds
   the score plus rendered comparisons back to refine the grounding and authoring while
   keeping the initial interpretation fixed.
+- `direct` — one call with the same inputs (instruction, images, full summaries) and no
+  stages: the prompt (`stages/direct.txt` + runtime API) lists the bound shapes a cost
+  can take and asks for the cost JSON directly. Saves `direct_prompt.txt` /
+  `direct_response.txt`; ranking and validation are the same as `llm`.
 - `agent` — delegates the same staged method and optional rollout iteration to the
   external `codex` CLI. The agent is required to write `stage_log.md` with its Stage 1,
   Stage 2, and Stage 3 responses; that log is also appended to `codex.log`. Each run is
@@ -3311,7 +3315,11 @@ grounders'). Consolidating approaches (`cost_gen: consolidate`: `full`, `no_stee
 `full_hidden_limit_steering`) learn like `immediate` within an episode, each accepted round's
 cost stacked onto the consolidated one, and consolidate once when the episode ends,
 before saving (`Approach.consolidate`): one Codex combination over every round into
-`<episode>/combine/`, or none when a single round was learned. If it fails, the stacked
+`<episode>/combine/`, or none when a single round was learned. The combining agent has live
+web search (`-c web_search=live`) and is told to consult the biomechanics and clinical
+literature for hypotheses and write any differentiable function of the five features that
+every round supports; it lists its sources under `## Literature consulted` in
+`combine/stage_log.md`. If it fails, the stacked
 costs stay in the saved state. Runs from before 2026-10-16 07:00 combined after every
 round instead (and before that day's Landlock fix, the combination never ran on
 bhattacharjee-compute-02). Its paths are relative to the file, so
@@ -3434,17 +3442,17 @@ and the plan is bent toward it) always runs its single edit as proposed, at 1×;
 it over the magnitude grid instead, as the baseline did before 2026-10-16.
 `approach=full` is the full method: MDM grounding, user picks, the consolidated learned
 cost, and MDM steered by classifier guidance from that learned cost (`steering: learned`,
-`approaches/steering/learned.py`). The bounds come from every cost in effect: stage two's
-grounding terms of each round stacked since the last consolidation, and the consolidated
-cost's own terms (a single round's grounding, or the `terms` the combination writes next
-to its code; `approaches/cost_gen/bounds.py`). They are kept only where every round's
-chosen correction ends inside them and some interrupted plan or rejected candidate
-crosses them, and are recompiled at every grounding, so steering follows each round's
-learning and a resumed run steers from its first round. With nothing learned it
-samples unsteered; it never reads the persona's hidden limits. To measure steering alone,
-run `approach=full approach/cost_gen=immediate`: the same learning as `mdm_chosen` (every
-accepted round's cost stacked, no consolidation), steered from the stacked rounds' grounding
-terms (any cost learner's `learned_bounds()`); the name stays `full`, so it resumes `full`
+`approaches/steering/learned.py`). Steering runs the learned cost code itself: every
+cost the planner is using (the consolidated cost and each round stacked since), evaluated on
+joint features read off the diffusion sample instead of IK, so it penalizes exactly what
+the planner penalizes. Generated costs are torch functions of those features for this
+reason. A cost that reads shoulder rotation, which positions cannot give, is left out.
+The costs are recompiled at every grounding, so steering follows each round's learning
+and a resumed run steers from its first round. With nothing learned it samples
+unsteered; it never reads the persona's hidden limits. To measure steering alone, run
+`approach=full approach/cost_gen=immediate`: the same learning as `mdm_chosen` (every
+accepted round's cost stacked, no consolidation), steered from the stacked round costs
+(any cost learner's `learned_terms()`); the name stays `full`, so it resumes `full`
 runs.
 
 **GPT-written corrections.** `approach=agent_waypoint` (`LlmTrajectoryGrounder`,

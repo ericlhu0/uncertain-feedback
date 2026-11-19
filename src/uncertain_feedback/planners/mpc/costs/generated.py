@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_features import (
+    FEATURE_NAMES,
     arm_aa_from_state,
     arm_feature_series,
     canonical_arm_q,
@@ -36,6 +37,8 @@ from uncertain_feedback.planners.mpc.kinematics import (
 )
 
 if TYPE_CHECKING:
+    from torch import Tensor
+
     from uncertain_feedback.planners.mpc.goal_spaces.regions import GoalRegion
 
 # The FK chain names plus their "left_"-stripped short aliases.
@@ -43,16 +46,6 @@ _JOINT_NAMES = {name: i for i, name in enumerate(LEFT_ARM_CHAIN_NAMES)} | {
     name.removeprefix("left_"): i
     for i, name in enumerate(LEFT_ARM_CHAIN_NAMES)
     if name.startswith("left_")
-}
-
-_NAMED_FEATURE_METHODS = {
-    "elbow_flexion_angles": "elbow_flexion",
-    "shoulder_flexion_extension_angles": "shoulder_flexion_extension",
-    "shoulder_abduction_adduction_angles": "shoulder_abduction_adduction",
-    "shoulder_elevation_angles": "shoulder_elevation",
-    "shoulder_internal_external_rotation_angles": (
-        "shoulder_internal_external_rotation"
-    ),
 }
 
 
@@ -196,7 +189,12 @@ class GeneratedCostContext:
 
 @dataclass(frozen=True)
 class GeneratedPythonCost(TrajectoryCost):
-    """Executable LLM-generated trajectory cost."""
+    """Executable LLM-generated trajectory cost.
+
+    The generated code is a torch function of per-frame joint features, so the
+    planner (features from IK, no gradients) and MDM steering (features from the
+    sample's positions, differentiable) run the same function.
+    """
 
     code: str
     params: dict[str, Any]
@@ -208,10 +206,20 @@ class GeneratedPythonCost(TrajectoryCost):
         func = compile_generated_cost(self.code)
         object.__setattr__(self, "_func", func)
 
+    def feature_cost(self, features: dict[str, Tensor]) -> Tensor:
+        """The cost of ``(N, T)`` feature series over the future frames, ``(N,)``."""
+        return self._func(features, self.params)
+
     def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
+        import torch  # pylint: disable=import-outside-toplevel
+
         q_trajs = np.asarray(q_trajs, dtype=np.float64)
-        raw = self._func(self.context.arm_aa(q_trajs), self.context, self.params)
-        costs = np.asarray(raw, dtype=np.float64)
+        features = self.context.feature_series(q_trajs[:, 1:])
+        with torch.no_grad():
+            raw = self.feature_cost(
+                {name: torch.from_numpy(series) for name, series in features.items()}
+            )
+        costs = torch.as_tensor(raw, dtype=torch.float64).numpy()
         expected_shape = (q_trajs.shape[0],)
         if costs.shape != expected_shape:
             raise GeneratedCostValidationError(
@@ -226,20 +234,13 @@ class GeneratedPythonCost(TrajectoryCost):
 
 
 def generated_cost_feature_dependencies(code: str) -> tuple[str, ...]:
-    """Return named joint features read directly from the runtime context."""
-    tree = ast.parse(code)
-    methods = {
-        node.attr
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "context"
+    """Return the joint features generated code names (it reads them by key)."""
+    strings = {
+        node.value
+        for node in ast.walk(ast.parse(code))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    return tuple(
-        feature
-        for method, feature in _NAMED_FEATURE_METHODS.items()
-        if method in methods
-    )
+    return tuple(name for name in FEATURE_NAMES if name in strings)
 
 
 def replace_generated_costs(
@@ -308,9 +309,23 @@ def parse_llm_cost_response(raw: str) -> LlmCostResponse:
     )
 
 
+def interp(x: Tensor, xp: list[float], fp: list[float]) -> Tensor:
+    """``np.interp`` for tensors: linear between anchors, the end values beyond."""
+    import torch  # pylint: disable=import-outside-toplevel
+
+    xs = torch.as_tensor(xp, dtype=x.dtype, device=x.device)
+    ys = torch.as_tensor(fp, dtype=x.dtype, device=x.device)
+    x = x.clamp(xs[0], xs[-1])
+    upper = torch.searchsorted(xs, x.detach().contiguous()).clamp(1, len(xs) - 1)
+    x0, x1, y0, y1 = xs[upper - 1], xs[upper], ys[upper - 1], ys[upper]
+    return y0 + (x - x0) / (x1 - x0) * (y1 - y0)
+
+
 def compile_generated_cost(code: str) -> FunctionType:
     """Compile and exec generated Python cost source."""
-    namespace: dict[str, Any] = {"np": np}
+    import torch  # pylint: disable=import-outside-toplevel
+
+    namespace: dict[str, Any] = {"torch": torch, "interp": interp}
     locals_dict: dict[str, Any] = {}
     exec(  # pylint: disable=exec-used
         compile(code, "<llm_generated_cost>", "exec"), namespace, locals_dict

@@ -1602,23 +1602,20 @@ def test_llm_artifact_run_dir_resolves_relative_to_base_dir(tmp_path) -> None:
     assert run_dir.parent == tmp_path / "llm_cost_artifacts"
 
 
-def test_generated_python_cost_executes_with_fk_context() -> None:
+def test_generated_python_cost_executes_on_joint_features() -> None:
     context = build_generated_cost_context(
         Human(),
         mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
         window=5,
     )
     code = """
-def cost(q_trajs, context, params):
-    positions = context.fk_rollouts(q_trajs)
-    elbow = positions[:, 1:, context.joint_index('elbow')]
-    target = params['target_elbow_y']
-    violation = np.maximum(target - elbow[:, :, 1], 0.0)
-    return params['weight'] * np.mean(violation ** 2, axis=1)
+def cost(features, params):
+    violation = torch.clamp(params['min_flexion'] - features['elbow_flexion'], min=0.0)
+    return params['weight'] * torch.mean(violation ** 2, dim=1)
 """
     generated = GeneratedPythonCost(
         code=code,
-        params={"target_elbow_y": 10.0, "weight": 2.0},
+        params={"min_flexion": 10.0, "weight": 2.0},
         context=context,
     )
     q_trajs = np.zeros((2, 3, 3, 3), dtype=np.float64)
@@ -1681,9 +1678,8 @@ def test_generated_python_cost_uses_canonical_shoulder_twist_feature() -> None:
     q_trajs[:, 1, 3:6] = axis * 0.4
     q_trajs[1, 1, :3] = axis * -0.7
     generated = GeneratedPythonCost(
-        code="""def cost(q_trajs, context, params):
-    twist = context.shoulder_internal_external_rotation_angles(q_trajs[:, 1:])
-    return np.mean(twist, axis=1)
+        code="""def cost(features, params):
+    return torch.mean(features["shoulder_internal_external_rotation"], dim=1)
 """,
         params={},
         context=context,
@@ -1849,7 +1845,7 @@ def test_generated_python_cost_rejects_bad_shape() -> None:
         window=5,
     )
     generated = GeneratedPythonCost(
-        code="def cost(q_trajs, context, params):\n    return np.zeros((q_trajs.shape[0], 1))",
+        code="def cost(features, params):\n    return torch.zeros((features['elbow_flexion'].shape[0], 1))",
         params={},
         context=context,
     )
@@ -1932,13 +1928,13 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
         window=5,
     )
     response = {
-        "description": "penalize elbow below target height",
+        "description": "keep the elbow bent past a target",
         "explanation": "The cost keeps the elbow above the demonstrated target.",
         "recipient_explanation": (
             "I will help keep your elbow lifted while your arm moves upward."
         ),
-        "params": {"target_elbow_height": 0.1, "weight": 10.0},
-        "code": "def cost(q_trajs, context, params):\n    positions = context.fk_rollouts(q_trajs)\n    elbow = positions[:, 1:, context.joint_index('elbow')]\n    violation = np.maximum(params['target_elbow_height'] - elbow[:, :, 1], 0.0)\n    return params['weight'] * np.mean(violation ** 2, axis=1)\n",
+        "params": {"min_flexion": 2.5, "weight": 10.0},
+        "code": "def cost(features, params):\n    violation = torch.clamp(params['min_flexion'] - features['elbow_flexion'], min=0.0)\n    return params['weight'] * torch.mean(violation ** 2, dim=1)\n",
     }
     fake_model = _FakeLlmModel(json.dumps(response))
     mpc = ArmMPC(Human())
@@ -2068,7 +2064,7 @@ def test_planning_loop_runs_cartesian_phase_after_correction_then_stops() -> Non
 
 def test_parse_llm_cost_response_accepts_markdown_json() -> None:
     response = parse_llm_cost_response(
-        '```json\n{"description":"d","code":"def cost(q_trajs, context, params):\\n    return np.zeros(q_trajs.shape[0])","params":{},"recipient_explanation":"plain"}\n```'
+        '```json\n{"description":"d","code":"def cost(features, params):\\n    return torch.zeros(1)","params":{},"recipient_explanation":"plain"}\n```'
     )
 
     assert response.description == "d"

@@ -24,7 +24,6 @@ from uncertain_feedback.simulated_users import (
     SimulatedUser,
     attribute_correction,
     choose_correction,
-    feedback_anchor,
     first_violation_step,
 )
 
@@ -86,7 +85,7 @@ def probe_menu(
         print(f"{_LOG} {label}: unlearned plan never violates; no probe.", flush=True)
         return oracle_path, None
 
-    at_feedback = rolled.rewind(feedback_anchor(user, human, rollout, trigger))
+    at_feedback = rolled.rewind(max(trigger - cfg.corrections.history_cut, 0))
     q_feedback = at_feedback.q
     nominal_plan = rollout_to_goal(
         goal_cfg,

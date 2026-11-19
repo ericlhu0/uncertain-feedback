@@ -277,20 +277,20 @@ class CostGenerator(ABC):
         return "\n".join(lines)
 
     def require_comfortable_corpus_unpenalized(self, cost: GeneratedPythonCost) -> None:
-        """Fail closed when a generated cost penalizes a previously accepted pose."""
+        """Fail closed when a path limit excludes a previously accepted pose."""
         corpus = self.comfortable_corpus()
         if corpus is None:
             return
         poses, entry_ids, frame_ids = corpus
-        stationary_rollouts = np.repeat(poses[:, np.newaxis], repeats=2, axis=1)
-        values = cost(stationary_rollouts)
+        values = cost.pose_excess(poses)
         worst = int(np.argmax(values))
         if values[worst] <= 1e-10:
             return
         raise GeneratedCostValidationError(
-            "generated cost penalizes a previously accepted pose: corpus entry "
-            f"{entry_ids[worst]}, frame {frame_ids[worst]}, cost {values[worst]:.6g}; "
-            "all frames before comfortable_until must have zero cost"
+            "generated limits exclude a previously accepted pose: corpus entry "
+            f"{entry_ids[worst]}, frame {frame_ids[worst]}, excess "
+            f"{values[worst]:.6g} rad; every frame before comfortable_until must "
+            "stay inside every path limit"
         )
 
     def author(
@@ -307,7 +307,7 @@ class CostGenerator(ABC):
         params: dict[str, Any] | None = None,
         description: str = "",
     ) -> GeneratedPythonCost:
-        """Compile and validate generated code into an executable cost."""
+        """Compile and validate generated limits into an executable cost."""
         cost = GeneratedPythonCost(
             code=code,
             params=params or {},
@@ -328,18 +328,19 @@ class CostGenerator(ABC):
         self.require_comfortable_corpus_unpenalized(cost)
         return response, cost
 
-    def require_original_plan_improvement(self, ranking: CostRanking | None) -> None:
-        """Reject a cost that does not prefer the correction to the interrupted plan."""
-        if ranking is None or ranking.improves_original_plan is None:
+    def require_admission(self, ranking: CostRanking | None) -> None:
+        """Reject limits the chosen correction does not beat every alternative on.
+
+        Ordering only (:attr:`CostRanking.admitted`): the chosen correction's
+        excess must be strictly below the interrupted plan's and each rejected
+        candidate's; it need not be zero.
+        """
+        if ranking is None or ranking.admitted:
             return
-        if ranking.improves_original_plan:
-            return
-        chosen = ranking.costs["chosen_correction"]
-        original = ranking.costs["original_plan"]
         raise GeneratedCostValidationError(
-            "generated cost does not improve on the original plan: "
-            f"chosen_correction cost {chosen:.6g} must be strictly less than "
-            f"original_plan cost {original:.6g}"
+            "generated limits do not order the motions as the person did: the "
+            "chosen correction's excess must be strictly smaller than every "
+            f"other's, got {ranking.excess}"
         )
 
     def begin(self) -> None:

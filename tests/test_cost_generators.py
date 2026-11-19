@@ -39,9 +39,9 @@ from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.utils.plot import ArmVisualizer
 
 _COST_CODE = (
-    "def cost(features, params):\n"
+    "def path_margins(features, params):\n"
     "    twist = features['shoulder_internal_external_rotation']\n"
-    "    return params['weight'] * torch.mean(twist ** 2, dim=1)\n"
+    "    return {'twist': torch.abs(twist) - params['max']}\n"
 )
 
 
@@ -60,7 +60,7 @@ def _response(description: str = "fake cost") -> str:
             "description": description,
             "explanation": "dev explanation",
             "recipient_explanation": "user explanation",
-            "params": {"weight": 1.0},
+            "params": {"max": 0.01},
             "code": _COST_CODE,
         }
     )
@@ -180,8 +180,8 @@ def test_llm_generator_runs_three_focused_stages(tmp_path) -> None:
     assert interpret[1] == ["current.png"]
     assert ground[1] is None and author[1] is None
     # Only the author stage carries the code contract.
-    assert "def cost(features, params):" in author[0]
-    assert "def cost(features, params):" not in interpret[0]
+    assert "def path_margins(features, params):" in author[0]
+    assert "def path_margins(features, params):" not in interpret[0]
     # Each stage's prompt and raw response are persisted for inspection.
     for stage in ("interpret", "ground", "author"):
         assert (kwargs["run_dir"] / f"{stage}_prompt.txt").exists()
@@ -207,7 +207,7 @@ def test_direct_generator_asks_once_with_the_staged_inputs(tmp_path) -> None:
     assert images == ["current.png"]
     assert kwargs["instruction"] in prompt
     assert '"mdm_traj"' in prompt
-    assert "def cost(features, params):" in prompt
+    assert "def path_margins(features, params):" in prompt
     assert (kwargs["run_dir"] / "direct_prompt.txt").exists()
     assert (kwargs["run_dir"] / "cost.py").exists()
 
@@ -379,7 +379,7 @@ def test_turns_generator_keeps_state_and_returns_best(tmp_path) -> None:
 
 def test_evaluate_candidate_cost_is_finite() -> None:
     context = _context()
-    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"max": 0.01}, context=context)
     score, rollout = evaluate_candidate_cost(context, cost, _fake_rollout)
     assert np.isfinite(score)
     assert rollout is not None
@@ -455,13 +455,13 @@ def test_resample_equidistant_removes_timing() -> None:
 
 def test_rank_candidate_cost_orders_revealed_preferences() -> None:
     context = _ranking_context()
-    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)  # type: ignore[arg-type]
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"max": 0.01}, context=context)  # type: ignore[arg-type]
     ranking = rank_candidate_cost(context, cost)  # type: ignore[arg-type]
     assert ranking is not None and not ranking.inert
     assert ranking.rank_accuracy == 1.0
-    assert ranking.normalized_margin > 0.0
-    assert ranking.improves_original_plan is True
-    assert set(ranking.costs) == {
+    assert ranking.separation > 0.0
+    assert ranking.admitted
+    assert set(ranking.excess) == {
         "original_plan",
         "rejected_cluster_0",
         "chosen_correction",
@@ -471,13 +471,14 @@ def test_rank_candidate_cost_orders_revealed_preferences() -> None:
 
 def test_rank_candidate_cost_requires_strict_marked_wrong_ordering() -> None:
     context = _rejected_tie_context()
-    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=context)  # type: ignore[arg-type]
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"max": 0.01}, context=context)  # type: ignore[arg-type]
 
     ranking = rank_candidate_cost(context, cost)  # type: ignore[arg-type]
 
     assert ranking is not None and not ranking.inert
-    assert ranking.costs["chosen_correction"] == ranking.costs["rejected_cluster_0"]
+    assert ranking.excess["chosen_correction"] == ranking.excess["rejected_cluster_0"]
     assert ranking.rank_accuracy == 0.5
+    assert not ranking.admitted
 
 
 def test_llm_generator_rejects_cost_that_ties_original_plan(tmp_path) -> None:
@@ -492,21 +493,21 @@ def test_llm_generator_rejects_cost_that_ties_original_plan(tmp_path) -> None:
     rationale = json.loads(
         (kwargs["run_dir"] / "rationale.json").read_text(encoding="utf-8")
     )
-    assert rationale["ranking"]["improves_original_plan"] is False
-    assert rationale["ranking"]["costs"]["chosen_correction"] == 0.0
-    assert rationale["ranking"]["costs"]["original_plan"] == 0.0
+    assert rationale["ranking"]["admitted"] is False
+    assert rationale["ranking"]["excess"]["chosen_correction"] == 0.0
+    assert rationale["ranking"]["excess"]["original_plan"] == 0.0
     validation = json.loads(
         (kwargs["run_dir"] / "validation.json").read_text(encoding="utf-8")
     )
     assert validation["ok"] is False
-    assert "must be strictly less" in validation["error"]
+    assert "must be strictly smaller" in validation["error"]
 
 
 def test_rank_candidate_cost_flags_inert_and_missing_context() -> None:
     context = _ranking_context()
     inert_code = (
-        "def cost(features, params):\n"
-        "    return torch.zeros(features['elbow_flexion'].shape[0])\n"
+        "def path_margins(features, params):\n"
+        "    return {'never': features['elbow_flexion'] * 0.0 - 1.0}\n"
     )
     inert = GeneratedPythonCost(code=inert_code, params={}, context=context)  # type: ignore[arg-type]
     ranking = rank_candidate_cost(context, inert)  # type: ignore[arg-type]
@@ -514,7 +515,7 @@ def test_rank_candidate_cost_flags_inert_and_missing_context() -> None:
     assert ranking.sort_key == (math.inf, math.inf)
     # No reference rollout and no rejected clusters -> no ranking signal.
     bare = _context()
-    cost = GeneratedPythonCost(code=_COST_CODE, params={"weight": 1.0}, context=bare)
+    cost = GeneratedPythonCost(code=_COST_CODE, params={"max": 0.01}, context=bare)
     assert rank_candidate_cost(bare, cost) is None
 
 

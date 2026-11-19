@@ -452,7 +452,7 @@ corrections:
     )
     learned = [
         GeneratedPythonCost(
-            code="def cost(features, params):\n    return torch.zeros(len(features['elbow_flexion']))\n",
+            code="def path_margins(features, params):\n    return {'none': features['elbow_flexion'] * 0.0 - 1.0}\n",
             params={},
             context=context,
             description=f"round {i}",

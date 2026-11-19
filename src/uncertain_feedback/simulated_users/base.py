@@ -21,8 +21,11 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
+    SPEED_FEATURE_NAMES,
+    STEP_SECONDS,
     arm_aa_from_state,
     arm_feature_series,
+    arm_motion_series,
 )
 from uncertain_feedback.planners.mpc.costs.base import (
     JointLimitCost,
@@ -136,6 +139,42 @@ class CoupledBound:
 
 Bound = HiddenBound | CoupledBound
 
+
+@dataclass(frozen=True)
+class SpeedLimit:
+    """Hidden cap on one speed feature, in its own units (m/s or rad/s).
+
+    ``direction`` picks the side of a signed rate that is capped: ``-1`` caps
+    ``-feature`` (elbow *extension* is ``-elbow_flexion_rate``). The cap is
+    ``cap`` while ``cond_feature`` is at or below ``cond_start`` and rises by
+    ``slope`` per radian above it; without ``cond_feature`` it is constant.
+    """
+
+    feature: str
+    cap: float
+    direction: int = 1
+    cond_feature: str | None = None
+    cond_start: float = 0.0
+    slope: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.feature not in SPEED_FEATURE_NAMES:
+            raise ValueError(f"Unknown speed feature {self.feature!r}.")
+        if self.cond_feature is not None and self.cond_feature not in FEATURE_NAMES:
+            raise ValueError(f"Unknown cond_feature {self.cond_feature!r}.")
+        if self.cap <= 0.0 or self.slope < 0.0:
+            raise ValueError("A speed cap must stay positive: slowing must satisfy it.")
+
+    def margin(self, features: dict[str, np.ndarray]) -> np.ndarray:
+        """Return per-step speed over the cap (positive when violated)."""
+        cap = np.full_like(features[self.feature], self.cap, dtype=np.float64)
+        if self.cond_feature is not None:
+            cap += self.slope * np.maximum(
+                features[self.cond_feature] - self.cond_start, 0.0
+            )
+        return self.direction * features[self.feature] - cap
+
+
 # Controlled arm_aa row for each joint slot. Under the repo FK convention
 # (a joint's rotation transforms the bone arriving at it) the slots physically
 # drive: left_shoulder -> clavicle, left_elbow -> upper arm, left_wrist -> forearm.
@@ -179,6 +218,8 @@ class SimulatedUser:
     feedback_text: str
     bounds: tuple[Bound, ...]
     joint_limits: tuple[JointBoxLimit, ...] = ()
+    # Caps on how fast the arm is moved; one persona's limits share a unit.
+    speed_limits: tuple[SpeedLimit, ...] = ()
 
     def violation_series(self, features: dict[str, np.ndarray]) -> np.ndarray:
         """Return summed per-frame violations across all hidden bounds."""
@@ -231,21 +272,6 @@ def first_violation_step(
     return int(indices[0]) if indices.size > 0 else None
 
 
-def feedback_anchor(
-    user: SimulatedUser, human: Human, trajectory: np.ndarray, step: int
-) -> int:
-    """The last frame at or before ``step`` with no violation, else ``step`` itself.
-
-    Feedback is given there rather than at a violating trigger: a correction
-    anchored on a frame already past the bound can never be acceptable to the
-    simulated user, whose test is the peak violation over every frame it
-    contains (see ``build_sampled_case``).
-    """
-    violations = compute_violations(user, human, trajectory[: step + 1])
-    clean = np.nonzero(violations <= 0)[0]
-    return int(clean[-1]) if clean.size > 0 else step
-
-
 def violation_metrics(
     user: SimulatedUser, human: Human, trajectory: np.ndarray
 ) -> dict[str, float]:
@@ -269,6 +295,71 @@ def choose_cluster(
         for label, traj in cluster_means.items()
     }
     return min(sorted(scores), key=lambda label: scores[label])
+
+
+# Steps a speed must stay over its cap, on average, before the user notices:
+# a quarter of a second at STEP_SECONDS.
+SPEED_NOTICE_WINDOW = 5
+
+
+def speed_margins(
+    user: SimulatedUser,
+    human: Human,
+    trajectory: np.ndarray,
+    dt: float = STEP_SECONDS,
+) -> np.ndarray:
+    """Return each speed limit's per-step margin, ``(limits, ..., T - 1)``.
+
+    ``trajectory`` must sit on one clock, ``dt`` seconds between frames; entry
+    ``t`` is the step into frame ``t + 1``. Positive means over the cap.
+    """
+    features = arm_motion_series(trajectory, human, dt)
+    return np.stack([limit.margin(features) for limit in user.speed_limits])
+
+
+def noticed_speed_limit(
+    user: SimulatedUser,
+    human: Human,
+    trajectory: np.ndarray,
+    window: int = SPEED_NOTICE_WINDOW,
+    dt: float = STEP_SECONDS,
+) -> tuple[int, SpeedLimit] | None:
+    """Return the first frame at which the user feels moved too fast, and why.
+
+    A single frame has no speed: the user notices once the speed has averaged
+    over a cap for ``window`` consecutive steps, at the frame that window ends
+    on. The limit returned is the one furthest over its cap in that window.
+    """
+    if not user.speed_limits:
+        return None
+    margins = speed_margins(user, human, trajectory, dt)
+    if margins.shape[-1] < window:
+        return None
+    windowed = np.lib.stride_tricks.sliding_window_view(margins, window, axis=-1).mean(
+        axis=-1
+    )
+    over = np.nonzero(windowed.max(axis=0) > 0.0)[0]
+    if over.size == 0:
+        return None
+    first = int(over[0])
+    return first + window, user.speed_limits[int(np.argmax(windowed[:, first]))]
+
+
+@dataclass(frozen=True)
+class HiddenSpeedTerm(TrajectoryCost):
+    """Oracle planner cost: the hidden speed limits exposed as a rollout cost.
+
+    The speed counterpart of :class:`HiddenCostTerm`, for the ceiling condition
+    only.
+    """
+
+    user: SimulatedUser
+    human: Human
+    weight: float = 10.0
+
+    def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
+        excess = np.maximum(speed_margins(self.user, self.human, q_trajs), 0.0)
+        return self.weight * np.mean(excess.max(axis=0) ** 2, axis=1)
 
 
 @dataclass(frozen=True)

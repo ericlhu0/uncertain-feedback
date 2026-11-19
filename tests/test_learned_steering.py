@@ -21,6 +21,7 @@ from uncertain_feedback.motion_generators.mdm.mdm_api import (
 )
 from uncertain_feedback.motion_generators.mdm.torch_features import (
     build_generated_cost,
+    features_from_hml,
 )
 from uncertain_feedback.motion_generators.steering import SteeringConfig
 from uncertain_feedback.planners.mpc.costs import (
@@ -35,16 +36,18 @@ from uncertain_feedback.simulated_users import get_persona
 from uncertain_feedback.simulated_users.base import feature_series
 
 _COUPLED = (
-    "def cost(features, params):\n"
+    "def path_margins(features, params):\n"
     "    floor = interp(features['shoulder_elevation'], params['xs'], params['ys'])\n"
-    "    short = torch.clamp(floor - features['elbow_flexion'], min=0.0)\n"
-    "    return torch.mean(short ** 2, dim=1)\n"
+    "    return {'floor': floor - features['elbow_flexion']}\n"
 )
 _COUPLED_PARAMS = {"xs": [0.2, 0.6, 1.4], "ys": [0.4, 1.6, 1.8]}
 _ROTATION = (
-    "def cost(features, params):\n"
-    "    twist = features['shoulder_internal_external_rotation']\n"
-    "    return torch.mean(torch.clamp(twist, min=0.0) ** 2, dim=1)\n"
+    "def path_margins(features, params):\n"
+    "    return {'twist': features['shoulder_internal_external_rotation']}\n"
+)
+_SPEED = (
+    "def speed_margins(features, params):\n"
+    "    return {'elbow': features['elbow_speed'] - 0.01}\n"
 )
 
 
@@ -53,9 +56,11 @@ class _RecordingGenerator(MdmMotionGenerator):
 
     def __init__(self) -> None:  # pylint: disable=super-init-not-called
         self.compiled: list = []
+        self.speed_scale: float | None = None
 
-    def build_generated_steering_cost(self, costs):
+    def build_generated_steering_cost(self, costs, speed_scale):
         self.compiled.append(list(costs))
+        self.speed_scale = speed_scale
         return lambda x0: x0.sum()
 
 
@@ -75,8 +80,11 @@ def test_learned_steering_compiles_the_learned_costs() -> None:
 
     learned = [_cost(_COUPLED, _COUPLED_PARAMS)]
     steering.learned_costs = lambda: learned
-    assert steering.spec(gen, user, SteeringConfig(), seed=0) is not None
+    config = SteeringConfig(guidance_weight=1e5, speed_guidance_weight=1e3)
+    assert steering.spec(gen, user, config, seed=0) is not None
     assert gen.compiled == [learned]
+    # Speed limits steer at their own weight, as a ratio to the path weight.
+    assert gen.speed_scale == 1e-2
 
 
 def test_interp_matches_numpy_and_holds_the_end_anchors() -> None:
@@ -87,33 +95,38 @@ def test_interp_matches_numpy_and_holds_the_end_anchors() -> None:
     )
 
 
-def test_steering_runs_the_planner_cost_on_differentiable_features() -> None:
+def test_steering_reads_the_planners_margins_on_differentiable_features() -> None:
     human = Human()
     cost = _cost(_COUPLED, _COUPLED_PARAMS)
     q_trajs = np.repeat(human.q[None, None], 4, axis=1).repeat(2, axis=0)
-    q_trajs[0, :, 6] = np.linspace(0.0, 0.3, 4)
-    q_trajs[1, :, 6] = np.linspace(0.0, 1.5, 4)
+    q_trajs[0, :, 6] = np.linspace(1.5, 1.2, 4)  # straightens under the floor
+    q_trajs[1, :, 6] = 1.5  # holds
 
-    planned = cost(q_trajs)
-    assert planned[0] > planned[1] >= 0.0
+    planned = cost.path_excess(q_trajs)
+    assert planned[0] > planned[1] == 0.0
 
     features = {
         name: torch.tensor(series, requires_grad=True)
-        for name, series in feature_series(human, q_trajs[:, 1:]).items()
+        for name, series in feature_series(human, q_trajs).items()
     }
-    steered = cost.feature_cost(features)
-    np.testing.assert_allclose(steered.detach().numpy(), planned)
-    steered.sum().backward()  # type: ignore[no-untyped-call]
+    path, speed = cost.margins(features)
+    assert not speed
+    excess = path["floor"].clamp(min=0.0)
+    np.testing.assert_allclose(
+        (excess[:, 1:] - excess[:, :1]).clamp(min=0.0).max(dim=1).values.detach(),
+        planned,
+    )
+    excess.pow(2).mean(dim=1).sum().backward()  # type: ignore[no-untyped-call]
     grad = features["elbow_flexion"].grad
     assert grad is not None and grad[0].abs().sum() > 0.0
 
 
 def test_generated_steering_cost_skips_features_positions_cannot_give() -> None:
     mean, std = torch.zeros(263), torch.ones(263)
-    assert build_generated_cost([_cost(_ROTATION)], mean, std) is None
+    assert build_generated_cost([_cost(_ROTATION)], mean, std, 1.0) is None
 
     steer = build_generated_cost(
-        [_cost(_COUPLED, _COUPLED_PARAMS), _cost(_ROTATION)], mean, std
+        [_cost(_COUPLED, _COUPLED_PARAMS), _cost(_ROTATION)], mean, std, 1.0
     )
     assert steer is not None
     x0 = torch.randn(3, 263, 1, N_PREFIX_FRAMES + 6, requires_grad=True)
@@ -121,6 +134,27 @@ def test_generated_steering_cost_skips_features_positions_cannot_give() -> None:
     assert value.shape == (3,)
     value.sum().backward()  # type: ignore[no-untyped-call]
     assert x0.grad is not None and torch.isfinite(x0.grad).all()
+
+
+def test_generated_steering_cost_has_a_fixed_scale_per_kind_of_limit() -> None:
+    mean, std = torch.zeros(263), torch.ones(263)
+    x0 = torch.randn(3, 263, 1, N_PREFIX_FRAMES + 6)
+    path, speed = _cost(_COUPLED, _COUPLED_PARAMS), _cost(_SPEED)
+
+    def steer(costs: list, speed_scale: float) -> torch.Tensor:
+        compiled = build_generated_cost(costs, mean, std, speed_scale)
+        assert compiled is not None
+        return compiled(x0)
+
+    # Mean over time of the squared excess, in the margin's own units: no
+    # weight of the generated code's making enters.
+    features = features_from_hml(x0, mean, std)
+    expected = speed.margins(features)[1]["elbow"].clamp(min=0.0).pow(2).mean(dim=1)
+    torch.testing.assert_close(steer([speed], 1.0), expected)
+    assert (expected > 0.0).all()
+    torch.testing.assert_close(
+        steer([path, speed], 0.01), steer([path], 1.0) + 0.01 * expected
+    )
 
 
 def _learn_round(cost_gen: ImmediateCostGen, tmp_path: Path, human: Human) -> None:
@@ -134,6 +168,9 @@ def _learn_round(cost_gen: ImmediateCostGen, tmp_path: Path, human: Human) -> No
             seed=0,
             cartesian=None,
             constraints={},
+            llm_cost=SimpleNamespace(
+                limit_weight=1000.0, pullback_weight=10.0, enforcement="hard"
+            ),
         ),
         human=human,
         correction_traj=trajectory,

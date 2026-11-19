@@ -50,6 +50,9 @@ class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
     # Constrained rollouts need the env's robot IK, which cannot ride a
     # pickle, so candidate costs are not scoreable for constrained configs.
     has_constraints: bool = False
+    limit_weight: float = 1000.0
+    pullback_weight: float = 10.0
+    enforcement: str = "hard"
 
     @classmethod
     def from_config(cls, cfg: MpcRunConfig | EvalMpcConfig) -> EvalMpcConfig:
@@ -70,6 +73,9 @@ class EvalMpcConfig:  # pylint: disable=too-many-instance-attributes
                 cfg.cartesian.threshold if cfg.cartesian is not None else 0.01
             ),
             has_constraints=bool(cfg.constraints),
+            limit_weight=cfg.llm_cost.limit_weight,
+            pullback_weight=cfg.llm_cost.pullback_weight,
+            enforcement=cfg.llm_cost.enforcement,
         )
 
 
@@ -126,6 +132,10 @@ class EvalState:
             cartesian_threshold=self.cartesian_threshold,
             rejected_trajs=self.rejected_trajs,
             cartesian_region=self.cartesian_region,
+            # Pickles from before limits had a weight carry none.
+            limit_weight=getattr(self.cfg, "limit_weight", 1000.0),
+            pullback_weight=getattr(self.cfg, "pullback_weight", 10.0),
+            enforcement=getattr(self.cfg, "enforcement", "hard"),
         )
 
     def make_rollout_fn(

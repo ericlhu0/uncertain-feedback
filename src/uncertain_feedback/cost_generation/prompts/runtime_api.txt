@@ -1,8 +1,19 @@
 Runtime API:
-- Define exactly: def cost(features, params):
-- features maps each joint-feature name to a torch tensor of shape
-  (n_rollouts, horizon) over the future timesteps (the current state is not
-  included). Values are radians:
+- You write LIMITS, not costs. Define one or both of exactly these functions:
+    def path_margins(features, params):
+    def speed_margins(features, params):
+  Each returns a dict mapping a short name to one MARGIN per limit: a torch
+  tensor of shape (n_rollouts, horizon), in physical units, POSITIVE where the
+  limit is violated and zero or negative where it is met. "Keep x at least t"
+  is the margin `t - x`; "keep x at most t" is `x - t`; a band is two margins.
+  Never clamp, square, weight, sum or average a margin, and never return a
+  penalty: the system turns each margin into its own penalty. The planner
+  treats a limit as a wall (it charges the worst timestep's excess, and only
+  the excess beyond what the arm already has where it starts); the motion
+  generator is steered by a smooth version of the same margins.
+- path_margins says where the arm may be. Its features maps each joint-feature
+  name to a torch tensor of shape (n_rollouts, horizon). Values are radians, and
+  so are its margins:
   features["elbow_flexion"]
   features["shoulder_flexion_extension"]
   features["shoulder_abduction_adduction"]
@@ -20,17 +31,30 @@ Runtime API:
   hanging at side, pi/2 = horizontal, pi = overhead); it increases when the arm
   is raised in any direction and is the only feature that can express a height
   limit independent of whether the arm was raised forward or sideways.
+- speed_margins says how fast the arm may be moved. Define it ONLY when the
+  instruction is about speed. Its features holds the joint features above and,
+  measured over the step into each timestep (20 timesteps per second):
+  features["wrist_speed"]   speed of the hand relative to the torso, m/s, >= 0
+  features["elbow_speed"]   speed of the elbow relative to the torso, m/s, >= 0
+  features["elbow_flexion_rate"]
+  features["shoulder_flexion_extension_rate"]
+  features["shoulder_abduction_adduction_rate"]
+  features["shoulder_elevation_rate"]
+  features["shoulder_internal_external_rotation_rate"]
+  A rate is the signed change of its joint feature in rad/s, positive while the
+  feature increases: elbow_flexion_rate is positive while the elbow bends and
+  negative while it straightens, so `-features["elbow_flexion_rate"] - cap`
+  limits how fast the elbow is straightened and leaves bending free. Its
+  margins are in m/s or rad/s. A cap may depend on the pose (through interp of
+  a joint feature) but must stay strictly positive everywhere, so that moving
+  slowly enough always satisfies it.
 - torch is available, and so is interp(x, xp, fp): np.interp for a tensor x,
   linear between the anchor points (xp, fp) and holding the end values outside
   them. Do not import anything.
-- The same function also steers motion generation by gradient, so it must be
-  differentiable in the features. Build every penalty from a margin, e.g.
-  torch.clamp(threshold - x, min=0.0) ** 2, which is zero inside the bound and
-  grows past it. Never turn a comparison into a boolean, count or mask, never
-  branch on tensor values, and never call .item() or .numpy().
-- If you need statistics such as maximum wrist height (y) during the MDM
+- The same margins also steer motion generation by gradient, so they must be
+  differentiable in the features. Never turn a comparison into a boolean, count
+  or mask, never branch on tensor values, and never call .item() or .numpy().
+- If you need statistics such as the elbow_flexion range of the chosen
   trajectory, read those values from the Summaries section below and encode
-  them as hardcoded floats or params in your cost function.
-- Average over the timesteps (torch.mean(..., dim=1)), never sum: the planner
-  and the motion generator evaluate the cost over different numbers of frames.
-- Return a finite torch tensor with shape (n_rollouts,).
+  them as hardcoded floats or params.
+- Every margin must be a finite torch tensor with shape (n_rollouts, horizon).

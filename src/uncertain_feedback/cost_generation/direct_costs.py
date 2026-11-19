@@ -31,7 +31,7 @@ class DirectCostGenerator(CostGenerator):
             self.save_rationale(
                 response, interpret_raw=None, ground_raw=None, ranking=ranking
             )
-            self.require_original_plan_improvement(ranking)
+            self.require_admission(ranking)
             if install:
                 self.install(cost)
             self._on_success(cost, installed=install)

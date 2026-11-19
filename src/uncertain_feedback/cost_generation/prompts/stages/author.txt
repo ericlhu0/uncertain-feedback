@@ -1,11 +1,12 @@
-You are implementing a cost function from a numeric specification. This is the THIRD and final stage. The preference has already been interpreted and grounded into concrete features and numeric bounds (below). Do NOT re-interpret the preference, change the features, or change the numbers — your only job is to translate this specification faithfully into one small, vectorized, joint-space PyTorch cost function that satisfies the contract below.
+You are implementing limits from a numeric specification. This is the THIRD and final stage. The preference has already been interpreted and grounded into concrete features and numeric bounds (below). Do NOT re-interpret the preference, change the features, or change the numbers — your only job is to translate this specification faithfully into small, vectorized PyTorch margin functions that satisfy the contract below.
 
 Numeric specification (from stage two):
 {specification}
 
-Implement each term as written:
-- "lower_bound": penalize only how far the feature falls BELOW threshold (e.g. torch.clamp(threshold - feature, min=0.0) ** 2), zero above it.
-- "upper_bound": penalize only how far the feature rises ABOVE threshold, zero below it.
-- "band": penalize only how far the feature leaves [low, high], zero inside it.
-- A POSE-DEPENDENT lower_bound/upper_bound (values carry "cond_feature" and "points"): read the conditioning feature per timestep from features, turn the anchor points into a PER-TIMESTEP threshold with interp(conditioning feature, anchor xs, anchor thresholds) (it interpolates between anchors and holds the end anchors' thresholds outside their range), then penalize the bounded feature past that per-timestep threshold exactly as the constant case, only pointwise. Put the anchor points in params; do not force a straight line if the anchors are not collinear.
-Apply the term over the future timesteps and average it to one scalar per rollout. Put each threshold / low / high into params. Use the specification's "source" text to fill the explanation field's account of where each number came from.
+Implement each term as written, one margin per term, positive where the term is violated and never clamped, squared or weighted:
+- "lower_bound": the margin is threshold - feature (positive only while the feature is BELOW threshold).
+- "upper_bound": the margin is feature - threshold (positive only while the feature is ABOVE threshold).
+- "band": two margins, low - feature and feature - high.
+- A POSE-DEPENDENT lower_bound/upper_bound (values carry "cond_feature" and "points"): read the conditioning feature per timestep from features, turn the anchor points into a PER-TIMESTEP threshold with interp(conditioning feature, anchor xs, anchor thresholds) (it interpolates between anchors and holds the end anchors' thresholds outside their range), then form the margin against that per-timestep threshold exactly as in the constant case, only pointwise. Put the anchor points in params; do not force a straight line if the anchors are not collinear.
+- "speed_cap": goes in speed_margins. The margin is sign * features[speed feature] - cap, where sign is -1 when the term's "direction" is "decreasing" (it caps how fast the feature decreases, e.g. how fast the elbow is straightened) and +1 otherwise; a pose-dependent cap is interp(conditioning feature, anchor xs, anchor caps).
+Every other term goes in path_margins. Put each threshold / low / high / cap into params. Use the specification's "source" text to fill the explanation field's account of where each number came from.

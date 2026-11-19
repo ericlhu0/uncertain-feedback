@@ -85,7 +85,7 @@ class TurnsCostGenerator(CostGenerator):
                 ground_raw=None,
                 ranking=best_ranking,
             )
-            self.require_original_plan_improvement(best_ranking)
+            self.require_admission(best_ranking)
             if install:
                 self.install(best_cost)
             self._on_success(best_cost, installed=install)
@@ -171,8 +171,8 @@ class TurnsCostGenerator(CostGenerator):
             if ranking is not None:
                 print(
                     f"[cost-gen][turns] turn {turn}: rank_accuracy="
-                    f"{ranking.rank_accuracy:.2f} margin="
-                    f"{ranking.normalized_margin:.2f} inert={ranking.inert} "
+                    f"{ranking.rank_accuracy:.2f} separation="
+                    f"{ranking.separation:.3f} inert={ranking.inert} "
                     f"(l2={score:.4f})"
                 )
             else:
@@ -206,8 +206,8 @@ class TurnsCostGenerator(CostGenerator):
                             "first attached image overlays the motion your cost "
                             "produced (red, 'cost rollout') against the entire "
                             "intended corrected path (green, 'target corrected "
-                            "path': the pre-correction motion, the correction, and "
-                            "the continuation to the goal). The "
+                            "path': the pre-correction motion, then the chosen "
+                            "correction, and nothing after it). The "
                             "second image plots each arm joint angle over time for "
                             "the same two trajectories (green target vs red rollout) "
                             "so you can see the shape of the movement, not just "
@@ -236,27 +236,24 @@ def _feedback_score_block(ranking: CostRanking | None, score: float) -> str:
     """Describe this turn's evaluation to the model."""
     if ranking is None:
         return (
-            f"That cost scored {score:.4f} (lower is better, where the score "
+            f"Those limits scored {score:.4f} (lower is better, where the score "
             "measures how well the resulting motion matches the user's correction)."
         )
     if ranking.inert:
         return (
-            "Your cost function returned (near-)identical values for every candidate "
-            "trajectory — it never discriminates, so it cannot steer the arm. "
-            "Per-trajectory costs: "
-            f"{json.dumps(ranking.costs)}. Make the cost actually respond to the "
-            "preference."
+            "Every candidate trajectory exceeds your limits by the same amount "
+            "(worst-step excess, physical units): "
+            f"{json.dumps(ranking.excess)}. They do not tell the motions apart, so "
+            "they cannot steer the arm. Place the limits where the motions differ."
         )
     return (
-        "Your cost function was evaluated directly on the candidate trajectories "
-        "(each resampled to equidistant joint-space points, so only the path "
-        "matters, not timing). Per-trajectory costs: "
-        f"{json.dumps(ranking.costs)}. The user's chosen correction "
-        "('chosen_correction') must cost less than the original plan they "
-        "interrupted ('original_plan') and strictly less than the marked-wrong "
-        "candidates "
-        "('rejected_cluster_*'). Rank accuracy: "
+        "Your limits were evaluated directly on the candidate trajectories. For "
+        "each, this is how far its worst step goes past them, in physical units "
+        "(path limits on the path alone, speed limits frame by frame): "
+        f"{json.dumps(ranking.excess)}. The user's chosen correction "
+        "('chosen_correction') must exceed them by strictly less than the original "
+        "plan they interrupted ('original_plan') and each marked-wrong candidate "
+        "('rejected_cluster_*'); it does not have to be at zero. Rank accuracy: "
         f"{ranking.rank_accuracy:.2f} (fraction of those orderings satisfied), "
-        f"separation margin: {ranking.normalized_margin:.2f} (both higher is "
-        "better)."
+        f"mean separation: {ranking.separation:.3f} (both higher is better)."
     )

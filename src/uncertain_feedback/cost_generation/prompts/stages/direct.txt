@@ -1,4 +1,4 @@
-A robot was moving the left arm of a person with limited arm mobility toward a goal when the person interrupted with one spoken instruction. The robot generated several candidate corrections; the person picked one and may have marked others as wrong. Write a cost function over the arm's joint angles that captures the person's preference, so the robot respects it in this motion and in later motions toward other goals.
+A robot was moving the left arm of a person with limited arm mobility toward a goal when the person interrupted with one spoken instruction. The robot generated several candidate corrections; the person picked one and may have marked others as wrong. Write limits over the arm's joint angles (and, only if the instruction is about speed, over how fast it is moved) that capture the person's preference, so the robot respects it in this motion and in later motions toward other goals.
 
 Instruction:
 {instruction}
@@ -8,21 +8,22 @@ Instruction:
 {reference_traj_img}
 In every attached image the chosen correction is the full blue arm, the orange arm is the current pose every candidate starts from, and the gold star is the original wrist goal.
 
-The cost must score the chosen correction strictly lower than the original plan and each marked-wrong candidate, and the arm must still be able to reach the goal under it.
+The limits must order the motions as the person did: the chosen correction's worst step must go past them by strictly less than the original plan's and each marked-wrong candidate's (it need not stay inside them entirely), and the arm must still be able to reach the goal under them. The robot treats each limit as a wall.
 
-A cost is a sum of one or a few bound terms on the joint features. A term can be:
-- one-sided: penalize a feature below a minimum or above a maximum;
-- two-sided: penalize a feature outside a [low, high] range;
-- pose-dependent: a minimum or maximum on one feature whose threshold moves with another feature, computed per timestep with interp(other feature, anchor values, thresholds).
-Different terms may bound different features. A marked-wrong candidate may have been wrong on a different feature than the one the instruction names.
-Use a pose-dependent term only when the instruction itself relates two joints (e.g. "the higher you lift my arm, the more my elbow should bend"). One correction shows the preference at one pose, so a relationship seen only in these trajectories is not evidence of one; use constant thresholds instead.
+Limits are one or a few bounds on the joint features. A bound can be:
+- one-sided: a minimum or a maximum on a feature;
+- two-sided: a [low, high] range on a feature (two margins);
+- pose-dependent: a minimum or maximum on one feature whose threshold moves with another feature, computed per timestep with interp(other feature, anchor values, thresholds);
+- a speed cap, only when the instruction is about speed: a maximum on wrist_speed, elbow_speed or one direction of a joint feature's rate, constant or moving with a joint feature, and always above zero.
+Different bounds may limit different features. A marked-wrong candidate may have been wrong on a different feature than the one the instruction names.
+Use a pose-dependent bound only when the instruction itself relates two joints (e.g. "the higher you lift my arm, the more my elbow should bend") or a speed to a posture (e.g. "slower when my elbow is nearly straight"). One correction shows the preference at one pose, so a relationship seen only in these trajectories is not evidence of one; use constant thresholds instead.
 
-Trajectory summaries (radians for joint features). "mdm_traj" is the chosen correction, "reference" the original plan, "current" the current pose, and "candidate_comparison" compares their end values with each marked-wrong candidate ("rejected_ends"):
+Trajectory summaries (radians for joint features, under "joint_features"; m/s and rad/s for speeds, under "speed_features"). "mdm_traj" is the chosen correction, "reference" the original plan, "current" the current pose, and "candidate_comparison" compares their end values with each marked-wrong candidate ("rejected_ends"):
 {summaries}
 
 Return only a JSON object with keys:
 - "description": the preference in plain words.
-- "code": the cost function source.
+- "code": the source of path_margins and/or speed_margins.
 - "params": a dict of the numbers the code reads.
 - "explanation": where each number came from.
 - "recipient_explanation": one or two plain sentences telling the person how their arm will be moved.

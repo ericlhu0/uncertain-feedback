@@ -28,7 +28,7 @@ class FakeCost:
     """Generated-cost stand-in that scores every trajectory as zero."""
 
     description = "cost"
-    code = "def cost(): pass"
+    code = "def path_margins(): pass"
     params: dict[str, float] = {}
 
     def __call__(self, q_trajs):
@@ -116,10 +116,12 @@ def test_cluster_activation_converts_mdm_positions_before_history_concat(
     assert trajectory.cluster_fulls[0].shape == (2, 7)
 
 
-def make_session(monkeypatch, tmp_path) -> tuple[Session, SimulatedUser]:
+def make_session(
+    monkeypatch, tmp_path, history_cut: int = 0
+) -> tuple[Session, SimulatedUser]:
     config_path = tmp_path / "mpc.yaml"
     config_path.write_text(
-        """
+        f"""
 steps: 6
 horizon: 2
 n_mpc_samples: 2
@@ -137,6 +139,7 @@ cartesian:
     - [0.1, 0.2, 0.3]
 corrections:
   trigger_threshold: 0.02
+  history_cut: {history_cut}
 """,
         encoding="utf-8",
     )
@@ -227,12 +230,12 @@ def _violations_by_frame(monkeypatch, values: dict[int, float]) -> None:
     monkeypatch.setattr(simulated_users_base, "compute_violations", violations)
 
 
-def test_pause_gives_feedback_from_the_last_comfortable_frame(
+def test_pause_gives_feedback_a_fixed_number_of_steps_before_the_complaint(
     monkeypatch, tmp_path
 ) -> None:
-    session, _ = make_session(monkeypatch, tmp_path)
-    # Frame 2 is under the trigger threshold but not comfortable.
-    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+    session, _ = make_session(monkeypatch, tmp_path, history_cut=2)
+    # The complaint comes at frame 3; where the limit was crossed is not read.
+    _violations_by_frame(monkeypatch, {3: 0.03})
 
     trajectory = session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
     payload = session._trajectory_payload()
@@ -248,8 +251,8 @@ def test_pause_gives_feedback_from_the_last_comfortable_frame(
 def test_ignoring_a_backed_up_pause_resumes_from_the_live_frame(
     monkeypatch, tmp_path
 ) -> None:
-    session, _ = make_session(monkeypatch, tmp_path)
-    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+    session, _ = make_session(monkeypatch, tmp_path, history_cut=2)
+    _violations_by_frame(monkeypatch, {3: 0.03})
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
 
     payload = session.ignore_comfort_violation()
@@ -262,8 +265,8 @@ def test_ignoring_a_backed_up_pause_resumes_from_the_live_frame(
 def test_applying_a_backed_up_correction_rewinds_to_the_feedback_frame(
     monkeypatch, tmp_path
 ) -> None:
-    session, _ = make_session(monkeypatch, tmp_path)
-    _violations_by_frame(monkeypatch, {2: 0.01, 3: 0.03})
+    session, _ = make_session(monkeypatch, tmp_path, history_cut=2)
+    _violations_by_frame(monkeypatch, {3: 0.03})
     session.start_trajectory(np.zeros((3, 3)).tolist(), [0.4, 0.5, 0.6])
     trajectory = session.trajectory
     assert trajectory is not None

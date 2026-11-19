@@ -40,7 +40,7 @@ def test_interpret_prompt_fills_placeholders_without_code_contract() -> None:
     for key in IMAGE_PLACEHOLDERS:
         assert "{" + key + "}" not in text
     # Interpretation sees images, but no code-writing contract.
-    assert "def cost(features, params):" not in text
+    assert "def path_margins(features, params):" not in text
     assert "Return only JSON" not in text
     assert '"evidence"' in text
     assert (
@@ -86,7 +86,7 @@ def test_language_only_interpret_and_ground_frame_plan_as_interrupted() -> None:
     ground = build_ground_prompt("{}", {}, language_only=True)
     assert "INTERRUPTED PLAN" in ground
     assert 'strictly higher than the "recent" history' in ground
-    assert "score the chosen correction strictly lower" not in ground
+    assert "exceed them by strictly less than" not in ground
 
 
 def test_unavailable_image_dropped_without_attachment() -> None:
@@ -119,13 +119,16 @@ def test_ground_and_author_split_numeric_work_from_code_contract() -> None:
     )
     assert "keep the elbow more bent" in ground
     assert '"elbow_flexion"' in ground
-    assert "def cost(features, params):" not in ground
-    assert "score the chosen correction strictly lower" in ground
-    assert "does not mean the original plan must receive zero preference cost" in ground
+    assert "def path_margins(features, params):" not in ground
+    assert "exceed them by strictly less than" in ground
+    assert "does not mean the original plan must stay inside the bounds" in ground
+    # A chosen correction is preferred, not accepted: satisfying it is the default.
+    assert "That is the default placement, not an absolute rule" in ground
+    assert "MUST already be satisfied" not in ground
 
     author = build_author_prompt('{"terms": []}')
     assert '{"terms": []}' in author
-    assert "def cost(features, params):" in author
+    assert "def path_margins(features, params):" in author
     assert "Return only JSON" in author
 
 
@@ -136,9 +139,9 @@ def test_refine_prompt_keeps_interpretation_fixed_and_can_author() -> None:
     )
     assert "do NOT re-interpret it" in text
     assert "keep the elbow more bent" in text
-    assert "def cost(features, params):" in text
+    assert "def path_margins(features, params):" in text
     assert "Return only JSON" in text
-    assert "score the chosen correction strictly lower" in text
+    assert "exceed them by strictly less than" in text
 
 
 def test_staged_task_body_inlines_all_stages_for_agent() -> None:
@@ -151,7 +154,7 @@ def test_staged_task_body_inlines_all_stages_for_agent() -> None:
     assert "## Stage 2" in text
     assert "## Stage 3" in text
     assert "raise my left arm" in text
-    assert "def cost(features, params):" in text
+    assert "def path_margins(features, params):" in text
     assert '"evidence"' in text
     assert [p.name for p in attached] == ["current.png"]
 
@@ -207,7 +210,7 @@ def test_combine_prompt_replays_every_round_and_requires_anchors(tmp_path) -> No
     assert "feedback 0" in text and "feedback 1" in text
     assert "def cost_0" in text and "def cost_1" in text
     assert "np.interp" in text
-    assert "def cost(features, params):" in text
+    assert "def path_margins(features, params):" in text
     assert images == [tmp_path / "round_0.png", tmp_path / "round_1.png"]
 
 
@@ -254,7 +257,7 @@ def test_associated_changes_preserved_but_not_immediate_cost_terms() -> None:
     assert '"associated_changes"' in interpret
     assert (
         'Do NOT turn stage one\'s "associated_changes" or "unresolved_explanations" '
-        "into additional cost terms" in ground
+        "into additional bounds" in ground
     )
 
 
@@ -268,6 +271,10 @@ def test_combine_consults_literature_but_rounds_decide() -> None:
     combine = " ".join(_combine_body().split())
     assert "consult the biomechanics and clinical literature" in combine
     assert "any differentiable function of the five features" in combine
+    # Accepted motion stays inside the limits; a chosen correction only has to
+    # keep beating what it replaced.
+    assert "may be stricter than an earlier chosen correction" in combine
+    assert "must stay inside every limit" in combine
     assert "the rounds decide between them" in combine
 
 
@@ -284,5 +291,25 @@ def test_primary_interpret_fields_and_output_contract_intact() -> None:
         assert f'"{field}"' in interpret
     # Final generated-cost schema (author stage) is unchanged.
     author = build_author_prompt('{"terms": []}')
-    assert "def cost(features, params):" in author
+    assert "def path_margins(features, params):" in author
     assert "Return only JSON" in author
+
+
+def test_contract_states_margins_and_scopes_speed_and_position() -> None:
+    author = " ".join(build_author_prompt('{"terms": []}').split())
+    assert "def speed_margins(features, params):" in author
+    assert "POSITIVE where the limit is violated" in author
+    assert "Never clamp, square, weight, sum or average a margin" in author
+    # Speed features come with units and signs.
+    assert (
+        'features["wrist_speed"] speed of the hand relative to the torso, m/s' in author
+    )
+    assert "negative while it straightens" in author
+    # Scoped rules replace the blanket velocity and Cartesian bans.
+    assert "Use speed features ONLY when the instruction is about speed" in author
+    assert "Do NOT use Cartesian or world-space positions" in author
+    assert "Do not include smoothness, velocity, or acceleration costs" not in author
+    interpret, _ = build_interpret_prompt("x", {}, {})
+    assert '"speed": an object or null' in interpret
+    ground = build_ground_prompt("{}", {})
+    assert '"speed_cap"' in ground and "wrist_speed" in ground

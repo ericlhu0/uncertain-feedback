@@ -76,9 +76,15 @@ class TransferConfig:
 
 @dataclass(frozen=True)
 class CorrectionConfig:
-    """Repeated within-trajectory feedback trigger settings."""
+    """Repeated within-trajectory feedback trigger settings.
+
+    ``history_cut`` is how many steps before a complaint the feedback is taken
+    to be given: the motion up to there counts as accepted, the rest is
+    discarded. A fixed count, so nothing about the person's limits is read.
+    """
 
     trigger_threshold: float = 0.02
+    history_cut: int = 10
 
 
 @dataclass(frozen=True)
@@ -128,9 +134,19 @@ class LlmCostConfig:
     # danger-full-access flag does not expose the repository or simulator oracle.
     codex_cmd: str = "codex exec --skip-git-repo-check"
     reasoning_effort: str | None = None
+    # Planner penalty per unit (rad, rad/s, m/s) a rollout's worst step goes
+    # past a learned limit: high, so a limit acts as a wall rather than a taste.
+    limit_weight: float = 1000.0
+    # Planner penalty per rad of path excess averaged over a rollout: small, so
+    # an arm a chosen correction left past a limit returns inside as it goes on.
+    pullback_weight: float = 10.0
+    # "hard" charges the two weights above; "soft" charges a unit-weight mean
+    # squared excess instead (the form steering uses), so a limit only bends the plan.
+    enforcement: str = "hard"
 
 
 COST_BACKENDS = {"llm", "turns", "agent", "direct"}
+LIMIT_ENFORCEMENTS = {"hard", "soft"}
 
 
 @dataclass(frozen=True)
@@ -247,6 +263,15 @@ def _cost_backend(value: Any) -> str:
             f"llm_cost.backend must be one of {sorted(COST_BACKENDS)}, got {value!r}."
         )
     return backend
+
+
+def _enforcement(value: Any) -> str:
+    if value not in LIMIT_ENFORCEMENTS:
+        raise ValueError(
+            f"llm_cost.enforcement must be one of {sorted(LIMIT_ENFORCEMENTS)}, "
+            f"got {value!r}."
+        )
+    return value
 
 
 def _goal_list(value: Any, name: str) -> list[list[float]]:
@@ -390,6 +415,10 @@ def _parse_steering(data: dict[str, Any]) -> SteeringConfig:
         ),
         guidance_weight=_float(
             data.get("guidance_weight", 1e5), "feedback.uq.steering.guidance_weight"
+        ),
+        speed_guidance_weight=_float(
+            data.get("speed_guidance_weight", 1e3),
+            "feedback.uq.steering.speed_guidance_weight",
         ),
         bounds=tuple(_parse_steering_bound(bound) for bound in bounds),
     )
@@ -711,6 +740,14 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
                 )
                 or "codex exec"
             ),
+            limit_weight=_float(
+                llm_cost_data.get("limit_weight", 1000.0), "llm_cost.limit_weight"
+            ),
+            pullback_weight=_float(
+                llm_cost_data.get("pullback_weight", 10.0),
+                "llm_cost.pullback_weight",
+            ),
+            enforcement=_enforcement(llm_cost_data.get("enforcement", "hard")),
         ),
         seed=_nonnegative_int(data.get("seed", 0), "seed"),
         preference_learning=_bool(
@@ -729,7 +766,12 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             goals=transfer_goals,
             trigger_threshold=trigger_threshold,
         ),
-        corrections=CorrectionConfig(trigger_threshold=trigger_threshold),
+        corrections=CorrectionConfig(
+            trigger_threshold=trigger_threshold,
+            history_cut=_nonnegative_int(
+                corrections_data.get("history_cut", 10), "corrections.history_cut"
+            ),
+        ),
         simulated_user=simulated_user,
     )
 

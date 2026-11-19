@@ -14,6 +14,10 @@ from typing import Any
 
 import numpy as np
 
+from uncertain_feedback.planners.mpc.arm_features import (
+    SPEED_FEATURE_NAMES,
+    arm_motion_series,
+)
 from uncertain_feedback.planners.mpc.costs import GeneratedCostContext
 from uncertain_feedback.utils.plot import ArmVisualizer
 
@@ -39,7 +43,10 @@ def build_motion_summaries(
     (the spine3-relative wrist target) is given it is added under
     ``"cartesian_goal"``. When explicitly marked-wrong candidate trajectories are
     available, a rollout-labeled terminal joint-feature comparison is included under
-    ``"candidate_comparison"``.
+    ``"candidate_comparison"``. Every trajectory also carries
+    ``"speed_features"``: min / median / max of each speed feature over its
+    steps (m/s for ``wrist_speed`` and ``elbow_speed``, rad/s for the signed
+    ``<feature>_rate``).
     """
     mdm_positions = context.mdm_positions
     current_positions = context.current_positions
@@ -61,6 +68,9 @@ def build_motion_summaries(
         context,
         context.mdm_traj,
     )
+    summaries["mdm_traj"]["speed_features"] = _speed_feature_summary(
+        context, context.mdm_traj
+    )
     if context.rejected_trajs:
         summaries["candidate_comparison"] = _candidate_comparison_summary(context)
     if context.recent_q.size > 0:
@@ -74,6 +84,9 @@ def build_motion_summaries(
             context,
             context.recent_q,
         )
+        summaries["recent"]["speed_features"] = _speed_feature_summary(
+            context, context.recent_q
+        )
     else:
         summaries["recent"] = {}
     if context.reference_traj is not None and context.reference_traj.size > 0:
@@ -86,6 +99,9 @@ def build_motion_summaries(
         summaries["reference"]["joint_features"] = _joint_feature_summary(
             context,
             context.reference_traj,
+        )
+        summaries["reference"]["speed_features"] = _speed_feature_summary(
+            context, context.reference_traj
         )
     if cartesian_goal is not None:
         summaries["cartesian_goal"] = np.asarray(
@@ -171,8 +187,8 @@ def build_rollout_joint_comparison(
 ) -> dict[str, Any]:
     """Return joint feature comparison between a scored rollout and the intended target.
 
-    Uses ``context.full_correction_traj`` as the target when available (the full
-    pre-correction + correction + goal-continuation path), falling back to
+    Uses ``context.full_correction_traj`` as the target when available (the
+    executed history followed by the chosen correction), falling back to
     ``context.mdm_traj``.
     """
     target_traj = (
@@ -262,6 +278,23 @@ def _joint_feature_summary(
     return {
         name: _series_stats(values)
         for name, values in context.feature_series(trajectory).items()
+    }
+
+
+def _speed_feature_summary(
+    context: GeneratedCostContext,
+    trajectory: np.ndarray,
+) -> dict[str, Any]:
+    if len(trajectory) < 2:
+        return {}
+    motion = arm_motion_series(trajectory, context)
+    return {
+        name: {
+            "min": float(motion[name].min()),
+            "median": float(np.median(motion[name])),
+            "max": float(motion[name].max()),
+        }
+        for name in SPEED_FEATURE_NAMES
     }
 
 

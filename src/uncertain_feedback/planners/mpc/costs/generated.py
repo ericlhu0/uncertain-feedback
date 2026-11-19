@@ -1,9 +1,11 @@
-"""Compiled-cost runtime for generated Python trajectory costs.
+"""Compiled-constraint runtime for generated Python limits.
 
-The planner-side half of the generated-cost pipeline, independent of how a cost was
-authored: the runtime context handed to generated code
-(:class:`GeneratedCostContext`), the executable cost wrapper
-(:class:`GeneratedPythonCost`), and the JSON response parser/compiler.
+The planner-side half of the generated-cost pipeline, independent of how a limit
+was authored: the runtime context handed to generated code
+(:class:`GeneratedCostContext`), the executable wrapper that turns generated
+margins into a planner cost (:class:`GeneratedPythonCost`), and the JSON response
+parser/compiler. Generated code states limits as margins; the penalty is the
+system's.
 
 Prompt summaries and overlay images built on this context live in
 :mod:`uncertain_feedback.cost_generation.summaries`; scoring lives in
@@ -22,8 +24,10 @@ import numpy as np
 
 from uncertain_feedback.planners.mpc.arm_features import (
     FEATURE_NAMES,
+    SPEED_FEATURE_NAMES,
     arm_aa_from_state,
     arm_feature_series,
+    arm_motion_series,
     canonical_arm_q,
 )
 from uncertain_feedback.planners.mpc.costs.base import (
@@ -88,6 +92,13 @@ class GeneratedCostContext:
     cartesian_threshold: float | None = None
     rejected_trajs: tuple[np.ndarray, ...] = ()
     cartesian_region: GoalRegion | None = None
+    # Planner penalty per unit of worst-step excess (``llm_cost.limit_weight``).
+    limit_weight: float = 1000.0
+    # Planner penalty per rad of path excess averaged over a rollout
+    # (``llm_cost.pullback_weight``).
+    pullback_weight: float = 10.0
+    # ``llm_cost.enforcement``: "hard" or "soft".
+    enforcement: str = "hard"
 
     @property
     def current_positions(self) -> np.ndarray:
@@ -189,48 +200,132 @@ class GeneratedCostContext:
 
 @dataclass(frozen=True)
 class GeneratedPythonCost(TrajectoryCost):
-    """Executable LLM-generated trajectory cost.
+    """Executable LLM-generated limits, charged by the planner as a hard cost.
 
-    The generated code is a torch function of per-frame joint features, so the
-    planner (features from IK, no gradients) and MDM steering (features from the
-    sample's positions, differentiable) run the same function.
+    The generated code defines constraints, not penalties: ``path_margins(features,
+    params)`` and/or ``speed_margins(features, params)``, each returning ``{name:
+    margin}`` with ``(N, T)`` torch margins in physical units (rad for a path
+    limit; rad/s or m/s for a speed limit), positive when violated. Path margins
+    see the pose features only; speed margins also see the speed features
+    (``SPEED_FEATURE_NAMES``), measured over the step into each frame. The
+    planner (features from IK) and MDM steering (features from the sample's
+    positions, differentiable) evaluate the same margins.
+
+    The planner's penalty is the system's: ``context.limit_weight`` times the
+    worst step's excess, linear, summed over margins. A path margin is charged
+    only beyond the excess the rollout's first frame already has, so an arm that
+    starts past a limit can still plan, as long as it goes no further past it.
+    ``context.pullback_weight`` times the path excess averaged over the rollout
+    is added on top: a small cost that brings such an arm back inside. With
+    ``context.enforcement == "soft"`` the planner instead charges each margin's
+    squared excess averaged over the rollout, at unit weight.
     """
 
     code: str
     params: dict[str, Any]
     context: GeneratedCostContext
     description: str = ""
-    _func: FunctionType = field(init=False, repr=False, compare=False)
+    _path: FunctionType | None = field(init=False, repr=False, compare=False)
+    _speed: FunctionType | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        func = compile_generated_cost(self.code)
-        object.__setattr__(self, "_func", func)
+        path, speed = compile_generated_cost(self.code)
+        object.__setattr__(self, "_path", path)
+        object.__setattr__(self, "_speed", speed)
 
-    def feature_cost(self, features: dict[str, Tensor]) -> Tensor:
-        """The cost of ``(N, T)`` feature series over the future frames, ``(N,)``."""
-        return self._func(features, self.params)
+    def margins(
+        self, features: dict[str, Tensor]
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """The ``(path, speed)`` margins of ``(N, T)`` feature series."""
+        pose = {name: features[name] for name in FEATURE_NAMES if name in features}
+        return (
+            {} if self._path is None else self._path(pose, self.params),
+            {} if self._speed is None else self._speed(features, self.params),
+        )
 
-    def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
+    def _excess(
+        self, func: FunctionType | None, features: dict[str, np.ndarray]
+    ) -> list[np.ndarray]:
+        """Each margin of ``func`` over ``(N, T)`` features, clamped at zero."""
         import torch  # pylint: disable=import-outside-toplevel
 
-        q_trajs = np.asarray(q_trajs, dtype=np.float64)
-        features = self.context.feature_series(q_trajs[:, 1:])
+        if func is None:
+            return []
+        shape = next(iter(features.values())).shape
         with torch.no_grad():
-            raw = self.feature_cost(
-                {name: torch.from_numpy(series) for name, series in features.items()}
+            margins = func(
+                {name: torch.from_numpy(series) for name, series in features.items()},
+                self.params,
             )
-        costs = torch.as_tensor(raw, dtype=torch.float64).numpy()
-        expected_shape = (q_trajs.shape[0],)
-        if costs.shape != expected_shape:
-            raise GeneratedCostValidationError(
-                "generated cost must return shape "
-                f"{expected_shape}, got {costs.shape}"
-            )
-        if not np.all(np.isfinite(costs)):
-            raise GeneratedCostValidationError(
-                "generated cost returned non-finite values"
-            )
-        return costs
+        excess = []
+        for name, margin in margins.items():
+            values = torch.as_tensor(margin, dtype=torch.float64).numpy()
+            if values.shape != shape or not np.all(np.isfinite(values)):
+                raise GeneratedCostValidationError(
+                    f"margin {name!r} must be finite with shape {shape}, "
+                    f"got shape {values.shape}"
+                )
+            excess.append(np.maximum(values, 0.0))
+        return excess
+
+    def pose_excess(self, q: np.ndarray) -> np.ndarray:
+        """Summed path-limit excess (rad) at each pose of ``q`` ``(M, 7)``, ``(M,)``."""
+        features = self.context.feature_series(np.asarray(q, dtype=np.float64)[None])
+        excess = self._excess(self._path, features)
+        return np.sum(excess, axis=0)[0] if excess else np.zeros(len(q))
+
+    def path_excess(self, q_trajs: np.ndarray) -> np.ndarray:
+        """Worst-step path excess of ``(N, T, 7)`` rollouts beyond their start, ``(N,)``.
+
+        Radians, summed over the path margins: how much further past each limit
+        the rollout goes than its first frame already is.
+        """
+        features = self.context.feature_series(q_trajs)
+        return np.sum(
+            [
+                np.maximum(excess[:, 1:] - excess[:, :1], 0.0).max(axis=1)
+                for excess in self._excess(self._path, features)
+            ],
+            axis=0,
+        ) + np.zeros(len(q_trajs))
+
+    def path_lingering(self, q_trajs: np.ndarray) -> np.ndarray:
+        """Path excess of ``(N, T, 7)`` rollouts averaged over their steps, ``(N,)``.
+
+        Radians, summed over the path margins and counted from the limit itself.
+        """
+        features = self.context.feature_series(q_trajs)
+        return np.sum(
+            [
+                excess[:, 1:].mean(axis=1)
+                for excess in self._excess(self._path, features)
+            ],
+            axis=0,
+        ) + np.zeros(len(q_trajs))
+
+    def speed_excess(self, q_trajs: np.ndarray) -> np.ndarray:
+        """Worst-step speed excess of ``(N, T, 7)`` rollouts, ``(N,)``.
+
+        rad/s or m/s, summed over the speed margins; the frames must sit
+        ``STEP_SECONDS`` apart.
+        """
+        features = arm_motion_series(q_trajs, self.context)
+        return np.sum(
+            [excess.max(axis=1) for excess in self._excess(self._speed, features)],
+            axis=0,
+        ) + np.zeros(len(q_trajs))
+
+    def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
+        q_trajs = self.context.canonical_q(np.asarray(q_trajs, dtype=np.float64))
+        if self.context.enforcement == "soft":
+            path = self._excess(self._path, self.context.feature_series(q_trajs[:, 1:]))
+            speed = self._excess(self._speed, arm_motion_series(q_trajs, self.context))
+            return np.sum(
+                [(excess**2).mean(axis=1) for excess in (*path, *speed)], axis=0
+            ) + np.zeros(len(q_trajs))
+        return self.context.limit_weight * (
+            self.path_excess(q_trajs) + self.speed_excess(q_trajs)
+        ) + self.context.pullback_weight * self.path_lingering(q_trajs)
 
 
 def generated_cost_feature_dependencies(code: str) -> tuple[str, ...]:
@@ -240,7 +335,9 @@ def generated_cost_feature_dependencies(code: str) -> tuple[str, ...]:
         for node in ast.walk(ast.parse(code))
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    return tuple(name for name in FEATURE_NAMES if name in strings)
+    return tuple(
+        name for name in (*FEATURE_NAMES, *SPEED_FEATURE_NAMES) if name in strings
+    )
 
 
 def replace_generated_costs(
@@ -321,19 +418,24 @@ def interp(x: Tensor, xp: list[float], fp: list[float]) -> Tensor:
     return y0 + (x - x0) / (x1 - x0) * (y1 - y0)
 
 
-def compile_generated_cost(code: str) -> FunctionType:
-    """Compile and exec generated Python cost source."""
+def compile_generated_cost(
+    code: str,
+) -> tuple[FunctionType | None, FunctionType | None]:
+    """Compile generated source into its ``(path_margins, speed_margins)`` functions."""
     import torch  # pylint: disable=import-outside-toplevel
 
     namespace: dict[str, Any] = {"torch": torch, "interp": interp}
-    locals_dict: dict[str, Any] = {}
-    exec(  # pylint: disable=exec-used
-        compile(code, "<llm_generated_cost>", "exec"), namespace, locals_dict
+    # pylint: disable-next=exec-used
+    exec(compile(code, "<llm_generated_limits>", "exec"), namespace)
+    path, speed = namespace.get("path_margins"), namespace.get("speed_margins")
+    if not isinstance(path, FunctionType) and not isinstance(speed, FunctionType):
+        raise GeneratedCostValidationError(
+            "generated code must define path_margins and/or speed_margins"
+        )
+    return (
+        path if isinstance(path, FunctionType) else None,
+        speed if isinstance(speed, FunctionType) else None,
     )
-    func = locals_dict.get("cost")
-    if not isinstance(func, FunctionType):
-        raise GeneratedCostValidationError("generated code must define cost")
-    return func
 
 
 def build_generated_cost_context(
@@ -346,6 +448,9 @@ def build_generated_cost_context(
     cartesian_threshold: float | None = None,
     rejected_trajs: tuple[np.ndarray, ...] | None = None,
     cartesian_region: GoalRegion | None = None,
+    limit_weight: float = 1000.0,
+    pullback_weight: float = 10.0,
+    enforcement: str = "hard",
 ) -> GeneratedCostContext:
     """Build the q-native runtime context generated Python costs see.
 
@@ -380,4 +485,7 @@ def build_generated_cost_context(
             canonical_arm_q(traj, human) for traj in (rejected_trajs or ())
         ),
         cartesian_region=cartesian_region,
+        limit_weight=limit_weight,
+        pullback_weight=pullback_weight,
+        enforcement=enforcement,
     )

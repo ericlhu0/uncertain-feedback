@@ -324,7 +324,7 @@ class AgentCostGenerator(CostGenerator):
                 ground_raw=_stage_section(stage_log, "## Stage 2 response"),
                 ranking=ranking,
             )
-            self.require_original_plan_improvement(ranking)
+            self.require_admission(ranking)
             if install:
                 self.install(cost)
             self._on_success(cost, installed=install)
@@ -415,15 +415,18 @@ class AgentCostGenerator(CostGenerator):
                 f"This prints an L2 score (lower is better) and a `goal reached:` "
                 f"line reporting whether the arm still reaches the goal. The goal is "
                 f"always reachable within the person's limits, so keep revising until "
-                f"it reports the goal is reached — a cost that blocks the goal is not "
-                f"acceptable. It also writes "
+                f"it reports the goal is reached — limits that block the goal are not "
+                f"acceptable. It also prints an `ordering:` line: how far each ranked "
+                f"motion's worst step goes past your limits, in physical units; the "
+                f"chosen correction must be strictly below the original plan and "
+                f"every rejected candidate. It also writes "
                 f"the comparison images. When the command includes an archive "
                 f"directory, it also saves candidate JSON, score, rollout, "
                 f"and MP4 files there. It writes "
-                f"`{_COMPARISON_FILE}`, which overlays the motion your cost produced "
-                "(red, 'cost rollout') against the entire intended corrected path "
-                "(green, 'target corrected path': the pre-correction motion, the "
-                "correction, and the continuation to the goal) it should match, and "
+                f"`{_COMPARISON_FILE}`, which overlays the motion your limits produced "
+                "(red, 'cost rollout') against the path the person saw "
+                "(green, 'target corrected path': the pre-correction motion, then the "
+                "chosen correction, and nothing after it), and "
                 f"`{_ANGLES_FILE}`, which plots each arm joint angle over time for "
                 "the same two trajectories (green target vs red rollout), plus the "
                 "initial uncorrected goal-seeking path (dashed steel-blue) so you "
@@ -434,7 +437,7 @@ class AgentCostGenerator(CostGenerator):
                 "`response.json`, re-run the command, and keep iterating until "
                 "you are satisfied that the generated arm movement matches the "
                 "green reference well enough, or until you determine there is no "
-                "way to make it match with the available cost API. In your final "
+                "way to make it match with the available limits API. In your final "
                 f"`{_ITERATION_LOG_FILE}` entry, state which stopping condition "
                 "you reached and why. Leave the best `response.json` as your final "
                 "answer.\n\n"

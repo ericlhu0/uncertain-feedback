@@ -95,12 +95,12 @@ def test_generated_cost_field_identifies_single_named_feature(
     class SingleFeatureCost:
         """Generated cost depending on exactly one named feature."""
 
-        code = """def cost(features, params):
-    return torch.sum(features["elbow_flexion"] ** 2, dim=1)
+        code = """def path_margins(features, params):
+    return {"bend": features["elbow_flexion"] - 1.0}
 """
 
-        def __call__(self, q_trajs):
-            return np.arange(q_trajs.shape[0], dtype=np.float64)
+        def pose_excess(self, q):
+            return np.arange(q.shape[0], dtype=np.float64)
 
     session = Session(
         rig=SimpleNamespace(human=Human()),  # type: ignore[arg-type]
@@ -245,7 +245,7 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
         """Marker cost standing in for the combined result."""
 
         description = "combined"
-        code = "def cost(): pass"
+        code = "def path_margins(): pass"
         params: dict[str, float] = {}
 
         def __call__(self, q_trajs):
@@ -356,7 +356,7 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
         """Marker cost standing in for the combined result."""
 
         description = "combined"
-        code = "def cost(): pass"
+        code = "def path_margins(): pass"
         params: dict[str, float] = {}
 
     combined = CombinedCost()
@@ -424,8 +424,8 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
 
 
 def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) -> None:
-    code = """def cost(features, params):
-    return torch.zeros(len(features[\"elbow_flexion\"])) + params[\"weight\"]
+    code = """def path_margins(features, params):
+    return {"bend": features["elbow_flexion"] * 0.0 + params["max"]}
 """
     session_dir = tmp_path / "20260713_120000_session_persona"
     corpus_dir = session_dir / "trajectory_corpus"
@@ -439,7 +439,7 @@ def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) 
         round_dir=session_dir / "round",
         state_path=session_dir / "round" / "state.pkl",
         cost_code=code,
-        params={"weight": 2.0},
+        params={"max": 2.0},
         summaries={},
         image_paths=(),
         description="round cost",
@@ -456,7 +456,7 @@ def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) 
                 "rounds": [cost_round.to_json()],
                 "unified": {
                     "code": code,
-                    "params": {"weight": 3.0},
+                    "params": {"max": 3.0},
                     "description": "unified cost",
                 },
             }
@@ -484,9 +484,9 @@ def test_session_load_recompiles_round_and_unified_costs(monkeypatch, tmp_path) 
     assert loaded.trajectory is None
     assert loaded.trajectory_count == 2
     assert loaded.rounds[0].grounding == "threshold"
-    q_trajs = np.zeros((2, 1, 3, 3))
-    np.testing.assert_array_equal(loaded._round_costs[0](q_trajs), [2.0, 2.0])
-    np.testing.assert_array_equal(loaded.unified_cost(q_trajs), [3.0, 3.0])  # type: ignore[misc]
+    poses = np.zeros((2, 7))
+    np.testing.assert_array_equal(loaded._round_costs[0].pose_excess(poses), [2.0, 2.0])
+    np.testing.assert_array_equal(loaded.unified_cost.pose_excess(poses), [3.0, 3.0])  # type: ignore[union-attr]
 
 
 def test_list_sessions_is_newest_first_with_context_counts(

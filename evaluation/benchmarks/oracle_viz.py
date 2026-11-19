@@ -49,7 +49,6 @@ from uncertain_feedback.simulated_users import (
     HiddenCostTerm,
     SimulatedUser,
     attribute_correction,
-    feedback_anchor,
     first_violation_step,
     render_hidden_bounds,
     verbalize_everyday,
@@ -198,7 +197,7 @@ def build_persona_case(
     if trigger is None:
         return None
 
-    feedback_step = feedback_anchor(user, human, nominal_rollout, trigger)
+    feedback_step = max(trigger - cfg.corrections.history_cut, 0)
     q_feedback = np.asarray(nominal_rollout[feedback_step], dtype=np.float64)
     nominal_plan = rollout_to_goal(
         goal_cfg,

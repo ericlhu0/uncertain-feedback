@@ -61,6 +61,7 @@ def test_base_cycle_is_rejected(tmp_path) -> None:
         "dressing_first_sleeve",
         "dressing_second_sleeve",
         "pressure_sore_relief",
+        "elbow_extension",
     ],
 )
 def test_task_configs_add_the_learning_stack_to_the_planner_task(task: str) -> None:

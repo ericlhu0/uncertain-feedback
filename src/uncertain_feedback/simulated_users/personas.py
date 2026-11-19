@@ -14,6 +14,7 @@ from uncertain_feedback.simulated_users.base import (
     HiddenBound,
     JointBoxLimit,
     SimulatedUser,
+    SpeedLimit,
 )
 
 # Anatomical box limits shared by every persona (radians, per axis-angle
@@ -222,6 +223,54 @@ CROSS_BODY_PAIN = SimulatedUser(
     joint_limits=DEFAULT_ARM_JOINT_LIMITS,
 )
 
+SPASTIC_ELBOW_FLEXORS = SimulatedUser(
+    name="spastic_elbow_flexors",
+    description=(
+        "Spastic elbow flexors after stroke: the catch depends on how fast the "
+        "elbow is straightened (Tardieu scale: R1 at a fast stretch comes "
+        "earlier than R2 at a slow one). The dynamic stretch-reflex threshold "
+        "falls linearly with stretch velocity, lambda* = lambda - mu * v "
+        "(Levin & Feldman 1994, Brain Res 657:23-30), so the fastest extension "
+        "that reaches a given elbow angle without a catch is "
+        "(flexion - flexion at lambda) / mu. Tonic threshold lambda at ~45 deg "
+        "of flexion (0.79 rad; reported 110-159 deg with 180 = straight, "
+        "Subramanian, Feldman & Levin 2018, J Neurophysiol 119:5-20), "
+        "mu = 0.4 s, and never below 0.14 rad/s (8 deg/s, the slowest stretch "
+        "Levin & Feldman applied to hemiparetic elbows). Path is unrestricted: "
+        "any elbow angle is fine if reached slowly enough."
+    ),
+    feedback_text="slow down when you straighten my elbow",
+    bounds=(),
+    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
+    speed_limits=(
+        SpeedLimit(
+            feature="elbow_flexion_rate",
+            direction=-1,
+            cap=0.14,
+            cond_feature="elbow_flexion",
+            cond_start=0.79,
+            slope=2.5,
+        ),
+    ),
+)
+
+MOVED_TOO_FAST = SimulatedUser(
+    name="moved_too_fast",
+    description=(
+        "Wants to be moved gently, wherever the arm goes: hand speed capped at "
+        "0.25 m/s, the reduced-speed limit ISO 10218-1 sets for a robot moving "
+        "next to a person, and elbow speed at 0.125 m/s, the same swing rate "
+        "about the shoulder for a joint at half the hand's distance from it."
+    ),
+    feedback_text="slow down, you're moving my arm too fast",
+    bounds=(),
+    joint_limits=DEFAULT_ARM_JOINT_LIMITS,
+    speed_limits=(
+        SpeedLimit(feature="wrist_speed", cap=0.25),
+        SpeedLimit(feature="elbow_speed", cap=0.125),
+    ),
+)
+
 PERSONAS: dict[str, SimulatedUser] = {
     user.name: user
     for user in (
@@ -235,6 +284,8 @@ PERSONAS: dict[str, SimulatedUser] = {
         BICEPS_LONG_HEAD_CONTRACTURE,
         BRACHIAL_PLEXUS_MECHANOSENSITIVITY,
         CROSS_BODY_PAIN,
+        SPASTIC_ELBOW_FLEXORS,
+        MOVED_TOO_FAST,
     )
 }
 

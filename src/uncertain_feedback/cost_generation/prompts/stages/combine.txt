@@ -1,6 +1,6 @@
-You are unifying {round_count} costs learned from separate corrections given by the
-same care recipient at different arm poses. Produce ONE cost that explains every
-round. The new cost replaces all per-round generated costs; never sum or stack them.
+You are unifying {round_count} sets of limits learned from separate corrections given by the
+same care recipient at different arm poses. Produce ONE set of limits that explains every
+round. It replaces all per-round limits; never stack them.
 
 Use these joint features:
 - `elbow_flexion`: 0 is straight; larger values are more bent.
@@ -8,44 +8,43 @@ Use these joint features:
 - `shoulder_flexion_extension`: positive is toward +z; negative is toward -z.
 - `shoulder_elevation`: 0 is down at the side, pi/2 is horizontal, pi is overhead.
 - `shoulder_internal_external_rotation`: positive is internal rotation; negative is external.
+and, only for a round whose instruction was about speed, the speed features: `wrist_speed`
+and `elbow_speed` (m/s, relative to the torso) and the signed `<joint feature>_rate` of each
+feature above (rad/s, positive while the feature increases).
 
-Each per-round cost is a PROVISIONAL local explanation of one correction at one pose,
+Each per-round set of limits is a PROVISIONAL local explanation of one correction at one pose,
 not an established global preference. Your task is to model this person's arm mobility
 limits from all rounds together. Before choosing a form, consult the biomechanics and
 clinical literature on human arm mobility limits (you have web search): for example how
 one joint's range depends on the position of others, what limits and painful ranges are
-typical of conditions that match what the rounds show, and how discomfort grows toward a
-limit. Use what you find to propose hypotheses; the rounds decide between them. The cost
-may be any differentiable function of the five features, of whatever shape the evidence
-supports. A pattern from the literature that the rounds do not support stays out of the
-cost. In "explanation", name the source behind each part of the cost and the rounds that
+typical of conditions that match what the rounds show, how the speed a joint tolerates
+depends on its angle, and how discomfort grows toward a limit. Use what you find to propose
+hypotheses; the rounds decide between them. A path limit may be any differentiable function of the five features, of
+whatever shape the evidence supports; a speed limit any differentiable cap that stays above
+zero. A pattern from the literature that the rounds do not support stays out of the
+limits. In "explanation", name the source behind each limit and the rounds that
 support it.
 
 The feedback wording may be identical in every round because simulated personas use a
 canned line. Infer pose variation from trigger poses, trajectories, numeric summaries,
 and images rather than repeated wording. Open every listed image before authoring.
 
-The cost must stay consistent with every round. Each chosen correction endpoint must
-remain unpenalized so every round's goal can still be reached safely. The motion the
-recipient accepted must also stay possible under the unified cost: in each round's eval
-state, the executed history (`human.history`) and the chosen correction
-(`correction_traj`). Verify against the ACTUAL poses visited, frame by frame — summary
-ranges cannot validate a cost that depends on several features — and also against the
-per-frame features of the executed-trajectory corpus when it is provided. Nothing after
-the correction endpoint was accepted: the rest of `full_correction_traj`, also drawn as
-the end of the green target path in the comparison images, is a continuation to the
-goal that the planner added with generic comfort costs only, never shown to the
-recipient. It is not evidence of comfort and often enters poses this person objects to,
-so the unified cost may penalize it, and a lower round score from leaving it is
-acceptable. The opposite also holds: each round's feedback interrupted a plan the
-recipient objected to, `reference_traj` in its eval state (the "reference" summary).
-Its first frames repeat poses already accepted, but past them it entered the poses that
-prompted the feedback, so the unified cost must penalize every round's reference plan.
-Check this frame by frame too: the reference frames beyond the accepted motion must get
-a penalty large enough to steer the planner off them, not a near-zero weight. A cost that
-leaves any round's reference plan free does not explain that round. If any accepted pose
-is penalized, relax the cost there; if any round's reference plan goes unpenalized,
-tighten it there; then re-check every round. A round deleted during the run kept the arm from its goal: its
-preference is real, but the unified cost must be looser there.
+Two kinds of motion constrain the unified limits differently.
+- ACCEPTED motion is what was executed without complaint: each round's executed history
+  (`human.history` in its eval state), and the per-frame features of the
+  executed-trajectory corpus when it is provided. It must stay inside every limit, frame
+  by frame, speeds included. Verify against the ACTUAL poses visited — summary ranges
+  cannot validate a limit that depends on several features. If any accepted frame is
+  past a limit, relax the limit there and re-check every round.
+- A CHOSEN CORRECTION (`correction_traj`) was only PREFERRED to what it replaced: the plan
+  the person interrupted and the candidates they marked wrong. It was the best of what was
+  offered, not proof of comfort. So the unified limits may be stricter than an earlier
+  chosen correction, and its endpoint may end up past a limit, provided that in every round
+  the chosen correction still goes past the limits by strictly less (worst step) than the
+  plan and each marked-wrong candidate it was chosen over. The render command prints this
+  ordering per round; a round where it fails is a round the limits contradict.
+Nothing else is evidence: no motion after a correction was shown to the recipient. A round
+deleted during the run kept the arm from its goal: its preference is real, but the unified
+limits must be looser there. Every round's goal must stay reachable.
 
 {rounds}

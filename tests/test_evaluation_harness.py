@@ -87,6 +87,14 @@ def test_bridge_baseline_episode_smoke(tmp_path: Path) -> None:
     result = run_episode(cfg, human, user, task, approach, tmp_path / "episode")
     assert (tmp_path / "episode" / "episode_summary.json").exists()
     assert result, "episode recorded no interactions"
+    # Feedback is given a fixed number of steps before the complaint, wherever
+    # the hidden limit was crossed.
+    first = result[0]
+    assert first.trigger_step is not None and first.rounds
+    np.testing.assert_array_equal(
+        first.rounds[0].q_feedback,
+        first.initial_rollout[max(first.trigger_step - cfg.corrections.history_cut, 0)],
+    )
 
 
 class _JointPin(GeneratedPythonCost):
@@ -104,8 +112,7 @@ class _PinnedCostGen(NoCostGen):
         super().__init__()
         self.cost = _JointPin(
             code=(
-                "def cost(features, params):\n"
-                "    return torch.zeros(len(features['elbow_flexion']))\n"
+                "def path_margins(features, params):\n    return {'none': features['elbow_flexion'] * 0.0 - 1.0}\n"
             ),
             params={},
             context=build_generated_cost_context(
@@ -312,7 +319,7 @@ def test_retire_keeps_rounds_for_consolidation(tmp_path: Path) -> None:
     )
     costs = [
         GeneratedPythonCost(
-            code="def cost(features, params):\n    return torch.zeros(len(features['elbow_flexion']))\n",
+            code="def path_margins(features, params):\n    return {'none': features['elbow_flexion'] * 0.0 - 1.0}\n",
             params={},
             context=context,
         )
@@ -356,7 +363,7 @@ def test_consolidation_sees_the_retired_round_note(tmp_path: Path, monkeypatch) 
     )
     blocking, correcting, combined = (
         GeneratedPythonCost(
-            code="def cost(features, params):\n    return torch.zeros(len(features['elbow_flexion']))\n",
+            code="def path_margins(features, params):\n    return {'none': features['elbow_flexion'] * 0.0 - 1.0}\n",
             params={},
             context=context,
         )
@@ -425,8 +432,8 @@ def test_a_later_run_resumes_what_an_episode_learned(tmp_path: Path) -> None:
     user = get_persona("elbow_contracture")
     episode_dir = tmp_path / "first" / "task_00"
     code = (
-        "def cost(features, params):\n"
-        "    return params['w'] * torch.mean(features['elbow_flexion'], dim=1)\n"
+        "def path_margins(features, params):\n"
+        "    return {'bend': features['elbow_flexion'] - params['w']}\n"
     )
     costs, rounds = [], []
     for i in range(2):
@@ -527,7 +534,7 @@ def test_proposal_leaves_out_only_the_blocking_costs(monkeypatch) -> None:
     )
     human = Human(pose=cfg.pose, arm=cfg.arm)
     harmless = GeneratedPythonCost(
-        code="def cost(features, params):\n    return torch.zeros(len(features['elbow_flexion']))\n",
+        code="def path_margins(features, params):\n    return {'none': features['elbow_flexion'] * 0.0 - 1.0}\n",
         params={},
         context=_PinnedCostGen(human).cost.context,
     )

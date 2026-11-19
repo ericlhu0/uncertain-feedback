@@ -6,6 +6,11 @@ generator, plus observed tensions. Covers `costs/prompts/**`, the three backends
 `cost_generator.py` / `generated.py` / `cost_feedback.py`, and the rendering in
 `utils/plot.py`._
 
+_Written before the margin contract (2026-11-15): generated code now returns
+`path_margins` / `speed_margins` and the system owns every penalty. The prompt
+inventory below still holds; the `cost(features, params)` signature does not. See
+README, "Generated limits: the margin contract"._
+
 ---
 
 ## 1. What this subsystem does

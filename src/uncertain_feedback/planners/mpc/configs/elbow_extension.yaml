@@ -1,0 +1,15 @@
+# Passive range of motion: straighten the left elbow to within 20 degrees of full extension.
+# Only elbow flexion is constrained; where the arm is held while it straightens is free.
+# Seated body, starting from the pose's lowered, bent left arm.
+pose: src/uncertain_feedback/motion_generators/mdm/transfer_seated_pose.pt
+seed: 0
+steps: 300
+horizon: 10
+n_mpc_samples: 200
+max_angle_delta: 0.0025
+
+cartesian:
+  goals:
+    - features:
+        elbow_flexion: [null, 0.34906585]
+  threshold: 0.001

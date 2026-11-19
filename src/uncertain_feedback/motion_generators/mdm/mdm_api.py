@@ -474,19 +474,20 @@ class MdmMotionGenerator(
         return build_user_bound_cost(user, *self._hml_stats())
 
     def build_generated_steering_cost(
-        self, costs: Sequence[GeneratedPythonCost]
+        self, costs: Sequence[GeneratedPythonCost], speed_scale: float
     ) -> Callable[[Any], Any] | None:
-        """Compile generated planner costs into a steering cost over ``x̂0``.
+        """Compile generated limits into a steering cost over ``x̂0``.
 
-        Returns ``None`` when every cost reads a feature positions cannot give
-        (see ``torch_features.build_generated_cost``).
+        ``speed_scale`` weighs speed limits against path limits. Returns ``None``
+        when every cost reads a feature positions cannot give (see
+        ``torch_features.build_generated_cost``).
         """
         # pylint: disable-next=import-outside-toplevel
         from uncertain_feedback.motion_generators.mdm.torch_features import (
             build_generated_cost,
         )
 
-        return build_generated_cost(costs, *self._hml_stats())
+        return build_generated_cost(costs, *self._hml_stats(), speed_scale)
 
     def _hml_stats(self) -> tuple[Any, Any]:
         """HumanML normalization stats as float32 tensors on the model's device."""

@@ -1,7 +1,7 @@
 """The cost-generation stage: correction context in, generated cost out.
 
 :func:`generate_cost_for_correction` is the whole stage in one call — roll the
-pre-correction reference, assemble the full corrected path, build the prompt
+pre-correction reference, join the executed history to the correction, build the prompt
 summaries and images, bundle the picklable :class:`EvalState`, then run whichever
 backend the config selects. Callers (``planners/run.py``, the demo runner and the
 evaluation approaches) do not touch the backends directly.
@@ -39,7 +39,6 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.goal_spaces import as_goal_region
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import (
-    assemble_full_correction_traj,
     make_cost_eval_rollout,
     rollout_reference_trajectory,
 )
@@ -182,9 +181,9 @@ def generate_cost_for_correction(  # pylint: disable=too-many-arguments,too-many
         full_correction_q = None
     else:
         correction_q = canonical_arm_q(correction_traj, human)
-        full_correction_q = assemble_full_correction_traj(
-            cfg_backend, human, correction_q, base_extra_costs
-        )
+        # The target is what the person saw: executed history, then the chosen
+        # correction. Nothing after it was shown to them, so nothing is added.
+        full_correction_q = np.concatenate([human.history[:-1], correction_q])
     rejected_trajs: tuple[np.ndarray, ...] = ()
     prompt_candidate_trajs = candidate_trajs
     if candidate_trajs:
@@ -213,6 +212,9 @@ def generate_cost_for_correction(  # pylint: disable=too-many-arguments,too-many
         cartesian_threshold=cartesian_threshold,
         rejected_trajs=rejected_trajs,
         cartesian_region=goal_region,
+        limit_weight=cfg_backend.llm_cost.limit_weight,
+        pullback_weight=cfg_backend.llm_cost.pullback_weight,
+        enforcement=cfg_backend.llm_cost.enforcement,
     )
     summaries = build_motion_summaries(generated_context, cartesian_goal=goal_pos)
     if language_only:

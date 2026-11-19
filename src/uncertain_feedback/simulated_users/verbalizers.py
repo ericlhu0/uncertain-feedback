@@ -21,6 +21,7 @@ from uncertain_feedback.simulated_users.attribution import (
     CorrectionIntent,
     has_feedback_content,
 )
+from uncertain_feedback.simulated_users.base import SpeedLimit
 
 FEATURE_DEAD_BAND = 0.05
 OFFSET_DEAD_BAND = 0.05
@@ -40,6 +41,14 @@ JOINT_PHRASES: dict[tuple[str, int], str] = {
     ("shoulder_abduction_adduction", -1): "move my arm out to the side more",
     ("shoulder_elevation", 1): "keep my arm lower",
     ("shoulder_elevation", -1): "raise my arm higher",
+}
+
+# (speed feature, capped direction) → complaint about being moved over that cap.
+SPEED_PHRASES: dict[tuple[str, int], str] = {
+    ("wrist_speed", 1): "slow down, you're moving my hand too fast",
+    ("elbow_speed", 1): "slow down, you're moving my elbow too fast",
+    ("elbow_flexion_rate", -1): "slow down, you're straightening my elbow too fast",
+    ("elbow_flexion_rate", 1): "slow down, you're bending my elbow too fast",
 }
 
 # Per-axis corrective direction words on the verified world axes (x lateral,
@@ -108,6 +117,11 @@ def _offset_phrase(
     if norm >= _MAGNITUDE_LARGE:
         return f"{phrase} a lot"
     return phrase
+
+
+def verbalize_speed(limit: SpeedLimit) -> Utterance:
+    """What the user says when moved over ``limit`` (``noticed_speed_limit``)."""
+    return Utterance(SPEED_PHRASES[(limit.feature, limit.direction)], "speed")
 
 
 def verbalize_vague(intent: CorrectionIntent) -> Utterance | None:

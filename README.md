@@ -2627,6 +2627,27 @@ outside the post-stroke flexor synergy ([Hadjiosif et al., 2024](https://pmc.ncb
 The same hidden bounds are the evaluation ground truth for the method-level
 experiments that will live in the repo-root `evaluation/` directory.
 
+Two personas limit how fast the arm is moved instead of where it goes
+(`SimulatedUser.speed_limits`, a tuple of `SpeedLimit`; they have no `bounds`, so
+the path benchmarks above skip them and only the speed evaluation below uses them):
+
+- `spastic_elbow_flexors` caps the signed elbow *extension* rate, with a cap that
+  depends on the elbow angle: 0.14 rad/s (8°/s) at or below 0.79 rad (45°) of
+  flexion, rising by 2.5 rad/s per radian of flexion above that. It is the Tardieu
+  picture (the catch comes earlier the faster the stretch) written as the fastest
+  stretch that reaches each angle without a catch, from the stretch-reflex
+  threshold line λ* = λ − μv with λ at 45° of flexion and μ = 0.4 s.
+- `moved_too_fast` caps the hand at 0.25 m/s and the elbow at 0.125 m/s, wherever
+  the arm goes.
+
+The numbers and their sources are in each persona's `description`; they are
+placeholders pending review. A single frame has no speed, so a speed persona
+notices over a window (`noticed_speed_limit`: the limit's margin, speed minus
+cap, averaged over `SPEED_NOTICE_WINDOW` = 5 steps = 0.25 s, is positive) and says
+which limit it was (`verbalize_speed`, e.g. "slow down, you're straightening my
+elbow too fast"). `run_episode`, `CorrectionSession` and the demo runner still
+trigger on the path bounds only.
+
 ### MDM + UQ Config
 Save as `src/uncertain_feedback/planners/mpc/configs/mpc_mdm_uq.yaml`:
 ```yaml
@@ -2687,6 +2708,7 @@ uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/bp_access.yaml --save outputs/bp_access.mp4
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/edema_elevation.yaml --save outputs/edema_elevation.mp4
 uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/wheelchair_armrest.yaml --save outputs/wheelchair_armrest.mp4
+uv run python src/uncertain_feedback/planners/run.py --mpc-config src/uncertain_feedback/planners/mpc/configs/elbow_extension.yaml --save outputs/elbow_extension.mp4
 ```
 
 - **Bathing:** seated body (e.g. a shower chair); upper-arm elevation ≥75° from
@@ -2741,6 +2763,12 @@ the persona's comfort costs:
   the armrest's height band (−0.22 to −0.08 m in Y) beside the thigh. The YAML
   `arm:` starts the arm hanging off the side of the chair, with ~34° of elbow
   flexion so the start already respects the elbow-contracture personas.
+
+- **Elbow extension** (`elbow_extension.yaml`): passive range of motion, the elbow
+  straightened to within 20° of full extension (a `features` goal on
+  `elbow_flexion` alone; where the arm is held meanwhile is free). The task the
+  speed evaluation uses for the spasticity persona, since nothing but elbow
+  extension reaches it.
 
 These are positioning proxies: tables, armrests, pillows and garments are
 neither simulated nor drawn.
@@ -3073,6 +3101,52 @@ persona judges each option exactly as it is tracked.
 
 ## Cost-generation backends
 
+### Generated limits: the margin contract
+
+Generated code defines constraints, not costs. It returns margins: `(N, T)` tensors over
+the feature series, in physical units, positive where a limit is violated. Path limits go
+in `path_margins(features, params)` (pose features, radians) and speed limits in
+`speed_margins(features, params)` (pose and speed features; rad/s or m/s); each returns
+`{name: margin}`. The code never writes a weight or a penalty; the system does:
+
+- **In the planner a limit is hard.** The cost is `llm_cost.limit_weight` (default 1000)
+  times the worst step's excess, linear, summed over margins: not squared, not averaged
+  over time. A path limit is charged only beyond the excess the arm already has at its
+  current state, so starting past a limit does not make every plan infeasible; the arm
+  must go no further past it. A small extra cost, `llm_cost.pullback_weight` (default 10)
+  times the path excess averaged over the rollout, brings such an arm back inside.
+  `llm_cost.enforcement: soft` (default `hard`) swaps both for the soft form steering
+  uses, each margin's squared excess averaged over the rollout at unit weight, for
+  comparing hard against soft enforcement.
+- **A chosen correction is played back as chosen**, exempt from learned limits.
+- **The motion generator is steered by a smooth form** with a gradient, the squared excess
+  averaged over time, of fixed scale: `feedback.uq.steering.guidance_weight` (default 1e5)
+  weighs path limits (rad²) and `feedback.uq.steering.speed_guidance_weight` (default 1e3)
+  speed limits ((rad/s)², (m/s)²).
+- **Admission is ordering only** (`rank_candidate_cost`, `require_admission`), in physical
+  units, over exactly three kinds of motion: the chosen correction, the interrupted
+  original plan, and the candidates the person explicitly rejected. The chosen correction's
+  worst-step excess must be strictly smaller than each of the others'. Limits are not
+  rejected because the chosen correction itself exceeds them. Path limits are scored on
+  arclength-resampled paths, speed limits frame for frame. The goal-reach rollout check is
+  separate and unchanged.
+- **The target is what the person saw**: executed history plus the chosen correction. The
+  comfort-only continuation to the goal is no longer appended to it.
+- **Accepted versus preferred.** Motion executed without complaint is accepted and must
+  stay inside every limit; a chosen correction was only preferred to what it replaced.
+  Consolidation may therefore end with a limit stricter than an earlier chosen correction,
+  as long as that correction still beats the plan it replaced; `CombineCostGenerator`
+  verifies both on every round and fails otherwise (the stacked costs then stay).
+- **After a complaint the history is cut a fixed `corrections.history_cut` steps back**
+  (default 10): feedback is taken to be given there, the motion up to there accepted, the
+  rest discarded. Nothing about the person's hidden limit is read. On 163 complaints in
+  saved episodes the last frame inside the hidden limit was 1 to 5 steps back (median 1),
+  so 10 steps covers all of them.
+
+The prompts (`runtime_api.txt`, `output_contract.txt`, `stages/*.txt`) ask for this
+contract, list the speed features with units and signs, and allow speed features only
+when the instruction is about speed; positions stay disallowed.
+
 `llm_cost.backend` selects how the cost is generated:
 
 Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation uses
@@ -3186,7 +3260,7 @@ discomfort report. Every generated-cost backend uses this corpus to keep previou
 accepted poses unpenalized, so goals that never trigger a correction still contribute
 negative evidence. The `llm` and `turns` backends receive numeric per-entry feature
 ranges; after authoring, all backends are checked directly on every accepted pose and
-the cost is rejected if any receives positive cost. Before an agent run, the relevant
+the limits are rejected if any accepted pose is past a path limit. Before an agent run, the relevant
 trajectory and feature files are copied into its task workspace and the oracle-derived
 `feedback_text` and `trigger_violation` fields are removed from the staged manifest.
 The original manifest remains unchanged for the demo UI and session history; only
@@ -3291,9 +3365,11 @@ cost learning. `benchmark/cost_learning.yaml` is the six personas with curated g
 `mdm_llm_transfer.yaml`, everyday feedback, one goal each, five rounds. Every arm plans on
 the person the config describes (`Human(pose=cfg.pose, arm=cfg.arm)`), and MDM is loaded
 only for the arms that ground with it. Feedback
-rounds are anchored on the last frame before the trigger with no violation (as
-`build_sampled_case` does), since the simulated user rejects any candidate whose frames
-violate and every candidate starts at the feedback pose. The verbalizer's feature dead band
+rounds are given a fixed `corrections.history_cut` steps (default 10) before the trigger:
+the motion up to there is the accepted history and the rest is discarded. The cut reads
+nothing of the persona's hidden limit; on saved episodes the last frame inside the limit
+lay 1 to 5 steps before the complaint, so the feedback pose is inside it. A trigger in a
+segment's first `history_cut` steps cuts back to that segment's first frame. The verbalizer's feature dead band
 (`FEATURE_DEAD_BAND` in `simulated_users/verbalizers.py`, and `has_feedback_content`'s
 default) is 0.05 rad: at the former 0.15 rad a marginal re-violation left the persona with
 nothing to say and ended the episode as `no_feedback_content`.
@@ -3477,7 +3553,7 @@ persona's first goal, a full `run_episode` under `task_NN_.../learn`, and keeps 
 Every later goal is then probed (`benchmarks/transfer.py`, `probe_menu`): the goal is rolled
 with the base comfort costs only, so the feedback situation is the same for every approach and
 exists even when the learned cost would have avoided it; the persona attributes and verbalizes
-at the last clean frame before the trigger, the approach proposes its menu there, and each
+`corrections.history_cut` steps before the trigger, the approach proposes its menu there, and each
 candidate is scored by the grounding `correction_violation` against the hidden bound
 (`metrics/cost_learning/menu.py`, `menu_rows`, one record per candidate as proposed, before the
 chooser's magnitude). Each probe starts where the persona's oracle execution of the previous
@@ -3509,6 +3585,104 @@ the weight did not change that fraction). Of the learning arms, `full` steers ea
 with the bounds it learned on the first goal, so it is the arm the metric tests: compare it with
 `no_steering` (the same learning, unsteered menus) and `full_hidden_limit_steering` (the
 hidden-limit ceiling).
+
+### Speed limits: features and the three-arm limit evaluation
+
+**One clock.** The planner keeps no clock of its own; one planner step is declared
+to last `arm_features.STEP_SECONDS` = 0.05 s, the length of an MDM frame (20 fps): a
+played-back correction advances one MDM frame per step, and the fine-tuning clips are
+planner rollouts stored one step per frame. Every speed below is in real units on
+that clock.
+
+**Speed features.** `arm_features.arm_motion_series(trajectory, context, dt)` returns,
+for every frame after the first, the five pose features plus `wrist_speed` and
+`elbow_speed` (m/s, relative to the torso) and the signed `<feature>_rate` of each
+pose feature (rad/s; `SPEED_FEATURE_NAMES`), each measured over the step into that
+frame. Generated `speed_margins` read them from the same `features` dict as the pose
+features (`features['elbow_flexion_rate']`, shape `(N, T)`). MDM steering computes
+the same features differentiably from the sample's joint positions
+(`torch_features.motion_features`, at 20 fps), including the step from the last
+pinned prefix frame into the first free frame, so a jump out of the prefix counts as
+speed; shoulder rotation and its rate are the one feature positions cannot give.
+
+**Checking and enforcement** follow the margin contract ("Generated limits" under
+Cost-generation backends): speed limits are admitted by the same ordering test as path
+limits, scored frame for frame instead of arclength-resampled, and enforced by the
+planner's hard penalty alone. Nothing slows the executed step, and a chosen correction is
+played back as chosen. The penalty charges the planner's own sampling noise, so a cap
+near the per-step noise speed stops the arm short of the goal (table below).
+
+**Evaluation.** `evaluation/run_speed_eval.py` compares the old soft penalty with the hard one on
+hidden limits, speed or path, and needs no LLM and no motion generator:
+
+```bash
+# the reach alone
+uv run python evaluation/run_speed_eval.py --out-dir outputs/speed_eval
+# a correction played back first, then the reach
+uv run python evaluation/run_speed_eval.py --out-dir outputs/speed_eval_playback \
+    --correction <run>/task_NN_<persona>_<verbalizer>/goal_00/round_00/trajectories.npz
+```
+
+Per persona (`--personas`, default the two speed personas; `adhesive_capsulitis` and
+`elbow_contracture` run the same comparison for a path limit), care task (`--tasks`,
+default `elbow_extension bathing transfer`) and sampled start (`--starts` kept per pair,
+out of `--max-attempts` draws; `--seed`), the arm follows the correction (`correction_q`,
+`(T, 7)`, in the `--correction` npz, re-anchored on the start; every round's
+`trajectories.npz` from `run_episode` holds one, so a saved MDM correction can be
+replayed without a GPU) and then reaches for the task's goal under three arms
+(`evaluation/benchmarks/speed.py`): `none` (base costs only), `hidden_soft` (the
+persona's hidden limit as the old soft cost, `--weight` (default 10) times the squared
+excess averaged over the horizon) and `constraint` (the same limit hand-written as
+margins, `CONSTRAINTS`, installed as a `GeneratedPythonCost` like a learned one and so
+charged hard, at `--limit-weight`, default 1000, plus `--pullback-weight`, default 10,
+for staying past a path limit). Playback is the same motion in every
+arm. A start is kept when it is inside the persona's path bounds, the task's base costs
+are zero there, the `none` arm reaches the goal and the persona complains about it.
+Outputs: `speed_eval.csv`, one row per run (`reached`; `over_limit_share`, the share of
+executed steps over a hidden limit, and `peak_excess` in the limit's `unit`, from
+`evaluation/metrics/speed.py`, for the whole motion and as `playback_*` / `reach_*` for
+the correction playback and the goal reach apart, NaN for a stretch with no step;
+`duration_s` and `duration_ratio` against the `none` arm; `complaint_step` and
+`complaint`, when and what the persona would say), `summary.csv` (means per persona and
+arm), `runs/<persona>_<task>_<start>.npz` (each arm's executed `(T, 7)` motion and its
+`playback_steps`) and, for each persona's first kept start,
+`videos/<persona>_{none,constraint}.mp4` (playback orange, reach blue, steps over the
+hidden limit red; 20 fps, so real time).
+
+Measured 2026-11-15 (seed 0, three starts per persona and task, the reach segment; every
+run reached its goal). Share of reach steps over the hidden limit / mean peak excess /
+duration of the whole run against `none`:
+
+| Run | Persona | `none` | `hidden_soft`, weight 10 | `constraint` (hard, weight 1000) |
+|---|---|---|---|---|
+| reach only | `moved_too_fast` (6 starts) | 26.8% / 0.099 m/s | 21.8% / 0.051 m/s / 1.01x | 0% / 0 / 1.10x |
+| reach only | `spastic_elbow_flexors` (8) | 39.3% / 0.445 rad/s | 11.9% / 0.026 rad/s / 1.59x | 0% / 0 / 1.84x |
+| after a correction | `moved_too_fast` (9) | 14.4% / 0.078 m/s | 13.7% / 0.043 m/s / 1.01x | 0% / 0 / 1.04x |
+| after a correction | `spastic_elbow_flexors` (9) | 36.6% / 0.341 rad/s | 11.4% / 0.034 rad/s / 1.20x | 0% / 0 / 1.27x |
+| reach only | `adhesive_capsulitis` (2) | 18.6% / 0.223 rad | 3.1% / 0.002 rad / 1.13x | 0% / 0 / 1.15x |
+| reach only | `elbow_contracture` (4) | 17.4% / 0.081 rad | 0.8% / 0.001 rad / 1.28x | 0% / 0 / 1.38x |
+| after a correction | `elbow_contracture` (10, 8 with a reach) | 46.2% / 0.133 rad | 11.7% / 0.039 rad / 1.02x | 11.5% / 0.032 rad / 1.03x |
+
+The table predates the pull-back cost (`--pullback-weight 0` reproduces it). Rerun
+2026-11-16 on the last row, the `constraint` arm by pull-back weight:
+
+| `--pullback-weight` | reach steps over the limit | duration against `none` |
+|---|---|---|
+| 0 | 11.5% | 1.03x |
+| 1 | 6.8% | 1.04x |
+| 10 (default) | 5.5% | 1.04x |
+| 100 | 5.2% | 1.05x |
+
+The replayed correction (a saved MDM sample, wrist up to 0.67 m/s) is itself over the
+`moved_too_fast` limit on 25.1% of its steps and leaves the `elbow_contracture` arm up to
+0.137 rad past its limit in two of ten starts. Those two account for all of the
+`constraint` arm's reach-segment excess in the last row: a limit charged only beyond the
+start lets the arm stay as far past it as playback left it, never further, where the soft
+cost pulls it back sooner. With the pull-back cost at 10 the arm is back inside about
+0.5 s after playback ends in those two starts, against about 1 s without it; the
+remaining excess is the return itself, which the per-step joint limit paces. Tight caps (`elbow_extension`, spasticity floor scaled down,
+three starts): 0.14 and 0.07 rad/s reach the goal from 3 of 3 with no step over the cap,
+0.035 and 0.0175 rad/s stall from all 3.
 
 ### Grounding metrics on sampled cases
 
@@ -3646,8 +3820,9 @@ with that seed — verified against `manifest.json`'s recorded `motion_facts`.
 `--first-case` shifts the range for held-out cases.
 
 Per case this writes `case_NNN_overlay.png` (3-view overlay: oracle correction in
-green, nominal continuation in red, shared feedback pose (the last comfortable
-frame before the trigger) in orange, goal star),
+green, nominal continuation in red, shared feedback pose (for clip cases the last
+naive frame inside the bound, for persona cases `corrections.history_cut` steps before
+the trigger) in orange, goal star),
 `case_NNN_bound.png` (the bounded feature over time with the forbidden region
 shaded and both futures traced through it — the only legible view when the bound
 is on a rotation), `case_NNN_oracle.mp4` / `case_NNN_nominal.mp4`, and one

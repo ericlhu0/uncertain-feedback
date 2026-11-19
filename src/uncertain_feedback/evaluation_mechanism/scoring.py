@@ -1,7 +1,7 @@
-"""Score a generated cost against the preferences the user actually revealed.
+"""Score generated limits against the preferences the user actually revealed.
 
-This is the evaluation mechanism the cost generators use on their own output: rank a
-candidate cost by how it orders the revealed preference pairs
+This is the evaluation mechanism the cost generators use on their own output: admit
+candidate limits by how they order the revealed preference pairs
 (:func:`rank_candidate_cost`), measure how closely the cost's rollout tracks the
 correction (:func:`evaluate_candidate_cost`), check the Cartesian goal is still
 reached (:func:`goal_reach_report`), and render the rollout-vs-correction comparison
@@ -31,60 +31,64 @@ from uncertain_feedback.planners.mpc.costs.generated import (
 
 @dataclass(frozen=True)
 class CostRanking:
-    """How a candidate cost orders the preferences the user actually revealed.
+    """How candidate limits order the preferences the user actually revealed.
 
-    ``rank_accuracy`` is the fraction of preference pairs the cost orders
-    correctly; ``normalized_margin`` is the mean z-scored separation of the chosen
-    correction below the alternatives (a scale-free tiebreak, not a gate).
-    ``inert`` marks a cost that returned (near-)identical values for every
-    trajectory — it never discriminates, so its ranking is vacuous.
+    ``excess`` is each motion's worst-step excess over the limits, summed over
+    margins, in physical units (rad, rad/s, m/s). ``rank_accuracy`` is the
+    fraction of the alternatives (the interrupted plan, every rejected
+    candidate) whose excess is strictly larger than the chosen correction's;
+    ``separation`` is their mean excess above the chosen one's (a tiebreak, not
+    a gate). ``inert`` marks limits every motion exceeds equally.
     """
 
     rank_accuracy: float
-    normalized_margin: float
+    separation: float
     inert: bool
-    costs: dict[str, float]
+    excess: dict[str, float]
 
     @property
-    def improves_original_plan(self) -> bool | None:
-        """Whether the chosen correction costs strictly less than the original plan."""
-        chosen = self.costs.get("chosen_correction")
-        original = self.costs.get("original_plan")
-        if chosen is None or original is None:
-            return None
-        return chosen < original
+    def admitted(self) -> bool:
+        """Whether the chosen correction's excess is strictly below every other's.
+
+        Ordering only: the chosen correction may itself exceed the limits.
+        """
+        return self.rank_accuracy == 1.0
 
     @property
     def sort_key(self) -> tuple[float, float]:
-        """Lower-is-better selection key: rank accuracy first, margin as tiebreak."""
+        """Lower-is-better selection key: rank accuracy first, separation as tiebreak."""
         if self.inert:
             return (math.inf, math.inf)
-        return (1.0 - self.rank_accuracy, -self.normalized_margin)
+        return (1.0 - self.rank_accuracy, -self.separation)
 
     def as_json(self) -> dict[str, Any]:
         """JSON-safe payload for score/rationale artifacts."""
         return {
             "rank_accuracy": self.rank_accuracy,
-            "normalized_margin": self.normalized_margin,
+            "separation": self.separation,
             "inert": self.inert,
-            "improves_original_plan": self.improves_original_plan,
-            "costs": self.costs,
+            "admitted": self.admitted,
+            "excess": self.excess,
         }
 
 
 def rank_candidate_cost(
     context: GeneratedCostContext, cost: GeneratedPythonCost
 ) -> CostRanking | None:
-    """Evaluate a candidate cost by ranking consistency, not trajectory matching.
+    """Order the motions the user ranked by how far each exceeds candidate limits.
 
-    The cost function itself is applied to the trajectories whose preference order
-    the user revealed: the chosen correction (``mdm_traj``) must cost strictly less
-    than the original plan the user interrupted (``reference_traj``) and every
-    cluster the user explicitly marked undesirable (``rejected_trajs``).
-    Any cost that captures the intent satisfies this; recreating the correction
-    trajectory is not required. All trajectories are resampled to equidistant
-    joint-space points first (timing is a pipeline artifact, not intent) and
-    compared after z-normalization (generated costs have arbitrary scale).
+    Exactly three kinds of motion count: the chosen correction (``mdm_traj``),
+    the plan the user interrupted (``reference_traj``) and the candidates they
+    explicitly rejected (``rejected_trajs``). Limits are admitted when the
+    chosen correction's excess is strictly smaller than each of the others'
+    (:attr:`CostRanking.admitted`); whether the chosen correction itself stays
+    inside them does not matter. Excess is the planner's own measure
+    (:meth:`GeneratedPythonCost.path_excess` / ``speed_excess``): the worst
+    step, in physical units, path limits only beyond the shared start pose.
+    Path limits see every motion resampled to equidistant joint-space points
+    (timing is not their business); speed limits see each one frame for frame,
+    all on one clock, a planner step and an MDM frame both lasting
+    ``STEP_SECONDS``.
 
     Returns ``None`` when the context has no comparison trajectories (no reference
     rollout and no marked-undesirable clusters), in which case callers fall back to
@@ -102,27 +106,18 @@ def rank_candidate_cost(
         return None
     trajs["chosen_correction"] = chosen
     n = max(traj.shape[0] for traj in trajs.values())
-    batch = np.stack([resample_equidistant(traj, n) for traj in trajs.values()])
-    raw = np.asarray(cost(batch), dtype=np.float64)
-    costs = {name: float(value) for name, value in zip(trajs, raw)}
-    if not np.all(np.isfinite(raw)) or float(raw.std()) < 1e-12:
-        return CostRanking(0.0, 0.0, True, costs)
-    z = dict(zip(trajs, (raw - raw.mean()) / raw.std()))
-    z_chosen = z["chosen_correction"]
-    pairs: list[bool] = []
-    margins: list[float] = []
-    if "original_plan" in z:
-        pairs.append(bool(z_chosen < z["original_plan"]))
-        margins.append(float(z["original_plan"] - z_chosen))
-    for name in trajs:
-        if name.startswith("rejected_cluster_"):
-            pairs.append(bool(z_chosen < z[name]))
-            margins.append(float(z[name] - z_chosen))
+    path = cost.path_excess(
+        np.stack([resample_equidistant(traj, n) for traj in trajs.values()])
+    )
+    speed = [cost.speed_excess(traj[np.newaxis])[0] for traj in trajs.values()]
+    excess = {name: float(value) for name, value in zip(trajs, path + np.array(speed))}
+    others = [value for name, value in excess.items() if name != "chosen_correction"]
+    above = np.array(others) - excess["chosen_correction"]
     return CostRanking(
-        rank_accuracy=float(np.mean(pairs)),
-        normalized_margin=float(np.mean(margins)),
-        inert=False,
-        costs=costs,
+        rank_accuracy=float(np.mean(above > 0.0)),
+        separation=float(np.mean(above)),
+        inert=float(np.ptp(list(excess.values()))) < 1e-12,
+        excess=excess,
     )
 
 

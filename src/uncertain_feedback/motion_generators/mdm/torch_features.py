@@ -36,7 +36,7 @@ from typing import Callable, Sequence
 
 import torch
 
-from uncertain_feedback.motion_generators.mdm.mdm_api import N_PREFIX_FRAMES
+from uncertain_feedback.motion_generators.mdm.mdm_api import _FPS, N_PREFIX_FRAMES
 from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedPythonCost,
     generated_cost_feature_dependencies,
@@ -47,19 +47,27 @@ from uncertain_feedback.simulated_users.base import (
     SimulatedUser,
 )
 
-SUPPORTED_FEATURES = (
+_POSE_FEATURES = (
     "elbow_flexion",
     "shoulder_elevation",
     "shoulder_abduction_adduction",
     "shoulder_flexion_extension",
 )
+SUPPORTED_FEATURES = (
+    *_POSE_FEATURES,
+    "wrist_speed",
+    "elbow_speed",
+    *(f"{name}_rate" for name in _POSE_FEATURES),
+)
 
 _RIC_OFFSET = 4  # root rotation/velocity block preceding the RIC positions
 _N_RIC_JOINTS = 21  # SMPL joints minus the root
-# SMPL left shoulder/elbow/wrist (16/18/20) shifted into the root-less RIC block.
-_L_SHOULDER, _L_ELBOW, _L_WRIST = 15, 17, 19
+# SMPL spine3 and left shoulder/elbow/wrist (9/16/18/20) shifted into the
+# root-less RIC block.
+_SPINE3, _L_SHOULDER, _L_ELBOW, _L_WRIST = 8, 15, 17, 19
 
 _ACOS_EPS = 1e-6
+_SPEED_EPS = 1e-12  # a norm has no gradient at zero
 
 
 def flexion_elevation(
@@ -101,6 +109,36 @@ def shoulder_flexion(shoulder: torch.Tensor, elbow: torch.Tensor) -> torch.Tenso
     return torch.asin(upper[..., 2].clamp(-1.0 + _ACOS_EPS, 1.0 - _ACOS_EPS))
 
 
+def motion_features(
+    spine3: torch.Tensor,
+    shoulder: torch.Tensor,
+    elbow: torch.Tensor,
+    wrist: torch.Tensor,
+    dt: float,
+) -> dict[str, torch.Tensor]:
+    """Return pose and speed features for every frame after the first.
+
+    Torch mirror of ``arm_features.arm_motion_series`` for ``(N, T, 3)`` joint
+    positions ``dt`` seconds apart; every series is ``(N, T - 1)``. Speeds are
+    taken relative to ``spine3``, so a swaying body does not count as a moving
+    arm.
+    """
+    flexion, elevation = flexion_elevation(shoulder, elbow, wrist)
+    pose = {
+        "elbow_flexion": flexion,
+        "shoulder_elevation": elevation,
+        "shoulder_abduction_adduction": shoulder_abduction(shoulder, elbow),
+        "shoulder_flexion_extension": shoulder_flexion(shoulder, elbow),
+    }
+    features = {name: values[:, 1:] for name, values in pose.items()}
+    for name, joint in (("wrist_speed", wrist), ("elbow_speed", elbow)):
+        step = (joint - spine3).diff(dim=1)
+        features[name] = (step.pow(2).sum(-1) + _SPEED_EPS).sqrt() / dt
+    for name, values in pose.items():
+        features[f"{name}_rate"] = values.diff(dim=1) / dt
+    return features
+
+
 def features_from_hml(
     x0: torch.Tensor, hml_mean: torch.Tensor, hml_std: torch.Tensor
 ) -> dict[str, torch.Tensor]:
@@ -108,26 +146,23 @@ def features_from_hml(
 
     The frames pinned to the start pose by inpainting are dropped: the trigger
     pose the correction starts from may itself violate the user's bounds, and
-    nothing the sampler does can change it.
+    nothing the sampler does can change it. The last pinned frame is kept as
+    the reference the first free frame's speed is measured from, so a jump out
+    of the prefix counts as speed.
     """
     hml = x0[:, :, 0, :].permute(0, 2, 1)
     denorm = hml * hml_std + hml_mean
     ric = denorm[..., _RIC_OFFSET : _RIC_OFFSET + _N_RIC_JOINTS * 3].reshape(
         *denorm.shape[:2], _N_RIC_JOINTS, 3
     )
-    ric = ric[:, N_PREFIX_FRAMES:]
-    shoulder, elbow, wrist = (
+    ric = ric[:, N_PREFIX_FRAMES - 1 :]
+    return motion_features(
+        ric[:, :, _SPINE3],
         ric[:, :, _L_SHOULDER],
         ric[:, :, _L_ELBOW],
         ric[:, :, _L_WRIST],
+        1.0 / _FPS,
     )
-    flexion, elevation = flexion_elevation(shoulder, elbow, wrist)
-    return {
-        "elbow_flexion": flexion,
-        "shoulder_elevation": elevation,
-        "shoulder_abduction_adduction": shoulder_abduction(shoulder, elbow),
-        "shoulder_flexion_extension": shoulder_flexion(shoulder, elbow),
-    }
 
 
 def bound_violation(bound: Bound, features: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -215,11 +250,15 @@ def build_generated_cost(
     costs: Sequence[GeneratedPythonCost],
     hml_mean: torch.Tensor,
     hml_std: torch.Tensor,
+    speed_scale: float,
 ) -> Callable[[torch.Tensor], torch.Tensor] | None:
-    """Compile generated planner costs into one steering cost over ``x̂0``.
+    """Compile generated limits into one steering cost over ``x̂0``.
 
-    Each cost runs unchanged on the sample's features, so steering penalizes
-    what the planner penalizes. A cost reading a feature positions cannot give
+    The limits are the planner's, evaluated on the sample's features. The
+    planner's penalty (linear, worst step) has no useful gradient, so steering
+    uses a smooth one of fixed scale: each margin's squared excess averaged
+    over time, in rad² for path limits and, times ``speed_scale``, in (rad/s)²
+    or (m/s)² for speed limits. A cost reading a feature positions cannot give
     is left out. Returns ``None`` when no cost is left.
     """
     steerable = [
@@ -238,8 +277,11 @@ def build_generated_cost(
 
     def cost(x0: torch.Tensor) -> torch.Tensor:
         features = features_from_hml(x0, hml_mean, hml_std)
-        return torch.stack([term.feature_cost(features) for term in steerable]).sum(
-            dim=0
-        )
+        total = torch.zeros(x0.shape[0], dtype=x0.dtype, device=x0.device)
+        for term in steerable:
+            for scale, margins in zip((1.0, speed_scale), term.margins(features)):
+                for margin in margins.values():
+                    total = total + scale * margin.clamp(min=0.0).pow(2).mean(dim=1)
+        return total
 
     return cost

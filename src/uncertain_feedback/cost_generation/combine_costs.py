@@ -14,7 +14,11 @@ from uncertain_feedback.cost_generation.agent_costs import (
     AgentCostGenerator,
 )
 from uncertain_feedback.cost_generation.prompts import build_combine_task_body
-from uncertain_feedback.evaluation_mechanism import EvalState, evaluate_candidate_cost
+from uncertain_feedback.evaluation_mechanism import (
+    EvalState,
+    evaluate_candidate_cost,
+    rank_candidate_cost,
+)
 from uncertain_feedback.planners.mpc.costs import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
@@ -186,9 +190,21 @@ class CombineCostGenerator(AgentCostGenerator):
             scores = self._score_rounds(
                 response.code, response.params, response.description
             )
+            scores["verification"] = self._verify_rounds(
+                response.code, response.params, response.description
+            )
             with open(self.run_dir / "scores.json", "w", encoding="utf-8") as file:
                 json.dump(scores, file, indent=2, sort_keys=True)
             self.save_response(response)
+            failures = [
+                f"round {index}: {reason}"
+                for index, checks in scores["verification"].items()
+                for reason in checks["failures"]
+            ]
+            if failures:
+                raise GeneratedCostValidationError(
+                    "unified limits contradict the rounds: " + "; ".join(failures)
+                )
             if install:
                 self.install(cost)
             self._on_success(cost, installed=install)
@@ -211,6 +227,44 @@ class CombineCostGenerator(AgentCostGenerator):
             "per_round": per_round,
             "mean": float(np.mean(list(per_round.values()))),
         }
+
+    def _verify_rounds(
+        self, code: str, params: dict[str, Any], description: str
+    ) -> dict[str, Any]:
+        """Check the unified limits against what each round established.
+
+        Motion executed without complaint was accepted and must stay inside
+        every limit. A chosen correction was only preferred to what it
+        replaced: it may end up past a unified limit, as long as it still
+        exceeds the limits by strictly less than the plan and the candidates
+        it was chosen over.
+        """
+        verification: dict[str, Any] = {}
+        for round_ in self.rounds:
+            state = EvalState.load(round_.state_path)
+            context = state.make_generated_context()
+            cost = GeneratedPythonCost(code, params, context, description)
+            history = state.human.history
+            accepted = float(cost.pose_excess(history).max())
+            if len(history) > 1:
+                accepted += float(cost.speed_excess(history[np.newaxis])[0])
+            ranking = rank_candidate_cost(context, cost)
+            failures = []
+            if accepted > 1e-10:
+                failures.append(
+                    f"executed history exceeds the limits by {accepted:.4g}"
+                )
+            if ranking is not None and not ranking.admitted:
+                failures.append(
+                    "the chosen correction no longer beats what it replaced "
+                    f"({ranking.excess})"
+                )
+            verification[str(round_.index)] = {
+                "accepted_history_excess": accepted,
+                "ordering": None if ranking is None else ranking.as_json(),
+                "failures": failures,
+            }
+        return verification
 
     def _task_md(
         self,
@@ -242,8 +296,8 @@ class CombineCostGenerator(AgentCostGenerator):
         )
         corpus_block = f"{corpus_section}\n\n" if corpus_section else ""
         return (
-            "# Multi-round cost-combination task\n\n"
-            "Write the final unified cost JSON to `response.json`. Open every image "
+            "# Multi-round limit-combination task\n\n"
+            "Write the final unified limits JSON to `response.json`. Open every image "
             "below before drafting it. Treat the round instructions, listed images, "
             "numeric summaries, and sanitized corpus as the complete evidence about "
             "this recipient; simulator definitions and prior runs are intentionally "
@@ -252,12 +306,12 @@ class CombineCostGenerator(AgentCostGenerator):
             "## Required logs\n\n"
             "Maintain `stage_log.md` with `## Literature consulted` (each source and "
             "what you took from it), `## Evidence synthesis`, and "
-            "`## Final unified cost` sections. Maintain `ITERATION_LOG.md`; for each "
+            "`## Final unified limits` sections. Maintain `ITERATION_LOG.md`; for each "
             "candidate, run every command below, open every comparison and angles "
-            "image, and record each round's score, goal-reach result, mismatch, "
-            "whether that round's previously executed trajectory stays feasible under "
-            "the candidate, and resulting revision. The one unified cost must score "
-            "well on every "
+            "image, and record each round's score, goal-reach result, `ordering:` "
+            "line, mismatch, whether that round's executed history stays inside "
+            "every limit, and resulting revision. The one unified set of limits must "
+            "hold up on every "
             f"round.{synthesis_note}\n\n"
             f"{rendered_commands}\n\n{corpus_block}---\n\n{prompt_text}\n"
         )

@@ -36,8 +36,8 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.human import Human
 
 _CODE = (
-    "def cost(features, params):\n"
-    "    return params['weight'] * torch.mean(features['elbow_flexion'] ** 2, dim=1)\n"
+    "def path_margins(features, params):\n"
+    "    return {'bend': features['elbow_flexion'] - params['max']}\n"
 )
 
 
@@ -60,6 +60,9 @@ def _round(tmp_path: Path, index: int) -> CostRound:
         seed=0,
         cartesian=SimpleNamespace(goals=[[0.1, 0.2, 0.3]], threshold=0.05),
         constraints={},
+        llm_cost=SimpleNamespace(
+            limit_weight=1000.0, pullback_weight=10.0, enforcement="hard"
+        ),
         user=f"secret_persona_{index}",
         persona_goals={f"secret_persona_{index}": [[9.0, 9.0, 9.0]]},
     )
@@ -82,7 +85,7 @@ def _round(tmp_path: Path, index: int) -> CostRound:
         round_dir=round_dir,
         state_path=round_dir / "state.pkl",
         cost_code=_CODE,
-        params={"weight": float(index + 1)},
+        params={"max": float(index + 1)},
         summaries={"round": index},
         image_paths=(round_dir / "image.png",),
         trajectory_index=2,
@@ -110,9 +113,9 @@ def test_replace_generated_costs_drops_all_generated_terms() -> None:
     base = JointLimitCost(
         slots=(0,), low=np.full((1, 3), -1.0), high=np.full((1, 3), 1.0)
     )
-    old_a = GeneratedPythonCost(_CODE, {"weight": 1.0}, context)
-    old_b = GeneratedPythonCost(_CODE, {"weight": 2.0}, context)
-    new = GeneratedPythonCost(_CODE, {"weight": 3.0}, context)
+    old_a = GeneratedPythonCost(_CODE, {"max": 1.0}, context)
+    old_b = GeneratedPythonCost(_CODE, {"max": 2.0}, context)
+    new = GeneratedPythonCost(_CODE, {"max": 3.0}, context)
     composite = CompositeTrajectoryCost([base, old_a, old_b])
 
     assert replace_generated_costs(composite, new).terms() == (base, new)
@@ -156,7 +159,7 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
     base = JointLimitCost(
         slots=(0,), low=np.full((1, 3), -1.0), high=np.full((1, 3), 1.0)
     )
-    old = GeneratedPythonCost(_CODE, {"weight": 9.0}, context)
+    old = GeneratedPythonCost(_CODE, {"max": 9.0}, context)
     mpc = ArmMPC(Human(), extra_costs=CompositeTrajectoryCost([base, old]))
     generator = CombineCostGenerator(
         context=context,
@@ -172,7 +175,7 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
         response = {
             "description": "combined",
             "code": _CODE,
-            "params": {"weight": 4.0},
+            "params": {"max": 4.0},
             "explanation": "",
             "recipient_explanation": "",
         }
@@ -208,6 +211,63 @@ def test_combine_generator_writes_per_round_scores_and_replaces(
     assert b"secret_persona_0" not in staged_payload
     assert b"persona_goals" not in staged_payload
     assert not hasattr(EvalState.load(staged_state_path).cfg, "user")
+
+
+def test_combine_verification_keeps_accepted_motion_and_each_rounds_ordering(
+    tmp_path,
+) -> None:
+    human = Human()
+    rest = float(_context().elbow_flexion_angles(human.q[None])[0])
+
+    def bent(start: float, end: float, n: int) -> np.ndarray:
+        q = np.tile(human.q, (n, 1))
+        q[:, 6] += np.linspace(start, end, n)
+        return q
+
+    # Accepted without complaint up to 0.2 past rest; then the person chose a
+    # correction ending at 0.4 over a plan that went on to 0.8.
+    state = EvalState(
+        cfg=SimpleNamespace(  # type: ignore[arg-type]
+            steps=3,
+            horizon=2,
+            n_mpc_samples=4,
+            max_angle_delta=0.01,
+            seed=0,
+            cartesian=None,
+            constraints={},
+            llm_cost=SimpleNamespace(
+                limit_weight=1000.0, pullback_weight=10.0, enforcement="hard"
+            ),
+        ),
+        human=human.reset_human_with_q(bent(0.0, 0.2, 5)[0]).step(
+            bent(0.0, 0.2, 5)[1:]
+        ),
+        correction_traj=bent(0.2, 0.4, 5),
+        window=3,
+        base_extra_costs=CompositeTrajectoryCost(),
+        reference_traj=bent(0.2, 0.8, 5),
+    )
+    state.save(tmp_path / "state.pkl")
+    round_ = replace(_round(tmp_path, 0), state_path=tmp_path / "state.pkl")
+    generator = CombineCostGenerator(
+        context=_context(),
+        instruction="feedback",
+        summaries={},
+        run_dir=tmp_path / "combine",
+        rounds=[round_],
+    )
+
+    def failures(limit: float) -> list[str]:
+        checks = generator._verify_rounds(_CODE, {"max": rest + limit}, "")
+        return checks["0"]["failures"]
+
+    # Stricter than the chosen correction itself, which was only preferred to
+    # the plan: fine, as long as it still goes past the limit by less.
+    assert not failures(0.3)
+    # Accepted motion must stay inside.
+    assert "executed history exceeds" in failures(0.1)[0]
+    # A limit neither motion reaches no longer says why one was chosen.
+    assert "no longer beats what it replaced" in failures(1.0)[0]
 
 
 _requires_sandbox = pytest.mark.skipif(

@@ -38,7 +38,6 @@ from uncertain_feedback.simulated_users import (
     SimulatedUser,
     attribute_correction,
     choose_correction,
-    feedback_anchor,
     first_violation_step,
     violation_metrics,
 )
@@ -254,7 +253,8 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     ``human`` supplies the body (and, without ``task.start_q``, the start arm).
     Per goal: an oracle path (base + hidden cost) defines the persona's ideal;
     the approach plans with its current learned costs; discomfort triggers a
-    feedback round anchored on the last clean frame before the trigger (attribute -> verbalize -> ground -> choose -> learn ->
+    feedback round given ``corrections.history_cut`` steps before the trigger,
+    the motion after that discarded (attribute -> verbalize -> ground -> choose -> learn ->
     continue) until resolution or the round cap. Learned costs persist across
     the goal sequence, so later goals measure accumulated personalization.
 
@@ -366,8 +366,14 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             q_current = rollout[-1]
             continue
 
-        # The executed motion so far; its last frame is where feedback is given.
-        anchor = feedback_anchor(user, human, rollout, trigger)
+        # The executed motion so far; its last frame is where feedback is given:
+        # a fixed number of steps before a complaint (a person speaks late), the
+        # stall pose itself when a proposal was turned down there.
+        anchor = (
+            trigger
+            if before.rejected is not None
+            else max(trigger - cfg.corrections.history_cut, 0)
+        )
         executed = start.step(rollout[1 : anchor + 1])
         approved_spans = _executed_spans(before.approved_spans, 0, anchor)
         min_join = 0
@@ -508,9 +514,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 
             offset = len(executed.history) - 1
             if after.trigger is not None:
-                feedback_step = feedback_anchor(
-                    user, human, continuation, after.trigger
-                )
+                feedback_step = max(after.trigger - cfg.corrections.history_cut, 0)
                 approved_spans += _executed_spans(
                     after.approved_spans, offset, feedback_step
                 )

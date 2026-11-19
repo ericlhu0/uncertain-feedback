@@ -71,7 +71,6 @@ from uncertain_feedback.simulated_users.base import (
     HiddenCostTerm,
     SimulatedUser,
     compute_violations,
-    feedback_anchor,
     first_violation_step,
     violation_metrics,
 )
@@ -346,13 +345,15 @@ class Trajectory:
         """The person a correction starts from: at the pause, else at the start."""
         return self.feedback if self.feedback is not None else self.start
 
-    def set_feedback_frame(self, user: SimulatedUser, body: Human, step: int) -> None:
-        """Give feedback from the last comfortable frame at or before ``step``.
+    def set_feedback_frame(self, step: int, cut: int) -> None:
+        """Give feedback from ``cut`` steps before ``step``.
 
-        The live trajectory stays at ``step``, so resuming without feedback
-        carries on from there; applying a correction rewinds to this frame.
+        ``cut`` is ``corrections.history_cut`` after a discomfort complaint
+        (a person speaks late) and 0 otherwise. The live trajectory stays at
+        ``step``, so resuming without feedback carries on from there; applying
+        a correction rewinds to this frame.
         """
-        self.trigger_step = feedback_anchor(user, body, self.human.history, step)
+        self.trigger_step = max(step - cut, 0)
         self.feedback = self.human.rewind(self.trigger_step)
 
     def advance(self, session: "Session", max_steps: int | None = None) -> None:
@@ -383,7 +384,10 @@ class Trajectory:
                 self.paused = True
                 self.trigger_reason = reason
                 self.trigger_violation = violation
-                self.set_feedback_frame(user, rig.human, self.step)
+                self.set_feedback_frame(
+                    self.step,
+                    rig.cfg.corrections.history_cut if reason == "discomfort" else 0,
+                )
                 if reason == "stalled":
                     proposed = propose_unblocked_path(
                         rig._cfg_with_goal(self.goal), self.human, self.mpc.extra_costs
@@ -618,10 +622,6 @@ class Session:
                     _arm_aa(self.rig, traj.human.q[np.newaxis]),
                 )[0]
             )
-            feedback_step = traj.trigger_step
-            traj.set_feedback_frame(user, self.rig.human, traj.step)
-            if traj.trigger_step != feedback_step:
-                traj.clear_pending_feedback()
             return {"retriggered": True, "trigger_step": traj.trigger_step}
         self._set_trigger()
         return {"retriggered": True, "trigger_step": traj.trigger_step}
@@ -639,7 +639,7 @@ class Session:
             traj.trigger_step = None
             traj.feedback = None
         else:
-            traj.set_feedback_frame(self.user, self.rig.human, detected)
+            traj.set_feedback_frame(detected, self.rig.cfg.corrections.history_cut)
 
     # --- trajectory lifetime ----------------------------------------------
 
@@ -740,7 +740,7 @@ class Session:
                 self.user, rig.human, _arm_aa(rig, traj.human.q[np.newaxis])
             )[0]
         )
-        traj.set_feedback_frame(self.user, rig.human, traj.step)
+        traj.set_feedback_frame(traj.step, 0)
         traj.clear_pending_feedback()
         _log(
             f"correction requested at frame {traj.step}; "
@@ -1193,9 +1193,8 @@ class Session:
         if poses.shape[0] > 1500:
             poses = poses[rng.choice(poses.shape[0], 1500, replace=False)]
         feats = arm_feature_series(poses, self.rig.human)
-        batch = np.repeat(poses[:, None, :], 2, axis=1)
         try:
-            penalty = np.asarray(cost(batch), dtype=np.float64)
+            penalty = cost.pose_excess(poses)
         except Exception:  # pylint: disable=broad-exception-caught
             # pragma: no cover - viz must not sink an expensive cost
             return {

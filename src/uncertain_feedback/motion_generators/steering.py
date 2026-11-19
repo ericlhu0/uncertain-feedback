@@ -52,6 +52,10 @@ class SteeringConfig:
     ``bounds`` is the only cost steering compiles: a learned cost's bounds, or
     ones written in the config. The simulated user's hidden bounds are never a
     fallback, so with no ``bounds`` sampling is unsteered whatever the persona.
+
+    Learned limits steer through a smooth cost of fixed scale, the squared
+    excess averaged over time: ``guidance_weight`` multiplies path limits
+    (rad²) and ``speed_guidance_weight`` speed limits ((rad/s)² or (m/s)²).
     """
 
     mode: str = "cg"
@@ -59,6 +63,7 @@ class SteeringConfig:
     temperature: float = 0.5
     guide_from: int = 10
     guidance_weight: float = 1e5
+    speed_guidance_weight: float = 1e3
     bounds: tuple["Bound", ...] = ()
 
     def __post_init__(self) -> None:
@@ -153,7 +158,9 @@ def build_learned_steering_spec(
     if not isinstance(gen, MdmMotionGenerator):
         print("steering: unsupported backend, sampling unsteered")
         return None
-    cost = gen.build_generated_steering_cost(costs)
+    cost = gen.build_generated_steering_cost(
+        costs, config.speed_guidance_weight / config.guidance_weight
+    )
     if cost is None:
         print("steering: no steerable learned cost, sampling unsteered")
         return None

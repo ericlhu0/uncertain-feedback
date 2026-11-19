@@ -24,6 +24,7 @@ from uncertain_feedback.evaluation_mechanism import (
     EvalState,
     evaluate_and_render,
     goal_reach_report,
+    rank_candidate_cost,
 )
 from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
@@ -158,6 +159,12 @@ def main() -> None:
             f"({report['distance']:.3f} outside the goal region, "
             f"threshold {report['threshold']:.3f}; metres for position goals, "
             "radians for joint-angle goals)"
+        )
+    ranking = rank_candidate_cost(context, cost)
+    if ranking is not None:
+        print(
+            f"[cost-compare] ordering: {json.dumps(ranking.excess)} "
+            f"(admitted: {ranking.admitted})"
         )
     print(f"[cost-compare] comparison image: {image_path}")
     if args.angles_out is not None:

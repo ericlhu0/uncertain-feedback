@@ -28,6 +28,18 @@ FEATURE_NAMES = (
     "shoulder_internal_external_rotation",
 )
 
+# Seconds per planner step. The planner keeps no clock of its own: a played-back
+# correction advances one MDM frame per step and the fine-tuning clips are
+# planner rollouts stored one step per frame, so a step is one MDM frame (20 fps).
+STEP_SECONDS = 0.05
+
+# Cartesian speeds (m/s) and the signed rate of every pose feature (rad/s).
+SPEED_FEATURE_NAMES = (
+    "wrist_speed",
+    "elbow_speed",
+    *(f"{name}_rate" for name in FEATURE_NAMES),
+)
+
 
 class ArmFeatureContext(Protocol):
     """FK state required to interpret an arm trajectory."""
@@ -115,6 +127,53 @@ def arm_feature_series(
         shoulder_rotation,
     )
     return {name: value.reshape(leading) for name, value in zip(FEATURE_NAMES, values)}
+
+
+def arm_motion_series(
+    trajectory: np.ndarray,
+    context: ArmFeatureContext,
+    dt: float = STEP_SECONDS,
+) -> dict[str, np.ndarray]:
+    """Return pose and speed features for every frame after a trajectory's first.
+
+    ``trajectory`` is ``(..., T, 7)`` (or axis-angle) with ``dt`` seconds between
+    frames; every series is ``(..., T - 1)``. Pose features are those of
+    :func:`arm_feature_series` at frames ``1..T-1``. Speed features are measured
+    over the step into each of those frames: ``wrist_speed`` and ``elbow_speed``
+    in m/s relative to the torso, and the signed ``<feature>_rate`` of each pose
+    feature in rad/s.
+    """
+    q = canonical_arm_q(trajectory, context)
+    pose = arm_feature_series(q, context)
+    features = {name: values[..., 1:] for name, values in pose.items()}
+    elbow, wrist = _torso_frame_elbow_wrist(q, context)
+    features["wrist_speed"] = np.linalg.norm(np.diff(wrist, axis=-2), axis=-1) / dt
+    features["elbow_speed"] = np.linalg.norm(np.diff(elbow, axis=-2), axis=-1) / dt
+    for name, values in pose.items():
+        step = np.diff(values, axis=-1)
+        if name == "shoulder_internal_external_rotation":
+            step = (step + np.pi) % (2.0 * np.pi) - np.pi
+        features[f"{name}_rate"] = step / dt
+    return features
+
+
+def _torso_frame_elbow_wrist(
+    q: np.ndarray, context: ArmFeatureContext
+) -> tuple[np.ndarray, np.ndarray]:
+    """Elbow and wrist positions ``(..., 3)`` in the spine3 frame, from spine3."""
+    flat = q.reshape((-1, Q_DIM))
+    bones = np.diff(context.fk.tpose_joints, axis=0)
+    collar = Rotation.from_rotvec(context.fk.collar_aa)
+    clavicle = collar * Rotation.from_rotvec(flat[:, Q_CLAVICLE])
+    upper_arm = clavicle * Rotation.from_rotvec(flat[:, Q_SHOULDER])
+    forearm = upper_arm * Rotation.from_rotvec(
+        flat[:, Q_ELBOW, np.newaxis] * context.fk.elbow_hinge_axis
+    )
+    elbow = (
+        collar.apply(bones[0]) + clavicle.apply(bones[1]) + upper_arm.apply(bones[2])
+    )
+    wrist = elbow + forearm.apply(bones[3])
+    return elbow.reshape((*q.shape[:-1], 3)), wrist.reshape((*q.shape[:-1], 3))
 
 
 def arm_q_from_features(

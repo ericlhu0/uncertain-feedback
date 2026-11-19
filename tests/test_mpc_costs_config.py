@@ -621,6 +621,39 @@ transfer:
     assert cfg.transfer.trigger_threshold == 0.07
 
 
+def test_limit_weights_and_history_cut_are_config_values(tmp_path) -> None:
+    defaults = load_mpc_config(_write_config(tmp_path, _base_yaml("")))
+    assert defaults.corrections.history_cut == 10
+    assert defaults.llm_cost.limit_weight == 1000.0
+    assert defaults.llm_cost.pullback_weight == 10.0
+
+    cfg = load_mpc_config(
+        _write_config(
+            tmp_path,
+            _base_yaml("""
+corrections:
+  history_cut: 4
+llm_cost:
+  limit_weight: 250
+  pullback_weight: 2
+feedback:
+  uq:
+    diffusion_samples: 8
+    steering:
+      guidance_weight: 2.0e5
+      speed_guidance_weight: 500
+"""),
+        )
+    )
+
+    assert cfg.corrections.history_cut == 4
+    assert cfg.llm_cost.limit_weight == 250.0
+    assert cfg.llm_cost.pullback_weight == 2.0
+    assert cfg.feedback is not None and cfg.feedback.uq is not None
+    assert cfg.feedback.uq.steering.guidance_weight == 2.0e5
+    assert cfg.feedback.uq.steering.speed_guidance_weight == 500.0
+
+
 def test_correction_threshold_overrides_legacy_transfer_value(tmp_path) -> None:
     path = _write_config(
         tmp_path,
@@ -1602,28 +1635,47 @@ def test_llm_artifact_run_dir_resolves_relative_to_base_dir(tmp_path) -> None:
     assert run_dir.parent == tmp_path / "llm_cost_artifacts"
 
 
-def test_generated_python_cost_executes_on_joint_features() -> None:
+def test_generated_python_cost_charges_the_worst_step_beyond_the_start() -> None:
+    human = Human()
     context = build_generated_cost_context(
-        Human(),
+        human,
         mdm_traj=np.zeros((3, 3, 3), dtype=np.float64),
         window=5,
+        limit_weight=50.0,
+        pullback_weight=3.0,
     )
-    code = """
-def cost(features, params):
-    violation = torch.clamp(params['min_flexion'] - features['elbow_flexion'], min=0.0)
-    return params['weight'] * torch.mean(violation ** 2, dim=1)
-"""
+    rest = float(context.elbow_flexion_angles(human.q[None])[0])
     generated = GeneratedPythonCost(
-        code=code,
-        params={"min_flexion": 10.0, "weight": 2.0},
+        code=(
+            "def path_margins(features, params):\n"
+            "    return {'bend': features['elbow_flexion'] - params['max']}\n"
+        ),
+        params={"max": rest + 0.05},
         context=context,
     )
-    q_trajs = np.zeros((2, 3, 3, 3), dtype=np.float64)
+    q_trajs = np.tile(human.q, (4, 4, 1))
+    # Elbow bend beyond rest per frame; the limit sits 0.05 beyond rest.
+    q_trajs[:, :, Q_ELBOW] += [
+        [0.0, 0.0, 0.0, 0.0],  # stays inside
+        [0.0, 0.1, 0.3, 0.2],  # worst step 0.25 past the limit
+        [0.2, 0.2, 0.1, 0.0],  # starts 0.15 past it and only comes back
+        [0.2, 0.2, 0.3, 0.1],  # starts 0.15 past it and goes 0.1 further
+    ]
 
-    costs = generated(q_trajs)
-
-    assert costs.shape == (2,)
-    assert np.all(costs > 0.0)
+    # A wall, not a taste: linear in the worst step's excess, not squared, not
+    # averaged; and only the excess beyond what the start already has. On top,
+    # a small cost on the mean excess past the limit itself pulls the arm back.
+    np.testing.assert_allclose(
+        generated.path_excess(q_trajs), [0.0, 0.25, 0.0, 0.1], atol=1e-9
+    )
+    np.testing.assert_allclose(
+        generated.path_lingering(q_trajs), [0.0, 0.15, 0.2 / 3, 0.15], atol=1e-9
+    )
+    np.testing.assert_allclose(generated(q_trajs), [0.0, 12.95, 0.2, 5.45], atol=1e-9)
+    np.testing.assert_allclose(
+        generated.pose_excess(q_trajs[:, 0]), [0.0, 0.0, 0.15, 0.15], atol=1e-9
+    )
+    assert not generated.speed_excess(q_trajs).any()
 
 
 def test_generated_cost_context_named_joint_features_keep_leading_shape() -> None:
@@ -1678,14 +1730,14 @@ def test_generated_python_cost_uses_canonical_shoulder_twist_feature() -> None:
     q_trajs[:, 1, 3:6] = axis * 0.4
     q_trajs[1, 1, :3] = axis * -0.7
     generated = GeneratedPythonCost(
-        code="""def cost(features, params):
-    return torch.mean(features["shoulder_internal_external_rotation"], dim=1)
+        code="""def path_margins(features, params):
+    return {"twist": features["shoulder_internal_external_rotation"] - 0.1}
 """,
         params={},
         context=context,
     )
 
-    np.testing.assert_allclose(generated(q_trajs), [0.4, 0.4], atol=1e-10)
+    np.testing.assert_allclose(generated.path_excess(q_trajs), [0.3, 0.3], atol=1e-10)
 
 
 def test_generated_cost_context_shoulder_component_angles_are_stable() -> None:
@@ -1845,7 +1897,10 @@ def test_generated_python_cost_rejects_bad_shape() -> None:
         window=5,
     )
     generated = GeneratedPythonCost(
-        code="def cost(features, params):\n    return torch.zeros((features['elbow_flexion'].shape[0], 1))",
+        code=(
+            "def path_margins(features, params):\n"
+            "    return {'bad': torch.zeros((features['elbow_flexion'].shape[0], 1))}"
+        ),
         params={},
         context=context,
     )
@@ -1933,8 +1988,8 @@ def test_apply_llm_generated_cost_with_fake_model(tmp_path) -> None:
         "recipient_explanation": (
             "I will help keep your elbow lifted while your arm moves upward."
         ),
-        "params": {"min_flexion": 2.5, "weight": 10.0},
-        "code": "def cost(features, params):\n    violation = torch.clamp(params['min_flexion'] - features['elbow_flexion'], min=0.0)\n    return params['weight'] * torch.mean(violation ** 2, dim=1)\n",
+        "params": {"min_flexion": 2.5},
+        "code": "def path_margins(features, params):\n    return {'floor': params['min_flexion'] - features['elbow_flexion']}\n",
     }
     fake_model = _FakeLlmModel(json.dumps(response))
     mpc = ArmMPC(Human())

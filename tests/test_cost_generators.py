@@ -39,9 +39,9 @@ from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.utils.plot import ArmVisualizer
 
 _COST_CODE = (
-    "def cost(q_trajs, context, params):\n"
-    "    future = q_trajs[:, 1:, 0, 0]\n"
-    "    return params['weight'] * np.mean(future ** 2, axis=1)\n"
+    "def cost(features, params):\n"
+    "    twist = features['shoulder_internal_external_rotation']\n"
+    "    return params['weight'] * torch.mean(twist ** 2, dim=1)\n"
 )
 
 
@@ -180,8 +180,8 @@ def test_llm_generator_runs_three_focused_stages(tmp_path) -> None:
     assert interpret[1] == ["current.png"]
     assert ground[1] is None and author[1] is None
     # Only the author stage carries the code contract.
-    assert "def cost(q_trajs, context, params):" in author[0]
-    assert "def cost(q_trajs, context, params):" not in interpret[0]
+    assert "def cost(features, params):" in author[0]
+    assert "def cost(features, params):" not in interpret[0]
     # Each stage's prompt and raw response are persisted for inspection.
     for stage in ("interpret", "ground", "author"):
         assert (kwargs["run_dir"] / f"{stage}_prompt.txt").exists()
@@ -194,6 +194,24 @@ def test_llm_generator_runs_three_focused_stages(tmp_path) -> None:
     assert (kwargs["run_dir"] / "cost.py").exists()
 
 
+def test_direct_generator_asks_once_with_the_staged_inputs(tmp_path) -> None:
+    fake = _FakeLlmModel(_response())
+    kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="direct"))
+    kwargs["images"] = {"current_cluster_traj_img": Path("current.png")}
+
+    cost = create_cost_generator(**kwargs).generate(install=False)
+
+    assert isinstance(cost, GeneratedPythonCost)
+    assert len(fake.full_output_calls) == 1
+    prompt, images = fake.full_output_calls[0]
+    assert images == ["current.png"]
+    assert kwargs["instruction"] in prompt
+    assert '"mdm_traj"' in prompt
+    assert "def cost(features, params):" in prompt
+    assert (kwargs["run_dir"] / "direct_prompt.txt").exists()
+    assert (kwargs["run_dir"] / "cost.py").exists()
+
+
 def test_all_backends_reject_cost_that_penalizes_comfortable_corpus_pose(
     tmp_path,
 ) -> None:
@@ -201,7 +219,7 @@ def test_all_backends_reject_cost_that_penalizes_comfortable_corpus_pose(
     corpus_dir = _write_corpus(tmp_path, trajectory)
     fake = _FakeLlmModel(_response())
 
-    for backend in ("llm", "turns", "agent"):
+    for backend in ("llm", "turns", "agent", "direct"):
         kwargs = _factory_kwargs(
             tmp_path, fake, LlmCostConfig(backend=backend, use_images=False)
         )
@@ -217,7 +235,7 @@ def test_all_backends_reject_cost_that_penalizes_comfortable_corpus_pose(
 
 def test_llm_grounding_prompt_includes_comfortable_corpus_ranges(tmp_path) -> None:
     trajectory = np.zeros((2, 3, 3), dtype=np.float64)
-    trajectory[1, 2, 0] = 0.5
+    trajectory[1, 0, 0] = 0.5
     corpus_dir = _write_corpus(tmp_path, trajectory)
     fake = _FakeLlmModel(_response())
     kwargs = _factory_kwargs(tmp_path, fake, LlmCostConfig(backend="llm"))
@@ -487,8 +505,8 @@ def test_llm_generator_rejects_cost_that_ties_original_plan(tmp_path) -> None:
 def test_rank_candidate_cost_flags_inert_and_missing_context() -> None:
     context = _ranking_context()
     inert_code = (
-        "def cost(q_trajs, context, params):\n"
-        "    return np.zeros(q_trajs.shape[0])\n"
+        "def cost(features, params):\n"
+        "    return torch.zeros(features['elbow_flexion'].shape[0])\n"
     )
     inert = GeneratedPythonCost(code=inert_code, params={}, context=context)  # type: ignore[arg-type]
     ranking = rank_candidate_cost(context, inert)  # type: ignore[arg-type]

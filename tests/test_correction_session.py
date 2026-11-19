@@ -452,7 +452,7 @@ corrections:
     )
     learned = [
         GeneratedPythonCost(
-            code="def cost(q_trajs, context, params):\n    return np.zeros(len(q_trajs))\n",
+            code="def cost(features, params):\n    return torch.zeros(len(features['elbow_flexion']))\n",
             params={},
             context=context,
             description=f"round {i}",

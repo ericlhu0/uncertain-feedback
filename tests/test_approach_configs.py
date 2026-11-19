@@ -73,7 +73,7 @@ def test_full_without_consolidation_steers_from_the_immediate_learner() -> None:
     approach = _instantiate("full", overrides=["cost_gen=immediate"])
     assert isinstance(approach.cost_gen, ImmediateCostGen)
     assert isinstance(approach.steering, LearnedSteering)
-    assert approach.steering.learned_bounds == approach.cost_gen.learned_bounds
+    assert approach.steering.learned_costs == approach.cost_gen.learned_terms
 
 
 def test_steering_axis_override_disables_cg() -> None:

@@ -1,0 +1,28 @@
+A robot was moving the left arm of a person with limited arm mobility toward a goal when the person interrupted with one spoken instruction. The robot generated several candidate corrections; the person picked one and may have marked others as wrong. Write a cost function over the arm's joint angles that captures the person's preference, so the robot respects it in this motion and in later motions toward other goals.
+
+Instruction:
+{instruction}
+
+{current_cluster_traj_img}
+{other_clusters_traj_img}
+{reference_traj_img}
+In every attached image the chosen correction is the full blue arm, the orange arm is the current pose every candidate starts from, and the gold star is the original wrist goal.
+
+The cost must score the chosen correction strictly lower than the original plan and each marked-wrong candidate, and the arm must still be able to reach the goal under it.
+
+A cost is a sum of one or a few bound terms on the joint features. A term can be:
+- one-sided: penalize a feature below a minimum or above a maximum;
+- two-sided: penalize a feature outside a [low, high] range;
+- pose-dependent: a minimum or maximum on one feature whose threshold moves with another feature, computed per timestep with interp(other feature, anchor values, thresholds).
+Different terms may bound different features. A marked-wrong candidate may have been wrong on a different feature than the one the instruction names.
+Use a pose-dependent term only when the instruction itself relates two joints (e.g. "the higher you lift my arm, the more my elbow should bend"). One correction shows the preference at one pose, so a relationship seen only in these trajectories is not evidence of one; use constant thresholds instead.
+
+Trajectory summaries (radians for joint features). "mdm_traj" is the chosen correction, "reference" the original plan, "current" the current pose, and "candidate_comparison" compares their end values with each marked-wrong candidate ("rejected_ends"):
+{summaries}
+
+Return only a JSON object with keys:
+- "description": the preference in plain words.
+- "code": the cost function source.
+- "params": a dict of the numbers the code reads.
+- "explanation": where each number came from.
+- "recipient_explanation": one or two plain sentences telling the person how their arm will be moved.

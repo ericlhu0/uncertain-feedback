@@ -1,4 +1,4 @@
-"""Tests for steering MDM with the learned preference instead of hidden limits."""
+"""Tests for steering MDM with the learned costs instead of hidden limits."""
 
 # pylint: disable=missing-function-docstring,protected-access
 
@@ -9,109 +9,62 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import torch
 
-from evaluation.approaches import (
-    Approach,
-    ConsolidateCostGen,
-    CostGen,
-    ImmediateCostGen,
-    MdmGrounder,
-)
-from evaluation.approaches.cost_gen.bounds import admissible_bounds, bounds_from_terms
+from evaluation.approaches import Approach, ImmediateCostGen, MdmGrounder
 from evaluation.approaches.cost_gen.structs import RoundContext
 from evaluation.approaches.steering import LearnedSteering
 from uncertain_feedback.evaluation_mechanism import EvalState
-from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
+from uncertain_feedback.motion_generators.mdm.mdm_api import (
+    N_PREFIX_FRAMES,
+    MdmMotionGenerator,
+)
+from uncertain_feedback.motion_generators.mdm.torch_features import (
+    build_generated_cost,
+)
 from uncertain_feedback.motion_generators.steering import SteeringConfig
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
+    build_generated_cost_context,
 )
+from uncertain_feedback.planners.mpc.costs.generated import interp
 from uncertain_feedback.planners.mpc.goal_spaces import PointRegion
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import get_persona
-from uncertain_feedback.simulated_users.base import (
-    CoupledBound,
-    HiddenBound,
-    feature_series,
-)
+from uncertain_feedback.simulated_users.base import feature_series
 
-_ZERO_COST = "def cost(q_trajs, context, params):\n    return np.zeros(len(q_trajs))\n"
+_COUPLED = (
+    "def cost(features, params):\n"
+    "    floor = interp(features['shoulder_elevation'], params['xs'], params['ys'])\n"
+    "    short = torch.clamp(floor - features['elbow_flexion'], min=0.0)\n"
+    "    return torch.mean(short ** 2, dim=1)\n"
+)
+_COUPLED_PARAMS = {"xs": [0.2, 0.6, 1.4], "ys": [0.4, 1.6, 1.8]}
+_ROTATION = (
+    "def cost(features, params):\n"
+    "    twist = features['shoulder_internal_external_rotation']\n"
+    "    return torch.mean(torch.clamp(twist, min=0.0) ** 2, dim=1)\n"
+)
 
 
 class _RecordingGenerator(MdmMotionGenerator):
-    """Records the user each steering cost is compiled for; loads no model."""
+    """Records the costs each steering cost is compiled from; loads no model."""
 
     def __init__(self) -> None:  # pylint: disable=super-init-not-called
         self.compiled: list = []
 
-    def build_user_steering_cost(self, user):
-        self.compiled.append(user)
+    def build_generated_steering_cost(self, costs):
+        self.compiled.append(list(costs))
         return lambda x0: x0.sum()
 
 
-def _elbow_trajectory(human: Human, elbow: float) -> np.ndarray:
-    trajectory = np.repeat(human.q[None], 3, axis=0)
-    trajectory[:, 6] = elbow
-    return trajectory
+def _cost(code: str, params: dict | None = None) -> GeneratedPythonCost:
+    context = build_generated_cost_context(Human(), np.zeros((3, 3, 3)), window=3)
+    return GeneratedPythonCost(code, params or {}, context)
 
 
-def _elbow_flexion(human: Human, elbow: float) -> float:
-    return float(
-        feature_series(human, _elbow_trajectory(human, elbow))["elbow_flexion"][0]
-    )
-
-
-def _state(human: Human, chosen_elbow: float, interrupted_elbow: float) -> EvalState:
-    cfg = SimpleNamespace(
-        steps=3,
-        horizon=2,
-        n_mpc_samples=4,
-        max_angle_delta=0.01,
-        seed=0,
-        cartesian=None,
-        constraints={},
-    )
-    return EvalState(
-        cfg=cfg,  # type: ignore[arg-type]
-        human=human,
-        correction_traj=_elbow_trajectory(human, chosen_elbow),
-        window=3,
-        base_extra_costs=CompositeTrajectoryCost(),
-        reference_traj=_elbow_trajectory(human, interrupted_elbow),
-    )
-
-
-def _learn_round(
-    cost_gen: CostGen, tmp_path: Path, terms: list[dict], state: EvalState
-) -> None:
-    human = state.human
-    ctx = RoundContext(
-        round_dir=tmp_path / f"round_{len(cost_gen._cost_rounds):02d}",
-        goal=PointRegion((0.0, 0.0, 0.0)),
-        utterance_text="keep my elbow straighter",
-        grounding=None,  # type: ignore[arg-type]
-        human=human,
-        event_index=len(cost_gen._cost_rounds),
-        rejected_labels=frozenset(),
-    )
-    ctx.round_dir.mkdir(parents=True)
-    generation = SimpleNamespace(
-        generated_cost=GeneratedPythonCost(
-            _ZERO_COST, {}, state.make_generated_context()
-        ),
-        eval_state=state,
-        summaries={},
-        images={},
-        description="",
-        explanation="",
-        interpretation="",
-        grounding=json.dumps({"terms": terms}),
-    )
-    cost_gen.record(ctx, generation)  # type: ignore[arg-type]
-
-
-def test_learned_steering_compiles_only_the_learned_bounds() -> None:
+def test_learned_steering_compiles_the_learned_costs() -> None:
     user = get_persona("elbow_contracture")
     assert user.bounds, "the persona must have hidden limits to leave unread"
     steering = LearnedSteering()
@@ -120,137 +73,109 @@ def test_learned_steering_compiles_only_the_learned_bounds() -> None:
     assert steering.spec(gen, user, SteeringConfig(), seed=0) is None
     assert not gen.compiled
 
-    learned = (HiddenBound("shoulder_elevation", "upper_bound", high=1.0),)
-    steering.learned_bounds = lambda: learned
+    learned = [_cost(_COUPLED, _COUPLED_PARAMS)]
+    steering.learned_costs = lambda: learned
     assert steering.spec(gen, user, SteeringConfig(), seed=0) is not None
-    assert len(gen.compiled) == 1
-    target = gen.compiled[0]
-    assert target.bounds == learned
-    assert target.joint_limits == ()
+    assert gen.compiled == [learned]
 
 
-def test_terms_become_bounds_and_inadmissible_ones_are_dropped() -> None:
-    human = Human()
-    straight, bent = _elbow_flexion(human, 0.3), _elbow_flexion(human, 1.2)
-    middle = 0.5 * (straight + bent)
-    bounds = bounds_from_terms(
-        [
-            {
-                "feature": "elbow_flexion",
-                "bound_type": "upper_bound",
-                "values": {"threshold": middle},
-            },
-            {
-                "feature": "elbow_flexion",
-                "bound_type": "band",
-                "values": {"low": 0.0, "high": 3.0},
-            },
-            {
-                "feature": "elbow_flexion",
-                "bound_type": "lower_bound",
-                "values": {
-                    "cond_feature": "shoulder_elevation",
-                    "points": [[0.0, 0.1], [1.0, 0.3]],
-                },
-            },
-            {"feature": "elbow_flexion", "bound_type": "upper_bound", "values": {}},
-        ]
+def test_interp_matches_numpy_and_holds_the_end_anchors() -> None:
+    x = np.linspace(-0.5, 2.0, 41)
+    xs, ys = [0.2, 0.6, 1.4], [0.4, 1.6, 1.8]
+    np.testing.assert_allclose(
+        interp(torch.from_numpy(x), xs, ys).numpy(), np.interp(x, xs, ys)
     )
-    upper = HiddenBound("elbow_flexion", "upper_bound", high=middle)
-    assert bounds[0] == upper
-    assert bounds[1:3] == (
-        HiddenBound("elbow_flexion", "lower_bound", low=0.0),
-        HiddenBound("elbow_flexion", "upper_bound", high=3.0),
-    )
-    coupled = bounds[3]
-    assert isinstance(coupled, CoupledBound)
-    assert np.isclose(coupled.intercept, 0.1) and np.isclose(coupled.slope, 0.2)
-    assert len(bounds) == 4  # the malformed term is skipped
-
-    # Straight is chosen and bent was interrupted: only the upper bound both
-    # admits the choice and excludes something the person turned away from.
-    states = [_state(human, chosen_elbow=0.3, interrupted_elbow=1.2)]
-    assert admissible_bounds(bounds[:3], states) == (upper,)
-    flipped = [_state(human, chosen_elbow=1.2, interrupted_elbow=0.3)]
-    assert not admissible_bounds([upper], flipped)
 
 
-def test_learned_bounds_follow_each_round_and_survive_save_load(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_steering_runs_the_planner_cost_on_differentiable_features() -> None:
     human = Human()
-    straight, bent = _elbow_flexion(human, 0.3), _elbow_flexion(human, 1.2)
-    threshold = 0.5 * (straight + bent)
-    terms = [
-        {
-            "feature": "elbow_flexion",
-            "bound_type": "upper_bound",
-            "values": {"threshold": threshold},
-        }
-    ]
-    cost_gen = ConsolidateCostGen()
-    steering = LearnedSteering()
-    approach = Approach("full", MdmGrounder(), cost_gen, steering)
-    assert not steering.learned_bounds()
+    cost = _cost(_COUPLED, _COUPLED_PARAMS)
+    q_trajs = np.repeat(human.q[None, None], 4, axis=1).repeat(2, axis=0)
+    q_trajs[0, :, 6] = np.linspace(0.0, 0.3, 4)
+    q_trajs[1, :, 6] = np.linspace(0.0, 1.5, 4)
 
-    _learn_round(cost_gen, tmp_path, terms, _state(human, 0.3, 1.2))
-    learned = HiddenBound("elbow_flexion", "upper_bound", high=threshold)
-    assert steering.learned_bounds() == (learned,)
+    planned = cost(q_trajs)
+    assert planned[0] > planned[1] >= 0.0
 
-    # Within the attempt a second round stacks, bounds included.
-    looser = [{**terms[0], "values": {"threshold": threshold + 0.02}}]
-    _learn_round(cost_gen, tmp_path, looser, _state(human, 0.3, 1.2))
-    stacked = HiddenBound("elbow_flexion", "upper_bound", high=threshold + 0.02)
-    assert steering.learned_bounds() == (learned, stacked)
-    assert len(cost_gen.learned_terms()) == 2
+    features = {
+        name: torch.tensor(series, requires_grad=True)
+        for name, series in feature_series(human, q_trajs[:, 1:]).items()
+    }
+    steered = cost.feature_cost(features)
+    np.testing.assert_allclose(steered.detach().numpy(), planned)
+    steered.sum().backward()  # type: ignore[no-untyped-call]
+    grad = features["elbow_flexion"].grad
+    assert grad is not None and grad[0].abs().sum() > 0.0
 
-    # A failed consolidation leaves the stack planning.
-    monkeypatch.setattr(cost_gen, "_combine", lambda: None)
-    cost_gen.consolidate()
-    assert len(cost_gen.learned_terms()) == 2
 
-    # A combination's own terms replace both rounds'.
-    combined_terms = [{**terms[0], "values": {"threshold": threshold + 0.01}}]
-    monkeypatch.setattr(
-        cost_gen, "_combine", lambda: (cost_gen._generated[-1], combined_terms)
+def test_generated_steering_cost_skips_features_positions_cannot_give() -> None:
+    mean, std = torch.zeros(263), torch.ones(263)
+    assert build_generated_cost([_cost(_ROTATION)], mean, std) is None
+
+    steer = build_generated_cost(
+        [_cost(_COUPLED, _COUPLED_PARAMS), _cost(_ROTATION)], mean, std
     )
-    cost_gen.consolidate()
-    combined = (HiddenBound("elbow_flexion", "upper_bound", high=threshold + 0.01),)
-    assert steering.learned_bounds() == combined
-    assert len(cost_gen.learned_terms()) == 1
-
-    snapshot = json.loads(json.dumps(cost_gen.snapshot(tmp_path)))
-    resumed = Approach("full", MdmGrounder(), ConsolidateCostGen(), LearnedSteering())
-    resumed.cost_gen.restore(snapshot, tmp_path)
-    assert resumed.steering.learned_bounds() == combined  # type: ignore[attr-defined]
-    assert len(resumed.cost_gen.learned_terms()) == 1
-    assert approach.cost_gen is cost_gen
+    assert steer is not None
+    x0 = torch.randn(3, 263, 1, N_PREFIX_FRAMES + 6, requires_grad=True)
+    value = steer(x0)
+    assert value.shape == (3,)
+    value.sum().backward()  # type: ignore[no-untyped-call]
+    assert x0.grad is not None and torch.isfinite(x0.grad).all()
 
 
-def test_immediate_learning_steers_from_its_stacked_rounds(tmp_path: Path) -> None:
+def _learn_round(cost_gen: ImmediateCostGen, tmp_path: Path, human: Human) -> None:
+    trajectory = np.repeat(human.q[None], 3, axis=0)
+    state = EvalState(
+        cfg=SimpleNamespace(  # type: ignore[arg-type]
+            steps=3,
+            horizon=2,
+            n_mpc_samples=4,
+            max_angle_delta=0.01,
+            seed=0,
+            cartesian=None,
+            constraints={},
+        ),
+        human=human,
+        correction_traj=trajectory,
+        window=3,
+        base_extra_costs=CompositeTrajectoryCost(),
+        reference_traj=trajectory,
+    )
+    ctx = RoundContext(
+        round_dir=tmp_path / f"round_{len(cost_gen._cost_rounds):02d}",
+        goal=PointRegion((0.0, 0.0, 0.0)),
+        utterance_text="keep my elbow bent",
+        grounding=None,  # type: ignore[arg-type]
+        human=human,
+        event_index=len(cost_gen._cost_rounds),
+        rejected_labels=frozenset(),
+    )
+    ctx.round_dir.mkdir(parents=True)
+    generation = SimpleNamespace(
+        generated_cost=GeneratedPythonCost(
+            _COUPLED, _COUPLED_PARAMS, state.make_generated_context()
+        ),
+        eval_state=state,
+        summaries={},
+        images={},
+        description="",
+        explanation="",
+        interpretation="",
+        grounding=json.dumps({"terms": []}),
+    )
+    cost_gen.record(ctx, generation)  # type: ignore[arg-type]
+
+
+def test_learned_steering_follows_the_costs_planning(tmp_path: Path) -> None:
     human = Human()
-    straight, bent = _elbow_flexion(human, 0.3), _elbow_flexion(human, 1.2)
-    threshold = 0.5 * (straight + bent)
-    first = [
-        {
-            "feature": "elbow_flexion",
-            "bound_type": "upper_bound",
-            "values": {"threshold": threshold},
-        }
-    ]
-    second = [{**first[0], "values": {"threshold": threshold + 0.02}}]
     cost_gen = ImmediateCostGen()
     steering = LearnedSteering()
     Approach("full", MdmGrounder(), cost_gen, steering)
-    _learn_round(cost_gen, tmp_path, first, _state(human, 0.3, 1.2))
-    _learn_round(cost_gen, tmp_path, second, _state(human, 0.3, 1.2))
-    assert steering.learned_bounds() == (
-        HiddenBound("elbow_flexion", "upper_bound", high=threshold),
-        HiddenBound("elbow_flexion", "upper_bound", high=threshold + 0.02),
-    )
+    assert not steering.learned_costs()
+    _learn_round(cost_gen, tmp_path, human)
+    _learn_round(cost_gen, tmp_path, human)
+    assert steering.learned_costs() == cost_gen._generated
 
     # A retired round's cost no longer plans, so it no longer steers either.
     cost_gen.retire([cost_gen._generated[0]], "too strict")
-    assert steering.learned_bounds() == (
-        HiddenBound("elbow_flexion", "upper_bound", high=threshold + 0.02),
-    )
+    assert steering.learned_costs() == [cost_gen._generated[1]]

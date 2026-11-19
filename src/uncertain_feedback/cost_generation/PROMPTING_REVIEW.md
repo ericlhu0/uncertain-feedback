@@ -19,10 +19,9 @@ exact path.
 The cost function the LLM must produce has a fixed signature:
 
 ```python
-def cost(q_trajs, context, params):
-    # q_trajs: (n_rollouts, horizon+1, 3, 3) axis-angle for
-    #          [left_shoulder, left_elbow, left_wrist]
-    # returns: finite np.ndarray of shape (n_rollouts,)
+def cost(features, params):
+    # features: {feature name: torch tensor (n_rollouts, horizon)} over the future frames
+    # returns: finite torch tensor of shape (n_rollouts,)
 ```
 
 Everything below exists to steer the LLM toward writing a *good* such function:
@@ -58,6 +57,12 @@ Assembly details:
   conversation revise both the numeric grounding and the code against rollout feedback.
 - `agent` uses `build_staged_task_body`: the same stage heads are inlined into `TASK.md`
   so codex follows the same decomposition.
+- `direct` uses `build_direct_prompt`: no stages. `stages/direct.txt` gets the
+  instruction, the same image lines, and the full summaries, states the ranking
+  requirement and the bound shapes (one-sided, two-sided, pose-dependent via `interp`,
+  terms on different features; pose-dependent only when the instruction relates two
+  joints), and is followed by the runtime API; it asks for the
+  cost JSON keys directly instead of appending the output contract.
 
 ### Image placeholders
 
@@ -102,6 +107,13 @@ Core instructions in the head:
 - **Infer the preferred *set*, not the demonstrated point.** A feature value on the
   chosen trajectory is one example inside a broader comfortable set — convert to a band /
   one-sided bound / tolerance, never an exact target.
+- **A marked-wrong candidate may be wrong on another joint.** The ranking requirement
+  (chosen strictly cheaper than the original plan and every marked-wrong candidate)
+  stays, but when a marked-wrong candidate went further in the requested direction,
+  interpret names the joint that separates it under `secondary` and ground excludes it
+  with a one-sided bound on that joint rather than a band capping the requested
+  direction (simulated users reject any candidate that violates a hidden limit, so a
+  "bend more" candidate can be rejected for being raised too high).
 - **Say one plain caregiver sentence first**, then translate only that into the fewest
   cost terms — usually one destination term, plus at most one posture term. Params ≤ 3.
 - **Capture what distinguishes the CHOSEN path.** The instruction is identical across
@@ -132,33 +144,21 @@ Core instructions in the head:
 
 Appended verbatim to every prompt. Tells the model what it may call inside `cost`:
 
-- **Signature & shapes:** `q_trajs` is `(n_rollouts, horizon+1, 3, 3)` for
-  `[left_shoulder, left_elbow, left_wrist]` axis-angle.
-- **Preferred joint-feature helpers** (return radians, accept any array ending in
-  `(3,3)`):
-  - `context.elbow_flexion_angles(q_trajs)`
-  - `context.shoulder_flexion_extension_angles(q_trajs)` — signed depth (z) component
-  - `context.shoulder_abduction_adduction_angles(q_trajs)` — signed lateral (x),
-    positive = away from torso (left arm)
-  - `context.shoulder_internal_external_rotation_angles(q_trajs)` — signed twist about
-    T-pose upper-arm axis
-  - These are documented as **preference-friendly component-angle approximations in the
-    spine3 frame**, explicitly "not a clinical joint angle decomposition."
-- **Raw joint indexing** `q_trajs[:, :, j, :]` (0=shoulder, 1=elbow, 2=wrist) allowed
-  for advanced cases, with a warning not to pick one arbitrary rotvec component and
-  call it "flexion." Wrist terms only when a wrist-rotation preference is clearly
-  implied (the arm model has no hand joint beyond the wrist).
-- **Cartesian/FK helpers are for UNDERSTANDING only:** `fk_rollouts`, `mdm_positions`,
-  `current_positions`, `joint_index`, `mdm_traj`, `recent_q/recent_positions`. Positions
-  are `(x, y, z)` with **y = up** (a repeated warning: don't use z for height). NumPy
-  indexing only — dict-style `mdm_positions['left_wrist']` raises `TypeError`.
-- Stats like max wrist height should be **read from the Summaries** and hardcoded, not
-  recomputed.
-- `np` available; no imports.
-- Return finite `(n_rollouts,)`.
+- **Signature & shapes:** `features` maps the five joint-feature names to torch
+  tensors `(n_rollouts, horizon)` over the future frames (radians): `elbow_flexion`,
+  `shoulder_flexion_extension`, `shoulder_abduction_adduction`, `shoulder_elevation`,
+  `shoulder_internal_external_rotation`, with the same component-angle descriptions as
+  before. The planner fills it from IK; MDM steering fills it from the diffusion sample
+  and differentiates the same function.
+- **Differentiable:** every penalty is built from a margin (e.g.
+  `torch.clamp(threshold - x, min=0.0) ** 2`); no booleans, counts, masks, branching on
+  tensor values, `.item()` or `.numpy()`.
+- `torch` and `interp(x, xp, fp)` (`np.interp` for tensors) available; no imports.
+- Stats like max wrist height should be **read from the Summaries** and hardcoded.
+- Return a finite torch tensor `(n_rollouts,)`.
 
-**Key line:** _"The returned cost itself must stay joint-space … do not use these
-position outputs to compute it."_
+**Key line:** _"The same function also steers motion generation by gradient, so it
+must be differentiable in the features."_
 
 ---
 
@@ -383,6 +383,7 @@ The stale `defaults to "default"` docstring comment is also now fixed (reads `"1
 | `llm_costs.py` | single-pass staged backend |
 | `turns_costs.py` | multi-turn conversational backend (fixed interpret, ground+author refine) |
 | `agent_costs.py` | codex-CLI agent backend, `TASK.md` authoring |
+| `direct_costs.py` | single-call unstaged backend (`stages/direct.txt`) |
 | `../planners/mpc/costs/generated.py` | runtime context, cost compile/exec |
 | `summaries.py` | summaries JSON, `render_prompt_images` |
 | `../evaluation_mechanism/eval_state.py` | `EvalState` — picklable rollout state for the off-process agent |

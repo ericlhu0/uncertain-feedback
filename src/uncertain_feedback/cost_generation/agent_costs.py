@@ -198,6 +198,7 @@ class AgentCostGenerator(CostGenerator):
 
     _codex_log_label = "agent"
     _stream_codex_output = False
+    _codex_web_search = False
     _response_keys = _RESPONSE_KEYS
 
     def __init__(
@@ -540,6 +541,9 @@ class AgentCostGenerator(CostGenerator):
             for flag in ("--ephemeral", "--ignore-user-config", "--ignore-rules"):
                 if flag not in sandbox_command:
                     sandbox_command.append(flag)
+            if self._codex_web_search:
+                # `codex exec` has no --search flag; this is the config it sets.
+                sandbox_command += ["-c", "web_search=live"]
             sandbox_command.append(prompt)
 
             if executable_path.is_relative_to(Path.home()):

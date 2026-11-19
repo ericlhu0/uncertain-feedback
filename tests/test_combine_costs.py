@@ -36,8 +36,8 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.human import Human
 
 _CODE = (
-    "def cost(q_trajs, context, params):\n"
-    "    return params['weight'] * np.mean(q_trajs[:, 1:] ** 2, axis=(1, 2, 3))\n"
+    "def cost(features, params):\n"
+    "    return params['weight'] * torch.mean(features['elbow_flexion'] ** 2, dim=1)\n"
 )
 
 

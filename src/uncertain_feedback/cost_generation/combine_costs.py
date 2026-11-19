@@ -10,7 +10,6 @@ from typing import Any, Sequence
 import numpy as np
 
 from uncertain_feedback.cost_generation.agent_costs import (
-    _RESPONSE_KEYS,
     _SANDBOX_RENDER_SCRIPT,
     AgentCostGenerator,
 )
@@ -19,7 +18,6 @@ from uncertain_feedback.evaluation_mechanism import EvalState, evaluate_candidat
 from uncertain_feedback.planners.mpc.costs import (
     GeneratedCostValidationError,
     GeneratedPythonCost,
-    extract_json_object,
     replace_generated_costs,
 )
 
@@ -127,7 +125,7 @@ class CombineCostGenerator(AgentCostGenerator):
 
     _codex_log_label = "combine"
     _stream_codex_output = True
-    _response_keys = (*_RESPONSE_KEYS, "terms")
+    _codex_web_search = True
 
     def __init__(
         self,
@@ -138,9 +136,6 @@ class CombineCostGenerator(AgentCostGenerator):
     ) -> None:
         super().__init__(*args, timeout_seconds=timeout_seconds, **kwargs)
         self.rounds = tuple(rounds)
-        # The unified preference as stage-two style bound terms (``terms`` in
-        # the response), which learned steering compiles.
-        self.terms: list[dict[str, Any]] = []
 
     def generate(  # pylint: disable=too-many-locals
         self, install: bool = False
@@ -188,8 +183,6 @@ class CombineCostGenerator(AgentCostGenerator):
             raw = response_path.read_text(encoding="utf-8")
             (self.run_dir / "raw_response.txt").write_text(raw, encoding="utf-8")
             response, cost = self.parse_cost(raw)
-            terms = (extract_json_object(raw) or {}).get("terms")
-            self.terms = terms if isinstance(terms, list) else []
             scores = self._score_rounds(
                 response.code, response.params, response.description
             )
@@ -252,11 +245,13 @@ class CombineCostGenerator(AgentCostGenerator):
             "# Multi-round cost-combination task\n\n"
             "Write the final unified cost JSON to `response.json`. Open every image "
             "below before drafting it. Treat the round instructions, listed images, "
-            "numeric summaries, and sanitized corpus as the complete evidence set; "
-            "simulator definitions and prior runs are intentionally unavailable.\n\n"
+            "numeric summaries, and sanitized corpus as the complete evidence about "
+            "this recipient; simulator definitions and prior runs are intentionally "
+            "unavailable. Published literature informs hypotheses only.\n\n"
             f"## Visual context files\n\n{images}\n\n"
             "## Required logs\n\n"
-            "Maintain `stage_log.md` with `## Evidence synthesis` and "
+            "Maintain `stage_log.md` with `## Literature consulted` (each source and "
+            "what you took from it), `## Evidence synthesis`, and "
             "`## Final unified cost` sections. Maintain `ITERATION_LOG.md`; for each "
             "candidate, run every command below, open every comparison and angles "
             "image, and record each round's score, goal-reach result, mismatch, "

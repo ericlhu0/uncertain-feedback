@@ -58,7 +58,7 @@ class Approach:
                 "cost_gen.source must be 'nominal'."
             )
         if isinstance(steering, LearnedSteering):
-            steering.learned_bounds = cost_gen.learned_bounds
+            steering.learned_costs = cost_gen.learned_terms
         self.name = name
         self.grounder = grounder
         self.cost_gen = cost_gen

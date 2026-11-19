@@ -9,6 +9,8 @@ user correction, all constructed and called the same way:
   (:class:`~uncertain_feedback.cost_generation.turns_costs.TurnsCostGenerator`).
 - ``agent`` — delegates iteration to the ``codex`` CLI
   (:class:`~uncertain_feedback.cost_generation.agent_costs.AgentCostGenerator`).
+- ``direct`` — one unstaged LLM call from the same inputs
+  (:class:`~uncertain_feedback.cost_generation.direct_costs.DirectCostGenerator`).
 
 :class:`CostGenerator` holds the shared inputs and helpers (prompt building, model
 construction, response parsing/validation, artifact saving, installation) so each
@@ -515,6 +517,9 @@ def create_cost_generator(
     from uncertain_feedback.cost_generation.agent_costs import (  # pylint: disable=import-outside-toplevel
         AgentCostGenerator,
     )
+    from uncertain_feedback.cost_generation.direct_costs import (  # pylint: disable=import-outside-toplevel
+        DirectCostGenerator,
+    )
     from uncertain_feedback.cost_generation.llm_costs import (  # pylint: disable=import-outside-toplevel
         LlmCostGenerator,
     )
@@ -546,7 +551,9 @@ def create_cost_generator(
         return TurnsCostGenerator(max_turns=cfg.max_turns, **common)
     if backend == "agent":
         return AgentCostGenerator(codex_cmd=cfg.codex_cmd, **common)
+    if backend == "direct":
+        return DirectCostGenerator(**common)
     raise GeneratedCostValidationError(
         f"unknown cost-generator backend {backend!r}; "
-        "expected one of 'llm', 'turns', 'agent'"
+        "expected one of 'llm', 'turns', 'agent', 'direct'"
     )

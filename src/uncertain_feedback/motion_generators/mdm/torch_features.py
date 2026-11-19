@@ -32,11 +32,15 @@ must stay torch-free (config parsing, the abstract generator interface).
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Sequence
 
 import torch
 
 from uncertain_feedback.motion_generators.mdm.mdm_api import N_PREFIX_FRAMES
+from uncertain_feedback.planners.mpc.costs.generated import (
+    GeneratedPythonCost,
+    generated_cost_feature_dependencies,
+)
 from uncertain_feedback.simulated_users.base import (
     Bound,
     CoupledBound,
@@ -203,5 +207,39 @@ def build_user_bound_cost(
             dim=0
         )
         return (total**2).mean(dim=1)
+
+    return cost
+
+
+def build_generated_cost(
+    costs: Sequence[GeneratedPythonCost],
+    hml_mean: torch.Tensor,
+    hml_std: torch.Tensor,
+) -> Callable[[torch.Tensor], torch.Tensor] | None:
+    """Compile generated planner costs into one steering cost over ``x̂0``.
+
+    Each cost runs unchanged on the sample's features, so steering penalizes
+    what the planner penalizes. A cost reading a feature positions cannot give
+    is left out. Returns ``None`` when no cost is left.
+    """
+    steerable = [
+        cost
+        for cost in costs
+        if set(generated_cost_feature_dependencies(cost.code))
+        <= set(SUPPORTED_FEATURES)
+    ]
+    if len(steerable) < len(costs):
+        print(
+            f"steering: skipping {len(costs) - len(steerable)} learned cost(s) "
+            "that read features steering cannot compute"
+        )
+    if not steerable:
+        return None
+
+    def cost(x0: torch.Tensor) -> torch.Tensor:
+        features = features_from_hml(x0, hml_mean, hml_std)
+        return torch.stack([term.feature_cost(features) for term in steerable]).sum(
+            dim=0
+        )
 
     return cost

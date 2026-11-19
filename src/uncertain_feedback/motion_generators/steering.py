@@ -27,7 +27,7 @@ at module scope: ``torch.Tensor`` appears only in string annotations under
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from uncertain_feedback.motion_generators.base import MotionGenerator
+    from uncertain_feedback.planners.mpc.costs.generated import GeneratedPythonCost
     from uncertain_feedback.simulated_users.base import Bound
 
 STEERING_MODES = ("off", "cg", "resample")
@@ -133,6 +134,28 @@ def build_steering_spec(
     cost = gen.build_user_steering_cost(target)
     if cost is None:
         print("steering: no supported steering bounds, sampling unsteered")
+        return None
+    return SteeringSpec(cost=cost, config=config, seed=seed)
+
+
+def build_learned_steering_spec(
+    gen: MotionGenerator,
+    costs: Sequence[GeneratedPythonCost],
+    config: SteeringConfig,
+    seed: int,
+) -> SteeringSpec | None:
+    """Compile the learned planner costs themselves, or ``None`` if unsteerable."""
+    if config.mode == "off" or not costs:
+        return None
+    # pylint: disable-next=import-outside-toplevel
+    from uncertain_feedback.motion_generators.mdm.mdm_api import MdmMotionGenerator
+
+    if not isinstance(gen, MdmMotionGenerator):
+        print("steering: unsupported backend, sampling unsteered")
+        return None
+    cost = gen.build_generated_steering_cost(costs)
+    if cost is None:
+        print("steering: no steerable learned cost, sampling unsteered")
         return None
     return SteeringSpec(cost=cost, config=config, seed=seed)
 

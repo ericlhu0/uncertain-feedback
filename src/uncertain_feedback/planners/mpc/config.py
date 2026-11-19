@@ -130,7 +130,7 @@ class LlmCostConfig:
     reasoning_effort: str | None = None
 
 
-COST_BACKENDS = {"llm", "turns", "agent"}
+COST_BACKENDS = {"llm", "turns", "agent", "direct"}
 
 
 @dataclass(frozen=True)

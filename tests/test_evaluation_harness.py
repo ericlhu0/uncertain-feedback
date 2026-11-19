@@ -89,16 +89,23 @@ def test_bridge_baseline_episode_smoke(tmp_path: Path) -> None:
     assert result, "episode recorded no interactions"
 
 
+class _JointPin(GeneratedPythonCost):
+    """Penalizes any joint motion: anatomical features alone cannot pin the arm."""
+
+    def __call__(self, q_trajs: np.ndarray) -> np.ndarray:
+        moved = q_trajs[:, 1:] - q_trajs[:, :1]
+        return 1e3 * np.sum(moved.reshape(len(moved), -1) ** 2, axis=1)
+
+
 class _PinnedCostGen(NoCostGen):
     """A learned cost that keeps the arm where it is, so every rollout stalls."""
 
     def __init__(self, human: Human) -> None:
         super().__init__()
-        self.cost = GeneratedPythonCost(
+        self.cost = _JointPin(
             code=(
-                "def cost(q_trajs, context, params):\n"
-                "    return 1e3 * np.sum((q_trajs[:, 1:] - q_trajs[:, :1]) ** 2, "
-                "axis=(1, 2, 3))\n"
+                "def cost(features, params):\n"
+                "    return torch.zeros(len(features['elbow_flexion']))\n"
             ),
             params={},
             context=build_generated_cost_context(
@@ -305,7 +312,7 @@ def test_retire_keeps_rounds_for_consolidation(tmp_path: Path) -> None:
     )
     costs = [
         GeneratedPythonCost(
-            code="def cost(q_trajs, context, params):\n    return np.zeros(len(q_trajs))\n",
+            code="def cost(features, params):\n    return torch.zeros(len(features['elbow_flexion']))\n",
             params={},
             context=context,
         )
@@ -349,7 +356,7 @@ def test_consolidation_sees_the_retired_round_note(tmp_path: Path, monkeypatch) 
     )
     blocking, correcting, combined = (
         GeneratedPythonCost(
-            code="def cost(q_trajs, context, params):\n    return np.zeros(len(q_trajs))\n",
+            code="def cost(features, params):\n    return torch.zeros(len(features['elbow_flexion']))\n",
             params={},
             context=context,
         )
@@ -376,7 +383,7 @@ def test_consolidation_sees_the_retired_round_note(tmp_path: Path, monkeypatch) 
 
     def fake_combine():
         seen.extend(cost_gen._cost_rounds)
-        return combined, []
+        return combined
 
     monkeypatch.setattr(cost_gen, "_combine", fake_combine)
     ctx = RoundContext(
@@ -417,10 +424,9 @@ def test_a_later_run_resumes_what_an_episode_learned(tmp_path: Path) -> None:
     human = Human(pose=cfg.pose, arm=cfg.arm)
     user = get_persona("elbow_contracture")
     episode_dir = tmp_path / "first" / "task_00"
-    # Context-dependent, so a cost recompiled in the wrong round's context shows.
     code = (
-        "def cost(q_trajs, context, params):\n"
-        "    return params['w'] * np.full(len(q_trajs), np.sum(context.mdm_traj))\n"
+        "def cost(features, params):\n"
+        "    return params['w'] * torch.mean(features['elbow_flexion'], dim=1)\n"
     )
     costs, rounds = [], []
     for i in range(2):
@@ -521,7 +527,7 @@ def test_proposal_leaves_out_only_the_blocking_costs(monkeypatch) -> None:
     )
     human = Human(pose=cfg.pose, arm=cfg.arm)
     harmless = GeneratedPythonCost(
-        code="def cost(q_trajs, context, params):\n    return np.zeros(len(q_trajs))\n",
+        code="def cost(features, params):\n    return torch.zeros(len(features['elbow_flexion']))\n",
         params={},
         context=_PinnedCostGen(human).cost.context,
     )

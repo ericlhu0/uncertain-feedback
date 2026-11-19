@@ -26,7 +26,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 import numpy as np
 import yaml
@@ -56,6 +56,7 @@ from uncertain_feedback.motion_generators.steering import (
 )
 
 if TYPE_CHECKING:
+    from uncertain_feedback.planners.mpc.costs.generated import GeneratedPythonCost
     from uncertain_feedback.simulated_users.base import SimulatedUser
 
 _MDM_SUBDIR = MDM_ROOT / "motion-diffusion-model"
@@ -465,21 +466,40 @@ class MdmMotionGenerator(
         Returns ``None`` when none of the persona's bounds can be scored from
         positions alone (see ``torch_features.supported_bounds``).
         """
-        self._ensure_loaded()
-        assert self._hml_mean is not None
-        assert self._hml_std is not None
-        # pylint: disable=import-outside-toplevel
-        import torch
-
+        # pylint: disable-next=import-outside-toplevel
         from uncertain_feedback.motion_generators.mdm.torch_features import (
             build_user_bound_cost,
         )
+
+        return build_user_bound_cost(user, *self._hml_stats())
+
+    def build_generated_steering_cost(
+        self, costs: Sequence[GeneratedPythonCost]
+    ) -> Callable[[Any], Any] | None:
+        """Compile generated planner costs into a steering cost over ``x̂0``.
+
+        Returns ``None`` when every cost reads a feature positions cannot give
+        (see ``torch_features.build_generated_cost``).
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from uncertain_feedback.motion_generators.mdm.torch_features import (
+            build_generated_cost,
+        )
+
+        return build_generated_cost(costs, *self._hml_stats())
+
+    def _hml_stats(self) -> tuple[Any, Any]:
+        """HumanML normalization stats as float32 tensors on the model's device."""
+        self._ensure_loaded()
+        assert self._hml_mean is not None
+        assert self._hml_std is not None
+        import torch  # pylint: disable=import-outside-toplevel
 
         device = self._dist_util.dev()
         # float32 to match x̂0: float64 stats would upcast the autograd graph.
         mean = torch.tensor(self._hml_mean, dtype=torch.float32, device=device)
         std = torch.tensor(self._hml_std, dtype=torch.float32, device=device)
-        return build_user_bound_cost(user, mean, std)
+        return mean, std
 
     def _sample_hml(  # pylint: disable=too-many-locals,too-many-statements
         self,

@@ -7,14 +7,24 @@ from typing import Any, Sequence
 import pandas as pd
 
 from evaluation.benchmarks.structs import Interaction
+from evaluation.metrics.speed import felt_segments, limit_violation
 from uncertain_feedback.simulated_users import violation_metrics
 
 
 def goal_row(interaction: Interaction) -> dict[str, Any]:
-    """One flat record per goal; the unit success-at-k and rounds aggregate over."""
+    """One flat record per goal; the unit success-at-k and rounds aggregate over.
+
+    ``felt_*`` read every motion the persona went through, rewound steps
+    included (:func:`felt_segments`), against its hidden limits: speed limits
+    for a speed persona, path bounds otherwise (:func:`limit_violation`).
+    ``duration_ratio`` is the executed motion's length against the oracle's.
+    """
     task = interaction.task
     executed_metrics = violation_metrics(
         interaction.user, interaction.human, interaction.executed
+    )
+    felt = limit_violation(
+        interaction.user, interaction.human, felt_segments(interaction)
     )
     return {
         "persona": task.persona,
@@ -30,9 +40,14 @@ def goal_row(interaction: Interaction) -> dict[str, Any]:
         "user_turns": interaction.user_turns,
         "proposal_approved": interaction.proposal_approved,
         "violation_count": interaction.violation_count,
+        "speed_complaints": interaction.speed_complaints,
         "executed_mean_violation": float(executed_metrics["mean_violation"]),
         "executed_max_violation": float(executed_metrics["max_violation"]),
+        "felt_over_limit_share": felt["over_limit_share"],
+        "felt_peak_excess": felt["peak_excess"],
         "motion_steps": interaction.motion_steps,
+        "duration_ratio": interaction.motion_steps
+        / max(len(interaction.oracle_path) - 1, 1),
         "robot_seconds": interaction.robot_seconds,
     }
 

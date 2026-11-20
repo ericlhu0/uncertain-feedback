@@ -75,8 +75,8 @@ class InteractionBenchmark(Benchmark):
             names = [name for name, user in PERSONAS.items() if user.bounds]
         tasks: list[InteractionTask] = []
         for persona in names:
-            if not PERSONAS[persona].bounds:
-                raise ValueError(f"Persona {persona!r} has no hidden bounds.")
+            if not (PERSONAS[persona].bounds or PERSONAS[persona].speed_limits):
+                raise ValueError(f"Persona {persona!r} has no hidden limits.")
             goal_seq = self._goal_sequence(persona, cfg)
             if not goal_seq:
                 raise ValueError(f"No goals resolved for persona {persona!r}.")

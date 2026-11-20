@@ -4,12 +4,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 
+from evaluation.approaches import Approach, HiddenLimitCostGen, NoCostGen
+from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
+from evaluation.approaches.grounders.base import ClusterSelector, Grounder
+from evaluation.benchmarks.episode import run_episode
 from evaluation.benchmarks.speed import (
     ARMS,
     CONSTRAINTS,
@@ -17,7 +22,10 @@ from evaluation.benchmarks.speed import (
     run_arm,
     speed_row,
 )
-from evaluation.metrics.speed import limit_violation
+from evaluation.benchmarks.structs import InteractionTask
+from evaluation.metrics.cost_learning.success import goal_row
+from evaluation.metrics.grounding.structs import GroundingResult
+from evaluation.metrics.speed import felt_segments, learned_limit_row, limit_violation
 from uncertain_feedback.evaluation_mechanism.scoring import rank_candidate_cost
 from uncertain_feedback.motion_generators.mdm.mdm_api import N_PREFIX_FRAMES
 from uncertain_feedback.motion_generators.mdm.torch_features import (
@@ -46,15 +54,22 @@ from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import Q_DIM, Q_ELBOW
 from uncertain_feedback.planners.mpc.rollout import run_planning_loop
 from uncertain_feedback.simulated_users import (
+    Complaint,
+    HiddenBound,
     HiddenSpeedTerm,
     SimulatedUser,
     SpeedLimit,
     feature_series,
+    first_complaint,
+    first_violation_step,
     get_persona,
     noticed_speed_limit,
     speed_margins,
     verbalize_speed,
 )
+from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
+
+_REPO = Path(__file__).resolve().parents[1]
 
 _ELBOW_CAP = (
     "def speed_margins(features, params):\n"
@@ -264,6 +279,42 @@ def test_user_notices_a_sustained_speed_not_a_single_fast_step() -> None:
     assert noticed_speed_limit(user, human, human.q[None]) is None
 
 
+def test_first_complaint_is_the_earlier_of_a_path_limit_and_a_noticed_speed() -> None:
+    human = Human()
+    speed = SpeedLimit("elbow_flexion_rate", cap=0.2, direction=-1)
+    q = np.repeat(human.q[None], 20, axis=0)
+    q[:, Q_ELBOW] = 1.0 - 0.015 * np.arange(20)  # 0.3 rad/s extension throughout
+    flexion = feature_series(human, q)["elbow_flexion"]
+
+    def straightened_past(frame: int) -> SimulatedUser:
+        path = HiddenBound("elbow_flexion", "lower_bound", low=float(flexion[frame]))
+        return SimulatedUser("test", "", "", bounds=(path,), speed_limits=(speed,))
+
+    # Five steps in, the window is full and over the cap; a path limit crossed
+    # earlier is complained of first, and on the same frame the path wins.
+    assert first_complaint(straightened_past(12), human, q, 0.0) == Complaint(5, speed)
+    assert first_complaint(straightened_past(2), human, q, 0.0) == Complaint(3)
+    assert first_complaint(straightened_past(4), human, q, 0.0) == Complaint(5)
+    assert first_complaint(_user(speed), human, q[:5]) is None
+    path_only = replace(straightened_past(12), speed_limits=())
+    assert first_complaint(path_only, human, q, 0.0) == Complaint(
+        first_violation_step(path_only, human, q, 0.0) or 0
+    )
+
+    # Executed motion before it fills the window: the same motion played on
+    # from a fast history is noticed at once.
+    history = q[:6] - q[5] + q[0]
+    assert first_complaint(_user(speed), human, q, history=history) == Complaint(
+        0, speed
+    )
+    # Taken as played from the current pose: a candidate starting elsewhere is
+    # not charged for the jump to its first frame.
+    still = np.repeat(human.q[None], 8, axis=0)
+    moved = still.copy()
+    moved[:, Q_ELBOW] -= 1.0
+    assert first_complaint(_user(speed), human, moved, history=still) is None
+
+
 def test_speed_personas_have_a_phrase_for_every_limit() -> None:
     for name in ("moved_too_fast", "spastic_elbow_flexors"):
         user = get_persona(name)
@@ -415,3 +466,125 @@ def test_path_persona_runs_through_the_same_arms() -> None:
     assert limit_violation(user, human, [q[1]])["peak_excess"] == pytest.approx(
         0.5 - flexion.min()
     )
+
+
+class _SlowedDown(Grounder):
+    """Offers the interrupted plan as it was and played at half its speed."""
+
+    def ground(
+        self,
+        text: str,
+        human: Human,
+        nominal_plan: np.ndarray,
+        cluster_selector: ClusterSelector,
+    ) -> GroundingResult:
+        del text
+        frames = np.arange(len(nominal_plan))
+        halves = np.arange(2 * len(nominal_plan) - 1) / 2.0
+        slow = np.stack(
+            [np.interp(halves, frames, joint) for joint in nominal_plan.T], axis=1
+        )
+        candidates = {
+            0: human.arm_aa_from_q(nominal_plan),
+            1: human.arm_aa_from_q(slow),
+        }
+        label, magnitude = cluster_selector(candidates)
+        return GroundingResult(
+            candidates,
+            label,
+            magnitude,
+            scale_trajectory(candidates[label], magnitude),
+        )
+
+
+class _LearnsTheCap(NoCostGen):
+    """Learns the given limit from the first correction, as if generated."""
+
+    def __init__(self, cost: GeneratedPythonCost) -> None:
+        super().__init__()
+        self.cost = cost
+        self.rounds: list[str] = []
+
+    def learned_terms(self) -> list[GeneratedPythonCost]:
+        return [self.cost] if self.rounds else []
+
+    def learn(self, ctx: RoundContext) -> LearnOutcome:
+        self.rounds.append(ctx.utterance_text)
+        return LearnOutcome(cost_accepted=True, unified_installed=False)
+
+
+def test_a_speed_complaint_runs_the_episode_loop_to_a_learned_cap(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "mpc.yaml"
+    config.write_text(
+        "pose: null\nsteps: 600\nhorizon: 5\nn_mpc_samples: 64\n"
+        "max_angle_delta: 0.004\n"
+        "cartesian:\n  goals:\n    - [0.0, 0.0, 0.0]\n  threshold: 0.03\n"
+    )
+    cfg = load_mpc_config(config)
+    human = Human()
+    limit = SpeedLimit("wrist_speed", cap=0.1)
+    user = replace(get_persona("moved_too_fast"), speed_limits=(limit,))
+    goal = PointRegion(human.wrist_from_q(human.q) + np.array([-0.1, -0.12, 0.1]))
+    task = InteractionTask(user.name, "joint_resolved", (goal,), max_rounds=2, seed=0)
+    learner = _LearnsTheCap(
+        _cost(
+            human,
+            "def speed_margins(features, params):\n"
+            "    return {'hand': features['wrist_speed'] - params['cap']}\n",
+            {"cap": 0.1},
+        )
+    )
+    approach = Approach("learns_the_cap", _SlowedDown(), learner)
+    approach.reset(cfg, human, None, user, task.seed, tmp_path / "episode")
+
+    goal_run = run_episode(cfg, human, user, task, approach, tmp_path / "episode")[0]
+
+    (round_,) = goal_run.rounds
+    assert goal_run.trigger_step is not None
+    assert goal_run.trigger_speed == limit and goal_run.speed_complaints == 1
+    assert learner.rounds == [verbalize_speed(limit).text] == [round_.utterance.text]
+    # The interrupted plan is refused as too fast; a slowed one is taken.
+    assert not round_.choice.acceptable[0] and round_.choice.acceptable[1]
+    assert round_.grounding.chosen_label == 1
+    # The learned cap holds the replan under the limit to the goal.
+    assert goal_run.result == "ok" and goal_run.reached
+    assert limit_violation(user, human, [round_.continuation])["peak_excess"] == 0.0
+    # The persona felt the motion up to its complaint, then the rewound rest.
+    felt = felt_segments(goal_run)
+    assert len(felt) == 2 and len(felt[0]) == goal_run.trigger_step + 1
+    np.testing.assert_array_equal(felt[1][0], round_.q_feedback)
+    row = goal_row(goal_run)
+    assert row["speed_complaints"] == 1 and row["felt_peak_excess"] > 0.0
+
+
+def test_the_ceiling_plans_with_the_hidden_limit_from_the_start(tmp_path: Path) -> None:
+    cfg = load_mpc_config(_REPO / "evaluation/conf/care_tasks/elbow_extension.yaml")
+    human = Human()
+    user = get_persona("spastic_elbow_flexors")
+    approach = Approach("hidden_limit_ceiling", _SlowedDown(), HiddenLimitCostGen())
+    approach.reset(cfg, human, None, user, 0, tmp_path)
+    (limit,) = approach.cost_gen.learned_terms()
+    assert (limit.code, limit.params) == CONSTRAINTS[user.name]
+    assert limit in approach.planning_costs().terms()
+
+
+@pytest.mark.parametrize("persona", ["moved_too_fast", "spastic_elbow_flexors"])
+def test_the_hidden_limit_written_as_margins_passes_every_check(persona: str) -> None:
+    user = get_persona(persona)
+    code, params = CONSTRAINTS[persona]
+    row = learned_limit_row(code, params, user)
+    assert row["speed_cap"] and row["right_feature"] and row["catches"]
+    assert row["spares_reverse"] is (
+        True if persona == "spastic_elbow_flexors" else None
+    )
+    both_ways = (
+        "def speed_margins(features, params):\n"
+        "    return {'elbow': features['elbow_flexion_rate'].abs() - params['cap']}\n"
+    )
+    assert learned_limit_row(both_ways, {"cap": 0.3}, user)["spares_reverse"] is (
+        False if persona == "spastic_elbow_flexors" else None
+    )
+    path = learned_limit_row(_PATH, {"cap": 1.0}, user)
+    assert not (path["speed_cap"] or path["right_feature"] or path["catches"])

@@ -14,6 +14,7 @@ from uncertain_feedback.simulated_users import (
     CorrectionIntent,
     HiddenBound,
     SimulatedUser,
+    SpeedLimit,
     Utterance,
     choose_correction,
     feature_series,
@@ -115,6 +116,58 @@ def test_robot_top_runs_the_first_candidate_as_proposed(human: Human) -> None:
     )
     assert (result.label, result.magnitude) == (1, 1.0)
     assert result.no_acceptable_cluster
+
+
+def _extension_user(cap: float) -> SimulatedUser:
+    return SimulatedUser(
+        name="test",
+        description="",
+        feedback_text="",
+        bounds=(),
+        speed_limits=(SpeedLimit("elbow_flexion_rate", cap=cap, direction=-1),),
+    )
+
+
+def test_a_candidate_that_moves_too_fast_is_refused_at_its_size(human: Human) -> None:
+    # Straightening 0.02 rad a step (0.4 rad/s); the user tolerates 0.35 rad/s,
+    # so 3/4 of the motion in the same time.
+    oracle = _q_traj(list(np.linspace(1.0, 0.6, 21)))
+    means = {0: human.arm_aa_from_q(_q_traj(list(np.linspace(1.0, 0.6, 21))))}
+    result = choose_correction(
+        _extension_user(0.35), human, means, oracle, mode="progress"
+    )
+    assert not result.no_acceptable_cluster
+    assert (result.label, result.magnitude) == (0, 0.75)
+
+
+def test_speed_is_judged_with_the_executed_history_before_it(human: Human) -> None:
+    # Two fast steps alone are too brief to notice; after three fast executed
+    # steps they complete a noticed window.
+    oracle = _q_traj(list(np.linspace(1.0, 0.9, 6)))
+    means = {0: human.arm_aa_from_q(_q_traj([1.0, 0.95, 0.9]))}
+    user = _extension_user(0.3)
+    alone = choose_correction(user, human, means, oracle, magnitudes=(1.0,))
+    history = _q_traj([1.15, 1.1, 1.05, 1.0])
+    after = choose_correction(
+        user, human, means, oracle, magnitudes=(1.0,), history=history
+    )
+    assert alone.acceptable == {0: True}
+    assert after.acceptable == {0: False} and after.no_acceptable_cluster
+
+
+def test_with_nothing_acceptable_the_least_fast_candidate_is_taken(
+    human: Human,
+) -> None:
+    oracle = _q_traj(list(np.linspace(1.0, 0.2, 21)))
+    means = {
+        0: human.arm_aa_from_q(_q_traj(list(np.linspace(1.0, 0.2, 9)))),
+        1: human.arm_aa_from_q(_q_traj(list(np.linspace(1.0, 0.2, 21)))),
+    }
+    result = choose_correction(
+        _extension_user(0.05), human, means, oracle, mode="progress"
+    )
+    assert result.no_acceptable_cluster
+    assert (result.label, result.magnitude) == (1, 0.5)
 
 
 def _intent(elbow_delta: float) -> CorrectionIntent:

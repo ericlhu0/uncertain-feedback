@@ -29,10 +29,15 @@ from uncertain_feedback.planners.mpc.costs import (
     build_generated_cost_context,
 )
 from uncertain_feedback.planners.mpc.human import Human
-from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
+from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES, Q_ELBOW
 from uncertain_feedback.planners.mpc.rollout import StallProposal
 from uncertain_feedback.planners.run import RunSetup, run_repeated_correction_session
-from uncertain_feedback.simulated_users import HiddenBound, SimulatedUser
+from uncertain_feedback.simulated_users import (
+    Complaint,
+    HiddenBound,
+    SimulatedUser,
+    SpeedLimit,
+)
 
 
 def test_discomfort_before_text_time_consumes_first_trigger() -> None:
@@ -57,6 +62,64 @@ def test_discomfort_rearms_only_after_returning_to_comfort() -> None:
     assert trigger.evaluate(2, 0.02) is None
     assert trigger.evaluate(3, 0.03) == "discomfort"
     assert trigger.evaluate(4, 0.04) is None
+
+
+def test_a_noticed_speed_is_discomfort_and_rearms_the_same_way() -> None:
+    trigger = CorrectionTrigger(threshold=0.02, text_time=None)
+
+    assert trigger.evaluate(0, 0.0) is None
+    assert trigger.evaluate(1, 0.0, too_fast=True) == "discomfort"
+    assert trigger.evaluate(2, 0.0, too_fast=True) is None
+    assert trigger.evaluate(3, 0.0) is None
+    assert trigger.evaluate(4, 0.0, too_fast=True) == "discomfort"
+
+
+def test_session_pauses_once_the_person_notices_the_speed(tmp_path) -> None:
+    human = Human()
+    # Bending the elbow 0.02 rad a step (0.4 rad/s) against a 0.2 rad/s cap.
+    frames = np.repeat(human.q[None], 12, axis=0)
+    frames[:, Q_ELBOW] += 0.02 * np.arange(1, 13)
+    planner = ArmMPC(
+        human, visualize=False, feedback=FeedbackConfig(max_playback_delta=10.0)
+    )
+    planner.push_trajectory(human.arm_aa_from_q(frames))
+    user = SimulatedUser(
+        name="fast",
+        description="",
+        feedback_text="slow down",
+        bounds=(),
+        speed_limits=(SpeedLimit("elbow_flexion_rate", cap=0.2),),
+    )
+    handled: list[tuple[int, str]] = []
+
+    def handle(step, _human, reason, violation, local_index):
+        handled.append((step, reason))
+        return CorrectionRoundResult(
+            round_index=local_index,
+            trajectory_index=0,
+            trigger_step=step,
+            trigger_reason=reason,
+            trigger_violation=violation,
+            feedback_text=user.feedback_text,
+            correction_traj=np.zeros((1, 7)),
+            generated_cost=None,
+            cost_round=None,
+            artifact_dir=tmp_path / f"round_{local_index}",
+        )
+
+    session = CorrectionSession(
+        mpc=planner,
+        user=user,
+        feedback_text=user.feedback_text,
+        trigger_threshold=0.02,
+        text_time=None,
+        artifact_dir=tmp_path,
+        handle_correction=handle,
+    )
+    session.run_trajectory(10)
+
+    # The fifth fast step fills the window; the speed stays up, so once.
+    assert handled == [(5, "discomfort")]
 
 
 def test_unrestricted_trigger_uses_text_time_only() -> None:
@@ -482,7 +545,7 @@ corrections:
             human.step(np.ones((2, 7))), (learned[0],), reached_goal=True
         ),
     )
-    monkeypatch.setattr(run_module, "first_violation_step", lambda *_args: 0)
+    monkeypatch.setattr(run_module, "first_complaint", lambda *_args: Complaint(0))
     combined: dict[str, Any] = {}
 
     class FakeCombine:

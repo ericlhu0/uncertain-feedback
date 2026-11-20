@@ -29,6 +29,8 @@ Modes model different users picking among candidate corrections:
   where they are going and what hurts, but not the oracle's route. Acceptability, and so the rejected
   candidates a learner sees, is identical to ``oracle_progress``.
 
+In every mode a comfortable candidate also never moves the user over a speed
+limit long enough to notice, as it would play (:func:`~.base.first_complaint`).
 Only ``cost_to_go`` reads the sentence; ``intent_aligned`` sees the intent
 behind it.
 """
@@ -54,6 +56,8 @@ from uncertain_feedback.simulated_users.base import (
     SimulatedUser,
     compute_violations,
     feature_series,
+    first_complaint,
+    speed_margins,
 )
 from uncertain_feedback.simulated_users.progress import correction_progress
 from uncertain_feedback.simulated_users.verbalizers import (
@@ -171,16 +175,21 @@ def choose_correction(
     mode: str = "oracle_progress",
     intent: CorrectionIntent | None = None,
     rng: np.random.Generator | None = None,
+    history: np.ndarray | None = None,
     steps_to_goal: Callable[[np.ndarray], float] | None = None,
     utterance: Utterance | None = None,
 ) -> ChoiceResult:
     """Pick a (cluster, magnitude) the user would accept, per ``mode``.
 
-    Candidates whose playback exceeds the pain ``threshold`` at any frame are
-    rejected, matching the execution-time trigger; ``oracle_progress`` rejects
-    any violation at all. When none survives, the lowest peak-violation
-    candidate is returned with ``no_acceptable_cluster=True``. ``robot_top``
-    returns the first candidate at magnitude 1 regardless, flagging the same.
+    A candidate is rejected when the user would complain while it plays, by
+    the execution-time trigger (:func:`first_complaint`): past the pain
+    ``threshold`` at any frame (``oracle_progress`` rejects any violation at
+    all), or moved over a speed limit long enough to notice, at the candidate's
+    size and with ``history``, the motion executed up to its first frame,
+    filling the window. When none survives, the candidate least past the path
+    limits, then least over a speed limit at its fastest step, is returned with
+    ``no_acceptable_cluster=True``. ``robot_top`` returns the first candidate
+    at magnitude 1 regardless, flagging the same.
     """
     if mode not in CHOOSER_MODES:
         raise ValueError(f"Unknown chooser mode {mode!r}; expected {CHOOSER_MODES}.")
@@ -212,7 +221,7 @@ def choose_correction(
     pair_keys: dict[tuple[int, float], tuple[float, ...]] = {}
     # cost_to_go: (_says_so strictly, loosely, candidate) per pair.
     stated_pairs: dict[tuple[int, float], tuple[bool, bool, np.ndarray]] = {}
-    fallback_violation = np.inf
+    fallback_violation = (np.inf, np.inf)
     fallback: tuple[int, float] | None = None
 
     for label in sorted(cluster_means):
@@ -232,15 +241,18 @@ def choose_correction(
                 np.min(np.linalg.norm(tail - end_q, axis=-1) + remaining_arc)
             )
             scores[label] = min(progress, scores.get(label, np.inf))
-            violations = compute_violations(user, human, candidate)
-            peak_violation = float(np.max(violations))
+            peak_violation = (
+                float(np.max(compute_violations(user, human, candidate))),
+                (
+                    float(np.max(speed_margins(user, human, candidate), initial=0.0))
+                    if user.speed_limits
+                    else 0.0
+                ),
+            )
             if peak_violation < fallback_violation:
                 fallback_violation = peak_violation
                 fallback = (label, magnitude)
-            # Any frame past the limit makes the demo painful, so the same
-            # max-based test the execution trigger (first_violation_step) uses
-            # rules the candidate out here.
-            if peak_violation > limit:
+            if first_complaint(user, human, candidate, limit, history) is not None:
                 continue
             acceptable[label] = True
             acceptable_pairs.append((label, magnitude))

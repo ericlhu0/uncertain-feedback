@@ -12,7 +12,11 @@ from uncertain_feedback.planners.mpc import ArmMPC
 from uncertain_feedback.planners.mpc.costs import GeneratedPythonCost
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import run_planning_loop
-from uncertain_feedback.simulated_users import SimulatedUser, compute_violations
+from uncertain_feedback.simulated_users import (
+    SimulatedUser,
+    compute_violations,
+    first_complaint,
+)
 
 if TYPE_CHECKING:
     from uncertain_feedback.cost_generation.combine_costs import CostRound
@@ -43,12 +47,19 @@ class CorrectionTrigger:
         self.discomfort_armed = False
 
     def evaluate(
-        self, step: int, violation: float | None, stalled: bool = False
+        self,
+        step: int,
+        violation: float | None,
+        stalled: bool = False,
+        too_fast: bool = False,
     ) -> TriggerReason | None:
         """Decide whether this step should pause for feedback, and why.
 
         ``stalled`` is the planner's :attr:`ArmMPC.goal_stalled`: the goal is
         out of reach under the current costs, so only new feedback can help.
+        ``too_fast`` is a speed limit the person notices at this step
+        (:func:`moved_too_fast`); like a ``violation`` over the threshold it is
+        discomfort.
         """
         if self.operator_requested is not None and self.operator_requested():
             # A live person asking outranks both the scripted step and the
@@ -58,13 +69,13 @@ class CorrectionTrigger:
         if stalled:
             self.note_operator_pause()
             return "stalled"
-        uncomfortable = (
-            self.automatic and violation is not None and violation > self.threshold
+        uncomfortable = self.automatic and (
+            too_fast or (violation is not None and violation > self.threshold)
         )
         if self.first_correction_triggered:
             if not self.automatic or violation is None:
                 return None
-            if violation <= self.threshold:
+            if not uncomfortable:
                 self.discomfort_armed = True
                 return None
             if uncomfortable and self.discomfort_armed:
@@ -109,6 +120,23 @@ class CorrectionTrajectoryResult:
     artifact_dir: Path
 
 
+def moved_too_fast(user: SimulatedUser, human: Human, threshold: float) -> bool:
+    """Whether ``user`` complains of speed at ``human``'s current frame.
+
+    :func:`first_complaint` on that frame, the executed motion before it filling
+    the speed window.
+    """
+    if not user.speed_limits:
+        return False
+    complaint = first_complaint(user, human, human.q[None], threshold, human.history)
+    return complaint is not None and complaint.speed is not None
+
+
+def complains(user: SimulatedUser) -> bool:
+    """Whether ``user`` raises discomfort on its own: it has limits and words."""
+    return bool((user.bounds or user.speed_limits) and user.feedback_text)
+
+
 CorrectionHandler = Callable[
     [int, Human, TriggerReason, float | None, int],
     CorrectionRoundResult,
@@ -146,7 +174,7 @@ class CorrectionSession:
     ) -> CorrectionTrajectoryResult:
         """Roll out ``n_steps`` from the planner's person, pausing for a round
         whenever the trigger fires."""
-        automatic = bool(self.user.bounds and self.user.feedback_text)
+        automatic = complains(self.user)
         trigger = CorrectionTrigger(
             threshold=self.trigger_threshold,
             text_time=self.text_time,
@@ -156,12 +184,14 @@ class CorrectionSession:
 
         def on_pre_step(step: int, human: Human) -> None:
             violation = None
+            too_fast = False
             if automatic:
                 violation = float(
                     compute_violations(
                         self.user, human, human.arm_aa_from_q(human.q[np.newaxis])
                     )[0]
                 )
+                too_fast = moved_too_fast(self.user, human, self.trigger_threshold)
             stalled = self.mpc.goal_stalled
             if (
                 stalled
@@ -169,7 +199,9 @@ class CorrectionSession:
                 and self.approve_stall_proposal(step, human)
             ):
                 return
-            reason = trigger.evaluate(step, violation, stalled=stalled)
+            reason = trigger.evaluate(
+                step, violation, stalled=stalled, too_fast=too_fast
+            )
             if reason is None:
                 return
             result = self.handle_correction(

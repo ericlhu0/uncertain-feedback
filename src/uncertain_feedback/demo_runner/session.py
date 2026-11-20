@@ -42,6 +42,8 @@ from uncertain_feedback.motion_generators.steering import (
 from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
     TriggerReason,
+    complains,
+    moved_too_fast,
 )
 from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig
 from uncertain_feedback.planners.mpc.arm_features import (
@@ -71,7 +73,7 @@ from uncertain_feedback.simulated_users.base import (
     HiddenCostTerm,
     SimulatedUser,
     compute_violations,
-    first_violation_step,
+    first_complaint,
     violation_metrics,
 )
 from uncertain_feedback.uncertainty import UqConfig
@@ -371,14 +373,18 @@ class Trajectory:
         )
         while self.step < stop_step:
             violation = None
+            too_fast = False
             if self.trigger.automatic:
                 violation = float(
                     compute_violations(
                         user, rig.human, _arm_aa(rig, self.human.q[np.newaxis])
                     )[0]
                 )
+                too_fast = moved_too_fast(
+                    user, self.human, rig.cfg.corrections.trigger_threshold
+                )
             reason = self.trigger.evaluate(
-                self.step, violation, stalled=self.mpc.goal_stalled
+                self.step, violation, stalled=self.mpc.goal_stalled, too_fast=too_fast
             )
             if reason is not None:
                 self.paused = True
@@ -629,7 +635,7 @@ class Session:
     def _set_trigger(self) -> None:
         traj = self.trajectory
         assert traj is not None
-        detected = first_violation_step(
+        detected = first_complaint(
             self.user,
             self.rig.human,
             _arm_aa(self.rig, traj.human.history),
@@ -639,7 +645,7 @@ class Session:
             traj.trigger_step = None
             traj.feedback = None
         else:
-            traj.set_feedback_frame(detected, self.rig.cfg.corrections.history_cut)
+            traj.set_feedback_frame(detected.step, self.rig.cfg.corrections.history_cut)
 
     # --- trajectory lifetime ----------------------------------------------
 
@@ -676,7 +682,7 @@ class Session:
             trigger=CorrectionTrigger(
                 threshold=rig.cfg.corrections.trigger_threshold,
                 text_time=None,
-                automatic=bool(self.user.bounds and self.user.feedback_text),
+                automatic=complains(self.user),
             ),
             artifact_dir=artifact_dir,
             start=start,

@@ -2,7 +2,7 @@
 
 A :class:`SimulatedUser` holds range-of-motion restrictions the planner does not
 know about. It plays the care recipient in headless experiments: it decides when
-the robot's motion becomes uncomfortable (:func:`first_violation_step`), what it
+the robot's motion becomes uncomfortable (:func:`first_complaint`), what it
 says (``feedback_text``), which UQ cluster it prefers (:func:`choose_cluster`),
 and scores any trajectory by how much the hidden restrictions are violated
 (:func:`violation_metrics`). The hidden cost is never shown to the cost
@@ -26,6 +26,7 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_aa_from_state,
     arm_feature_series,
     arm_motion_series,
+    canonical_arm_q,
 )
 from uncertain_feedback.planners.mpc.costs.base import (
     JointLimitCost,
@@ -343,6 +344,48 @@ def noticed_speed_limit(
         return None
     first = int(over[0])
     return first + window, user.speed_limits[int(np.argmax(windowed[:, first]))]
+
+
+@dataclass(frozen=True)
+class Complaint:
+    """When the user first objects to a motion, and to what.
+
+    ``step`` indexes the motion judged. ``speed`` is the limit the user noticed
+    being moved over, ``None`` for a pose past the path limits.
+    """
+
+    step: int
+    speed: SpeedLimit | None = None
+
+
+def first_complaint(
+    user: SimulatedUser,
+    human: Human,
+    trajectory: np.ndarray,
+    threshold: float = 0.02,
+    history: np.ndarray | None = None,
+) -> Complaint | None:
+    """The user's first complaint about ``trajectory``, if any.
+
+    The earlier of a frame past the path limits by ``threshold``
+    (:func:`first_violation_step`) and a speed noticed over a cap
+    (:func:`noticed_speed_limit`); a path complaint wins a tie. ``history`` is
+    the motion already executed, ending at the user's current pose
+    (``Human.history``): its last steps fill the speed window, and
+    ``trajectory[0]`` is taken to be that pose, so ``trajectory`` is judged as
+    it would play from there. Without it only ``trajectory``'s own steps count.
+    """
+    path = first_violation_step(user, human, trajectory, threshold)
+    motion = canonical_arm_q(trajectory, human)
+    lead = 0
+    if history is not None:
+        recent = np.asarray(history, dtype=np.float64)[-(SPEED_NOTICE_WINDOW + 1) :]
+        motion = np.concatenate([recent, motion[1:]])
+        lead = len(recent) - 1
+    noticed = noticed_speed_limit(user, human, motion)
+    if noticed is not None and (path is None or noticed[0] - lead < path):
+        return Complaint(noticed[0] - lead, noticed[1])
+    return None if path is None else Complaint(path)
 
 
 @dataclass(frozen=True)

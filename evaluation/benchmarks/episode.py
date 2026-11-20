@@ -293,16 +293,15 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     """Play one persona through the task's goal sequence against ``approach``.
 
     ``human`` supplies the body (and, without ``task.start_q``, the start arm).
-    Per goal: an oracle path (base + hidden costs, the speed limits' too)
-    defines the persona's ideal;
-    the approach plans with its current learned costs; a complaint
-    (:func:`first_complaint`: a pose past the hidden path limits, or a speed
-    noticed over a hidden speed limit) triggers a feedback round given
-    ``corrections.history_cut`` steps before the trigger, the motion after that
-    discarded (attribute -> verbalize -> ground -> choose -> learn -> continue)
-    until resolution or the round cap. A speed complaint is put in words by
-    :func:`verbalize_speed` whatever the task's verbalizer. Learned costs persist
-    across the goal sequence, so later goals measure accumulated
+    Per goal: an oracle path (base + hidden costs, speed limits included)
+    defines the persona's ideal; the approach plans with its current learned
+    costs; a complaint (:func:`first_complaint`: a pose past the hidden path
+    limits, or a speed noticed over a hidden speed limit) triggers a feedback
+    round given ``corrections.history_cut`` steps before the trigger, the motion
+    after that discarded (attribute -> verbalize -> ground -> choose -> learn ->
+    continue) until resolution or the round cap. A speed complaint is put in
+    words by :func:`verbalize_speed` whatever the task's verbalizer. Learned
+    costs persist across the goal sequence, so later goals measure accumulated
     personalization.
 
     With ``cartesian.stall`` set, a rollout that stalls short of the goal gets a

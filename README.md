@@ -3121,8 +3121,9 @@ in `path_margins(features, params)` (pose features, radians) and speed limits in
 - **A chosen correction is played back as chosen**, exempt from learned limits.
 - **The motion generator is steered by a smooth form** with a gradient, the squared excess
   averaged over time, of fixed scale: `feedback.uq.steering.guidance_weight` (default 1e5)
-  weighs path limits (rad²) and `feedback.uq.steering.speed_guidance_weight` (default 1e3)
-  speed limits ((rad/s)², (m/s)²).
+  weighs path limits (rad²) and `feedback.uq.steering.speed_guidance_weight` (default 1e4,
+  tuned 2026-11-19; 1e3 before) speed limits ((rad/s)², (m/s)²), from the first step
+  after the pinned prefix.
 - **Admission is ordering only** (`rank_candidate_cost`, `require_admission`), in physical
   units, over exactly three kinds of motion: the chosen correction, the interrupted
   original plan, and the candidates the person explicitly rejected. The chosen correction's
@@ -3611,9 +3612,11 @@ pose feature (rad/s; `SPEED_FEATURE_NAMES`), each measured over the step into th
 frame. Generated `speed_margins` read them from the same `features` dict as the pose
 features (`features['elbow_flexion_rate']`, shape `(N, T)`). MDM steering computes
 the same features differentiably from the sample's joint positions
-(`torch_features.motion_features`, at 20 fps), including the step from the last
-pinned prefix frame into the first free frame, so a jump out of the prefix counts as
-speed; shoulder rotation and its rate are the one feature positions cannot give.
+(`torch_features.motion_features`, at 20 fps). The features include the step from the
+last pinned prefix frame into the first free frame, but steering's speed limits leave
+it out: a correction plays re-anchored on the live pose, which drops that step (see
+*Speed personas in the episode loop*). Shoulder rotation and its rate are the one
+feature positions cannot give.
 
 **Checking and enforcement** follow the margin contract ("Generated limits" under
 Cost-generation backends): speed limits are admitted by the same ordering test as path
@@ -3693,6 +3696,121 @@ cost pulls it back sooner. With the pull-back cost at 10 the arm is back inside 
 remaining excess is the return itself, which the per-step joint limit paces. Tight caps (`elbow_extension`, spasticity floor scaled down,
 three starts): 0.14 and 0.07 rad/s reach the goal from 3 of 3 with no step over the cap,
 0.035 and 0.0175 rad/s stall from all 3.
+
+### Speed personas in the episode loop
+
+**When the persona complains.** `simulated_users.first_complaint(user, human, trajectory,
+threshold, history)` is the one rule: the earlier of a frame past the path limits by
+`corrections.trigger_threshold` and a speed noticed over a cap (`noticed_speed_limit`, a
+5-step mean over the cap, 0.25 s), a path complaint winning a tie. `history`, the executed
+motion ending at the current pose, fills the speed window, and `trajectory[0]` is taken to
+be that pose. It triggers `run_episode`'s rollouts and continuations, approves stall
+proposals (episode and `run.py`), judges the chooser's candidates, drives the
+`CorrectionTrigger` of `CorrectionSession` and of the demo runner (`too_fast`), and keeps
+task starts. Path personas behave as before: a CPU episode set (`bridge_baseline`
+grounder on `mpc_smoke.yaml`, three path personas) and an MDM set (`no_learning` on two
+bathing starts, 128 samples) gave bit-identical triggers, re-triggers, choices,
+utterances and executed paths on origin/main and on this code.
+
+**A speed round.** The words come from `verbalize_speed(limit)` ("slow down, you're
+straightening my elbow too fast") whatever the task's verbalizer; the intent is still
+`attribute_correction`'s, whose join index anchors the chooser's oracle tail. The oracle
+path adds `HiddenSpeedTerm`. The chooser refuses a candidate the persona would notice as
+too fast as it plays: at its magnitude (0.5–1.5 scale the displacement in the same time,
+so a smaller one is slower), on the 0.05 s clock, with the executed motion filling the
+window; with nothing acceptable it takes the candidate least past the path limits, then
+least over a speed limit at its fastest step. The rewind after a speed complaint is the
+same `corrections.history_cut`, and the chosen correction plays as chosen.
+
+**Metrics.** `goal_row` adds `speed_complaints` (stops for a noticed speed),
+`felt_over_limit_share` and `felt_peak_excess` (`metrics/speed.py`: `limit_violation` over
+`felt_segments`, every stretch the persona went through including the steps a rewind
+discarded, split at each rewind because the reset is instant) and `duration_ratio`
+(executed steps over the oracle's); `round_rows` adds `continuation_over_limit_share` and
+`continuation_peak_excess`. `analyze_results.py` puts them in `summary.csv` and, for speed
+personas, checks every learned cost in each episode's `learned_state.json` into
+`learned_limits.csv` (`learned_limit_row`: `speed_cap` = it states speed margins,
+`right_feature`, `catches` = a step at 4x a hidden cap the capped way is over its margins,
+`spares_reverse` = the same step the other way is not, plus `retired` by stall relaxation).
+
+**Arms.** `approach=no_learning` (MDM menus, nothing learned); `approach=full` (LLM limits,
+learned steering; `approach/cost_gen=immediate` skips the Codex consolidation at the end of
+each episode); `approach=hidden_limit_ceiling`, a ceiling, never the method: the planner
+holds the persona's hidden limit (`CONSTRAINTS`, charged hard like a learned one) from the
+first step, and MDM is steered by it through `steering: learned`
+(`approaches/cost_gen/hidden_limit.py`, `HiddenLimitCostGen`; only the personas in
+`CONSTRAINTS`).
+
+**Steering speed limits** (`speed_guidance_weight`, and the step out of the prefix).
+Tuned offline 2026-11-19 on 8 round-0 states of the speed task starts (4 per persona,
+elbow_extension, bathing and transfer), 256 samples each through `MdmGrounder` with
+learned steering on the hand-written `CONSTRAINTS`, each sample IK'd and re-anchored as it
+would play (one RTX PRO 6000 Blackwell; script and per-state numbers in
+`outputs/speed_e2e/` of the `speed-e2e` worktree, not committed). Means over the states;
+"refused" = samples the persona would notice as too fast at 1x, "menu ok" = share of the
+6 clustered candidates acceptable at 1x:
+
+| speed steps steered | weight | refused | NaN samples | end shift vs unsteered | reach | jerk | menu ok |
+|---|---|---|---|---|---|---|---|
+| — (unsteered) | 0 | 12.4% (max 40%) | 0 | — | — | — | 79% |
+| with the prefix step | 1e3 | 5.1% | 0 | 3.0 cm | −4.7% | −1.5% | 94% |
+| with the prefix step | 1e4 | 6.3% | 1.1% (max 3.5%) | 9.0 cm | −4.2% | +3.3% | 50% |
+| without it | 1e3 | 8.0% | 0 | 1.0 cm | −3.3% | −0.7% | 85% |
+| without it | **1e4** | **1.7%** (max 7.4%) | **0** | 4.1 cm | −11.9% | −2.3% | 94% |
+| without it | 3e4 | 2.0% | 0.4% (max 2%) | 4.8 cm | −14.7% | −2.2% | 71% |
+| without it | 1e5 | 11.2% | 11.7% (max 38%) | — | −10.0% | +1.9% | 33% |
+
+The raw step out of the prefix is about 4 cm of wrist travel in one 0.05 s frame (0.9 m/s,
+several times either persona's cap) and the re-anchored correction never plays it, so
+charging it spends the guidance on a jump that does not exist in execution; with it,
+1e4 already diverges (NaNs, menus collapsing). Without it, 1e4 is the largest weight with
+no NaN; at 3e4 divergent samples appear. Its cost is amplitude: at a fixed clip length a
+slower sample is a shorter one (reach −12%, end pose 4 cm away on average).
+
+**Running it.** Speed starts must be noticed as too fast on the base-cost rollout
+(`generate_task_starts.py` keeps them through `first_complaint`). `moved_too_fast` never
+complains on `elbow_extension` (40 of 40 draws rejected `no_violation`: moving only the
+elbow at the planner's pace stays under 0.25 m/s hand and 0.125 m/s elbow speed), so it
+runs on bathing and transfer only:
+
+```bash
+for task in elbow_extension bathing transfer; do
+  uv run python evaluation/generate_task_starts.py \
+      --mpc-config evaluation/conf/care_tasks/$task.yaml \
+      --out-dir outputs/speed_e2e/task_starts/$task \
+      --personas moved_too_fast spastic_elbow_flexors --per-persona 5 --max-attempts 40
+done
+# one arm on one task's starts (repeat per task and arm)
+uv run python evaluation/run_experiment.py approach=hidden_limit_ceiling benchmark=task_starts \
+    benchmark.starts_dir=outputs/speed_e2e/task_starts/bathing \
+    mpc_config=evaluation/conf/care_tasks/bathing.yaml hydra.run.dir=outputs/speed_e2e/ceiling/bathing
+# the full method, then its later goal: the same tasks resumed from what it learned
+uv run python evaluation/run_experiment.py approach=full approach/cost_gen=immediate \
+    benchmark=task_starts benchmark.starts_dir=outputs/speed_e2e/task_starts/bathing \
+    mpc_config=evaluation/conf/care_tasks/bathing.yaml hydra.run.dir=outputs/speed_e2e/full/bathing/attempt1
+uv run python evaluation/run_experiment.py approach=full approach/cost_gen=immediate \
+    benchmark=task_starts benchmark.starts_dir=outputs/speed_e2e/task_starts/bathing \
+    mpc_config=evaluation/conf/care_tasks/bathing.yaml resume_from=outputs/speed_e2e/full/bathing/attempt1 \
+    hydra.run.dir=outputs/speed_e2e/full/bathing/attempt2
+uv run python evaluation/analyze_results.py outputs/speed_e2e/full outputs/speed_e2e/ceiling \
+    --out outputs/speed_e2e/analysis
+```
+
+Smoke run 2026-11-19 (seed 0, two starts per persona, one goal each; `no_learning` and the
+ceiling, no LLM):
+
+| arm | persona, task | reached | user turns | speed complaints | felt steps over the limit | duration vs oracle |
+|---|---|---|---|---|---|---|
+| `no_learning` | `spastic_elbow_flexors`, elbow_extension | 0/2 (capped at 3 rounds) | 3, 3 | 4, 4 | 4.2%, 8.4% (peak 0.39, 0.25 rad/s) | — |
+| `no_learning` | `moved_too_fast`, bathing | 2/2 | 2, 1 | 2, 1 | 5.3%, 4.2% (peak 0.067, 0.051 m/s) | 1.52x, 2.03x |
+| `hidden_limit_ceiling` | `spastic_elbow_flexors`, elbow_extension | 2/2 | 0, 0 | 0, 0 | 0% | 1.28x, 1.31x |
+| `hidden_limit_ceiling` | `moved_too_fast`, bathing | 2/2 | 0, 0 | 0, 0 | 0% | 1.16x, 1.10x |
+
+Without learning, every MDM candidate was acceptable at some size and the persona picked
+corrections that straighten the elbow at 0.02–0.10 rad/s, but the unlearned replan after
+each one goes straight back to 0.27–0.39 rad/s against the 0.14 rad/s cap and is stopped
+within five steps; three such rounds bring the elbow from 0.85 to 0.40 rad of the
+0.35 rad goal. The ceiling holds the cap from the start and never needs a correction.
 
 ### Grounding metrics on sampled cases
 

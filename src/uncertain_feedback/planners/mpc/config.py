@@ -417,7 +417,7 @@ def _parse_steering(data: dict[str, Any]) -> SteeringConfig:
             data.get("guidance_weight", 1e5), "feedback.uq.steering.guidance_weight"
         ),
         speed_guidance_weight=_float(
-            data.get("speed_guidance_weight", 1e3),
+            data.get("speed_guidance_weight", 1e4),
             "feedback.uq.steering.speed_guidance_weight",
         ),
         bounds=tuple(_parse_steering_bound(bound) for bound in bounds),

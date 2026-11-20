@@ -167,6 +167,25 @@ def test_hml_features_count_the_jump_out_of_the_prefix_as_speed() -> None:
     )
 
 
+def test_steering_leaves_the_jump_out_of_the_prefix_out_of_speed_limits() -> None:
+    human = Human()
+    hand = (
+        "def speed_margins(features, params):\n"
+        "    return {'hand': features['wrist_speed'] - params['cap']}\n"
+    )
+    steer = build_generated_cost(
+        [_cost(human, hand, {"cap": 0.5})], torch.zeros(263), torch.ones(263), 1.0
+    )
+    assert steer is not None
+    wrist_x = 4 + 19 * 3
+    jump = torch.zeros(1, 263, 1, N_PREFIX_FRAMES + 4)
+    jump[0, wrist_x, 0, N_PREFIX_FRAMES:] = 0.1  # 2 m/s, then still
+    assert steer(jump).item() == 0.0
+    moving = jump.clone()
+    moving[0, wrist_x, 0, N_PREFIX_FRAMES + 1 :] = 0.2  # and 2 m/s after it
+    assert steer(moving).item() == pytest.approx((2.0 - 0.5) ** 2 / 3, rel=1e-4)
+
+
 def test_generated_cost_reads_speed_in_the_planner_and_in_steering() -> None:
     human = Human()
     cost = _cost(human, _ELBOW_CAP, {"cap": 0.1})

@@ -9,8 +9,12 @@ import pytest
 
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users import (
+    ATTRIBUTED_FEATURES,
+    ChoiceResult,
+    CorrectionIntent,
     HiddenBound,
     SimulatedUser,
+    Utterance,
     choose_correction,
     feature_series,
 )
@@ -111,3 +115,51 @@ def test_robot_top_runs_the_first_candidate_as_proposed(human: Human) -> None:
     )
     assert (result.label, result.magnitude) == (1, 1.0)
     assert result.no_acceptable_cluster
+
+
+def _intent(elbow_delta: float) -> CorrectionIntent:
+    deltas = {name: 0.0 for name in ATTRIBUTED_FEATURES}
+    deltas["elbow_flexion"] = elbow_delta
+    return CorrectionIntent(0, deltas, np.zeros(3), np.zeros(3))
+
+
+def test_cost_to_go_picks_fewest_steps_among_comfortable(human: Human) -> None:
+    oracle = _q_traj(list(np.linspace(0.0, 1.2, 21)))
+    straighten = human.arm_aa_from_q(_q_traj(list(np.linspace(0.3, 0.1, 10))))
+    # Bends the elbow a little but mostly raises the shoulder.
+    raise_q = _q_traj(list(np.linspace(0.0, 0.1, 10)))
+    raise_q[:, 2] = np.linspace(0.0, 0.6, 10)
+    means = {
+        0: _aa_mean(human, 0.2),
+        1: _aa_mean(human, 0.4),
+        2: _aa_mean(human, 1.2),
+        3: straighten,
+        4: human.arm_aa_from_q(raise_q),
+    }
+
+    # The further the elbow flexes or the shoulder rises the closer the goal;
+    # cluster 2 gets there first but hurts at every magnitude, cluster 4 next.
+    def steps(candidate: np.ndarray) -> float:
+        end = human.q_from_arm_aa(candidate)[-1]
+        return 10.0 - 10.0 * float(end[6] + end[2])
+
+    def choose(intent: CorrectionIntent, text: str) -> ChoiceResult:
+        return choose_correction(
+            _user(human, 0.45),
+            human,
+            means,
+            oracle,
+            mode="cost_to_go",
+            intent=intent,
+            steps_to_goal=steps,
+            utterance=Utterance(text, "joint_resolved"),
+        )
+
+    result = choose(_intent(-0.3), "bend my elbow more")
+    assert result.acceptable == {0: True, 1: True, 2: False, 3: True, 4: True}
+    # Cluster 4 bends the elbow too, but its largest motion is the shoulder.
+    assert (result.label, result.magnitude) == (1, 1.0)
+    # Asked to straighten, only cluster 3 moves the way the words say.
+    assert choose(_intent(0.3), "straighten my elbow more").label == 3
+    with pytest.raises(ValueError):
+        choose_correction(_user(human, 0.45), human, means, oracle, mode="cost_to_go")

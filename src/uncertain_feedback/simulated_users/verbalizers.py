@@ -88,18 +88,23 @@ def _joint_resolved_phrases(intent: CorrectionIntent) -> list[tuple[str, float]]
     ]
 
 
+def named_axes(offset: np.ndarray) -> list[int]:
+    """World axes the direction words name: the dominant one, and the runner-up
+    when it is at least half as large."""
+    components = np.asarray(offset, dtype=np.float64)
+    order = np.argsort(-np.abs(components))
+    dominant = abs(components[order[0]])
+    return [int(axis) for axis in order[:2] if abs(components[axis]) >= dominant / 2.0]
+
+
 def _direction_words(
     offset: np.ndarray,
     lexicon: tuple[tuple[str, str], ...] = _AXIS_DIRECTION_WORDS,
 ) -> str:
     """Corrective direction words from the offset's dominant axis components."""
     components = np.asarray(offset, dtype=np.float64)
-    order = np.argsort(-np.abs(components))
-    dominant = abs(components[order[0]])
     words = []
-    for axis in order[:2]:
-        if abs(components[axis]) < dominant / 2.0:
-            break
+    for axis in named_axes(components):
         negative, positive = lexicon[axis]
         words.append(negative if components[axis] > 0 else positive)
     return " and ".join(words)

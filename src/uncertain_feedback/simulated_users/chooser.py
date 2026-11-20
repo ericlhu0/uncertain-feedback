@@ -2,7 +2,7 @@
 
 Modes model different users picking among candidate corrections:
 
-- ``oracle_progress`` (default): among candidates that never violate a hidden
+- ``oracle_progress``: among candidates that never violate a hidden
   bound at any frame (zero tolerance, not the pain threshold), the one whose
   endpoint lands closest to the oracle correction's own end along its
   feature-space path (:func:`~.progress.correction_progress`; ``arc_progress``
@@ -20,12 +20,22 @@ Modes model different users picking among candidate corrections:
   proposed, the first candidate in the grounder's order (the largest cluster
   for MDM) at magnitude 1, comfortable or not. ``acceptable`` is still judged
   as ``oracle_progress`` would, so the metrics read the same.
+- ``cost_to_go`` (the planner config's default): among the candidates ``oracle_progress`` accepts, those
+  whose largest motion is what the user's own sentence names, going the way
+  it says (failing any, those that merely move the named way; failing any,
+  all — :func:`_says_so`), the one after which the goal is fewest planner
+  steps away under the user's own limits (``steps_to_goal``; ``inf`` when
+  unreached), ties broken by the ``oracle_progress`` key. A person who knows
+  where they are going and what hurts, but not the oracle's route. Acceptability, and so the rejected
+  candidates a learner sees, is identical to ``oracle_progress``.
 
-No mode sees language; ``intent_aligned`` sees the intent behind it.
+Only ``cost_to_go`` reads the sentence; ``intent_aligned`` sees the intent
+behind it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -46,6 +56,11 @@ from uncertain_feedback.simulated_users.base import (
     feature_series,
 )
 from uncertain_feedback.simulated_users.progress import correction_progress
+from uncertain_feedback.simulated_users.verbalizers import (
+    JOINT_PHRASES,
+    Utterance,
+    named_axes,
+)
 from uncertain_feedback.uncertainty.cluster_picker import scale_trajectory
 
 CHOOSER_MODES = (
@@ -54,6 +69,7 @@ CHOOSER_MODES = (
     "progress",
     "random",
     "robot_top",
+    "cost_to_go",
 )
 
 # Offsets are meters, features radians; 5 cm of offset weighs as much as 0.15 rad.
@@ -98,6 +114,51 @@ def _candidate_change(human: Human, candidate: np.ndarray) -> np.ndarray:
     return np.asarray(parts, dtype=np.float64)
 
 
+def _stated(
+    intent: CorrectionIntent, utterance: Utterance
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """:func:`_desired_vector`, the components the sentence names, and the
+    group they are compared within.
+
+    A joint phrase names its feature among the joint features; an arm or elbow
+    phrase names its referent's direction-word axes among that referent's
+    three. Free-form and vague sentences name nothing.
+    """
+    desired = _desired_vector(intent)
+    named = np.zeros(desired.shape, dtype=bool)
+    n_features = len(ATTRIBUTED_FEATURES)
+    group = np.arange(0)
+    if utterance.form == "joint_resolved":
+        group = np.arange(n_features)
+        for index, name in enumerate(ATTRIBUTED_FEATURES):
+            sign = 1 if intent.feature_deltas[name] > 0 else -1
+            named[index] = JOINT_PHRASES[(name, sign)] in utterance.text
+    elif utterance.form in ("arm", "elbow", "motion_directive"):
+        elbow = "elbow" in utterance.text
+        offset = intent.elbow_offset if elbow else intent.wrist_offset
+        start = n_features + (3 if elbow else 0)
+        group = np.arange(start, start + 3)
+        for axis in named_axes(offset):
+            named[start + axis] = True
+    return desired, named, group
+
+
+def _says_so(
+    change: np.ndarray, stated: tuple[np.ndarray, np.ndarray, np.ndarray]
+) -> tuple[bool, bool]:
+    """Whether ``change`` does what the sentence says: (every named component
+    goes the right way and the largest motion in their group is a named one,
+    the named components move the right way overall). With nothing named,
+    both are agreement with the whole intent."""
+    desired, named, group = stated
+    if not named.any():
+        agrees = float(np.dot(change, desired)) > 0.0
+        return agrees, agrees
+    signs = bool(np.all(change[named] * desired[named] > 0.0))
+    largest = bool(named[group[np.argmax(np.abs(change[group]))]])
+    return signs and largest, float(np.dot(change[named], desired[named])) > 0.0
+
+
 def choose_correction(
     user: SimulatedUser,
     human: Human,
@@ -110,6 +171,8 @@ def choose_correction(
     mode: str = "oracle_progress",
     intent: CorrectionIntent | None = None,
     rng: np.random.Generator | None = None,
+    steps_to_goal: Callable[[np.ndarray], float] | None = None,
+    utterance: Utterance | None = None,
 ) -> ChoiceResult:
     """Pick a (cluster, magnitude) the user would accept, per ``mode``.
 
@@ -123,13 +186,22 @@ def choose_correction(
         raise ValueError(f"Unknown chooser mode {mode!r}; expected {CHOOSER_MODES}.")
     if mode == "intent_aligned" and intent is None:
         raise ValueError("intent_aligned mode requires the correction intent.")
+    if mode == "cost_to_go" and (
+        steps_to_goal is None or intent is None or utterance is None
+    ):
+        raise ValueError("cost_to_go mode requires steps_to_goal, intent, utterance.")
 
     desired = _desired_vector(intent) if intent is not None else None
     desired_norm = float(np.linalg.norm(desired)) if desired is not None else 0.0
+    stated = (
+        _stated(intent, utterance)
+        if intent is not None and utterance is not None
+        else None
+    )
 
     oracle_q = canonical_arm_q(oracle_path, human).reshape(-1, 7)
     tail = oracle_q[min_join:]
-    limit = 0.0 if mode in ("oracle_progress", "robot_top") else threshold
+    limit = 0.0 if mode in ("oracle_progress", "robot_top", "cost_to_go") else threshold
     step_lengths = np.linalg.norm(np.diff(tail, axis=0), axis=-1)
     remaining_arc = np.concatenate([np.cumsum(step_lengths[::-1])[::-1], [0.0]])
 
@@ -137,7 +209,9 @@ def choose_correction(
     scores: dict[int, float] = {}
     alignment: dict[int, float] = {}
     acceptable_pairs: list[tuple[int, float]] = []
-    pair_keys: dict[tuple[int, float], tuple[float, float]] = {}
+    pair_keys: dict[tuple[int, float], tuple[float, ...]] = {}
+    # cost_to_go: (_says_so strictly, loosely, candidate) per pair.
+    stated_pairs: dict[tuple[int, float], tuple[bool, bool, np.ndarray]] = {}
     fallback_violation = np.inf
     fallback: tuple[int, float] | None = None
 
@@ -170,12 +244,17 @@ def choose_correction(
                 continue
             acceptable[label] = True
             acceptable_pairs.append((label, magnitude))
-            if mode == "oracle_progress":
+            if mode in ("oracle_progress", "cost_to_go"):
                 result = correction_progress(tail, candidate, human)
                 pair_keys[(label, magnitude)] = (
                     -abs(result.arc_progress - 1.0),
                     result.alignment,
                 )
+                if stated is not None and mode == "cost_to_go":
+                    stated_pairs[(label, magnitude)] = (
+                        *_says_so(_candidate_change(human, candidate), stated),
+                        candidate,
+                    )
             elif mode == "progress":
                 pair_keys[(label, magnitude)] = (-progress, 0.0)
             elif mode == "intent_aligned":
@@ -205,6 +284,17 @@ def choose_correction(
     if mode == "random":
         assert rng is not None, "random mode requires an rng."
         label, magnitude = acceptable_pairs[int(rng.integers(len(acceptable_pairs)))]
+    elif mode == "cost_to_go":
+        assert steps_to_goal is not None
+        pool = (
+            [pair for pair in acceptable_pairs if stated_pairs[pair][0]]
+            or [pair for pair in acceptable_pairs if stated_pairs[pair][1]]
+            or acceptable_pairs
+        )
+        label, magnitude = max(
+            pool,
+            key=lambda pair: (-steps_to_goal(stated_pairs[pair][2]), *pair_keys[pair]),
+        )
     else:
         label, magnitude = max(acceptable_pairs, key=lambda pair: pair_keys[pair])
     return ChoiceResult(label, magnitude, acceptable, scores, False, alignment)

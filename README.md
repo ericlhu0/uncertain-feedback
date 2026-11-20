@@ -3509,9 +3509,19 @@ uv run python evaluation/run_experiment.py -m hydra/launcher=joblib hydra.launch
 ```
 
 **Who picks the correction.** By default the simulated user picks a candidate and its
-size from the grounder's menu (`simulated_user.chooser`, `oracle_progress`).
-`sim_chooser=robot_top` takes that choice away: the robot runs the first candidate (the
-largest MDM cluster) at 1×, and the user's verdict on the menu is still recorded.
+size from the grounder's menu (`simulated_user.chooser`, `cost_to_go`). Among the
+comfortable candidates (no hidden-bound violation at any frame), it keeps those whose
+largest motion is what the user's sentence names (the joint, or the arm/elbow direction
+words), going the way it says (failing any, those that at least move the named way;
+failing any, all), and takes the one after which the goal is fewest planner steps away,
+replanned under the persona's own limits (one oracle replan per such candidate, ~1 s
+each). After each correction this user also replans the route their next sentence is
+measured against from where the arm ended up. `sim_chooser=oracle_progress`, the default
+before 2026-11-20, takes the comfortable candidate whose end lands nearest the oracle
+correction's end along its path instead; both reject the same candidates, so a learner
+sees the same negatives. `sim_chooser=robot_top` takes the choice away: the robot runs
+the first candidate (the largest MDM cluster) at 1×, and the user's verdict on the menu
+is still recorded.
 `approach=llm_keypoint` (`LlmKeypointGrounder`: GPT proposes one elbow or wrist keypoint
 and the plan is bent toward it) always runs its single edit as proposed, at 1×;
 `approach=llm_keypoint_rescaled` (grounder `rescale: true`) lets the user shrink or grow
@@ -3702,11 +3712,13 @@ RMS displacement — in anatomical-feature space, and as `position_diversity` in
 position space, the one a person watching the menu perceives; the two disagree when
 candidates reach similar hand positions through different joint configurations). `score.py`
 runs them on one case. The progress metric's implementation lives in
-`simulated_users/progress.py`, since the simulated user's default chooser selects by it.
+`simulated_users/progress.py`, since the simulated user's chooser selects by it
+(`oracle_progress`; `cost_to_go` breaks ties with it).
 
 `run_grounding.py` applies them to a grounder on the sampled cases of a captioned clip set,
 the way the simulated user would use it: the grounder proposes a menu, the user's chooser
-(`simulated_user.chooser`, `oracle_progress` by default: over the config's magnitude grid,
+(`simulated_user.chooser`; `cost_to_go`, the default, runs as `oracle_progress` here,
+since a case has no goal to plan toward: over the config's magnitude grid,
 any hidden-bound violation at any frame rules a candidate out, and among the rest the one
 whose endpoint lands nearest the oracle correction's end along its path wins, ties broken by
 alignment; `intent_aligned` picks by the nominal-vs-oracle intent contrast instead, which

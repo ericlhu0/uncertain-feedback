@@ -96,9 +96,9 @@ class SimulatedUserConfig:
     max_rounds: int = 3
     magnitudes: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5)
     nominal_steps: int = 20
-    # Candidate-selection model: oracle_progress | intent_aligned | progress | random
-    # | robot_top (no user choice: the first candidate at magnitude 1).
-    chooser: str = "oracle_progress"
+    # Candidate-selection model: cost_to_go | oracle_progress | intent_aligned | progress
+    # | random | robot_top (no user choice: the first candidate at magnitude 1).
+    chooser: str = "cost_to_go"
 
 
 @dataclass(frozen=True)
@@ -676,10 +676,11 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         "progress",
         "random",
         "robot_top",
+        "cost_to_go",
     ):
         raise ValueError(
             "simulated_user.chooser must be oracle_progress, intent_aligned, "
-            "progress, random, or robot_top."
+            "progress, random, robot_top, or cost_to_go."
         )
     simulated_user = SimulatedUserConfig(
         verbalizer=str(

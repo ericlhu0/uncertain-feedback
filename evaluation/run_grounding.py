@@ -12,8 +12,9 @@ Case ``i`` is run ``i`` of the clip set (same seed, same draw order), so its
 first VLM caption is the utterance and the clip's hidden bound and oracle window
 are the ground truth. The correction starts one frame before the bound crossing
 (see :func:`build_sampled_case`); the grounder proposes a candidate menu from the
-naive continuation there, and the simulated user's chooser (``oracle_progress``
-by default, from the planner config) picks a candidate and magnitude, and that
+naive continuation there, and the simulated user's chooser (the planner
+config's, with ``cost_to_go`` run as ``oracle_progress``: a case has no goal to
+plan toward) picks a candidate and magnitude, and that
 scaled correction is scored with the violation and progress metrics, the naive
 continuation alongside it as the ``nominal`` reference. Expressivity is scored
 over the whole menu, in anatomical-feature space and in elbow/wrist position space. A case whose ``trajectories.npz`` already exists reuses
@@ -158,6 +159,7 @@ def main() -> None:
     source = clip_source_from_dir(clips_dir)
     runs = json.loads((clips_dir / "manifest.json").read_text(encoding="utf-8"))["runs"]
     sim_cfg = source.run_cfg.simulated_user
+    chooser = "oracle_progress" if sim_cfg.chooser == "cost_to_go" else sim_cfg.chooser
     gen = _generator(args, source)
     grounder = _grounder(args)
     human = source.human
@@ -184,7 +186,7 @@ def main() -> None:
             case.oracle_correction,
             threshold=source.threshold,
             magnitudes=sim_cfg.magnitudes,
-            mode=sim_cfg.chooser,
+            mode=chooser,
             intent=intent,
             rng=rng,
         )

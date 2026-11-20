@@ -19,33 +19,41 @@ from uncertain_feedback.simulated_users import (
     verbalize_vague,
 )
 
-# The verbalizer callable bound at episode setup: (intent, q_trigger, event_index).
-BoundVerbalizer = Callable[[CorrectionIntent, np.ndarray, int], Utterance | None]
+# The verbalizer callable bound at episode setup: (intent, q_trigger,
+# event_index, route), ``route`` the oracle path ``intent`` was attributed on.
+BoundVerbalizer = Callable[
+    [CorrectionIntent, np.ndarray, int, np.ndarray], Utterance | None
+]
 
 
 def bind_verbalizer(
     task: InteractionTask,
     cfg: MpcRunConfig,
     human: Human,
-    oracle_path: np.ndarray,
     episode_key: str,
     cache_dir: Path,
 ) -> BoundVerbalizer:
-    """Bind the task's verbalizer to its episode state (rng, VLM, oracle)."""
+    """Bind the task's verbalizer to its episode state (rng, VLM)."""
     if task.verbalizer == "scripted":
         if task.feedback_text is None:
             raise ValueError("verbalizer: scripted needs the task's feedback_text.")
         spoken = Utterance(text=task.feedback_text, form="scripted")
-        return lambda intent, q_trigger, event_index: spoken
+        return lambda intent, q_trigger, event_index, route: spoken
     if task.verbalizer == "vague":
-        return lambda intent, q_trigger, event_index: verbalize_vague(intent)
+        return lambda intent, q_trigger, event_index, route: verbalize_vague(intent)
     if task.verbalizer == "joint_resolved":
-        return lambda intent, q_trigger, event_index: verbalize_joint_resolved(intent)
+        return lambda intent, q_trigger, event_index, route: verbalize_joint_resolved(
+            intent
+        )
     if task.verbalizer == "motion_directive":
-        return lambda intent, q_trigger, event_index: verbalize_motion_directive(intent)
+        return lambda intent, q_trigger, event_index, route: verbalize_motion_directive(
+            intent
+        )
     if task.verbalizer == "everyday":
         rng = np.random.default_rng(task.seed)
-        return lambda intent, q_trigger, event_index: verbalize_everyday(intent, rng)
+        return lambda intent, q_trigger, event_index, route: verbalize_everyday(
+            intent, rng
+        )
     if task.verbalizer == "visual":
         # Imported lazily so non-visual episodes never touch the OpenAI client.
         from uncertain_feedback.llm.openai_model import (  # pylint: disable=import-outside-toplevel
@@ -64,10 +72,10 @@ def bind_verbalizer(
             ),
             cache_dir,
         )
-        return lambda intent, q_trigger, event_index: visual.verbalize(
+        return lambda intent, q_trigger, event_index, route: visual.verbalize(
             intent,
             q_trigger,
-            oracle_path,
+            route,
             human,
             episode_key,
             event_index,
@@ -84,10 +92,10 @@ def bind_verbalizer(
         clip_caption = ClipCaptionVerbalizer(
             cfg.llm_cost.model, cache_dir, human.posture
         )
-        return lambda intent, q_trigger, event_index: clip_caption.verbalize(
+        return lambda intent, q_trigger, event_index, route: clip_caption.verbalize(
             intent,
             q_trigger,
-            oracle_path,
+            route,
             human,
             episode_key,
             event_index,

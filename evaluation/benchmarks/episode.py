@@ -121,6 +121,27 @@ def _stall_proposal(  # pylint: disable=too-many-arguments,too-many-positional-a
     return proposed, approved
 
 
+def oracle_steps_to_goal(
+    cfg: MpcRunConfig,
+    at: Human,
+    goal: GoalRegion,
+    oracle_costs: CompositeTrajectoryCost,
+    candidate: np.ndarray,
+) -> float:
+    """Planner steps to the goal after playing ``candidate`` from ``at``.
+
+    The ``cost_to_go`` chooser's score: the oracle planner (the persona's own
+    limits as costs) replans from the candidate's end; ``inf`` when it stalls
+    or runs out of steps first.
+    """
+    after = at.step(canonical_arm_q(candidate, at)[1:])
+    path = rollout_to_goal(
+        cfg, after, goal, oracle_costs, stop_on_stall=True, log_prefix=_LOG
+    ).history
+    reached = goal_reach(after, cfg, path, goal)["reached"]
+    return float(len(path) - 1) if reached else float("inf")
+
+
 @dataclass(frozen=True)
 class _Motion:
     """The arm's way toward the goal from one pose until it needs the persona.
@@ -313,7 +334,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             f"{task.persona}_{task.verbalizer}_seed{task.seed}_goal{goal_index}"
         )
         verbalize = bind_verbalizer(
-            task, cfg, human, oracle_path, episode_key, goal_dir / "visual_cache"
+            task, cfg, human, episode_key, goal_dir / "visual_cache"
         )
 
         start = human.reset_human_with_q(q_current)
@@ -376,6 +397,9 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
         )
         executed = start.step(rollout[1 : anchor + 1])
         approved_spans = _executed_spans(before.approved_spans, 0, anchor)
+        # The route the user has in mind, which their words compare against;
+        # the cost_to_go user replans it after each correction.
+        route = oracle_path
         min_join = 0
         result = "capped"
         reached = False
@@ -400,9 +424,9 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 ).history
             round_plan_seconds = time.perf_counter() - round_plan_t0
             intent = attribute_correction(
-                oracle_path, nominal_plan, q_feedback, human, min_join=min_join
+                route, nominal_plan, q_feedback, human, min_join=min_join
             )
-            utterance = verbalize(intent, q_feedback, event_index)
+            utterance = verbalize(intent, q_feedback, event_index, route)
             if utterance is None:
                 result = "no_feedback_content"
                 break
@@ -420,13 +444,21 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     user,
                     human,
                     means,
-                    oracle_path,  # pylint: disable=cell-var-from-loop
+                    route,  # pylint: disable=cell-var-from-loop
                     min_join=round_join,  # pylint: disable=cell-var-from-loop
                     threshold=threshold,
                     magnitudes=sim_cfg.magnitudes,
                     mode=sim_cfg.chooser,
                     intent=intent,  # pylint: disable=cell-var-from-loop
                     rng=chooser_rng,
+                    steps_to_goal=lambda candidate: oracle_steps_to_goal(
+                        goal_cfg,  # pylint: disable=cell-var-from-loop
+                        at_feedback,  # pylint: disable=cell-var-from-loop
+                        goal,  # pylint: disable=cell-var-from-loop
+                        oracle_costs,
+                        candidate,
+                    ),
+                    utterance=utterance,  # pylint: disable=cell-var-from-loop
                 )
                 choices.append(choice)  # pylint: disable=cell-var-from-loop
                 return choice.label, choice.magnitude
@@ -464,6 +496,17 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
 
             correction_q = canonical_arm_q(grounding.correction_traj, human)
             executed = executed.step(correction_q[1:])
+            next_join = intent.join_index
+            if sim_cfg.chooser == "cost_to_go":
+                route = rollout_to_goal(
+                    goal_cfg,
+                    executed,
+                    goal,
+                    oracle_costs,
+                    stop_on_stall=True,
+                    log_prefix=_LOG,
+                ).history
+                next_join = 0
 
             round_plan_t0 = time.perf_counter()
             after = _move_to_goal(
@@ -519,7 +562,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     after.approved_spans, offset, feedback_step
                 )
                 executed = executed.step(continuation[1 : feedback_step + 1])
-                min_join = intent.join_index
+                min_join = next_join
                 continue
             approved_spans += _executed_spans(
                 after.approved_spans, offset, len(continuation) - 1
@@ -528,7 +571,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             if after.rejected is not None:
                 pending_plan = after.rejected.human.history
                 pending_retire = after.rejected.dropped
-                min_join = intent.join_index
+                min_join = next_join
                 continue
             reached = after.reached
             result = "ok" if reached else "goal_not_reached"

@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.approaches.base import Approach
-from evaluation.benchmarks.episode import run_episode
+from evaluation.benchmarks.episode import oracle_steps_to_goal, run_episode
 from evaluation.benchmarks.structs import InteractionTask, MenuProbe
 from evaluation.benchmarks.verbalize import bind_verbalizer
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
@@ -101,11 +101,10 @@ def probe_menu(
         task,
         cfg,
         human,
-        oracle_path,
         f"{task.persona}_{task.verbalizer}_seed{task.seed}_probe{goal_index}",
         goal_dir / "visual_cache",
     )
-    utterance = verbalize(intent, q_feedback, goal_index)
+    utterance = verbalize(intent, q_feedback, goal_index, oracle_path)
     if utterance is None:
         print(f"{_LOG} {label}: no feedback content; no probe.", flush=True)
         return oracle_path, None
@@ -124,6 +123,10 @@ def probe_menu(
             mode=sim_cfg.chooser,
             intent=intent,
             rng=rng,
+            steps_to_goal=lambda candidate: oracle_steps_to_goal(
+                goal_cfg, at_feedback, goal, oracle_costs, candidate
+            ),
+            utterance=utterance,
         )
         return choice.label, choice.magnitude
 

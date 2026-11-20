@@ -3812,6 +3812,16 @@ each one goes straight back to 0.27–0.39 rad/s against the 0.14 rad/s cap and 
 within five steps; three such rounds bring the elbow from 0.85 to 0.40 rad of the
 0.35 rad goal. The ceiling holds the cap from the start and never needs a correction.
 
+Both no-LLM arms on all 25 starts (seed 0, 5 per persona and task; `moved_too_fast` has
+none on elbow_extension), one goal each, `analyze_results.py`:
+
+| arm | persona | reached | user turns | speed complaints | felt steps over the limit (peak) | duration vs oracle, reached |
+|---|---|---|---|---|---|---|
+| `no_learning` | `moved_too_fast` (10) | 10/10 | 1.3 | 1.3 | 6.9% (0.065 m/s) | 1.69x |
+| `no_learning` | `spastic_elbow_flexors` (15) | 11/15 (elbow_extension 1/5, 4 capped) | 1.9 | 2.1 | 6.1% (0.24 rad/s) | 1.81x |
+| `hidden_limit_ceiling` | `moved_too_fast` (10) | 10/10 | 0 | 0 | 0% | 1.05x |
+| `hidden_limit_ceiling` | `spastic_elbow_flexors` (15) | 15/15 | 0 | 0 | 0% | 1.09x |
+
 ### Grounding metrics on sampled cases
 
 `evaluation/metrics/grounding/` scores one grounding round against the hidden bound and

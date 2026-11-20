@@ -2,6 +2,7 @@
 
 from evaluation.approaches.cost_gen.base import COST_GEN_SOURCES, CostGen
 from evaluation.approaches.cost_gen.consolidate import ConsolidateCostGen
+from evaluation.approaches.cost_gen.hidden_limit import HiddenLimitCostGen
 from evaluation.approaches.cost_gen.immediate import ImmediateCostGen
 from evaluation.approaches.cost_gen.none import NoCostGen
 
@@ -13,6 +14,7 @@ __all__ = [
     "COST_GEN_SOURCES",
     "ConsolidateCostGen",
     "CostGen",
+    "HiddenLimitCostGen",
     "ImmediateCostGen",
     "NoCostGen",
 ]

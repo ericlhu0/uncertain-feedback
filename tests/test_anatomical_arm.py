@@ -10,6 +10,8 @@ joint positions exactly.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
@@ -20,10 +22,12 @@ from uncertain_feedback.planners.mpc.arm_features import (
     arm_feature_series,
     arm_q_from_features,
 )
+from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     Q_CLAVICLE,
     Q_DIM,
+    Q_ELBOW,
     SmplLeftArmFK,
     _rate_limited_step_q,
     anatomical_elbow_wrist_slots,
@@ -34,6 +38,9 @@ from uncertain_feedback.planners.mpc.kinematics import (
 # (the real SMPL left arm carries a ~7.5° bend, which defines the hinge plane).
 _TPOSE_UPPER = np.array([1.0, 0.0, 0.0])
 _TPOSE_FOREARM = np.array([np.cos(np.deg2rad(7.5)), 0.0, np.sin(np.deg2rad(7.5))])
+_DEMO_MPC = (
+    Path(__file__).resolve().parents[1] / "evaluation" / "conf" / "mpc_demo_low1.yaml"
+)
 
 
 def _slot_worlds(
@@ -243,6 +250,54 @@ def test_torch_position_features_match_arm_feature_series() -> None:
         expected["shoulder_flexion_extension"],
         atol=1e-6,
     )
+
+
+def _bent_arm_poses(seed: int, n: int = 24) -> np.ndarray:
+    """Random arm states with the elbow bent, so the forearm shows the twist."""
+    rng = np.random.default_rng(seed)
+    q = rng.uniform(-0.6, 0.6, size=(n, Q_DIM))
+    q[:, Q_ELBOW] = rng.uniform(0.5, 2.0, size=n)
+    return q
+
+
+def _torch_rotation(human: Human, q: np.ndarray) -> np.ndarray:
+    import torch
+
+    from uncertain_feedback.motion_generators.mdm.torch_features import (
+        shoulder_rotation,
+    )
+
+    positions = human.fk_positions_from_q(q)
+    shoulder, elbow, wrist = (
+        torch.tensor(positions[:, idx], dtype=torch.float64) for idx in (2, 3, 4)
+    )
+    return shoulder_rotation(shoulder, elbow, wrist).numpy()
+
+
+def test_torch_shoulder_rotation_matches_arm_feature_series() -> None:
+    """Positions give the planner's swing-twist angle exactly for a T-pose clavicle."""
+    human = Human()
+    q = _bent_arm_poses(11)
+    q[:, Q_CLAVICLE] = 0.0
+
+    expected = arm_feature_series(q, human)["shoulder_internal_external_rotation"]
+    np.testing.assert_allclose(_torch_rotation(human, q), expected, atol=1e-6)
+
+
+def test_torch_shoulder_rotation_offset_for_a_seated_collar_is_small() -> None:
+    """The seated demo pose's fixed collar and clavicle shift the angle by well
+    under the dead zone: a median 0.04 rad, at most 0.15 rad (measured
+    2026-11-05), the same kind of frame offset as abduction and flexion."""
+    cfg = load_mpc_config(_DEMO_MPC)
+    human = Human(pose=cfg.pose, arm=cfg.arm)
+    q = _bent_arm_poses(12, n=200)
+    q[:, Q_CLAVICLE] = human.q[Q_CLAVICLE]
+
+    expected = arm_feature_series(q, human)["shoulder_internal_external_rotation"]
+    error = _torch_rotation(human, q) - expected
+    error = np.abs((error + np.pi) % (2.0 * np.pi) - np.pi)
+    assert np.median(error) < 0.1
+    assert error.max() < 0.2
 
 
 def test_raw_arm_conversion_preserves_fk_positions() -> None:

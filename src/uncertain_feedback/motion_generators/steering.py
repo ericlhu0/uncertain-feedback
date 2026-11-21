@@ -208,7 +208,8 @@ def sample_peaks(
     ``human.q``, as every frontend does before tracking it
     (``feedback.anchor_correction``); otherwise only its echoed frame 0 (the
     current configuration) is dropped. Learned limits are judged on every one
-    of them, steerable or not: path margins per frame (rad) and speed margins
+    of them, rotation limits included on the frames guidance switches them off
+    (``ROTATION_DEAD_ZONE``): path margins per frame (rad) and speed margins
     over each step into a frame (rad/s or m/s), the frames being MDM's 1/20 s
     apart. A spec without learned limits is judged on ``config.bounds`` (rad).
     """

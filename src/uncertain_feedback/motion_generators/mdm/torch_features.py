@@ -26,14 +26,28 @@ right) and measure both against it, which also makes elevation torso-relative;
 then tighten ``test_torch_position_features_match_arm_feature_series`` to a
 twisted ``spine3_aa``. Introduced 2026-09-11 with abduction support.
 
+Shoulder internal/external rotation is read off the forearm: with no twist, the
+forearm's component perpendicular to the upper arm points where the T-pose bend
+points, carried along by the swing that took the T-pose upper-arm axis to the
+current one; the twist is the angle from that reference to the actual
+perpendicular, about the upper arm. It equals ``arm_feature_series``'s
+swing-twist angle exactly for a T-pose collar and clavicle; the seated demo
+pose's fixed collar and clavicle shift it by a median 0.04 rad (at most 0.15 rad
+over random arm poses), the same kind of frame offset as the two features
+above. A straight elbow leaves no perpendicular to read, so a limit on rotation
+is inactive below ``ROTATION_DEAD_ZONE`` of elbow flexion; the planner's q-based
+feature has no such blind spot.
+
 This module imports torch at module scope — import it lazily from anywhere that
 must stay torch-free (config parsing, the abstract generator interface).
 """
 
 from __future__ import annotations
 
+import functools
 from typing import Callable, Sequence
 
+import numpy as np
 import torch
 
 from uncertain_feedback.motion_generators.mdm.mdm_api import _FPS, N_PREFIX_FRAMES
@@ -41,24 +55,22 @@ from uncertain_feedback.planners.mpc.costs.generated import (
     GeneratedPythonCost,
     generated_cost_feature_dependencies,
 )
+from uncertain_feedback.planners.mpc.kinematics import (
+    ELBOW_CHAIN_IDX,
+    SHOULDER_CHAIN_IDX,
+    WRIST_CHAIN_IDX,
+    SmplLeftArmFK,
+)
 from uncertain_feedback.simulated_users.base import (
     Bound,
     CoupledBound,
     SimulatedUser,
 )
 
-_POSE_FEATURES = (
-    "elbow_flexion",
-    "shoulder_elevation",
-    "shoulder_abduction_adduction",
-    "shoulder_flexion_extension",
-)
-SUPPORTED_FEATURES = (
-    *_POSE_FEATURES,
-    "wrist_speed",
-    "elbow_speed",
-    *(f"{name}_rate" for name in _POSE_FEATURES),
-)
+_ROTATION = "shoulder_internal_external_rotation"
+# Elbow flexion (radians) below which the forearm lies too close to the upper arm
+# for its direction to tell the humerus twist: rotation limits are inactive there.
+ROTATION_DEAD_ZONE = 0.3
 
 _RIC_OFFSET = 4  # root rotation/velocity block preceding the RIC positions
 _N_RIC_JOINTS = 21  # SMPL joints minus the root
@@ -109,6 +121,50 @@ def shoulder_flexion(shoulder: torch.Tensor, elbow: torch.Tensor) -> torch.Tenso
     return torch.asin(upper[..., 2].clamp(-1.0 + _ACOS_EPS, 1.0 - _ACOS_EPS))
 
 
+@functools.lru_cache(maxsize=None)
+def _tpose_axes() -> tuple[torch.Tensor, torch.Tensor]:
+    """T-pose upper-arm axis and the forearm bend perpendicular to it (float64)."""
+    tpose = SmplLeftArmFK().tpose_joints
+    upper = tpose[ELBOW_CHAIN_IDX] - tpose[SHOULDER_CHAIN_IDX]
+    upper = upper / np.linalg.norm(upper)
+    forearm = tpose[WRIST_CHAIN_IDX] - tpose[ELBOW_CHAIN_IDX]
+    bend = forearm - (forearm @ upper) * upper
+    bend = bend / np.linalg.norm(bend)
+    return torch.tensor(upper), torch.tensor(bend)
+
+
+def shoulder_rotation(
+    shoulder: torch.Tensor, elbow: torch.Tensor, wrist: torch.Tensor
+) -> torch.Tensor:
+    """Return the upper arm's signed twist about its own axis (internal = +).
+
+    The swing is the shortest rotation taking the T-pose upper-arm axis onto
+    the current one; it carries the T-pose bend direction to the zero-twist
+    reference, and the twist is the angle from that reference to the forearm's
+    actual perpendicular, about the upper arm (see the module docstring for
+    what this matches and where it is blind). Rodrigues' formula is written
+    with ``1 / (1 + cos)`` so the no-swing case is regular; only an arm pointing
+    exactly opposite the T-pose axis is singular, and that is clamped.
+    """
+    axis, bend = (t.to(shoulder) for t in _tpose_axes())
+    upper = torch.nn.functional.normalize(elbow - shoulder, dim=-1)
+    forearm = torch.nn.functional.normalize(wrist - elbow, dim=-1)
+    cos = (upper * axis).sum(-1, keepdim=True)
+    swing = torch.cross(axis.expand_as(upper), upper, dim=-1)
+    reference = (
+        cos * bend
+        + torch.cross(swing, bend.expand_as(upper), dim=-1)
+        + swing
+        * (swing * bend).sum(-1, keepdim=True)
+        / (1.0 + cos).clamp(min=_ACOS_EPS)
+    )
+    perpendicular = forearm - (forearm * upper).sum(-1, keepdim=True) * upper
+    return torch.atan2(
+        (upper * torch.cross(reference, perpendicular, dim=-1)).sum(-1),
+        (reference * perpendicular).sum(-1),
+    )
+
+
 def motion_features(
     spine3: torch.Tensor,
     shoulder: torch.Tensor,
@@ -129,13 +185,17 @@ def motion_features(
         "shoulder_elevation": elevation,
         "shoulder_abduction_adduction": shoulder_abduction(shoulder, elbow),
         "shoulder_flexion_extension": shoulder_flexion(shoulder, elbow),
+        _ROTATION: shoulder_rotation(shoulder, elbow, wrist),
     }
     features = {name: values[:, 1:] for name, values in pose.items()}
     for name, joint in (("wrist_speed", wrist), ("elbow_speed", elbow)):
         step = (joint - spine3).diff(dim=1)
         features[name] = (step.pow(2).sum(-1) + _SPEED_EPS).sqrt() / dt
     for name, values in pose.items():
-        features[f"{name}_rate"] = values.diff(dim=1) / dt
+        step = values.diff(dim=1)
+        if name == _ROTATION:
+            step = torch.remainder(step + torch.pi, 2.0 * torch.pi) - torch.pi
+        features[f"{name}_rate"] = step / dt
     return features
 
 
@@ -169,14 +229,20 @@ def features_from_hml(
 def bound_violation(bound: Bound, features: dict[str, torch.Tensor]) -> torch.Tensor:
     """Return per-frame violation magnitudes (radians), zero when satisfied.
 
-    Torch mirror of :meth:`HiddenBound.violation` / :meth:`CoupledBound.violation`.
+    Torch mirror of :meth:`HiddenBound.violation` / :meth:`CoupledBound.violation`,
+    except that a bound reading shoulder rotation is inactive while the elbow is
+    too straight to read it (``ROTATION_DEAD_ZONE``).
     """
     values = features[bound.feature]
     if isinstance(bound, CoupledBound):
         threshold = bound.intercept + bound.slope * features[bound.cond_feature]
         if bound.bound_type == "upper_bound":
-            return (values - threshold).clamp(min=0.0)
-        return (threshold - values).clamp(min=0.0)
+            violation = (values - threshold).clamp(min=0.0)
+        else:
+            violation = (threshold - values).clamp(min=0.0)
+        if _ROTATION in (bound.feature, bound.cond_feature):
+            violation = _outside_dead_zone(violation, features)
+        return violation
 
     if bound.bound_type == "upper_bound":
         violation = (values - float(bound.high)).clamp(min=0.0)  # type: ignore[arg-type]
@@ -191,25 +257,20 @@ def bound_violation(bound: Bound, features: dict[str, torch.Tensor]) -> torch.Te
         cond = features[bound.condition.feature]
         active = (cond >= bound.condition.low) & (cond <= bound.condition.high)
         violation = torch.where(active, violation, torch.zeros_like(violation))
+    if _ROTATION in (
+        bound.feature,
+        bound.condition.feature if bound.condition is not None else None,
+    ):
+        violation = _outside_dead_zone(violation, features)
     return violation
 
 
-def supported_bounds(user: SimulatedUser) -> tuple[Bound, ...]:
-    """Return the persona's bounds this module can score from positions.
-
-    ``JointBoxLimit`` is structurally excluded: it acts on the raw controlled
-    axis-angles, which positions alone cannot recover without IK.
-    """
-    return tuple(bound for bound in user.bounds if _is_supported(bound))
-
-
-def _is_supported(bound: Bound) -> bool:
-    features = [bound.feature]
-    if isinstance(bound, CoupledBound):
-        features.append(bound.cond_feature)
-    elif bound.condition is not None:
-        features.append(bound.condition.feature)
-    return all(feature in SUPPORTED_FEATURES for feature in features)
+def _outside_dead_zone(
+    excess: torch.Tensor, features: dict[str, torch.Tensor]
+) -> torch.Tensor:
+    """Zero ``excess`` on frames whose elbow is too straight to read rotation."""
+    bent = features["elbow_flexion"] >= ROTATION_DEAD_ZONE
+    return torch.where(bent, excess, torch.zeros_like(excess))
 
 
 def build_user_bound_cost(
@@ -221,19 +282,16 @@ def build_user_bound_cost(
     summed per-frame violation — without its weight: resampling is scale-free
     and classifier guidance absorbs the scale into its guidance weight.
 
-    Returns ``None`` when the persona has no bounds this module can score.
+    ``JointBoxLimit`` is structurally excluded: it acts on the raw controlled
+    axis-angles, which positions alone cannot recover without IK. Returns
+    ``None`` when the persona has no feature bounds.
     """
-    bounds = supported_bounds(user)
-    skipped = [
-        f"{type(bound).__name__}({bound.feature})"
-        for bound in user.bounds
-        if not _is_supported(bound)
-    ] + [f"JointBoxLimit({limit.joint})" for limit in user.joint_limits]
-    if skipped:
-        print(
-            f"steering cost for {user.name}: skipping unsupported terms "
-            f"({', '.join(skipped)})"
+    bounds = user.bounds
+    if user.joint_limits:
+        skipped = ", ".join(
+            f"JointBoxLimit({limit.joint})" for limit in user.joint_limits
         )
+        print(f"steering cost for {user.name}: skipping unsupported terms ({skipped})")
     if not bounds:
         return None
 
@@ -263,33 +321,31 @@ def build_generated_cost(
     prefix: a correction is played re-anchored on the live pose
     (``anchor_q_trajectory``), which drops that step, and charging it pushed
     guidance against a jump that never plays, to divergence at high weights.
-    A cost reading a feature positions cannot give is left out. Returns
-    ``None`` when no cost is left.
+    A cost reading shoulder rotation or its rate is inactive, every margin of
+    it, on frames whose elbow is too straight to read rotation
+    (``ROTATION_DEAD_ZONE``). Returns ``None`` when there is no cost.
     """
-    steerable = [
-        cost
-        for cost in costs
-        if set(generated_cost_feature_dependencies(cost.code))
-        <= set(SUPPORTED_FEATURES)
-    ]
-    if len(steerable) < len(costs):
-        print(
-            f"steering: skipping {len(costs) - len(steerable)} learned cost(s) "
-            "that read features steering cannot compute"
-        )
-    if not steerable:
+    if not costs:
         return None
+    reads_rotation = [
+        any(
+            name.startswith(_ROTATION)
+            for name in generated_cost_feature_dependencies(term.code)
+        )
+        for term in costs
+    ]
 
     def cost(x0: torch.Tensor) -> torch.Tensor:
         features = features_from_hml(x0, hml_mean, hml_std)
         total = torch.zeros(x0.shape[0], dtype=x0.dtype, device=x0.device)
-        for term in steerable:
+        for term, gated in zip(costs, reads_rotation):
             path, speed = term.margins(features)
-            for margin in path.values():
-                total = total + margin.clamp(min=0.0).pow(2).mean(dim=1)
-            for margin in speed.values():
-                excess = margin[:, 1:].clamp(min=0.0)
-                total = total + speed_scale * excess.pow(2).mean(dim=1)
+            for scale, skip, margins in ((1.0, 0, path), (speed_scale, 1, speed)):
+                for margin in margins.values():
+                    excess = margin.clamp(min=0.0)
+                    if gated:
+                        excess = _outside_dead_zone(excess, features)
+                    total = total + scale * excess[:, skip:].pow(2).mean(dim=1)
         return total
 
     return cost

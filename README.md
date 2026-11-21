@@ -2820,12 +2820,12 @@ sampling toward the bounds given in `steering.bounds` (see below), so the
 candidates that reach clustering already respect that cost; `mode: "off"`
 samples MDM unsteered. Steering never reads the simulated user's hidden bounds —
 they are the evaluation ground truth — so a config without `steering.bounds`
-samples unsteered whatever its `user:`. The cost is compiled from the
-`elbow_flexion` / `shoulder_elevation` bounds and read off each denoising step's
-`x̂0` prediction; bounds on other features are skipped (named in a log line).
-Steering is implemented by the MDM backend; with any other backend the run logs
-a skip and samples unsteered, as it does when no bounds are given or none is
-supported. In the `evaluation/` harness the method's `full` arm steers from its
+samples unsteered whatever its `user:`. The cost is compiled from the bounds on
+the five pose features and read off each denoising step's `x̂0` prediction; a
+bound reading shoulder rotation steers only on frames whose elbow is bent at
+least 0.3 rad (`ROTATION_DEAD_ZONE`), and `JointBoxLimit`s are skipped (named in a
+log line). Steering is implemented by the MDM backend; with any other backend
+the run logs a skip and samples unsteered, as it does when no bounds are given. In the `evaluation/` harness the method's `full` arm steers from its
 learned bounds (`steering: learned`); steering from the hidden bounds is the
 labelled ceiling (`full_hidden_limit_steering`, `no_learning_cg`).
 
@@ -2860,8 +2860,8 @@ Either mode then prunes: once sampling ends, every sample's arm is solved by IK,
 re-anchored onto the live configuration as it would be tracked (when
 `feedback.anchor_correction` is on, the default), and dropped before clustering
 if it crosses, at any frame, what the sampling was steered toward: the learned
-limits (path and speed margins, all of them, including ones guidance cannot
-read such as shoulder rotation) for learned steering, otherwise the steering
+limits (path and speed margins, all of them, rotation limits included on the
+frames where guidance switches them off) for learned steering, otherwise the steering
 bounds. The check uses the exact anatomical features the planner and the
 evaluation score with, not the steering cost's approximation, and the log
 reports how many samples stayed inside. If fewer than `n_clusters` do (e.g. the
@@ -3546,7 +3546,9 @@ cost, and MDM steered by classifier guidance from that learned cost (`steering: 
 cost the planner is using (the consolidated cost and each round stacked since), evaluated on
 joint features read off the diffusion sample instead of IK, so it penalizes exactly what
 the planner penalizes. Generated costs are torch functions of those features for this
-reason. A cost that reads shoulder rotation, which positions cannot give, is left out.
+reason. A cost that reads shoulder rotation steers only while the elbow is bent at least
+0.3 rad (`ROTATION_DEAD_ZONE`): the rotation is read off the forearm, which shows no twist
+when the arm is straight.
 The costs are recompiled at every grounding, so steering follows each round's learning
 and a resumed run steers from its first round. With nothing learned it samples
 unsteered; it never reads the persona's hidden limits. To measure steering alone, run
@@ -3628,8 +3630,8 @@ the same features differentiably from the sample's joint positions
 (`torch_features.motion_features`, at 20 fps). The features include the step from the
 last pinned prefix frame into the first free frame, but steering's speed limits leave
 it out: a correction plays re-anchored on the live pose, which drops that step (see
-*Speed personas in the episode loop*). Shoulder rotation and its rate are the one
-feature positions cannot give.
+*Speed personas in the episode loop*). Shoulder rotation and its rate are read off the
+forearm, so a limit on either steers only on frames whose elbow is bent at least 0.3 rad.
 
 **Checking and enforcement** follow the margin contract ("Generated limits" under
 Cost-generation backends): speed limits are admitted by the same ordering test as path

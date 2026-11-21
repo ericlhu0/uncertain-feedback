@@ -139,6 +139,8 @@ def test_torch_features_agree_with_the_planner_on_the_same_motion() -> None:
     )
     features = motion_features(spine3, shoulder, elbow, wrist, STEP_SECONDS)
 
+    # Every feature generated limits can read, so none is left out of steering.
+    assert set(features) == set(expected)
     for name in ("wrist_speed", "elbow_speed", "elbow_flexion_rate"):
         np.testing.assert_allclose(features[name][0].numpy(), expected[name], atol=1e-5)
     for name in (

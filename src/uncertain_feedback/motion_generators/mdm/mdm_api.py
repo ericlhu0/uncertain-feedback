@@ -463,8 +463,8 @@ class MdmMotionGenerator(
     ) -> Callable[[Any], Any] | None:
         """Compile a persona's hidden bounds into a steering cost over ``x̂0``.
 
-        Returns ``None`` when none of the persona's bounds can be scored from
-        positions alone (see ``torch_features.supported_bounds``).
+        Returns ``None`` when the persona has no feature bounds (see
+        ``torch_features.build_user_bound_cost``).
         """
         # pylint: disable-next=import-outside-toplevel
         from uncertain_feedback.motion_generators.mdm.torch_features import (
@@ -479,8 +479,7 @@ class MdmMotionGenerator(
         """Compile generated limits into a steering cost over ``x̂0``.
 
         ``speed_scale`` weighs speed limits against path limits. Returns ``None``
-        when every cost reads a feature positions cannot give (see
-        ``torch_features.build_generated_cost``).
+        when there is no cost (see ``torch_features.build_generated_cost``).
         """
         # pylint: disable-next=import-outside-toplevel
         from uncertain_feedback.motion_generators.mdm.torch_features import (

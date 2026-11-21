@@ -20,6 +20,7 @@ from uncertain_feedback.motion_generators.mdm.mdm_api import (
     MdmMotionGenerator,
 )
 from uncertain_feedback.motion_generators.mdm.torch_features import (
+    ROTATION_DEAD_ZONE,
     build_generated_cost,
     features_from_hml,
 )
@@ -46,9 +47,10 @@ _COUPLED = (
     "    return {'floor': floor - features['elbow_flexion']}\n"
 )
 _COUPLED_PARAMS = {"xs": [0.2, 0.6, 1.4], "ys": [0.4, 1.6, 1.8]}
+# Over the limit at any twist, so only the dead zone can switch it off.
 _ROTATION = (
     "def path_margins(features, params):\n"
-    "    return {'twist': features['shoulder_internal_external_rotation']}\n"
+    "    return {'twist': features['shoulder_internal_external_rotation'] + 4.0}\n"
 )
 _SPEED = (
     "def speed_margins(features, params):\n"
@@ -128,7 +130,7 @@ def test_prune_judges_samples_on_every_learned_limit_not_the_config_bounds() -> 
     )
     more = peaks(cap, fast, twist)
     assert more[2] > 0.0  # moving: over the speed limit
-    # Still: only past the rotation limit, which guidance cannot read.
+    # Still: only past the rotation limit.
     np.testing.assert_allclose(more[1], 0.5)
 
 
@@ -166,19 +168,38 @@ def test_steering_reads_the_planners_margins_on_differentiable_features() -> Non
     assert grad is not None and grad[0].abs().sum() > 0.0
 
 
-def test_generated_steering_cost_skips_features_positions_cannot_give() -> None:
-    mean, std = torch.zeros(263), torch.ones(263)
-    assert build_generated_cost([_cost(_ROTATION)], mean, std, 1.0) is None
-
-    steer = build_generated_cost(
-        [_cost(_COUPLED, _COUPLED_PARAMS), _cost(_ROTATION)], mean, std, 1.0
+def _hanging_arm_x0(flexion: float, n_free: int = 4) -> torch.Tensor:
+    """A normalized ``(1, 263, 1, T)`` sample (mean 0, std 1) whose left upper arm
+    hangs straight down with the forearm bent ``flexion`` rad sideways and forward."""
+    x0 = torch.zeros(1, 263, 1, N_PREFIX_FRAMES + n_free)
+    elbow = torch.tensor([0.0, -0.3, 0.0])
+    side = torch.nn.functional.normalize(torch.tensor([1.0, 0.0, 1.0]), dim=0)
+    wrist = elbow + 0.25 * (
+        np.cos(flexion) * torch.tensor([0.0, -1.0, 0.0]) + np.sin(flexion) * side
     )
+    for joint, position in ((17, elbow), (19, wrist)):  # RIC left elbow / wrist
+        x0[0, 4 + joint * 3 : 7 + joint * 3, 0, :] = position[:, None]
+    return x0
+
+
+def test_generated_steering_cost_steers_on_rotation_where_the_elbow_is_bent() -> None:
+    mean, std = torch.zeros(263), torch.ones(263)
+    steer = build_generated_cost([_cost(_ROTATION)], mean, std, 1.0)
     assert steer is not None
-    x0 = torch.randn(3, 263, 1, N_PREFIX_FRAMES + 6, requires_grad=True)
-    value = steer(x0)
-    assert value.shape == (3,)
+
+    bent = _hanging_arm_x0(1.0).requires_grad_()
+    value = steer(bent)
+    assert value.item() > 0.0
     value.sum().backward()  # type: ignore[no-untyped-call]
-    assert x0.grad is not None and torch.isfinite(x0.grad).all()
+    assert bent.grad is not None and torch.isfinite(bent.grad).all()
+    assert bent.grad.abs().sum() > 0.0
+
+    straight = _hanging_arm_x0(0.5 * ROTATION_DEAD_ZONE)
+    assert steer(straight).item() == 0.0
+    # The dead zone switches off the whole cost, its other margins included.
+    both = _cost(_ROTATION.replace("}", ", 'bend': features['elbow_flexion'] + 1.0}"))
+    combined = build_generated_cost([both], mean, std, 1.0)
+    assert combined is not None and combined(straight).item() == 0.0
 
 
 def test_generated_steering_cost_has_a_fixed_scale_per_kind_of_limit() -> None:

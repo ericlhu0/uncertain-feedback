@@ -24,7 +24,7 @@ from uncertain_feedback.planners.mpc.costs import (
     GeneratedPythonCost,
     base_extra_costs,
 )
-from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion
+from uncertain_feedback.planners.mpc.goal_spaces import GoalRegion, GoalStallConfig
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import (
     StallProposal,
@@ -50,6 +50,32 @@ def _write_json(path: Path, payload: Any) -> None:
         json.dump(payload, file, indent=2, sort_keys=True, default=str)
 
 
+def with_goal_stall(cfg: MpcRunConfig, enabled: bool) -> MpcRunConfig:
+    """``cfg`` with goal-stall proposals on, or off as in runs before 2026-10-06.
+
+    On keeps the config's own ``cartesian.stall`` and adds the defaults when it
+    has none.
+    """
+    if cfg.cartesian is None:
+        return cfg
+    stall = (cfg.cartesian.stall or GoalStallConfig()) if enabled else None
+    return replace(cfg, cartesian=replace(cfg.cartesian, stall=stall))
+
+
+def raw_draws(grounding: GroundingResult) -> dict[str, np.ndarray]:
+    """The raw generator draws ``samples``/``sample_labels``, when the grounder sampled.
+
+    See ``UqClusterResult.samples``; saved so a menu can be re-scored and
+    re-clustered later.
+    """
+    draws: dict[str, np.ndarray] = {}
+    if grounding.samples is not None:
+        draws["samples"] = np.asarray(grounding.samples, dtype=np.float32)
+    if grounding.sample_labels is not None:
+        draws["sample_labels"] = np.asarray(grounding.sample_labels)
+    return draws
+
+
 def _save_round_trajectories(
     round_dir: Path,
     q_feedback: np.ndarray,
@@ -61,14 +87,8 @@ def _save_round_trajectories(
     """Every trajectory the round produced, so it can be re-scored later.
 
     ``candidate_<label>`` and ``correction`` are left-arm axis-angles (T, 3, 3);
-    the rest are canonical q (T, 7). ``samples``/``sample_labels`` are the raw
-    generator draws when the grounder sampled (see ``UqClusterResult.samples``).
+    the rest are canonical q (T, 7), plus the :func:`raw_draws`.
     """
-    extras: dict[str, np.ndarray] = {}
-    if grounding.samples is not None:
-        extras["samples"] = np.asarray(grounding.samples, dtype=np.float32)
-    if grounding.sample_labels is not None:
-        extras["sample_labels"] = np.asarray(grounding.sample_labels)
     np.savez_compressed(
         round_dir / "trajectories.npz",
         q_feedback=q_feedback,
@@ -77,7 +97,7 @@ def _save_round_trajectories(
         correction_q=correction_q,
         continuation=continuation,
         **{f"candidate_{label}": traj for label, traj in grounding.candidates.items()},
-        **extras,
+        **raw_draws(grounding),
     )
 
 

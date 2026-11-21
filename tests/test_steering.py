@@ -174,47 +174,55 @@ def test_torch_bound_violation_matches_numpy(bound) -> None:
 # --- cost construction ------------------------------------------------------
 
 
-def test_supported_bounds_skips_unsupported_features_and_joint_boxes() -> None:
+def test_rotation_bounds_are_inactive_while_the_elbow_is_straight() -> None:
+    import torch
+
     from uncertain_feedback.motion_generators.mdm.torch_features import (
-        supported_bounds,
+        ROTATION_DEAD_ZONE,
+        bound_violation,
     )
 
-    coupled = CoupledBound(
-        feature="elbow_flexion",
-        bound_type="upper_bound",
-        cond_feature="shoulder_elevation",
-        intercept=2.6,
-        slope=-0.65,
+    features = _features(seed=5)
+    features["shoulder_internal_external_rotation"] = np.random.default_rng(6).uniform(
+        -1.5, 1.5, size=features["elbow_flexion"].shape
     )
-    unsupported_feature = HiddenBound(
-        feature="shoulder_internal_external_rotation",
-        bound_type="upper_bound",
-        high=1.0,
-    )
-    unsupported_condition = HiddenBound(
-        feature="elbow_flexion",
-        bound_type="upper_bound",
-        high=1.0,
-        condition=FeatureCondition(
-            feature="shoulder_internal_external_rotation", low=0.0, high=1.0
+    torch_features = {
+        name: torch.tensor(value, dtype=torch.float64)
+        for name, value in features.items()
+    }
+    bounds = (
+        HiddenBound(
+            feature="shoulder_internal_external_rotation",
+            bound_type="upper_bound",
+            high=0.4,
         ),
-    )
-    user = SimulatedUser(
-        name="mixed",
-        description="",
-        feedback_text="",
-        bounds=(coupled, unsupported_feature, unsupported_condition),
-        joint_limits=(
-            JointBoxLimit(
-                joint="left_elbow", low=(-1.0, -1.0, -1.0), high=(1.0, 1.0, 1.0)
+        HiddenBound(
+            feature="elbow_flexion",
+            bound_type="upper_bound",
+            high=1.0,
+            condition=FeatureCondition(
+                feature="shoulder_internal_external_rotation", low=-0.5, high=0.5
             ),
         ),
+        CoupledBound(
+            feature="shoulder_elevation",
+            bound_type="upper_bound",
+            cond_feature="shoulder_internal_external_rotation",
+            intercept=1.5,
+            slope=0.5,
+        ),
     )
+    bent = features["elbow_flexion"] >= ROTATION_DEAD_ZONE
+    assert bent.any() and not bent.all()
+    for bound in bounds:
+        violation = bound_violation(bound, torch_features).numpy()
+        np.testing.assert_allclose(
+            violation, np.where(bent, bound.violation(features), 0.0), atol=1e-12
+        )
+        assert violation.any()
 
-    assert supported_bounds(user) == (coupled,)
 
-
-def test_build_user_bound_cost_returns_none_without_supported_bounds() -> None:
+def test_build_user_bound_cost_returns_none_with_only_joint_boxes() -> None:
     import torch
 
     from uncertain_feedback.motion_generators.mdm.torch_features import (
@@ -222,14 +230,13 @@ def test_build_user_bound_cost_returns_none_without_supported_bounds() -> None:
     )
 
     user = SimulatedUser(
-        name="rotation_only",
+        name="joint_box_only",
         description="",
         feedback_text="",
-        bounds=(
-            HiddenBound(
-                feature="shoulder_internal_external_rotation",
-                bound_type="upper_bound",
-                high=1.0,
+        bounds=(),
+        joint_limits=(
+            JointBoxLimit(
+                joint="left_elbow", low=(-1.0, -1.0, -1.0), high=(1.0, 1.0, 1.0)
             ),
         ),
     )

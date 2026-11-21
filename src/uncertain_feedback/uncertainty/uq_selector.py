@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
-from uncertain_feedback.motion_generators.steering import SteeringConfig, SteeringSpec
+from uncertain_feedback.motion_generators.steering import (
+    SteeringConfig,
+    SteeringSpec,
+    prune_violating,
+    sample_peaks,
+)
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.kinematics import (
     LEFT_ARM_CHAIN_INDICES,
@@ -117,12 +122,15 @@ class UqSelector:
         ) = None,
         trajectory_fraction: float = 1.0,
         steering: SteeringSpec | None = None,
+        anchor_correction: bool = True,
     ) -> UqClusterResult:
         """Generate multiple MDM samples, cluster them, let the user pick.
 
         The full pipeline:
 
-        1. Draw ``diffusion_samples`` trajectories from the diffusion model.
+        1. Draw ``diffusion_samples`` trajectories from the diffusion model;
+           with ``steering``, drop every sample whose tracked arm still
+           crosses what it was steered toward.
         2. Cluster them with the configured :class:`TrajectoryClusterer`.
         3. Show the interactive cluster-picker window (blocks until chosen),
            unless ``cluster_selector`` or ``auto_cluster`` picks headlessly.
@@ -148,6 +156,9 @@ class UqSelector:
                         over ``auto_cluster`` and the interactive picker.
             steering:   Optional cost-steering spec forwarded to the generator,
                         biasing the drawn samples toward the user's cost model.
+            anchor_correction: Whether the caller re-anchors the chosen option
+                        onto ``human.q`` before tracking it; steering's prune
+                        judges every sample the same way.
         """
         steer_kwargs: dict[str, Any] = (
             {} if steering is None else {"steering": steering}
@@ -169,6 +180,9 @@ class UqSelector:
             frozen_body=frozen_body,
             **steer_kwargs,
         )  # (n_diffusion_samples, n_frames, 22, 3)
+        if steering is not None:
+            peaks = sample_peaks(human, drawn, steering, anchor_correction)
+            drawn = prune_violating(drawn, peaks, self._clusterer.n_clusters)
         if use_position_uq:
             positions: np.ndarray | None = drawn
             trajectories = None

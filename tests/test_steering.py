@@ -22,17 +22,21 @@ from uncertain_feedback.motion_generators.steering import (
     SteeringSpec,
     build_steering_spec,
     conflict_warning,
+    prune_violating,
     resample_indices,
+    sample_peaks,
 )
 from uncertain_feedback.planners.mpc import ArmMPC, FeedbackConfig
 from uncertain_feedback.planners.mpc.config import load_mpc_config
 from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
 from uncertain_feedback.simulated_users.base import (
     CoupledBound,
     FeatureCondition,
     HiddenBound,
     JointBoxLimit,
     SimulatedUser,
+    feature_series,
 )
 from uncertain_feedback.simulated_users.personas import get_persona
 from uncertain_feedback.uncertainty import UqConfig
@@ -391,6 +395,32 @@ class _OneClusterer(TrajectoryClusterer):
         return np.zeros(features.shape[0], dtype=np.intp)
 
 
+def test_prune_violating_keeps_satisfying_samples_or_the_least_violating() -> None:
+    samples = np.arange(5)
+    peaks = np.array([0.3, 0.0, 0.1, 0.0, 0.2])
+    np.testing.assert_array_equal(prune_violating(samples, peaks, n_min=2), [1, 3])
+    # Too few satisfy: top up with the least violating, in sample order.
+    np.testing.assert_array_equal(prune_violating(samples, peaks, n_min=3), [1, 2, 3])
+    np.testing.assert_array_equal(
+        prune_violating(samples, peaks + 1.0, n_min=2), [1, 3]
+    )
+
+
+def test_sample_peaks_judges_config_bounds_on_exact_features() -> None:
+    human = Human()
+    q_trajs = np.repeat(human.q[None, None], 4, axis=1).repeat(2, axis=0)
+    q_trajs[0, :, 6] = np.linspace(0.0, 1.5, 4)  # bends past the cap
+    q_trajs[1, :, 6] = 0.5  # holds inside it
+    positions = np.zeros((*q_trajs.shape[:2], 22, 3))
+    positions[:, :, LEFT_ARM_CHAIN_INDICES] = human.fk_positions_from_q(q_trajs)
+    cap = HiddenBound("elbow_flexion", "upper_bound", high=1.0)
+    spec = SteeringSpec(cost=lambda x0: x0, config=SteeringConfig(bounds=(cap,)))
+
+    peaks = sample_peaks(human, positions, spec, anchor=False)
+    flexion = feature_series(human, q_trajs[:, 1:])["elbow_flexion"]
+    np.testing.assert_allclose(peaks, [flexion[0].max() - 1.0, 0.0], atol=1e-9)
+
+
 def test_build_steering_spec_without_bounds_samples_unsteered() -> None:
     # No persona argument and no hidden-bound fallback: nothing to compile.
     assert build_steering_spec(cast(Any, object()), SteeringConfig(), seed=0) is None
@@ -403,7 +433,13 @@ def test_query_mdm_with_uncertainty_forwards_the_steering_spec() -> None:
         feedback=FeedbackConfig(uq=UqConfig(diffusion_samples=2)),
         clusterer=_OneClusterer(n_clusters=1),
     )
-    spec = SteeringSpec(cost=lambda x0: x0, config=SteeringConfig(mode="resample"))
+    spec = SteeringSpec(
+        cost=lambda x0: x0,
+        config=SteeringConfig(
+            mode="resample",
+            bounds=(HiddenBound("elbow_flexion", "upper_bound", high=3.0),),
+        ),
+    )
 
     mpc.query_mdm_with_uncertainty(
         cast(Any, gen), "raise my left arm", prefix=False, auto_cluster=0

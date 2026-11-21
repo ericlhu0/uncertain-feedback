@@ -38,6 +38,8 @@ from uncertain_feedback.evaluation_mechanism import EvalState
 from uncertain_feedback.motion_generators.steering import (
     SteeringSpec,
     build_steering_spec,
+    prune_violating,
+    sample_peaks,
 )
 from uncertain_feedback.planners.correction_session import (
     CorrectionTrigger,
@@ -926,6 +928,14 @@ class Session:
             num_frames=_feedback_cfg(rig).frames,
             steering=spec,
         )
+        if spec is not None:
+            peaks = sample_peaks(
+                traj.corrected,
+                traj.samples,
+                spec,
+                _feedback_cfg(rig).anchor_correction,
+            )
+            traj.samples = prune_violating(traj.samples, peaks, n_clusters)
         _log(f"MDM generation done in {time.perf_counter() - t0:.1f}s")
         if spec is not None:
             _log(f"steering mode {spec.config.mode}")

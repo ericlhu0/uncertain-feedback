@@ -159,7 +159,7 @@ uncertain-feedback/
 │   ├── motion_generators/
 │   │   ├── __init__.py               # MOTION_GENERATOR_BUILDERS registry + make_motion_generator (name, model_path, seed, lock_seed, guidance_param)
 │   │   ├── base.py                   # MotionGenerator ABC (shared backend interface)
-│   │   ├── steering.py               # Diffusion steering: SteeringConfig/Spec/Event, build_steering_spec (shared bounds→spec guard chain; takes no persona), particle resampler, classifier-guidance cond_fn, conflict diagnostic (torch-free — imported at config-parse time)
+│   │   ├── steering.py               # Diffusion steering: SteeringConfig/Spec/Event, build_steering_spec (shared bounds→spec guard chain; takes no persona), particle resampler, classifier-guidance cond_fn, conflict diagnostic, `sample_peaks` + `prune_violating` (post-sampling prune of every sample crossing what it was steered toward, exact IK features; torch-free — imported at config-parse time)
 │   │   └── mdm/
 │   │       ├── transfer_seated_pose.pt # Seated start for transfer and the seated care configs; right arm folded, left arm lowered (normalized HML263)
 │   │       ├── transfer_bed_pose.pt    # Supine transfer start; extended legs and same arm setup (normalized HML263)
@@ -1466,14 +1466,16 @@ Both `generate_*` methods take a keyword-only `steering: SteeringSpec | None`. M
 it; a backend that does not support steering raises `NotImplementedError` for a non-`None`
 spec (as it may for `frozen_body`). A `SteeringSpec` bundles a `cost` (normalized `x̂0 (N,263,1,T)` → `(N,)`; built
 by `MdmMotionGenerator.build_user_steering_cost` from `SteeringConfig.bounds`, §6), a
-`SteeringConfig`, and a `seed`. `mode: "cg"` is the default everywhere; `mode: "off"` opts a
+`SteeringConfig`, a `seed`, and `limits`: the learned `GeneratedPythonCost`s a
+`build_learned_steering_spec` spec was compiled from (empty for a bounds spec). `mode: "cg"` is the default everywhere; `mode: "off"` opts a
 config out of steering entirely. `build_steering_spec(gen, config, seed)` (same module) is the
 shared guard chain both frontends and the evaluation steering modules compile a spec through:
 `mode: "off"` → `None`; no `config.bounds`, a non-MDM backend, or no supported bounds →
 printed skip + `None` (unsteered sampling). It takes no persona, so the simulated user's
 hidden bounds can only reach steering when a caller passes them in as `config.bounds` —
 which only `ClassifierGuidanceSteering`, the hidden-limit ceiling, does; `LearnedSteering`
-passes the learner's bounds, and `run.py` / the demo runner pass the YAML's.
+goes through `build_learned_steering_spec` with the learner's generated limits instead, and
+`run.py` / the demo runner pass the YAML's bounds.
 The demo runner calls it per generation from `Session._steering_spec` with the browser's
 Steering-dropdown mode substituted into the YAML config; `run.py` calls it per correction
 round in `handle_correction` and threads the spec through
@@ -1498,6 +1500,20 @@ On the first event, `conflict_warning` fires when essentially every sample viola
 cost *and* the effective sample size has collapsed: that means the prompt and the cost
 conflict, so reweighting the population (`mode: resample`) cannot help. It is a diagnostic
 only — nothing switches mode automatically.
+
+After sampling (either mode) `UqSelector.query` and the demo runner's `Session.generate`
+prune every drawn sample before clustering: `sample_peaks(human, positions, spec, anchor)`
+solves each sample's arm by IK, re-anchors it onto `human.q` as tracking will
+(`anchor_correction`, threaded into `query` from `feedback.anchor_correction` by `ArmMPC` and
+`MdmGrounder`), and returns its peak excess on exact features (not the facing-frame torch
+approximation the guidance uses, §6): over `spec.limits` when it has any — each limit's
+`pose_excess` per frame (rad) and `speed_excess` over steps 1/20 s apart, every learned limit
+including the ones guidance skips — else over `spec.config.bounds` (rad).
+`prune_violating(samples, peaks, n_clusters)` keeps the zero-peak samples, topped up with the
+least-violating ones when fewer than `n_clusters` survive. Judged at magnitude 1; a chooser
+that rescales an option can still push it past a limit. Unsteered sampling (spec `None`) is
+not pruned, so a learned set that guidance cannot read at all (only rotation limits) is not
+pruned either.
 
 Validated defaults (do not re-derive): `resample_steps=(15,25,35,45)`, `temperature=0.5`,
 `guide_from=10`, `guidance_weight=1e5`. `resample_steps`/`guide_from` live in loop-index space

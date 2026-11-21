@@ -2856,6 +2856,19 @@ remaining levers are guidance (`mode: cg`, the default) and rewording the
 correction. The warning is a diagnostic only; nothing switches mode
 automatically.
 
+Either mode then prunes: once sampling ends, every sample's arm is solved by IK,
+re-anchored onto the live configuration as it would be tracked (when
+`feedback.anchor_correction` is on, the default), and dropped before clustering
+if it crosses, at any frame, what the sampling was steered toward: the learned
+limits (path and speed margins, all of them, including ones guidance cannot
+read such as shoulder rotation) for learned steering, otherwise the steering
+bounds. The check uses the exact anatomical features the planner and the
+evaluation score with, not the steering cost's approximation, and the log
+reports how many samples stayed inside. If fewer than `n_clusters` do (e.g. the
+arm already starts past a limit), the `n_clusters` least-violating samples are
+kept so the menu keeps its size. Samples are judged at magnitude 1. Unsteered
+sampling is never pruned.
+
 In the interactive picker, each cluster panel has a **magnitude** slider
 (range 0.0–2.0) that scales that trajectory's motion up or down while
 preserving the direction of motion at every timestep (`scale` in joint-angle

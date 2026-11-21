@@ -510,6 +510,7 @@ class ArmMPC:
             default_scale=default_scale,
             cluster_selector=cluster_selector,
             steering=steering,
+            anchor_correction=feedback.anchor_correction,
             trajectory_fraction=feedback.trajectory_fraction,
         )
         self._last_uq_result = result

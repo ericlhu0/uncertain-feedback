@@ -23,7 +23,11 @@ from uncertain_feedback.motion_generators.mdm.torch_features import (
     build_generated_cost,
     features_from_hml,
 )
-from uncertain_feedback.motion_generators.steering import SteeringConfig
+from uncertain_feedback.motion_generators.steering import (
+    SteeringConfig,
+    SteeringSpec,
+    sample_peaks,
+)
 from uncertain_feedback.planners.mpc.costs import (
     CompositeTrajectoryCost,
     GeneratedPythonCost,
@@ -32,6 +36,7 @@ from uncertain_feedback.planners.mpc.costs import (
 from uncertain_feedback.planners.mpc.costs.generated import interp
 from uncertain_feedback.planners.mpc.goal_spaces import PointRegion
 from uncertain_feedback.planners.mpc.human import Human
+from uncertain_feedback.planners.mpc.kinematics import LEFT_ARM_CHAIN_INDICES
 from uncertain_feedback.simulated_users import get_persona
 from uncertain_feedback.simulated_users.base import feature_series
 
@@ -85,6 +90,46 @@ def test_learned_steering_compiles_the_learned_costs() -> None:
     assert gen.compiled == [learned]
     # Speed limits steer at their own weight, as a ratio to the path weight.
     assert gen.speed_scale == 1e-2
+
+
+def test_prune_judges_samples_on_every_learned_limit_not_the_config_bounds() -> None:
+    human = Human()
+    q_trajs = np.repeat(human.q[None, None], 5, axis=1).repeat(3, axis=0)
+    q_trajs[0, :, 6] = np.linspace(0.0, 1.5, 5)  # bends past the cap
+    q_trajs[1, :, 6] = 0.2  # holds still inside it
+    q_trajs[2, :, 6] = np.linspace(0.0, 0.6, 5)  # inside it, but moving
+    positions = np.zeros((*q_trajs.shape[:2], 22, 3))
+    positions[:, :, LEFT_ARM_CHAIN_INDICES] = human.fk_positions_from_q(q_trajs)
+    cap = _cost(
+        "def path_margins(features, params):\n"
+        "    return {'cap': features['elbow_flexion'] - params['cap']}\n",
+        {"cap": 1.0},
+    )
+    # A config bound every sample crosses: a learned spec does not judge it.
+    config = SteeringConfig(
+        bounds=(get_persona("elbow_contracture").bounds[0],),
+    )
+
+    def peaks(*limits: GeneratedPythonCost) -> np.ndarray:
+        spec = SteeringSpec(cost=lambda x0: x0, config=config, limits=limits)
+        return sample_peaks(human, positions, spec, anchor=False)
+
+    flexion = feature_series(human, q_trajs[:, 1:])["elbow_flexion"]
+    np.testing.assert_allclose(
+        peaks(cap), [flexion[0].max() - 1.0, 0.0, 0.0], atol=1e-9
+    )
+    fast = _cost(
+        "def speed_margins(features, params):\n"
+        "    return {'wrist': features['wrist_speed'] - 0.01}\n"
+    )
+    twist = _cost(
+        "def path_margins(features, params):\n"
+        "    return {'twist': features['shoulder_internal_external_rotation'] + 0.5}\n"
+    )
+    more = peaks(cap, fast, twist)
+    assert more[2] > 0.0  # moving: over the speed limit
+    # Still: only past the rotation limit, which guidance cannot read.
+    np.testing.assert_allclose(more[1], 0.5)
 
 
 def test_interp_matches_numpy_and_holds_the_end_anchors() -> None:

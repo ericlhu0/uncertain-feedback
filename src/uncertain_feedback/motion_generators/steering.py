@@ -18,6 +18,10 @@ Two mechanisms, selected by :attr:`SteeringConfig.mode`:
     production batch sizes, but it can only reweight the mass the model already
     puts on satisfying motions.
 
+Either way steering only biases sampling, so once sampling ends every sample
+whose tracked arm still crosses what it was steered toward is pruned before
+clustering (:func:`sample_peaks`, :func:`prune_violating`).
+
 This module is imported while parsing YAML configs, so it must stay torch-free
 at module scope: ``torch.Tensor`` appears only in string annotations under
 ``TYPE_CHECKING`` and ``torch`` itself is imported lazily inside
@@ -36,6 +40,7 @@ if TYPE_CHECKING:
 
     from uncertain_feedback.motion_generators.base import MotionGenerator
     from uncertain_feedback.planners.mpc.costs.generated import GeneratedPythonCost
+    from uncertain_feedback.planners.mpc.human import Human
     from uncertain_feedback.simulated_users.base import Bound
 
 STEERING_MODES = ("off", "cg", "resample")
@@ -98,11 +103,14 @@ class SteeringSpec:
 
     ``cost`` maps a normalized ``x̂0`` batch ``(N, 263, 1, T)`` to per-sample
     costs ``(N,)``, and must be differentiable w.r.t. its input for ``cg``.
+    ``limits`` are the learned limits a learned spec was compiled from; a spec
+    without them steers toward ``config.bounds``.
     """
 
     cost: Callable[[Tensor], Tensor]
     config: SteeringConfig
     seed: int = 0
+    limits: tuple["GeneratedPythonCost", ...] = ()
 
 
 def build_steering_spec(
@@ -164,7 +172,7 @@ def build_learned_steering_spec(
     if cost is None:
         print("steering: no steerable learned cost, sampling unsteered")
         return None
-    return SteeringSpec(cost=cost, config=config, seed=seed)
+    return SteeringSpec(cost=cost, config=config, seed=seed, limits=tuple(costs))
 
 
 def resample_indices(
@@ -187,6 +195,66 @@ def resample_indices(
     ess = 1.0 / float((weights**2).sum())
     positions = (rng.random() + np.arange(n)) / n
     return np.searchsorted(np.cumsum(weights), positions), ess
+
+
+def sample_peaks(
+    human: Human, positions: np.ndarray, spec: SteeringSpec, anchor: bool
+) -> np.ndarray:
+    """Return each drawn sample's peak excess over what ``spec`` steers toward.
+
+    ``positions`` are ``(N, T, 22, 3)`` samples. Every sample's arm is solved by
+    IK and judged on the exact anatomical features, not the steering cost's
+    facing-frame approximation. With ``anchor`` it is first re-anchored onto
+    ``human.q``, as every frontend does before tracking it
+    (``feedback.anchor_correction``); otherwise only its echoed frame 0 (the
+    current configuration) is dropped. Learned limits are judged on every one
+    of them, steerable or not: path margins per frame (rad) and speed margins
+    over each step into a frame (rad/s or m/s), the frames being MDM's 1/20 s
+    apart. A spec without learned limits is judged on ``config.bounds`` (rad).
+    """
+    # pylint: disable=import-outside-toplevel
+    from uncertain_feedback.planners.mpc.kinematics import (
+        LEFT_ARM_CHAIN_INDICES,
+        anchor_q_trajectory,
+    )
+    from uncertain_feedback.simulated_users.base import feature_series
+
+    q = human.ik_q_from_positions(positions[..., LEFT_ARM_CHAIN_INDICES, :])
+    q = np.stack([anchor_q_trajectory(s, human.q) for s in q]) if anchor else q[:, 1:]
+    if spec.limits:
+        n, t = q.shape[:2]
+        return np.max(
+            [
+                np.maximum(
+                    limit.pose_excess(q.reshape(n * t, -1)).reshape(n, t).max(axis=1),
+                    limit.speed_excess(q),
+                )
+                for limit in spec.limits
+            ],
+            axis=0,
+        )
+    features = feature_series(human, q)
+    return np.max(
+        [bound.violation(features) for bound in spec.config.bounds], axis=(0, 2)
+    )
+
+
+def prune_violating(samples: np.ndarray, peaks: np.ndarray, n_min: int) -> np.ndarray:
+    """Keep the samples that cross nothing they were steered away from (``peaks`` zero).
+
+    When fewer than ``n_min`` do (e.g. the arm already starts past a limit), the
+    ``n_min`` least-violating samples are kept instead, so the menu keeps its
+    size.
+    """
+    peaks = np.asarray(peaks, dtype=np.float64)
+    keep = np.flatnonzero(peaks <= 0.0)
+    if keep.size < n_min:
+        keep = np.sort(np.argsort(peaks, kind="stable")[:n_min])
+    print(
+        f"steering: {int((peaks <= 0.0).sum())}/{peaks.size} samples inside the "
+        f"steering limits, keeping {keep.size}"
+    )
+    return samples[keep]
 
 
 def make_cond_fn(

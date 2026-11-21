@@ -118,6 +118,7 @@ class MdmGrounder(Grounder):
             steering=self.steering.spec(
                 self.gen, self.user, uq.steering, seed=self._seed
             ),
+            anchor_correction=feedback.anchor_correction,
         )
         # Scaled here rather than taken from the selector, which scales the raw
         # option; scaling (axis-angle) and anchoring (q) do not commute.

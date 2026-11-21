@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from evaluation.benchmarks.structs import Interaction
+from evaluation.metrics.speed import limit_violation
 from uncertain_feedback.simulated_users import oracle_cluster_scores, violation_metrics
 
 
@@ -23,6 +24,7 @@ def round_rows(interaction: Interaction) -> list[dict[str, Any]]:
             user, human, grounding.candidates, grounding.magnitude
         )
         continuation_metrics = violation_metrics(user, human, rnd.continuation)
+        continuation_limits = limit_violation(user, human, [rnd.continuation])
         n_acceptable = sum(1 for ok in choice.acceptable.values() if ok)
         rows.append(
             {
@@ -63,6 +65,10 @@ def round_rows(interaction: Interaction) -> list[dict[str, Any]]:
                 "continuation_frac_violated": float(
                     continuation_metrics["frac_frames_violated"]
                 ),
+                "continuation_over_limit_share": continuation_limits[
+                    "over_limit_share"
+                ],
+                "continuation_peak_excess": continuation_limits["peak_excess"],
                 "retrigger_step": (
                     np.nan if rnd.retrigger_step is None else int(rnd.retrigger_step)
                 ),

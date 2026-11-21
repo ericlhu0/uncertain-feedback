@@ -10,12 +10,16 @@ user turns (feedback rounds plus approved stall proposals) per approach and,
 for goal sequences, per goal index; the
 breakdown of goal results; per-round grounding quality against feedback events.
 Every ``menu.csv`` a bound-transfer run wrote is pooled into ``all_menus.csv``
-with mean menu violation per approach and goal index.
+with mean menu violation per approach and goal index. For speed personas,
+every cost an episode learned (its ``learned_state.json``) is checked against
+the hidden limits in ``learned_limits.csv`` (:func:`learned_limit_row`), with
+the share retired by stall relaxation.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import pickle
 from pathlib import Path
 
@@ -36,6 +40,9 @@ from evaluation.metrics.cost_learning.success import (  # pylint: disable=wrong-
     goal_table,
     success_at_k,
 )
+from evaluation.metrics.speed import (  # pylint: disable=wrong-import-position
+    learned_limit_row,
+)
 
 
 def _collect(roots: list[Path]) -> list[Interaction]:
@@ -45,6 +52,33 @@ def _collect(roots: list[Path]) -> list[Interaction]:
             with open(path, "rb") as file:
                 interactions.extend(pickle.load(file))
     return interactions
+
+
+def _learned_limits(roots: list[Path]) -> pd.DataFrame:
+    """One row per cost a speed persona's episode learned, retired or not."""
+    rows = []
+    for root in roots:
+        for path in sorted(root.rglob("interactions.pkl")):
+            with open(path, "rb") as file:
+                first = pickle.load(file)[0]
+            state_path = path.parent / "learned_state.json"
+            if not first.user.speed_limits or not state_path.exists():
+                continue
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            for round_ in state["cost_gen"]["rounds"]:
+                rows.append(
+                    {
+                        "episode": str(path.parent),
+                        "persona": first.task.persona,
+                        "approach": first.approach,
+                        "round": round_["index"],
+                        "retired": bool(round_["retired"]),
+                        **learned_limit_row(
+                            round_["cost_code"], round_["params"], first.user
+                        ),
+                    }
+                )
+    return pd.DataFrame(rows)
 
 
 def _plot_success_at_k(curve: pd.DataFrame, path: Path) -> None:
@@ -123,14 +157,18 @@ def main() -> None:
     # Per-goal means per approach; time to complete only counts goals reached.
     summary = goals.groupby("approach").agg(
         success=("resolved", "mean"),
+        reached=("reached", "mean"),
         user_turns=("user_turns", "mean"),
         violation_count=("violation_count", "mean"),
+        speed_complaints=("speed_complaints", "mean"),
         executed_mean_violation=("executed_mean_violation", "mean"),
+        felt_over_limit_share=("felt_over_limit_share", "mean"),
+        felt_peak_excess=("felt_peak_excess", "mean"),
         robot_seconds=("robot_seconds", "mean"),
     )
-    summary["motion_steps_when_reached"] = (
-        goals[goals["reached"]].groupby("approach")["motion_steps"].mean()
-    )
+    reached = goals[goals["reached"]].groupby("approach")
+    summary["motion_steps_when_reached"] = reached["motion_steps"].mean()
+    summary["duration_ratio_when_reached"] = reached["duration_ratio"].mean()
     summary.to_csv(args.out / "summary.csv")
     print(summary.to_string())
 
@@ -176,6 +214,16 @@ def main() -> None:
         print(
             menu.groupby(["approach", "goal_index"])["violation"]
             .agg(["mean", "count"])
+            .to_string()
+        )
+    limits = _learned_limits(args.roots)
+    if not limits.empty:
+        limits.to_csv(args.out / "learned_limits.csv", index=False)
+        print(
+            limits.groupby(["approach", "persona"])[
+                ["speed_cap", "right_feature", "catches", "spares_reverse", "retired"]
+            ]
+            .mean()
             .to_string()
         )
     print(f"[evaluation] analysis written to {args.out}")

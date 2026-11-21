@@ -34,8 +34,9 @@ from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.planners.mpc.rollout import goal_reach, rollout_to_goal
 from uncertain_feedback.simulated_users import (
     HiddenCostTerm,
+    HiddenSpeedTerm,
     compute_violations,
-    first_violation_step,
+    first_complaint,
     get_persona,
 )
 from uncertain_feedback.simulated_users.personas import UNRESTRICTED
@@ -58,8 +59,9 @@ def generate_task_starts(
 
     A start is kept when it is comfortable, costs nothing under the task's base
     costs, the base-cost rollout from it to the config's first goal triggers
-    feedback (as ``run_episode`` tests it, with the default stall stop), and the
-    oracle (base + hidden cost) still reaches the goal, so the persona has
+    feedback (``first_complaint`` as ``run_episode`` tests it, with the default
+    stall stop: a speed persona complains of a speed), and the oracle (base +
+    hidden costs) still reaches the goal, so the persona has
     something to correct and the task is solvable. A start-relative goal
     (``DisplacementRegion``) is bound to each start.
 
@@ -155,18 +157,26 @@ def generate_task_starts(
                 nominal = rollout_to_goal(
                     cfg, start, start_goal, base, stop_on_stall=True
                 ).history
-            trigger = first_violation_step(user, human, nominal, threshold)
-            if trigger is None:
+            complaint = first_complaint(user, human, nominal, threshold)
+            if complaint is None:
                 row["rejected"] = "no_violation"
                 continue
             oracle_costs = CompositeTrajectoryCost(
-                [*base.terms(), HiddenCostTerm(user=user, human=human)]
+                [
+                    *base.terms(),
+                    HiddenCostTerm(user=user, human=human),
+                    *(
+                        [HiddenSpeedTerm(user=user, human=human)]
+                        if user.speed_limits
+                        else []
+                    ),
+                ]
             )
             oracle = rollout_to_goal(cfg, start, start_goal, oracle_costs).history
             if not goal_reach(human, cfg, oracle, start_goal)["reached"]:
                 row["rejected"] = "oracle_did_not_reach"
                 continue
-            row.update(trigger=trigger, rejected="")
+            row.update(trigger=complaint.step, rejected="")
             kept += 1
             print(f"[task_starts] {name} attempt {attempt}: kept", flush=True)
         print(f"[task_starts] {name}: {kept}/{quota} kept", flush=True)

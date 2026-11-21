@@ -4,6 +4,7 @@ from evaluation.approaches.base import Approach
 from evaluation.approaches.cost_gen import (
     ConsolidateCostGen,
     CostGen,
+    HiddenLimitCostGen,
     ImmediateCostGen,
     NoCostGen,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "ConsolidateCostGen",
     "CostGen",
     "Grounder",
+    "HiddenLimitCostGen",
     "ImmediateCostGen",
     "LearnedSteering",
     "LlmKeypointGrounder",

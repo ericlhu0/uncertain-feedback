@@ -1,0 +1,10 @@
+# Ceiling for the full method: MDM grounding and user picks as in full, but the planner
+# holds the persona's hidden limit from the start and MDM is steered by it (learned
+# steering reads the cost learner's terms, here the hidden limit). Never the method.
+defaults:
+  - grounder: mdm
+  - cost_gen: hidden_limit
+  - steering: learned
+  - _self_
+_target_: evaluation.approaches.base.Approach
+name: hidden_limit_ceiling

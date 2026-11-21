@@ -212,9 +212,7 @@ def _line_world(
             "distance": max(1.0 - float(rollout[-1][0]), 0.0),
         },
     )
-    monkeypatch.setattr(
-        episode_module, "first_violation_step", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr(episode_module, "first_complaint", lambda *args, **kwargs: None)
 
 
 def _line_motion(

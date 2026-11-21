@@ -148,7 +148,8 @@ def features_from_hml(
     pose the correction starts from may itself violate the user's bounds, and
     nothing the sampler does can change it. The last pinned frame is kept as
     the reference the first free frame's speed is measured from, so a jump out
-    of the prefix counts as speed.
+    of the prefix counts as speed (:func:`build_generated_cost` leaves that
+    step out of speed limits).
     """
     hml = x0[:, :, 0, :].permute(0, 2, 1)
     denorm = hml * hml_std + hml_mean
@@ -258,8 +259,12 @@ def build_generated_cost(
     planner's penalty (linear, worst step) has no useful gradient, so steering
     uses a smooth one of fixed scale: each margin's squared excess averaged
     over time, in rad² for path limits and, times ``speed_scale``, in (rad/s)²
-    or (m/s)² for speed limits. A cost reading a feature positions cannot give
-    is left out. Returns ``None`` when no cost is left.
+    or (m/s)² for speed limits. Speed limits skip the step out of the pinned
+    prefix: a correction is played re-anchored on the live pose
+    (``anchor_q_trajectory``), which drops that step, and charging it pushed
+    guidance against a jump that never plays, to divergence at high weights.
+    A cost reading a feature positions cannot give is left out. Returns
+    ``None`` when no cost is left.
     """
     steerable = [
         cost
@@ -279,9 +284,12 @@ def build_generated_cost(
         features = features_from_hml(x0, hml_mean, hml_std)
         total = torch.zeros(x0.shape[0], dtype=x0.dtype, device=x0.device)
         for term in steerable:
-            for scale, margins in zip((1.0, speed_scale), term.margins(features)):
-                for margin in margins.values():
-                    total = total + scale * margin.clamp(min=0.0).pow(2).mean(dim=1)
+            path, speed = term.margins(features)
+            for margin in path.values():
+                total = total + margin.clamp(min=0.0).pow(2).mean(dim=1)
+            for margin in speed.values():
+                excess = margin[:, 1:].clamp(min=0.0)
+                total = total + speed_scale * excess.pow(2).mean(dim=1)
         return total
 
     return cost

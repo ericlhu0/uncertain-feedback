@@ -1,0 +1,3 @@
+# Ceiling: the persona's hidden limit, hand-written as margins (benchmarks/speed.py
+# CONSTRAINTS), planned with from the first step; nothing is learned.
+_target_: evaluation.approaches.cost_gen.hidden_limit.HiddenLimitCostGen

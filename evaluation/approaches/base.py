@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from evaluation.approaches.cost_gen import CostGen, NoCostGen
+from evaluation.approaches.cost_gen import CostGen, HiddenLimitCostGen, NoCostGen
 from evaluation.approaches.cost_gen.structs import LearnOutcome, RoundContext
 from evaluation.approaches.grounders.base import ClusterSelector, Grounder
 from evaluation.approaches.grounders.mdm import MdmGrounder
@@ -86,6 +86,8 @@ class Approach:
         self._base = base_extra_costs(cfg.costs, human, user)
         self.grounder.reset(cfg, gen, user, seed, episode_dir)
         self.cost_gen.reset(cfg, self._base, episode_dir)
+        if isinstance(self.cost_gen, HiddenLimitCostGen):
+            self.cost_gen.bind(human, user)
         self._resumed_from = None
 
     def save(self, path: Path) -> None:

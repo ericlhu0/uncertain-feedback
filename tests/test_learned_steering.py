@@ -147,9 +147,11 @@ def test_generated_steering_cost_has_a_fixed_scale_per_kind_of_limit() -> None:
         return compiled(x0)
 
     # Mean over time of the squared excess, in the margin's own units: no
-    # weight of the generated code's making enters.
+    # weight of the generated code's making enters. Speed starts after the step
+    # out of the prefix, which the re-anchored correction never plays.
     features = features_from_hml(x0, mean, std)
-    expected = speed.margins(features)[1]["elbow"].clamp(min=0.0).pow(2).mean(dim=1)
+    margin = speed.margins(features)[1]["elbow"][:, 1:]
+    expected = margin.clamp(min=0.0).pow(2).mean(dim=1)
     torch.testing.assert_close(steer([speed], 1.0), expected)
     assert (expected > 0.0).all()
     torch.testing.assert_close(

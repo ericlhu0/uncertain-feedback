@@ -17,6 +17,7 @@ from evaluation.benchmarks.structs import FeedbackRound, Interaction, Interactio
 from evaluation.benchmarks.verbalize import bind_verbalizer
 from evaluation.metrics.cost_learning.success import goal_row
 from evaluation.metrics.grounding.structs import GroundingResult
+from evaluation.metrics.speed import felt_segments, limit_violation
 from uncertain_feedback.planners.mpc.arm_features import canonical_arm_q
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
 from uncertain_feedback.planners.mpc.costs import (
@@ -34,11 +35,15 @@ from uncertain_feedback.planners.mpc.rollout import (
 )
 from uncertain_feedback.simulated_users import (
     ChoiceResult,
+    Complaint,
     HiddenCostTerm,
+    HiddenSpeedTerm,
     SimulatedUser,
+    SpeedLimit,
     attribute_correction,
     choose_correction,
-    first_violation_step,
+    first_complaint,
+    verbalize_speed,
     violation_metrics,
 )
 
@@ -89,11 +94,12 @@ def _stall_proposal(  # pylint: disable=too-many-arguments,too-many-positional-a
     user: SimulatedUser,
     threshold: float,
     label: str,
-) -> tuple[StallProposal, bool] | None:
+) -> tuple[StallProposal, Complaint | None] | None:
     """Offer the stalled arm a path with the blocking learned costs left out.
 
-    The persona approves it when it stays under the trigger threshold, the same
-    test the chooser applies to candidate corrections. ``None`` when there is no
+    Returns the proposal and the persona's complaint about it; it approves a
+    proposal it has no complaint about, the same test the chooser applies to
+    candidate corrections. ``None`` when there is no
     learned cost to leave out, or when leaving them out brings the arm no
     closer to the goal (by ``cartesian.stall.min_gain``): then no learned cost
     is what holds it back, and there is nothing worth asking about.
@@ -112,13 +118,13 @@ def _stall_proposal(  # pylint: disable=too-many-arguments,too-many-positional-a
             flush=True,
         )
         return None
-    approved = first_violation_step(user, at, path, threshold) is None
+    complaint = first_complaint(user, at, path, threshold, at.history)
     print(
         f"{_LOG} {label} stalled; proposal leaving out {len(proposed.dropped)} "
-        f"learned cost(s) {'approved' if approved else 'rejected'}",
+        f"learned cost(s) {'approved' if complaint is None else 'rejected'}",
         flush=True,
     )
-    return proposed, approved
+    return proposed, complaint
 
 
 def oracle_steps_to_goal(
@@ -149,9 +155,11 @@ class _Motion:
     ``path`` starts at that pose: replans under every learned cost, with each
     stall proposal the persona approved followed in between
     (``approved_spans``, inclusive frame ranges of ``path``). It ends at
-    ``trigger`` (its first frame over the threshold), at the goal
+    ``trigger`` (its first frame the persona complains at), at the goal
     (``reached``), at a stall with nothing to propose, or at a stall whose
-    proposal the persona turned down (``rejected``).
+    proposal the persona turned down (``rejected``). ``speed`` is the speed
+    limit that complaint, or the one about the proposal, was about; ``None``
+    for a path limit.
     """
 
     path: np.ndarray
@@ -159,6 +167,7 @@ class _Motion:
     reached: bool
     approved_spans: tuple[tuple[int, int], ...]
     rejected: StallProposal | None
+    speed: SpeedLimit | None = None
 
 
 def _move_to_goal(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -193,11 +202,18 @@ def _move_to_goal(  # pylint: disable=too-many-arguments,too-many-positional-arg
             progress_label=f"{label} after approval {len(spans)}" if spans else label,
             log_prefix=_LOG,
         ).history
-        trigger = first_violation_step(user, at, segment, threshold)
+        complaint = first_complaint(user, at, segment, threshold, at.history)
         offset = len(path) - 1
         path = np.concatenate([path, segment[1:]])
-        if trigger is not None:
-            return _Motion(path, offset + trigger, False, tuple(spans), None)
+        if complaint is not None:
+            return _Motion(
+                path,
+                offset + complaint.step,
+                False,
+                tuple(spans),
+                None,
+                complaint.speed,
+            )
         at = at.step(segment[1:])
         if goal_reach(at, cfg, segment, goal)["reached"]:
             return _Motion(path, None, True, tuple(spans), None)
@@ -210,9 +226,9 @@ def _move_to_goal(  # pylint: disable=too-many-arguments,too-many-positional-arg
         )
         if offer is None:
             return _Motion(path, None, False, tuple(spans), None)
-        proposal, approved = offer
-        if not approved:
-            return _Motion(path, None, False, tuple(spans), proposal)
+        proposal, complaint = offer
+        if complaint is not None:
+            return _Motion(path, None, False, tuple(spans), proposal, complaint.speed)
         followed = proposal.human.history
         spans.append((len(path) - 1, len(path) + len(followed) - 2))
         path = np.concatenate([path, followed[1:]])
@@ -258,6 +274,11 @@ def _episode_summary(interactions: list[Interaction]) -> dict[str, Any]:
                 first.user, first.human, executed
             ).items()
         },
+        "felt_limits": limit_violation(
+            first.user,
+            first.human,
+            [segment for item in interactions for segment in felt_segments(item)],
+        ),
     }
 
 
@@ -272,12 +293,16 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     """Play one persona through the task's goal sequence against ``approach``.
 
     ``human`` supplies the body (and, without ``task.start_q``, the start arm).
-    Per goal: an oracle path (base + hidden cost) defines the persona's ideal;
-    the approach plans with its current learned costs; discomfort triggers a
-    feedback round given ``corrections.history_cut`` steps before the trigger,
-    the motion after that discarded (attribute -> verbalize -> ground -> choose -> learn ->
-    continue) until resolution or the round cap. Learned costs persist across
-    the goal sequence, so later goals measure accumulated personalization.
+    Per goal: an oracle path (base + hidden costs, speed limits included)
+    defines the persona's ideal; the approach plans with its current learned
+    costs; a complaint (:func:`first_complaint`: a pose past the hidden path
+    limits, or a speed noticed over a hidden speed limit) triggers a feedback
+    round given ``corrections.history_cut`` steps before the trigger, the motion
+    after that discarded (attribute -> verbalize -> ground -> choose -> learn ->
+    continue) until resolution or the round cap. A speed complaint is put in
+    words by :func:`verbalize_speed` whatever the task's verbalizer. Learned
+    costs persist across the goal sequence, so later goals measure accumulated
+    personalization.
 
     With ``cartesian.stall`` set, a rollout that stalls short of the goal gets a
     proposal (the path with the blocking learned costs left out) if that gets
@@ -303,7 +328,11 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
     sim_cfg = cfg.simulated_user
     base = base_extra_costs(cfg.costs, human, user)
     oracle_costs = CompositeTrajectoryCost(
-        [*base.terms(), HiddenCostTerm(user=user, human=human)]
+        [
+            *base.terms(),
+            HiddenCostTerm(user=user, human=human),
+            *([HiddenSpeedTerm(user=user, human=human)] if user.speed_limits else []),
+        ]
     )
 
     interactions: list[Interaction] = []
@@ -352,6 +381,8 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
         rollout = before.path
         np.save(goal_dir / "initial_rollout.npy", rollout)
         trigger = before.trigger
+        # The speed limit the persona complained of; None for a path limit.
+        noticed = before.speed
         approvals = len(before.approved_spans)
         rounds: list[FeedbackRound] = []
         pending_plan: np.ndarray | None = None
@@ -426,7 +457,11 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
             intent = attribute_correction(
                 route, nominal_plan, q_feedback, human, min_join=min_join
             )
-            utterance = verbalize(intent, q_feedback, event_index, route)
+            utterance = (
+                verbalize(intent, q_feedback, event_index, route)
+                if noticed is None
+                else verbalize_speed(noticed)
+            )
             if utterance is None:
                 result = "no_feedback_content"
                 break
@@ -451,6 +486,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     mode=sim_cfg.chooser,
                     intent=intent,  # pylint: disable=cell-var-from-loop
                     rng=chooser_rng,
+                    history=at_feedback.history,  # pylint: disable=cell-var-from-loop
                     steps_to_goal=lambda candidate: oracle_steps_to_goal(
                         goal_cfg,  # pylint: disable=cell-var-from-loop
                         at_feedback,  # pylint: disable=cell-var-from-loop
@@ -551,11 +587,13 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                     proposal_rejected=after.rejected is not None,
                     approvals=len(after.approved_spans),
                     plan_seconds=round_plan_seconds,
+                    retrigger_speed=None if after.trigger is None else after.speed,
                 )
             )
             event_index += 1
 
             offset = len(executed.history) - 1
+            noticed = after.speed
             if after.trigger is not None:
                 feedback_step = max(after.trigger - cfg.corrections.history_cut, 0)
                 approved_spans += _executed_spans(
@@ -598,6 +636,7 @@ def run_episode(  # pylint: disable=too-many-locals,too-many-statements,too-many
                 stall_rejected=before.rejected is not None,
                 plan_seconds=plan_seconds,
                 trigger_threshold=threshold,
+                trigger_speed=None if before.rejected is not None else before.speed,
             )
         )
 

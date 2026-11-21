@@ -16,6 +16,7 @@ from uncertain_feedback.simulated_users import (
     ChoiceResult,
     CorrectionIntent,
     SimulatedUser,
+    SpeedLimit,
     Utterance,
     compute_violations,
 )
@@ -65,7 +66,8 @@ class FeedbackRound:
     the arm did from its end until the round's outcome: the replan under the
     learned costs and, where it stalled short of the goal, each stall proposal
     the persona approved (``approvals`` of them) and the replan after it.
-    ``retrigger_step`` is its first violation. ``proposal_rejected`` means it
+    ``retrigger_step`` is its first complaint, and ``retrigger_speed`` the speed
+    limit it was about (``None`` for a path limit). ``proposal_rejected`` means it
     ended at a stall whose proposal the persona turned down, so the next round
     corrects it. The round resolved its feedback when neither happened.
     ``plan_seconds``, ``ground_seconds`` and ``learn_seconds`` are the robot's
@@ -91,6 +93,7 @@ class FeedbackRound:
     proposal_rejected: bool = False
     approvals: int = 0
     plan_seconds: float = float("nan")
+    retrigger_speed: SpeedLimit | None = None
 
     @property
     def resolved(self) -> bool:
@@ -104,7 +107,8 @@ class Interaction:
 
     ``user`` and ``human`` are carried so metrics can score any trajectory
     here against the persona's hidden bounds. ``initial_rollout`` is the motion
-    before any feedback, ``trigger_step`` its first violation or, when
+    before any feedback, ``trigger_step`` its first complaint (``trigger_speed``
+    the speed limit it was about, ``None`` for a path limit) or, when
     ``stall_rejected``, the stall whose proposal the persona turned down, and
     ``plan_seconds`` the time spent planning it. ``executed`` is
     every frame the arm moved through for this goal, starting at the goal's
@@ -135,6 +139,7 @@ class Interaction:
     stall_rejected: bool = False
     plan_seconds: float = float("nan")
     trigger_threshold: float = 0.02
+    trigger_speed: SpeedLimit | None = None
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         # Older pickles stored only whether a proposal was approved; those
@@ -180,6 +185,13 @@ class Interaction:
         return stops + sum(
             crossings(self.user, self.human, r.correction_q, self.trigger_threshold)
             for r in self.rounds
+        )
+
+    @property
+    def speed_complaints(self) -> int:
+        """Times the persona stopped the arm for moving it too fast."""
+        return int(self.trigger_speed is not None) + sum(
+            r.retrigger_speed is not None for r in self.rounds
         )
 
     @property

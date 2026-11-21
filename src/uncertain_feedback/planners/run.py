@@ -74,7 +74,7 @@ from uncertain_feedback.planners.mpc.rollout import (
 from uncertain_feedback.simulated_users import (
     SimulatedUser,
     choose_cluster,
-    first_violation_step,
+    first_complaint,
     get_persona,
 )
 from uncertain_feedback.uncertainty.clustering import make_clusterer
@@ -981,8 +981,12 @@ def run_repeated_correction_session(
         approved = (
             operator.confirm("follow the proposed path?")
             if operator is not None
-            else first_violation_step(
-                setup.user, human, proposal, cfg.corrections.trigger_threshold
+            else first_complaint(
+                setup.user,
+                human,
+                proposal,
+                cfg.corrections.trigger_threshold,
+                human.history,
             )
             is None
         )

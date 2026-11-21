@@ -63,7 +63,7 @@ class SteeringConfig:
     temperature: float = 0.5
     guide_from: int = 10
     guidance_weight: float = 1e5
-    speed_guidance_weight: float = 1e3
+    speed_guidance_weight: float = 1e4
     bounds: tuple["Bound", ...] = ()
 
     def __post_init__(self) -> None:

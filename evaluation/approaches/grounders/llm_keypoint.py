@@ -74,10 +74,10 @@ class LlmKeypointGrounder(Grounder):
         """Return {"joint": str, "keypoint": (3,) array} or None for a no-op."""
         if self._llm is None:
             from uncertain_feedback.llm import (  # pylint: disable=import-outside-toplevel
-                OpenAIModel,
+                make_model,
             )
 
-            self._llm = OpenAIModel(
+            self._llm = make_model(
                 model=required_llm_model(self.cfg),
                 system_prompt=_KEYPOINT_SYSTEM_PROMPT,
                 temperature=0.0,

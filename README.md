@@ -3170,6 +3170,31 @@ Unless overridden by `llm_cost.model` or `OPENAI_MODEL`, LLM cost generation use
 one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-6-luna`;
 `gpt-5.6-sol` is not used for now.
 
+**Claude on a subscription instead of OpenAI and Codex.** Log the `claude` CLI in once
+(`claude`, then `/login`), then set either or both of:
+
+```yaml
+llm_cost:
+  model: claude-opus-5-5   # any claude* name: single-prompt calls go through `claude -p`
+  agent_cmd: "claude -p --dangerously-skip-permissions --model claude-opus-5-5 --effort high"
+```
+
+A `claude*` `llm_cost.model` runs on `llm/claude_model.py` (`make_model` in
+`llm/factory.py` picks it), billed to the plan the CLI is logged into, for the `llm`,
+`turns` and `direct` backends, the `llm_keypoint`/`llm_trajectory`/`bridge` grounders and
+the `visual` verbalizer. Each call is `claude -p` with no tools under `--safe-mode`, from an
+empty temporary directory, so the repo's CLAUDE.md and your memory never reach the prompt.
+The CLI takes no temperature or token limit; `turns` folds its conversation into one
+message per call. Reasoning effort goes to `--effort` where a grounder sets one; the cost
+generator sends none for Claude, so the CLI's default applies.
+
+An `agent_cmd` that starts with `claude` runs the `agent` backend and the combiner on Claude
+Code in the same sandbox as codex (below). Only the login (`claudeAiOauth` from
+`~/.claude/.credentials.json`) is copied into a fresh `CLAUDE_CONFIG_DIR`, so no settings,
+CLAUDE.md, memory or MCP servers come along; name the model in the command. A login the
+agent refreshed is written back to the host. Web search and fetch are disallowed except for
+the combiner, which searches the literature.
+
 - `llm` — three focused LLM calls, run once: **interpret** (instruction + contrast
   images + compact summary, including rollout-labeled chosen-vs-marked-wrong terminal
   joint-feature comparisons when the person explicitly rejects UQ alternatives →
@@ -3205,7 +3230,7 @@ one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-6-lun
   etc. are rewritten), and `/proc` does not, so other processes stay hidden too. Linux
   hosts using this backend must provide a working `bwrap` or a Landlock kernel (5.13+).
   The combiner (below) runs this way too. The sandbox ignores `~/.codex/config.toml`, so
-  `llm_cost.codex_cmd` must name the model (`-m`, `-c model_reasoning_effort=...`), or
+  `llm_cost.agent_cmd` must name the model (`-m`, `-c model_reasoning_effort=...`), or
   codex falls back to its default at no reasoning; the evaluation's care-task stack
   (`evaluation/conf/mpc_task_learning.yaml`) pins `gpt-6-sol` at high effort, which the
   ChatGPT login accepts from codex 0.163.0 on. Staged `state.pkl`

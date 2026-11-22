@@ -281,7 +281,7 @@ construction, JSON parse/compile/smoke-test, artifact saving, and installation.
   as the next user message. Keeps the best-scoring cost; stops early after
   `_NO_IMPROVE_PATIENCE = 2` non-improving turns. `stage_log.md` records the fixed
   interpretation and every refine-turn prompt snapshot/response.
-- **`agent`** (`AgentCostGenerator`, `codex_cmd`): writes the same prompt into `TASK.md`
+- **`agent`** (`AgentCostGenerator`, `agent_cmd`): writes the same prompt into `TASK.md`
   as an inlined staged task and delegates to the external `codex` CLI, which authors
   `response.json` itself. It must also write `stage_log.md` with Stage 1, Stage 2, and
   Stage 3 responses; that file is appended to `codex.log`. When an `EvalState` is
@@ -293,7 +293,7 @@ construction, JSON parse/compile/smoke-test, artifact saving, and installation.
 Model / config knobs (`LlmCostConfig`, `config.py`): `enabled` (default false),
 `model` (`OPENAI_MODEL` env → `gpt-5.6-luna`, reasoning effort `xhigh`), `strict`, `artifact_dir`, `use_images`
 (default true), `prompt` (default `"1"`), `backend` (default `"llm"`), `max_turns` (6),
-`codex_cmd`. System prompt + `temperature=0.2`, no explicit output-token cap, set in
+`agent_cmd`. System prompt + `temperature=0.2`, no explicit output-token cap, set in
 `_make_llm_model`.
 
 ---

@@ -1536,7 +1536,7 @@ class Session:
             mpc=None,
             rollout_fn=state.make_rollout_fn(),
             eval_state=state,
-            codex_cmd=rig.cfg.llm_cost.codex_cmd,
+            agent_cmd=rig.cfg.llm_cost.agent_cmd,
             corpus_dir=self.corpus.dir,
             rounds=self.rounds,
         )

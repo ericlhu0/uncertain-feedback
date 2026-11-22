@@ -305,7 +305,7 @@ def test_combine_rounds_uses_last_persisted_round_and_rolls_from_start(
                 use_images=False,
                 model=None,
                 strict=True,
-                codex_cmd="codex",
+                agent_cmd="codex",
             )
         ),
         human=Human(),
@@ -393,7 +393,7 @@ def test_combine_rounds_between_trajectories_skips_the_rollout(
     session.rig = SimpleNamespace(  # type: ignore[assignment]
         cfg=SimpleNamespace(
             llm_cost=SimpleNamespace(
-                use_images=False, model=None, strict=True, codex_cmd="codex"
+                use_images=False, model=None, strict=True, agent_cmd="codex"
             )
         )
     )

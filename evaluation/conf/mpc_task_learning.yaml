@@ -29,4 +29,4 @@ llm_cost:
   use_images: true
   max_turns: 3
   # The combiner's model: the agent sandbox ignores ~/.codex/config.toml, so name it here.
-  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access -m gpt-6-sol -c model_reasoning_effort=high"
+  agent_cmd: "codex exec --skip-git-repo-check -s danger-full-access -m gpt-6-sol -c model_reasoning_effort=high"

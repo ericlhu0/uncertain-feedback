@@ -56,8 +56,8 @@ def bind_verbalizer(
         )
     if task.verbalizer == "visual":
         # Imported lazily so non-visual episodes never touch the OpenAI client.
-        from uncertain_feedback.llm.openai_model import (  # pylint: disable=import-outside-toplevel
-            OpenAIModel,
+        from uncertain_feedback.llm import (  # pylint: disable=import-outside-toplevel
+            make_model,
         )
         from uncertain_feedback.simulated_users.visual import (  # pylint: disable=import-outside-toplevel
             VisualVerbalizer,
@@ -66,7 +66,7 @@ def bind_verbalizer(
         if cfg.llm_cost.model is None:
             raise ValueError("verbalizer: visual needs llm_cost.model.")
         visual = VisualVerbalizer(
-            OpenAIModel(
+            make_model(
                 model=cfg.llm_cost.model,
                 system_prompt="You answer with exactly one short spoken sentence.",
             ),

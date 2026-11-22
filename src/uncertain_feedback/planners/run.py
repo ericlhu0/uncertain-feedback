@@ -941,7 +941,7 @@ def run_repeated_correction_session(
             mpc=None,
             rollout_fn=eval_state.make_rollout_fn(),
             eval_state=eval_state,
-            codex_cmd=cfg.llm_cost.codex_cmd,
+            agent_cmd=cfg.llm_cost.agent_cmd,
             rounds=all_cost_rounds,
         )
         combined = combinator.generate(install=False)

@@ -553,14 +553,14 @@ def test_agent_generator_errors_when_codex_missing(tmp_path) -> None:
     strict = create_cost_generator(
         **_factory_kwargs(tmp_path, fake, LlmCostConfig(backend="agent", strict=True))
     )
-    strict.codex_cmd = "definitely-not-a-real-binary-xyz"  # type: ignore[attr-defined]
+    strict.agent_cmd = "definitely-not-a-real-binary-xyz"  # type: ignore[attr-defined]
     with pytest.raises(GeneratedCostValidationError):
         strict.generate()
 
     lenient = create_cost_generator(
         **_factory_kwargs(tmp_path, fake, LlmCostConfig(backend="agent"))
     )
-    lenient.codex_cmd = "definitely-not-a-real-binary-xyz"  # type: ignore[attr-defined]
+    lenient.agent_cmd = "definitely-not-a-real-binary-xyz"  # type: ignore[attr-defined]
     assert lenient.generate() is None
 
 

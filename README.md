@@ -1866,7 +1866,8 @@ or rejects it and gives a correction:
   `continuation` runs through any approved proposals and the replans after
   them. The goal records `approvals` and `approved_spans`, the `executed`
   frames spent following them. Without `cartesian.stall` the loop behaves as
-  before. `evaluation/run_experiment.py` adds `cartesian.stall`
+  before. `evaluation/run_experiment.py` (and, since 2026-11-20,
+  `run_bound_transfer.py` for its learning goals) adds `cartesian.stall`
   (defaults) to every `mpc_config` unless it sets its own; pass
   `goal_stall=false` to reproduce runs from before 2026-10-06.
 
@@ -3599,10 +3600,31 @@ uv run python evaluation/analyze_results.py outputs/bound_transfer/seed0 \
 
 Each run writes `menu.csv` at its root (persona, approach, goal index, utterance, number of
 learned terms, candidate label, whether the chooser picked it, violation) and per probe
-`probe_NN/menu.npz` (`q_feedback`, `nominal_plan`, `candidate_<label>`) and `oracle_path.npy`;
-`probes.pkl` per task holds the `MenuProbe` records. `analyze_results.py` pools every `menu.csv`
-under its roots into `all_menus.csv` and prints mean menu violation per approach and goal index.
-The pilot arms skip cost generation, since nothing they could learn changes their menus:
+`probe_NN/menu.npz` (`q_feedback`, `nominal_plan`, `candidate_<label>`, and for the MDM grounder
+the raw diffusion draws `samples` and their cluster `sample_labels`, the same keys as an episode
+round's `trajectories.npz`, so a menu can be re-scored or re-clustered offline) and
+`oracle_path.npy`; `probes.pkl` per task holds the `MenuProbe` records. The learning goal runs
+with goal-stall proposals, as `run_experiment.py` does (`goal_stall=false` for runs from before
+2026-11-20).
+
+To probe several arms from one frozen learned state, rerun with `resume_from=<that run dir>`:
+each task skips its learning goal, loads what its namesake learned
+(`task_NN_.../learn/learned_state.json`) and probes from the end of that run's goal-0 oracle
+path (`learn/goal_00/oracle_path.npy`). `Approach.load` accepts only the approach that saved the
+state, so vary steering with the config group, which keeps the approach's name. Here
+`outputs/bound_transfer/full_seed0` is an earlier `approach=full` run (`hydra.run.dir`):
+
+```bash
+uv run python evaluation/run_bound_transfer.py -m seed=0 \
+    approach=full approach/steering=none,learned,cg \
+    benchmark=bound_transfer \
+    mpc_config=src/uncertain_feedback/planners/mpc/configs/mdm_llm_transfer.yaml \
+    resume_from=outputs/bound_transfer/full_seed0 \
+    hydra.sweep.dir=outputs/bound_transfer/seed0_bank
+```
+
+`analyze_results.py` pools every `menu.csv` under its roots into `all_menus.csv` and prints
+mean menu violation per approach and goal index. The pilot arms skip cost generation, since nothing they could learn changes their menus:
 `no_learning` is MDM's unconditioned menu and
 `no_learning_cg` (`approach/no_learning_cg.yaml`, classifier guidance from the hidden bounds) its
 known-preference upper bound, at the transfer config's `feedback.uq.steering.guidance_weight` of

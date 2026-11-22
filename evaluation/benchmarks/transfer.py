@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from evaluation.approaches.base import Approach
-from evaluation.benchmarks.episode import oracle_steps_to_goal, run_episode
+from evaluation.approaches.base import LEARNED_STATE_FILE, Approach
+from evaluation.benchmarks.episode import oracle_steps_to_goal, raw_draws, run_episode
 from evaluation.benchmarks.structs import InteractionTask, MenuProbe
 from evaluation.benchmarks.verbalize import bind_verbalizer
 from uncertain_feedback.planners.mpc.config import MpcRunConfig, cfg_with_goal
@@ -136,6 +136,7 @@ def probe_menu(
         q_feedback=q_feedback,
         nominal_plan=nominal_plan,
         **{f"candidate_{lab}": traj for lab, traj in grounding.candidates.items()},
+        **raw_draws(grounding),
     )
     probe = MenuProbe(
         task=task,
@@ -154,25 +155,38 @@ def probe_menu(
     return oracle_path, probe
 
 
-def run_transfer(
+def run_transfer(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     cfg: MpcRunConfig,
     human: Human,
     user: SimulatedUser,
     task: InteractionTask,
     approach: Approach,
     episode_dir: Path,
+    resume_dir: Path | None = None,
 ) -> list[MenuProbe]:
     """Learn on the task's first goal, then probe every later goal's menu.
 
     The learning goal is a full :func:`run_episode` on ``task.goals[0]`` under
-    ``episode_dir/learn``; the approach keeps whatever it learned. Each later
-    goal starts where the persona's oracle execution of the previous goal
-    ended, so the test reaches do not depend on how well learning went.
-    Probes are pickled to ``probes.pkl``.
+    ``episode_dir/learn``; the approach keeps whatever it learned. With
+    ``resume_dir`` (the same task's episode dir in an earlier run) nothing is
+    learned: the approach loads what that run's learning goal ended with, and
+    the probes start from that run's oracle path. Each later goal starts where
+    the persona's oracle execution of the previous goal ended, so the test
+    reaches do not depend on how well learning went. Probes are pickled to
+    ``probes.pkl``.
     """
-    learn_task = replace(task, goals=task.goals[:1])
-    learned = run_episode(cfg, human, user, learn_task, approach, episode_dir / "learn")
-    q_start = np.asarray(learned[0].oracle_path[-1], dtype=np.float64)
+    if resume_dir is None:
+        learn_task = replace(task, goals=task.goals[:1])
+        learned = run_episode(
+            cfg, human, user, learn_task, approach, episode_dir / "learn"
+        )
+        q_start = np.asarray(learned[0].oracle_path[-1], dtype=np.float64)
+    else:
+        episode_dir.mkdir(parents=True, exist_ok=True)
+        approach.load(resume_dir / "learn" / LEARNED_STATE_FILE)
+        oracle_path = np.load(resume_dir / "learn" / "goal_00" / "oracle_path.npy")
+        q_start = np.asarray(oracle_path[-1], dtype=np.float64)
+        print(f"{_LOG} {episode_dir.name} resumes from {resume_dir}", flush=True)
 
     probes: list[MenuProbe] = []
     for goal_index in range(1, len(task.goals)):

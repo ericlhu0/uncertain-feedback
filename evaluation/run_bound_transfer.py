@@ -11,6 +11,10 @@ Per task the approach learns on the first goal (a full episode under
 provokes feedback, the approach proposes a menu, and each candidate is scored
 by its hidden-bound violation. ``menu.csv`` at the run root has one row per
 candidate; pool runs with ``analyze_results.py``.
+
+With ``resume_from=<an earlier run dir>`` each task skips learning and probes
+with what its namesake there learned, so arms that differ only in steering
+(e.g. ``approach=full approach/steering=none``) probe the same learned state.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from omegaconf import DictConfig
 
 from evaluation.approaches.base import Approach
 from evaluation.benchmarks.base import Benchmark
+from evaluation.benchmarks.episode import with_goal_stall
 from evaluation.benchmarks.structs import MenuProbe
 from evaluation.benchmarks.transfer import run_transfer
 from evaluation.metrics.cost_learning.menu import menu_rows
@@ -56,7 +61,9 @@ def _run(cfg: DictConfig) -> None:
     if not mpc_config.is_absolute():
         mpc_config = _REPO_ROOT / mpc_config
     seed = int(cfg.seed)
-    run_cfg = replace(load_mpc_config(mpc_config), seed=seed)
+    run_cfg = with_goal_stall(
+        replace(load_mpc_config(mpc_config), seed=seed), cfg.goal_stall
+    )
     human = Human(pose=run_cfg.pose, arm=run_cfg.arm)
     gen = (
         make_motion_generator(run_cfg.motion_generator, None, seed=seed)
@@ -67,12 +74,17 @@ def _run(cfg: DictConfig) -> None:
     if cfg.max_tasks is not None:
         tasks = tasks[: int(cfg.max_tasks)]
 
+    # Repo-root relative like mpc_config: the generator's loader moved the cwd.
+    resume_from = None if cfg.resume_from is None else _REPO_ROOT / cfg.resume_from
     probes: list[MenuProbe] = []
     for task_id, task in enumerate(tasks):
         user = task.user if task.user is not None else get_persona(task.persona)
         episode_dir = out_dir / f"task_{task_id:02d}_{task.persona}_{task.verbalizer}"
         approach.reset(run_cfg, human, gen, user, task.seed, episode_dir)
-        probes.extend(run_transfer(run_cfg, human, user, task, approach, episode_dir))
+        resume_dir = None if resume_from is None else resume_from / episode_dir.name
+        probes.extend(
+            run_transfer(run_cfg, human, user, task, approach, episode_dir, resume_dir)
+        )
         menu = pd.DataFrame([row for probe in probes for row in menu_rows(probe)])
         menu.to_csv(out_dir / "menu.csv", index=False)
     if probes:

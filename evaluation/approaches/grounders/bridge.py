@@ -159,10 +159,10 @@ class BridgeInterpreterGrounder(BridgePotentialFieldGrounder):
     def _interpret(self, text: str, waypoint_context: str) -> list[dict[str, str]]:
         if self._llm is None:
             from uncertain_feedback.llm import (  # pylint: disable=import-outside-toplevel
-                OpenAIModel,
+                make_model,
             )
 
-            self._llm = OpenAIModel(
+            self._llm = make_model(
                 model=required_llm_model(self.cfg),
                 system_prompt=_INTERPRETER_SYSTEM_PROMPT,
                 temperature=0.0,

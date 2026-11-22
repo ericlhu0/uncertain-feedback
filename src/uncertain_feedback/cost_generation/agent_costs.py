@@ -1,4 +1,4 @@
-"""Agent (``agent``) cost generator that delegates to the ``codex`` CLI.
+"""Agent (``agent``) cost generator that delegates to the ``codex`` or ``claude`` CLI.
 
 Rather than calling the LLM directly, this writes the task (the same prompt the
 other backends use) into the run directory and lets the external ``codex`` coding
@@ -64,6 +64,7 @@ _SANDBOX_RUNTIME = Path("/tmp/runtime")
 _SANDBOX_VENV = Path("/tmp/venv")
 _SANDBOX_CODEX_HOME = Path("/tmp/codex-home")
 _SANDBOX_HOME = Path("/home/agent")
+_CLAUDE_CREDENTIALS = ".credentials.json"
 _SANDBOX_RENDER_SCRIPT = (
     f"{_SANDBOX_RUNTIME}/src/uncertain_feedback/evaluation_mechanism/"
     "render_cost_comparison.py"
@@ -162,6 +163,9 @@ def _landlock_command(
         directory.mkdir()
     environment = {name: on_host(value) for name, value in environment.items()}
     environment["TMPDIR"] = str(scratch)
+    # zsh (claude's shell when SHELL is unset) keeps heredocs under TMPPREFIX,
+    # which defaults to the unwritable /tmp.
+    environment["TMPPREFIX"] = str(scratch / "zsh")
     writable = [workspace, roots[_SANDBOX_CODEX_HOME], roots[_SANDBOX_HOME], scratch]
     return [
         "env",
@@ -183,6 +187,37 @@ def _landlock_command(
     ]
 
 
+def _claude_credentials() -> Path:
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")
+    return Path(config_dir) / _CLAUDE_CREDENTIALS
+
+
+def _stage_claude_login(agent_home: Path) -> None:
+    """Give the agent the subscription login and nothing else from the host."""
+    source = _claude_credentials()
+    if not source.exists():
+        raise GeneratedCostValidationError(
+            f"claude authentication not found at {source}; log in with `claude`"
+        )
+    login = json.loads(source.read_text(encoding="utf-8"))["claudeAiOauth"]
+    target = agent_home / _CLAUDE_CREDENTIALS
+    target.touch(mode=0o600)
+    target.write_text(json.dumps({"claudeAiOauth": login}), encoding="utf-8")
+
+
+def _return_claude_login(agent_home: Path) -> None:
+    """Keep a login the agent refreshed, since the refresh may retire the host's."""
+    staged = agent_home / _CLAUDE_CREDENTIALS
+    if not staged.exists():
+        return
+    login = json.loads(staged.read_text(encoding="utf-8"))["claudeAiOauth"]
+    host_path = _claude_credentials()
+    host = json.loads(host_path.read_text(encoding="utf-8"))
+    if login["expiresAt"] > host["claudeAiOauth"]["expiresAt"]:
+        host["claudeAiOauth"] = login
+        host_path.write_text(json.dumps(host), encoding="utf-8")
+
+
 def _stage_section(stage_log: str, heading: str) -> str | None:
     """Return one stage-log section, ending before the next level-two heading."""
     start = stage_log.find(heading)
@@ -194,7 +229,7 @@ def _stage_section(stage_log: str, heading: str) -> str | None:
 
 
 class AgentCostGenerator(CostGenerator):
-    """Cost generator that runs the ``codex`` CLI to author the cost JSON."""
+    """Cost generator that runs the ``codex`` (or ``claude``) CLI to author the cost JSON."""
 
     _codex_log_label = "agent"
     _stream_codex_output = False
@@ -567,11 +602,30 @@ class AgentCostGenerator(CostGenerator):
                 readable.append(install_root)
                 sandbox_command[0] = str(sandbox_install / "bin" / executable_path.name)
                 sandbox_path = f"{sandbox_install}/bin:{sandbox_path}"
+        if Path(command[0]).name == "claude":
+            _stage_claude_login(codex_home)
+            if not self._codex_web_search:
+                sandbox_command[1:1] = ["--disallowedTools", "WebSearch,WebFetch"]
+            if executable_path.is_relative_to(Path.home()):
+                # The native install is one self-contained binary per version.
+                sandbox_install = Path("/tmp/claude-install")
+                extra_mounts += [
+                    "--dir",
+                    str(sandbox_install),
+                    "--ro-bind",
+                    str(executable_path.parent),
+                    str(sandbox_install),
+                ]
+                roots[sandbox_install] = executable_path.parent
+                readable.append(executable_path.parent)
+                sandbox_command[0] = str(sandbox_install / executable_path.name)
 
         environment = {
             "PATH": sandbox_path,
             "HOME": str(_SANDBOX_HOME),
             "CODEX_HOME": str(_SANDBOX_CODEX_HOME),
+            # claude keeps its login and state where codex does.
+            "CLAUDE_CONFIG_DIR": str(_SANDBOX_CODEX_HOME),
             "PYTHONPATH": f"{_SANDBOX_RUNTIME}/src",
             "MPLBACKEND": "Agg",
         }
@@ -681,6 +735,7 @@ class AgentCostGenerator(CostGenerator):
                     process = subprocess.Popen(  # pylint: disable=consider-using-with
                         cmd,
                         cwd=self.run_dir,
+                        stdin=subprocess.DEVNULL,
                         stdout=(subprocess.PIPE if self._stream_codex_output else log),
                         stderr=subprocess.STDOUT,
                         text=True,
@@ -721,6 +776,7 @@ class AgentCostGenerator(CostGenerator):
                     if output_thread is not None:
                         output_thread.join()
                     log.flush()
+                _return_claude_login(temporary_dir / "codex-home")
                 shutil.copytree(workspace, self.run_dir, dirs_exist_ok=True)
         except FileNotFoundError as exc:
             raise GeneratedCostValidationError(

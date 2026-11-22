@@ -60,10 +60,10 @@ _REASONING_EFFORT = {"gpt-6-luna": "high", "gpt-5.6-sol": "low"}
 def _make_llm_model(model_name: str) -> Any:
     """Build the cost-generator LLM wrapper."""
     from uncertain_feedback.llm import (  # pylint: disable=import-outside-toplevel
-        OpenAIModel,
+        make_model,
     )
 
-    return OpenAIModel(
+    return make_model(
         model=model_name,
         system_prompt=_SYSTEM_PROMPT,
         temperature=0.0,

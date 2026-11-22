@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from uncertain_feedback.llm.openai_model import OpenAIModel
+from uncertain_feedback.llm.base_model import BaseModel
 from uncertain_feedback.planners.mpc.arm_features import arm_aa_from_state
 from uncertain_feedback.planners.mpc.human import Human
 from uncertain_feedback.simulated_users.attribution import (
@@ -57,7 +57,7 @@ def render_pose_image(
 class VisualVerbalizer:
     """VLM-backed verbalizer with a per-(episode, round) disk cache."""
 
-    def __init__(self, model: OpenAIModel, cache_dir: Path) -> None:
+    def __init__(self, model: BaseModel, cache_dir: Path) -> None:
         self._model = model
         self._cache_dir = cache_dir
 

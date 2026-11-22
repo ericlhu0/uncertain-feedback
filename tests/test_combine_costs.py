@@ -20,7 +20,10 @@ from uncertain_feedback.cost_generation import (
     CostRound,
     stall_retired_note,
 )
-from uncertain_feedback.cost_generation.agent_costs import _bwrap_usable
+from uncertain_feedback.cost_generation.agent_costs import (
+    _bwrap_usable,
+    _return_claude_login,
+)
 from uncertain_feedback.cost_generation.landlock import abi_version
 from uncertain_feedback.cost_generation.prompts import build_combine_task_body
 from uncertain_feedback.evaluation_mechanism import EvalState
@@ -341,3 +344,52 @@ def test_agent_sandbox_hides_oracle_and_prior_runs(tmp_path) -> None:
     generator._run_codex()
 
     assert "isolated" in (run_dir / "codex.log").read_text(encoding="utf-8")
+
+
+@_requires_sandbox
+def test_claude_agent_gets_only_the_login_and_returns_a_refresh(
+    tmp_path, monkeypatch
+) -> None:
+    host_config = tmp_path / "host_claude"
+    host_config.mkdir()
+    login = {"accessToken": "a", "refreshToken": "r", "expiresAt": 1}
+    (host_config / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": login, "mcpOAuth": {"server": "secret"}})
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host_config))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text("#!/bin/sh\n")
+    (bin_dir / "claude").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{Path(sys.executable).parent}")
+    run_dir = tmp_path / "combine"
+    run_dir.mkdir()
+    generator = CombineCostGenerator(
+        context=_context(),
+        instruction="feedback",
+        summaries={},
+        run_dir=run_dir,
+        codex_cmd="claude -p",
+        rounds=[],
+    )
+    (tmp_path / "runtime_parent").mkdir()
+
+    command = generator._isolated_command(
+        ["claude", "-p", "task"], tmp_path / "runtime_parent", run_dir
+    )
+
+    agent_home = tmp_path / "runtime_parent" / "codex-home"
+    staged = json.loads((agent_home / ".credentials.json").read_text())
+    assert staged == {"claudeAiOauth": login}
+    assert any("CLAUDE_CONFIG_DIR" in arg for arg in command)
+    # The combiner searches the literature, so its web tools stay on.
+    assert "--disallowedTools" not in command
+
+    refreshed = {**login, "accessToken": "b", "expiresAt": 2}
+    (agent_home / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": refreshed})
+    )
+    _return_claude_login(agent_home)
+
+    host = json.loads((host_config / ".credentials.json").read_text())
+    assert host == {"claudeAiOauth": refreshed, "mcpOAuth": {"server": "secret"}}

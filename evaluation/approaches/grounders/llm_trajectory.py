@@ -359,10 +359,10 @@ class LlmTrajectoryGrounder(Grounder):
     def _interpret(self, text: str, scene: str) -> list[dict[str, Any]]:
         if self._llm is None:
             from uncertain_feedback.llm import (  # pylint: disable=import-outside-toplevel
-                OpenAIModel,
+                make_model,
             )
 
-            self._llm = OpenAIModel(
+            self._llm = make_model(
                 model=self.model or required_llm_model(self.cfg),
                 system_prompt=self._system_prompt(),
                 temperature=0.0,

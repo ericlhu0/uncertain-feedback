@@ -155,7 +155,7 @@ class ConsolidateCostGen(CostGen):
             rollout_fn=state.make_rollout_fn(),
             eval_state=state,
             save_candidate_videos=False,
-            codex_cmd=cfg.llm_cost.codex_cmd,
+            agent_cmd=cfg.llm_cost.agent_cmd,
             rounds=self._cost_rounds,
         )
         return combinator.generate(install=False)

@@ -128,11 +128,12 @@ class LlmCostConfig:
     # (multi-turn conversation), or "agent" (delegate to the codex CLI).
     backend: str = "llm"
     max_turns: int = 6  # used by the "turns" backend
-    # Used by the "agent" backend. --skip-git-repo-check is required because the
-    # per-generation artifact run dir is not a git repo. AgentCostGenerator wraps
-    # this command in a fail-closed Bubblewrap filesystem namespace, so an inner
-    # danger-full-access flag does not expose the repository or simulator oracle.
-    codex_cmd: str = "codex exec --skip-git-repo-check"
+    # The coding-agent command (codex or claude) for the "agent" backend and the
+    # combiner. --skip-git-repo-check is required because the per-generation
+    # artifact run dir is not a git repo. AgentCostGenerator wraps this command in
+    # a fail-closed sandbox, so an inner danger-full-access flag does not expose
+    # the repository or simulator oracle.
+    agent_cmd: str = "codex exec --skip-git-repo-check"
     reasoning_effort: str | None = None
     # Planner penalty per unit (rad, rad/s, m/s) a rollout's worst step goes
     # past a learned limit: high, so a limit acts as a wall rather than a taste.
@@ -705,6 +706,8 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
         chooser=chooser_value,
     )
 
+    if "codex_cmd" in llm_cost_data:
+        raise ValueError("llm_cost.codex_cmd is now llm_cost.agent_cmd.")
     return MpcRunConfig(
         steps=_positive_int(data.get("steps"), "steps"),
         horizon=_positive_int(data.get("horizon"), "horizon"),
@@ -735,9 +738,9 @@ def load_mpc_config(path: Path) -> MpcRunConfig:
             max_turns=_positive_int(
                 llm_cost_data.get("max_turns", 6), "llm_cost.max_turns"
             ),
-            codex_cmd=(
+            agent_cmd=(
                 _optional_str(
-                    llm_cost_data.get("codex_cmd", "codex exec"), "llm_cost.codex_cmd"
+                    llm_cost_data.get("agent_cmd", "codex exec"), "llm_cost.agent_cmd"
                 )
                 or "codex exec"
             ),

@@ -239,13 +239,13 @@ class AgentCostGenerator(CostGenerator):
     def __init__(
         self,
         *args: Any,
-        codex_cmd: str = "codex exec",
+        agent_cmd: str = "codex exec",
         timeout_seconds: float | None = None,
         corpus_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, corpus_dir=corpus_dir, **kwargs)
-        self.codex_cmd = codex_cmd
+        self.agent_cmd = agent_cmd
         self.timeout_seconds = timeout_seconds
         self._staged_corpus_dir: Path | None = None
 
@@ -523,8 +523,8 @@ class AgentCostGenerator(CostGenerator):
         executable = shutil.which(command[0])
         if executable is None:
             raise GeneratedCostValidationError(
-                f"codex CLI not found (command: {self.codex_cmd!r}). Install codex "
-                "or set llm_cost.codex_cmd to its path."
+                f"agent CLI not found (command: {self.agent_cmd!r}). Install it "
+                "or set llm_cost.agent_cmd to its path."
             )
 
         runtime = temporary_dir / "runtime"
@@ -723,7 +723,7 @@ class AgentCostGenerator(CostGenerator):
                 temporary_dir = Path(tmp)
                 workspace = temporary_dir / "workspace"
                 shutil.copytree(self.run_dir, workspace)
-                command = shlex.split(self.codex_cmd) + [
+                command = shlex.split(self.agent_cmd) + [
                     _codex_instruction(self._response_keys)
                 ]
                 cmd = self._isolated_command(command, temporary_dir, workspace)
@@ -780,8 +780,8 @@ class AgentCostGenerator(CostGenerator):
                 shutil.copytree(workspace, self.run_dir, dirs_exist_ok=True)
         except FileNotFoundError as exc:
             raise GeneratedCostValidationError(
-                f"codex CLI not found (command: {self.codex_cmd!r}). Install codex "
-                "or set llm_cost.codex_cmd to its path."
+                f"agent CLI not found (command: {self.agent_cmd!r}). Install it "
+                "or set llm_cost.agent_cmd to its path."
             ) from exc
         print(
             f"{log_prefix} codex finished in "

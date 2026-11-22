@@ -654,6 +654,13 @@ feedback:
     assert cfg.feedback.uq.steering.speed_guidance_weight == 500.0
 
 
+def test_renamed_codex_cmd_key_is_refused(tmp_path) -> None:
+    path = _write_config(tmp_path, _base_yaml('llm_cost:\n  codex_cmd: "codex exec"'))
+
+    with pytest.raises(ValueError, match="agent_cmd"):
+        load_mpc_config(path)
+
+
 def test_correction_threshold_overrides_legacy_transfer_value(tmp_path) -> None:
     path = _write_config(
         tmp_path,

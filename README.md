@@ -3176,7 +3176,7 @@ one. Every shipped config, `mdm_llm_transfer.yaml` included, now uses `gpt-6-lun
 ```yaml
 llm_cost:
   model: claude-opus-5-5   # any claude* name: single-prompt calls go through `claude -p`
-  codex_cmd: "claude -p --dangerously-skip-permissions --model claude-opus-5-5 --effort high"
+  agent_cmd: "claude -p --dangerously-skip-permissions --model claude-opus-5-5 --effort high"
 ```
 
 A `claude*` `llm_cost.model` runs on `llm/claude_model.py` (`make_model` in
@@ -3188,7 +3188,7 @@ The CLI takes no temperature or token limit; `turns` folds its conversation into
 message per call. Reasoning effort goes to `--effort` where a grounder sets one; the cost
 generator sends none for Claude, so the CLI's default applies.
 
-A `codex_cmd` that starts with `claude` runs the `agent` backend and the combiner on Claude
+An `agent_cmd` that starts with `claude` runs the `agent` backend and the combiner on Claude
 Code in the same sandbox as codex (below). Only the login (`claudeAiOauth` from
 `~/.claude/.credentials.json`) is copied into a fresh `CLAUDE_CONFIG_DIR`, so no settings,
 CLAUDE.md, memory or MCP servers come along; name the model in the command. A login the
@@ -3230,7 +3230,7 @@ the combiner, which searches the literature.
   etc. are rewritten), and `/proc` does not, so other processes stay hidden too. Linux
   hosts using this backend must provide a working `bwrap` or a Landlock kernel (5.13+).
   The combiner (below) runs this way too. The sandbox ignores `~/.codex/config.toml`, so
-  `llm_cost.codex_cmd` must name the model (`-m`, `-c model_reasoning_effort=...`), or
+  `llm_cost.agent_cmd` must name the model (`-m`, `-c model_reasoning_effort=...`), or
   codex falls back to its default at no reasoning; the evaluation's care-task stack
   (`evaluation/conf/mpc_task_learning.yaml`) pins `gpt-6-sol` at high effort, which the
   ChatGPT login accepts from codex 0.163.0 on. Staged `state.pkl`

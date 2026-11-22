@@ -511,7 +511,7 @@ def create_cost_generator(
     """Build the cost generator selected by ``cfg.backend``.
 
     ``cfg`` is an ``LlmCostConfig`` (see config.py); the per-backend params
-    (``max_turns``, ``codex_cmd``) are read here. This is the only branch on the
+    (``max_turns``, ``agent_cmd``) are read here. This is the only branch on the
     backend — callers always construct and call the result identically.
     """
     # Local imports keep the subclass modules from importing this one at import time.
@@ -551,7 +551,7 @@ def create_cost_generator(
     if backend == "turns":
         return TurnsCostGenerator(max_turns=cfg.max_turns, **common)
     if backend == "agent":
-        return AgentCostGenerator(codex_cmd=cfg.codex_cmd, **common)
+        return AgentCostGenerator(agent_cmd=cfg.agent_cmd, **common)
     if backend == "direct":
         return DirectCostGenerator(**common)
     raise GeneratedCostValidationError(

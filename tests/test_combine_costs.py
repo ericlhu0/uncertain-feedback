@@ -293,7 +293,7 @@ def test_combine_codex_streams_output_to_console_and_log(tmp_path, capsys) -> No
         instruction="feedback",
         summaries={},
         run_dir=run_dir,
-        codex_cmd=command,
+        agent_cmd=command,
         rounds=[],
     )
 
@@ -337,7 +337,7 @@ def test_agent_sandbox_hides_oracle_and_prior_runs(tmp_path) -> None:
         instruction="feedback",
         summaries={},
         run_dir=run_dir,
-        codex_cmd=command,
+        agent_cmd=command,
         rounds=[],
     )
 
@@ -369,7 +369,7 @@ def test_claude_agent_gets_only_the_login_and_returns_a_refresh(
         instruction="feedback",
         summaries={},
         run_dir=run_dir,
-        codex_cmd="claude -p",
+        agent_cmd="claude -p",
         rounds=[],
     )
     (tmp_path / "runtime_parent").mkdir()

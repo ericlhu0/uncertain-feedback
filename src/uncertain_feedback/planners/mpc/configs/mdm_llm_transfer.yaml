@@ -86,4 +86,4 @@ llm_cost:
   artifact_dir: llm_cost_artifacts
   use_images: true
   max_turns: 3
-  codex_cmd: "codex exec --skip-git-repo-check -s danger-full-access"
+  agent_cmd: "codex exec --skip-git-repo-check -s danger-full-access"
